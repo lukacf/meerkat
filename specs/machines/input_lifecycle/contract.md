@@ -18,6 +18,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkApplied`(run_id: RunId)
 - `MarkAppliedPendingConsumption`(boundary_sequence: BoundarySequence)
 - `Consume`
+- `ConsumeOnAccept`
 - `Supersede`
 - `Coalesce`
 - `Abandon`
@@ -68,6 +69,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `Consume`
 - From: `AppliedPendingConsumption`
 - On: `Consume`()
+- Emits: `InputLifecycleNotice`, `RecordTerminalOutcome`
+- To: `Consumed`
+
+### `ConsumeOnAccept`
+- From: `Accepted`
+- On: `ConsumeOnAccept`()
 - Emits: `InputLifecycleNotice`, `RecordTerminalOutcome`
 - To: `Consumed`
 

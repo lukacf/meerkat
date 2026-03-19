@@ -1,6 +1,12 @@
 use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
+use super::mob_lifecycle_authority::{
+    MobLifecycleAuthority, MobLifecycleInput, MobLifecycleMutator,
+};
+use super::mob_orchestrator_authority::{
+    MobOrchestratorAuthority, MobOrchestratorInput, MobOrchestratorMutator,
+};
 use super::provision_guard::PendingProvision;
 use super::transaction::LifecycleRollback;
 use super::*;
@@ -119,7 +125,7 @@ pub(super) struct MobActor {
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     pub(super) flow_engine: FlowEngine,
     pub(super) flow_kernel: FlowRunKernel,
-    pub(super) orchestrator: super::orchestrator_kernel::MobOrchestratorKernel,
+    pub(super) orchestrator: MobOrchestratorAuthority,
     pub(super) run_tasks: BTreeMap<RunId, tokio::task::JoinHandle<()>>,
     pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
     pub(super) flow_streams:
@@ -141,11 +147,12 @@ pub(super) struct MobActor {
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle: super::state::MobLifecycleOwner,
+    pub(super) lifecycle_authority: MobLifecycleAuthority,
 }
 
 impl MobActor {
     fn state(&self) -> MobState {
-        self.lifecycle.state()
+        self.lifecycle_authority.phase()
     }
 
     fn mob_handle_for_tools(&self) -> MobHandle {
@@ -163,17 +170,16 @@ impl MobActor {
     }
 
     fn expect_state(&self, expected: &[MobState], to: MobState) -> Result<(), MobError> {
-        self.lifecycle.expect_transition(expected, to)
+        self.lifecycle_authority.require_phase(expected, to)
     }
 
-    /// Guard that the mob is in one of the `allowed` states.
+    /// Guard that the mob is in one of the `allowed` phases.
     ///
-    /// Unlike `expect_state`, this does not imply a state transition — it is
-    /// used by command handlers that operate *within* the current state
-    /// (retire, wire, external turn, etc.). The `to` parameter in the error
-    /// is set to the first allowed state as a hint; no actual transition occurs.
+    /// Used by command handlers that operate *within* the current state
+    /// (retire, wire, external turn, etc.). The first allowed state is used
+    /// as the `to` hint in the error.
     fn require_state(&self, allowed: &[MobState]) -> Result<(), MobError> {
-        self.lifecycle.require_state(allowed)
+        self.lifecycle_authority.require_phase(allowed, allowed[0])
     }
 
     async fn notify_orchestrator_lifecycle(&mut self, message: String) {
@@ -665,7 +671,9 @@ impl MobActor {
                         "failed cleaning up mcp servers after startup error"
                     );
                 }
-                self.lifecycle.set_state(MobState::Stopped);
+                if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+                    tracing::warn!(error = %e, "authority rejected Stop");
+                }
             } else if let Err(error) = self.start_autonomous_host_loops_from_roster().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
@@ -686,7 +694,9 @@ impl MobActor {
                         "failed cleaning up mcp servers after startup error"
                     );
                 }
-                self.lifecycle.set_state(MobState::Stopped);
+                if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+                    tracing::warn!(error = %e, "authority rejected Stop");
+                }
             }
         }
         let mut deferred_commands = VecDeque::new();
@@ -845,7 +855,10 @@ impl MobActor {
                     self.run_tasks.remove(&run_id);
                     self.run_cancel_tokens.remove(&run_id);
                     self.flow_streams.lock().await.remove(&run_id);
-                    self.orchestrator.record_flow_finished();
+                    if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::CompleteFlow)
+                    {
+                        tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
+                    }
                     self.lifecycle.finish_tracked_flow();
                 }
                 #[cfg(test)]
@@ -897,8 +910,17 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                self.orchestrator.record_stop();
-                                self.lifecycle.set_state(MobState::Stopped);
+                                if let Err(error) = self
+                                    .orchestrator
+                                    .apply(MobOrchestratorInput::StopOrchestrator)
+                                {
+                                    tracing::warn!(error = %error, "orchestrator StopOrchestrator failed");
+                                }
+                                if let Err(e) =
+                                    self.lifecycle_authority.apply(MobLifecycleInput::Stop)
+                                {
+                                    tracing::warn!(error = %e, "authority rejected Stop");
+                                }
                             } else {
                                 // Restore checkpointer state — mob stays Running.
                                 self.provisioner.rearm_all_checkpointers().await;
@@ -943,8 +965,17 @@ impl MobActor {
                                 }
                                 Err(error)
                             } else {
-                                self.orchestrator.record_resume();
-                                self.lifecycle.set_state(MobState::Running);
+                                if let Err(error) = self
+                                    .orchestrator
+                                    .apply(MobOrchestratorInput::ResumeOrchestrator)
+                                {
+                                    tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed");
+                                }
+                                if let Err(e) =
+                                    self.lifecycle_authority.apply(MobLifecycleInput::Resume)
+                                {
+                                    tracing::warn!(error = %e, "authority rejected Resume");
+                                }
                                 Ok(())
                             }
                         }
@@ -1055,7 +1086,9 @@ impl MobActor {
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
                     self.lifecycle.clear_tracked_flows();
-                    self.lifecycle.set_state(MobState::Stopped);
+                    if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+                        tracing::warn!(error = %e, "authority rejected Stop");
+                    }
                     let _ = reply_tx.send(result);
                     break;
                 }
@@ -1070,7 +1103,7 @@ impl MobActor {
 
         for (spawn_ticket, pending) in std::mem::take(&mut self.pending_spawns) {
             self.pending_spawn_ids.remove(&pending.meerkat_id);
-            if let Err(error) = self.orchestrator.record_spawn_completed() {
+            if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::CompleteSpawn) {
                 tracing::warn!(
                     spawn_ticket,
                     error = %error,
@@ -1381,7 +1414,7 @@ impl MobActor {
         let spawn_meerkat_id = meerkat_id.clone();
         let spawn_runtime_mode = selected_runtime_mode;
 
-        if let Err(error) = self.orchestrator.record_spawn_staged() {
+        if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::StageSpawn) {
             let _ = reply_tx.send(Err(error));
             return;
         }
@@ -1486,7 +1519,7 @@ impl MobActor {
                 continue;
             };
             self.pending_spawn_ids.remove(&pending.meerkat_id);
-            if let Err(error) = self.orchestrator.record_spawn_completed() {
+            if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::CompleteSpawn) {
                 tracing::warn!(
                     spawn_ticket,
                     error = %error,
@@ -2173,8 +2206,15 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        self.orchestrator.record_completed();
-        self.lifecycle.set_state(MobState::Completed);
+        if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::MarkCompleted) {
+            tracing::warn!(error = %error, "orchestrator MarkCompleted failed");
+        }
+        if let Err(e) = self
+            .lifecycle_authority
+            .apply(MobLifecycleInput::MarkCompleted)
+        {
+            tracing::warn!(error = %e, "authority rejected MarkCompleted");
+        }
         Ok(())
     }
 
@@ -2187,16 +2227,33 @@ impl MobActor {
         self.events.clear().await?;
         self.cleanup_namespace().await?;
         self.edge_locks.clear().await;
-        self.orchestrator.record_destroyed();
-        self.lifecycle.set_state(MobState::Destroyed);
+        // Transition through StopOrchestrator if still Running, then Destroy.
+        if self.orchestrator.phase() == MobState::Running
+            && let Err(error) = self
+                .orchestrator
+                .apply(MobOrchestratorInput::StopOrchestrator)
+        {
+            tracing::warn!(error = %error, "orchestrator StopOrchestrator failed during destroy");
+        }
+        if let Err(error) = self
+            .orchestrator
+            .apply(MobOrchestratorInput::DestroyOrchestrator)
+        {
+            tracing::warn!(error = %error, "orchestrator DestroyOrchestrator failed");
+        }
+        if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Destroy) {
+            tracing::warn!(error = %e, "authority rejected Destroy");
+        }
         Ok(())
     }
 
     /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`
     /// error paths after destructive steps have already been taken.
-    async fn fail_reset_to_stopped(&self) {
+    async fn fail_reset_to_stopped(&mut self) {
         self.provisioner.cancel_all_checkpointers().await;
-        self.lifecycle.set_state(MobState::Stopped);
+        if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+            tracing::warn!(error = %e, "authority rejected Stop in fail_reset_to_stopped");
+        }
     }
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
@@ -2271,8 +2328,15 @@ impl MobActor {
             return Err(error);
         }
 
-        self.orchestrator.record_resume();
-        self.lifecycle.set_state(MobState::Running);
+        if let Err(error) = self
+            .orchestrator
+            .apply(MobOrchestratorInput::ResumeOrchestrator)
+        {
+            tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed during reset");
+        }
+        if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Resume) {
+            tracing::warn!(error = %e, "authority rejected Resume during reset");
+        }
         Ok(())
     }
 
@@ -2558,9 +2622,11 @@ impl MobActor {
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_id = self
             .flow_kernel
-            .create_pending_run(config.flow_id.clone(), activation_params.clone())
+            .create_pending_run(&config, activation_params.clone())
             .await?;
-        self.orchestrator.record_flow_started();
+        if let Err(error) = self.orchestrator.apply(MobOrchestratorInput::StartFlow) {
+            tracing::warn!(error = %error, "orchestrator StartFlow failed");
+        }
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.run_cancel_tokens.insert(

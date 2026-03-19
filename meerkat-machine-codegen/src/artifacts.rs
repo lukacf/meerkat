@@ -270,7 +270,10 @@ pub fn render_machine_ci_cfg(schema: &MachineSchema, deep: bool) -> String {
     if !domains.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
-            if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
+            if matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            ) {
                 continue;
             }
             writeln!(
@@ -348,7 +351,10 @@ pub fn render_composition_ci_cfg(schema: &CompositionSchema, deep: bool) -> Stri
     if !domains.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
-            if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
+            if matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            ) {
                 continue;
             }
             let cardinality = if deep {
@@ -454,7 +460,10 @@ pub fn render_composition_witness_cfg(
     if !domains.is_empty() {
         pushln!(&mut out, "CONSTANTS");
         for (name, ty) in domains {
-            if matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)) {
+            if matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            ) {
                 continue;
             }
             writeln!(
@@ -750,7 +759,12 @@ fn collect_type_domains(ty: &TypeRef, domains: &mut BTreeMap<String, TypeRef>) {
             collect_type_domains(key, domains);
             collect_type_domains(value, domains);
         }
-        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Named(_) => {}
+        TypeRef::Bool
+        | TypeRef::U32
+        | TypeRef::U64
+        | TypeRef::String
+        | TypeRef::Named(_)
+        | TypeRef::Enum(_) => {}
     }
 }
 
@@ -1373,6 +1387,7 @@ fn collect_named_literals_from_expr(
             );
         }
         Expr::Not(inner)
+        | Expr::SeqElements(inner)
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
@@ -1538,6 +1553,7 @@ fn collect_named_literals_from_expr(
         Expr::Bool(_)
         | Expr::U64(_)
         | Expr::String(_)
+        | Expr::NamedVariant { .. }
         | Expr::EmptySet
         | Expr::EmptyMap
         | Expr::CurrentPhase
@@ -1561,6 +1577,7 @@ fn infer_expr_type(
         Expr::String(_) | Expr::CurrentPhase | Expr::Phase(_) | Expr::Variant(_) => {
             Some(TypeRef::String)
         }
+        Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Named(enum_name.clone())),
         Expr::Field(name) => field_types.get(name).cloned(),
         Expr::Binding(name) => binding_types.get(name).cloned(),
         Expr::None => None,
@@ -1590,6 +1607,12 @@ fn infer_expr_type(
         | Expr::SeqStartsWith { .. }
         | Expr::Quantified { .. } => Some(TypeRef::Bool),
         Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Len(_) => Some(TypeRef::U64),
+        Expr::SeqElements(inner) => {
+            match infer_expr_type(inner, field_types, helper_returns, binding_types) {
+                Some(TypeRef::Seq(inner_ty)) => Some(TypeRef::Set(inner_ty)),
+                _ => None,
+            }
+        }
         Expr::Head(inner) => {
             match infer_expr_type(inner, field_types, helper_returns, binding_types) {
                 Some(TypeRef::Seq(inner_ty)) => Some(*inner_ty),
@@ -1645,7 +1668,7 @@ fn render_default_domain_assignment(
                 "{\"alpha\"}".into()
             }
         }
-        TypeRef::Named(name) => {
+        TypeRef::Named(name) | TypeRef::Enum(name) => {
             render_named_domain_assignment(name, sample_cardinality, named_samples)
         }
         TypeRef::Seq(inner) => {
@@ -1743,7 +1766,7 @@ fn sample_values(
                 vec![tla_string("alpha")]
             }
         }
-        TypeRef::Named(name) => {
+        TypeRef::Named(name) | TypeRef::Enum(name) => {
             if let Some(samples) = named_samples.get(name) {
                 let limit = sample_cardinality.max(1);
                 let rendered = samples
@@ -1792,28 +1815,45 @@ fn render_option_domain_definition(inner: &TypeRef) -> String {
     format!("{{None}} \\cup {{Some(x) : x \\in {inner_domain}}}")
 }
 
+fn render_map_domain_definition(key: &TypeRef, value: &TypeRef) -> String {
+    let key_domain = render_type_domain_expr(key);
+    let value_domain = render_type_domain_expr(value);
+    let empty_map = "[x \\in {} |-> None]";
+    format!(
+        "{{{empty_map}}} \\cup {{ [x \\in {{k}} |-> v] : k \\in {key_domain}, v \\in {value_domain} }}"
+    )
+}
+
 fn render_type_domain_expr(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Bool => "BOOLEAN".into(),
         TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
         TypeRef::String => "StringValues".into(),
-        TypeRef::Named(_) | TypeRef::Set(_) | TypeRef::Seq(_) | TypeRef::Option(_) => {
-            domain_constant_name(ty)
-        }
-        TypeRef::Map(_, _) => "{}".into(),
+        TypeRef::Named(_)
+        | TypeRef::Enum(_)
+        | TypeRef::Set(_)
+        | TypeRef::Seq(_)
+        | TypeRef::Option(_)
+        | TypeRef::Map(_, _) => domain_constant_name(ty),
     }
 }
 
 fn domain_constant_name(ty: &TypeRef) -> String {
     match ty {
-        TypeRef::Named(name) => format!("{}Values", tla_ident(name)),
+        TypeRef::Named(name) | TypeRef::Enum(name) => format!("{}Values", tla_ident(name)),
         TypeRef::Seq(inner) => format!("SeqOf{}Values", tla_ident(&type_ref_name(inner))),
         TypeRef::Set(inner) => format!("SetOf{}Values", tla_ident(&type_ref_name(inner))),
         TypeRef::String => "StringValues".into(),
         TypeRef::Bool => "BooleanValues".into(),
         TypeRef::U32 | TypeRef::U64 => "NatValues".into(),
         TypeRef::Option(inner) => format!("Option{}Values", tla_ident(&type_ref_name(inner))),
-        TypeRef::Map(_, _) => "MapValues".into(),
+        TypeRef::Map(key, value) => {
+            format!(
+                "Map{}{}Values",
+                tla_ident(&type_ref_name(key)),
+                tla_ident(&type_ref_name(value))
+            )
+        }
     }
 }
 
@@ -1823,7 +1863,7 @@ fn type_ref_name(ty: &TypeRef) -> String {
         TypeRef::U32 => "U32".into(),
         TypeRef::U64 => "U64".into(),
         TypeRef::String => "String".into(),
-        TypeRef::Named(name) => name.clone(),
+        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
         TypeRef::Option(inner) => format!("Option{}", type_ref_name(inner)),
         TypeRef::Set(inner) => format!("Set{}", type_ref_name(inner)),
         TypeRef::Seq(inner) => format!("Seq{}", type_ref_name(inner)),
@@ -1892,7 +1932,12 @@ impl<'a> CompositionTlaCompiler<'a> {
 
         let model_constants = constants
             .iter()
-            .filter(|(_, ty)| !matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
+            .filter(|(_, ty)| {
+                !matches!(
+                    ty,
+                    TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+                )
+            })
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
@@ -1906,32 +1951,44 @@ impl<'a> CompositionTlaCompiler<'a> {
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
         pushln!(&mut out);
         for (name, ty) in &constants {
-            match ty {
-                TypeRef::Seq(inner) => {
-                    writeln!(
-                        &mut out,
-                        "{} == {}",
-                        name,
-                        render_sequence_domain_definition(inner)
-                    )
-                    .expect("write to string");
-                }
-                TypeRef::Option(inner) => {
-                    writeln!(
-                        &mut out,
-                        "{} == {}",
-                        name,
-                        render_option_domain_definition(inner)
-                    )
-                    .expect("write to string");
-                }
-                _ => {}
+            if let TypeRef::Seq(inner) = ty {
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    name,
+                    render_sequence_domain_definition(inner)
+                )
+                .expect("write to string");
             }
         }
-        if constants
-            .values()
-            .any(|ty| matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
-        {
+        for (name, ty) in &constants {
+            if let TypeRef::Option(inner) = ty {
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    name,
+                    render_option_domain_definition(inner)
+                )
+                .expect("write to string");
+            }
+        }
+        for (name, ty) in &constants {
+            if let TypeRef::Map(key, value) = ty {
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    name,
+                    render_map_domain_definition(key, value)
+                )
+                .expect("write to string");
+            }
+        }
+        if constants.values().any(|ty| {
+            matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            )
+        }) {
             pushln!(&mut out);
         }
         writeln!(
@@ -2434,9 +2491,12 @@ impl<'a> CompositionTlaCompiler<'a> {
             TypeRef::Bool => "BOOLEAN".into(),
             TypeRef::U32 | TypeRef::U64 => "0..2".into(),
             TypeRef::String => "{\"alpha\", \"beta\"}".into(),
-            TypeRef::Named(_) | TypeRef::Seq(_) | TypeRef::Set(_) => domain_constant_name(ty),
-            TypeRef::Option(_) => domain_constant_name(ty),
-            TypeRef::Map(_, _) => "{}".into(),
+            TypeRef::Named(_)
+            | TypeRef::Enum(_)
+            | TypeRef::Seq(_)
+            | TypeRef::Set(_)
+            | TypeRef::Option(_)
+            | TypeRef::Map(_, _) => domain_constant_name(ty),
         }
     }
 
@@ -3086,6 +3146,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
+            Expr::NamedVariant { variant, .. } => tla_string(variant),
             Expr::None => "None".into(),
             Expr::Some(inner) => format!("Some({})", self.render_literal_expr(inner)),
             Expr::SeqLiteral(items) => {
@@ -3639,7 +3700,12 @@ impl<'a> MachineTlaCompiler<'a> {
 
         let model_constants = constants
             .iter()
-            .filter(|(_, ty)| !matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
+            .filter(|(_, ty)| {
+                !matches!(
+                    ty,
+                    TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+                )
+            })
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
@@ -3652,32 +3718,44 @@ impl<'a> MachineTlaCompiler<'a> {
         writeln!(&mut out, "Some(v) == [tag |-> \"some\", value |-> v]");
         pushln!(&mut out);
         for (name, ty) in &constants {
-            match ty {
-                TypeRef::Seq(inner) => {
-                    writeln!(
-                        &mut out,
-                        "{} == {}",
-                        name,
-                        render_sequence_domain_definition(inner)
-                    )
-                    .expect("write to string");
-                }
-                TypeRef::Option(inner) => {
-                    writeln!(
-                        &mut out,
-                        "{} == {}",
-                        name,
-                        render_option_domain_definition(inner)
-                    )
-                    .expect("write to string");
-                }
-                _ => {}
+            if let TypeRef::Seq(inner) = ty {
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    name,
+                    render_sequence_domain_definition(inner)
+                )
+                .expect("write to string");
             }
         }
-        if constants
-            .values()
-            .any(|ty| matches!(ty, TypeRef::Seq(_) | TypeRef::Option(_)))
-        {
+        for (name, ty) in &constants {
+            if let TypeRef::Option(inner) = ty {
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    name,
+                    render_option_domain_definition(inner)
+                )
+                .expect("write to string");
+            }
+        }
+        for (name, ty) in &constants {
+            if let TypeRef::Map(key, value) = ty {
+                writeln!(
+                    &mut out,
+                    "{} == {}",
+                    name,
+                    render_map_domain_definition(key, value)
+                )
+                .expect("write to string");
+            }
+        }
+        if constants.values().any(|ty| {
+            matches!(
+                ty,
+                TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
+            )
+        }) {
             pushln!(&mut out);
         }
         writeln!(
@@ -4086,9 +4164,12 @@ impl<'a> MachineTlaCompiler<'a> {
             TypeRef::Bool => "BOOLEAN".into(),
             TypeRef::U32 | TypeRef::U64 => "0..2".into(),
             TypeRef::String => "{\"alpha\", \"beta\"}".into(),
-            TypeRef::Named(_) | TypeRef::Seq(_) | TypeRef::Set(_) => domain_constant_name(ty),
-            TypeRef::Option(_) => domain_constant_name(ty),
-            TypeRef::Map(_, _) => "{}".into(),
+            TypeRef::Named(_)
+            | TypeRef::Enum(_)
+            | TypeRef::Seq(_)
+            | TypeRef::Set(_)
+            | TypeRef::Option(_)
+            | TypeRef::Map(_, _) => domain_constant_name(ty),
         }
     }
 
@@ -4514,6 +4595,7 @@ impl<'a> MachineTlaCompiler<'a> {
             }
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
+            Expr::NamedVariant { variant, .. } => tla_string(variant),
             Expr::EmptySet => "{}".into(),
             Expr::EmptyMap => "[x \\in {} |-> None]".into(),
             Expr::SeqLiteral(items) => format!(
@@ -4610,6 +4692,10 @@ impl<'a> MachineTlaCompiler<'a> {
                 "StartsWith({}, {})",
                 self.render_expr_with_types(seq, env, binding_env, binding_types),
                 self.render_expr_with_types(prefix, env, binding_env, binding_types)
+            ),
+            Expr::SeqElements(inner) => format!(
+                "SeqElements({})",
+                self.render_expr_with_types(inner, env, binding_env, binding_types)
             ),
             Expr::Len(inner) => format!(
                 "Len({})",
@@ -4739,6 +4825,7 @@ impl<'a> MachineTlaCompiler<'a> {
             Expr::Bool(_) => Some(TypeRef::Bool),
             Expr::U64(_) => Some(TypeRef::U64),
             Expr::String(_) | Expr::Phase(_) | Expr::Variant(_) => Some(TypeRef::String),
+            Expr::NamedVariant { enum_name, .. } => Some(TypeRef::Named(enum_name.clone())),
             Expr::Field(name) => self
                 .schema
                 .state
@@ -5013,6 +5100,7 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
             collect_expr_bindings(else_expr, bindings);
         }
         Expr::Not(inner)
+        | Expr::SeqElements(inner)
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
@@ -5058,6 +5146,7 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
         Expr::Bool(_)
         | Expr::U64(_)
         | Expr::String(_)
+        | Expr::NamedVariant { .. }
         | Expr::EmptySet
         | Expr::EmptyMap
         | Expr::CurrentPhase
@@ -5088,6 +5177,7 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
             collect_expr_fields(else_expr, fields);
         }
         Expr::Not(inner)
+        | Expr::SeqElements(inner)
         | Expr::Len(inner)
         | Expr::Head(inner)
         | Expr::MapKeys(inner)
@@ -5127,6 +5217,7 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
         Expr::Bool(_)
         | Expr::U64(_)
         | Expr::String(_)
+        | Expr::NamedVariant { .. }
         | Expr::EmptySet
         | Expr::EmptyMap
         | Expr::CurrentPhase
@@ -5166,7 +5257,9 @@ fn default_state_init_expr(ty: &TypeRef) -> String {
         TypeRef::Bool => "FALSE".into(),
         TypeRef::U32 | TypeRef::U64 => "0".into(),
         TypeRef::String => tla_string(""),
-        TypeRef::Named(name) => tla_string(&format!("{}_default", tla_ident(name).to_lowercase())),
+        TypeRef::Named(name) | TypeRef::Enum(name) => {
+            tla_string(&format!("{}_default", tla_ident(name).to_lowercase()))
+        }
         TypeRef::Option(_) => "None".into(),
         TypeRef::Set(_) => "{}".into(),
         TypeRef::Seq(_) => "<<>>".into(),
@@ -5178,7 +5271,7 @@ fn default_absent_map_value_expr(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Bool => "FALSE".into(),
         TypeRef::U32 | TypeRef::U64 => "0".into(),
-        TypeRef::String | TypeRef::Named(_) => tla_string("None"),
+        TypeRef::String | TypeRef::Named(_) | TypeRef::Enum(_) => tla_string("None"),
         TypeRef::Option(_) => "None".into(),
         TypeRef::Set(_) => "{}".into(),
         TypeRef::Seq(_) => "<<>>".into(),
@@ -5192,7 +5285,7 @@ fn render_type_ref(ty: &TypeRef) -> String {
         TypeRef::U32 => "u32".into(),
         TypeRef::U64 => "u64".into(),
         TypeRef::String => "String".into(),
-        TypeRef::Named(name) => name.clone(),
+        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
         TypeRef::Option(inner) => format!("Option<{}>", render_type_ref(inner)),
         TypeRef::Set(inner) => format!("Set<{}>", render_type_ref(inner)),
         TypeRef::Seq(inner) => format!("Seq<{}>", render_type_ref(inner)),

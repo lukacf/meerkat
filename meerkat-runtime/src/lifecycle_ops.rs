@@ -6,7 +6,7 @@
 
 use meerkat_core::lifecycle::InputId;
 
-use crate::input_machine::InputStateMachine;
+use crate::input_lifecycle_authority::InputLifecycleInput;
 use crate::input_state::{InputAbandonReason, InputState};
 
 /// Abandon all non-terminal inputs with the given reason.
@@ -14,7 +14,13 @@ use crate::input_state::{InputAbandonReason, InputState};
 pub fn abandon_non_terminal(states: &mut [&mut InputState], reason: InputAbandonReason) -> usize {
     let mut count = 0;
     for state in states {
-        if !state.is_terminal() && InputStateMachine::abandon(state, reason.clone()).is_ok() {
+        if !state.is_terminal()
+            && state
+                .apply(InputLifecycleInput::Abandon {
+                    reason: reason.clone(),
+                })
+                .is_ok()
+        {
             count += 1;
         }
     }
@@ -34,17 +40,19 @@ pub fn would_abandon(states: &[&InputState]) -> Vec<InputId> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::input_lifecycle_authority::InputLifecycleInput;
     use crate::input_state::InputLifecycleState;
+    use meerkat_core::lifecycle::RunId;
 
     #[test]
     fn abandon_non_terminal_inputs() {
         let mut s1 = InputState::new_accepted(InputId::new());
         let mut s2 = InputState::new_accepted(InputId::new());
-        InputStateMachine::transition(&mut s2, InputLifecycleState::Queued, None).unwrap();
+        s2.apply(InputLifecycleInput::QueueAccepted).unwrap();
 
         // s3 is terminal (already consumed)
         let mut s3 = InputState::new_accepted(InputId::new());
-        InputStateMachine::transition(&mut s3, InputLifecycleState::Consumed, None).unwrap();
+        s3.apply(InputLifecycleInput::ConsumeOnAccept).unwrap();
 
         let mut refs: Vec<&mut InputState> = vec![&mut s1, &mut s2, &mut s3];
         let count = abandon_non_terminal(&mut refs, InputAbandonReason::Retired);
@@ -58,7 +66,8 @@ mod tests {
     #[test]
     fn terminal_unchanged() {
         let mut s = InputState::new_accepted(InputId::new());
-        InputStateMachine::transition(&mut s, InputLifecycleState::Superseded, None).unwrap();
+        s.apply(InputLifecycleInput::QueueAccepted).unwrap();
+        s.apply(InputLifecycleInput::Supersede).unwrap();
 
         let mut refs: Vec<&mut InputState> = vec![&mut s];
         let count = abandon_non_terminal(&mut refs, InputAbandonReason::Reset);
@@ -69,7 +78,7 @@ mod tests {
     fn would_abandon_predicts_correctly() {
         let s1 = InputState::new_accepted(InputId::new());
         let mut s2 = InputState::new_accepted(InputId::new());
-        InputStateMachine::transition(&mut s2, InputLifecycleState::Consumed, None).unwrap();
+        s2.apply(InputLifecycleInput::ConsumeOnAccept).unwrap();
 
         let refs: Vec<&InputState> = vec![&s1, &s2];
         let ids = would_abandon(&refs);
@@ -87,40 +96,50 @@ mod tests {
             InputLifecycleState::AppliedPendingConsumption,
         ] {
             let mut state = InputState::new_accepted(InputId::new());
-            // Transition to the initial state
+            let run_id = RunId::new();
             match initial_state {
-                InputLifecycleState::Accepted => {} // Already there
+                InputLifecycleState::Accepted => {}
                 InputLifecycleState::Queued => {
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Queued, None)
-                        .unwrap();
+                    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
                 }
                 InputLifecycleState::Staged => {
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Queued, None)
-                        .unwrap();
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Staged, None)
+                    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
+                    state
+                        .apply(InputLifecycleInput::StageForRun {
+                            run_id: run_id.clone(),
+                        })
                         .unwrap();
                 }
                 InputLifecycleState::Applied => {
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Queued, None)
+                    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
+                    state
+                        .apply(InputLifecycleInput::StageForRun {
+                            run_id: run_id.clone(),
+                        })
                         .unwrap();
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Staged, None)
-                        .unwrap();
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Applied, None)
+                    state
+                        .apply(InputLifecycleInput::MarkApplied {
+                            run_id: run_id.clone(),
+                        })
                         .unwrap();
                 }
                 InputLifecycleState::AppliedPendingConsumption => {
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Queued, None)
+                    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
+                    state
+                        .apply(InputLifecycleInput::StageForRun {
+                            run_id: run_id.clone(),
+                        })
                         .unwrap();
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Staged, None)
+                    state
+                        .apply(InputLifecycleInput::MarkApplied {
+                            run_id: run_id.clone(),
+                        })
                         .unwrap();
-                    InputStateMachine::transition(&mut state, InputLifecycleState::Applied, None)
+                    state
+                        .apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+                            boundary_sequence: 1,
+                        })
                         .unwrap();
-                    InputStateMachine::transition(
-                        &mut state,
-                        InputLifecycleState::AppliedPendingConsumption,
-                        None,
-                    )
-                    .unwrap();
                 }
                 _ => unreachable!(),
             }

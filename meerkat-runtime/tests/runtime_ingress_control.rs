@@ -146,7 +146,7 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
         .await
         .expect("input state")
         .expect("input record");
-    assert_eq!(state.current_state, InputLifecycleState::Consumed);
+    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
     assert_eq!(
         runtime.runtime_state(&sid).await.expect("runtime state"),
         RuntimeState::Idle
@@ -193,9 +193,9 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         .await
         .expect("input state")
         .expect("input record");
-    assert_eq!(state.current_state, InputLifecycleState::Abandoned);
+    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome,
+        state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })

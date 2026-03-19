@@ -1,3 +1,4 @@
+use super::mob_orchestrator_authority::MobOrchestratorMutator;
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -697,11 +698,18 @@ impl MobBuilder {
         let topology_service = Arc::new(super::topology::MobTopologyService::new(
             definition.topology.clone(),
         ));
-        let orchestrator = super::orchestrator_kernel::MobOrchestratorKernel::new(
-            &definition,
-            topology_service.clone(),
-        );
-        orchestrator.initialize();
+        let mut orchestrator =
+            super::mob_orchestrator_authority::MobOrchestratorAuthority::new(state.clone());
+        // Initialize: Creating -> Running. Shell executes topology bind + supervisor activation.
+        if let Ok(transition) = orchestrator
+            .apply(super::mob_orchestrator_authority::MobOrchestratorInput::InitializeOrchestrator)
+        {
+            if definition.orchestrator.is_some() {
+                topology_service.bind_coordinator();
+            }
+            // Effects (ActivateSupervisor) are satisfied by the mob builder wiring.
+            let _ = transition;
+        }
         let flow_kernel = super::flow_run_kernel::FlowRunKernel::new(
             handle.mob_id().clone(),
             run_store.clone(),
@@ -716,6 +724,11 @@ impl MobBuilder {
             flow_kernel.clone(),
         );
         let lifecycle = super::state::MobLifecycleOwner::new(state.clone());
+        let initial_phase = MobState::from_u8(state.load(Ordering::Acquire));
+        let lifecycle_authority = super::mob_lifecycle_authority::MobLifecycleAuthority::with_phase(
+            state.clone(),
+            initial_phase,
+        );
         let task_board_service = crate::tasks::MobTaskBoardService::new(
             definition.id.clone(),
             task_board.clone(),
@@ -753,6 +766,7 @@ impl MobBuilder {
             task_board_service,
             spawn_policy,
             lifecycle,
+            lifecycle_authority,
         };
         tokio::spawn(actor.run(command_rx));
 

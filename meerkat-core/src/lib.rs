@@ -51,6 +51,7 @@ pub mod state;
 pub mod time_compat;
 pub mod tool_scope;
 pub mod turn_boundary;
+pub mod turn_execution_authority;
 pub mod types;
 pub mod wait_interrupt;
 
@@ -153,6 +154,11 @@ pub use tool_scope::{
     ToolScopeRevision, ToolScopeStageError,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
+pub use turn_execution_authority::{
+    ContentShape, TurnExecutionAuthority, TurnExecutionEffect, TurnExecutionInput,
+    TurnExecutionMutator, TurnExecutionTransition, TurnPhase, TurnPrimitiveKind,
+    TurnTerminalOutcome,
+};
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
     ContentInput, HandlingMode, Message, OutputSchema, ProviderMeta, RunResult, SecurityMode,

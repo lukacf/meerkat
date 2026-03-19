@@ -245,6 +245,7 @@ pub enum TypeRef {
     U64,
     String,
     Named(String),
+    Enum(String),
     Option(Box<TypeRef>),
     Set(Box<TypeRef>),
     Seq(Box<TypeRef>),
@@ -517,6 +518,10 @@ pub enum Expr {
     Bool(bool),
     U64(u64),
     String(String),
+    NamedVariant {
+        enum_name: String,
+        variant: String,
+    },
     EmptySet,
     EmptyMap,
     SeqLiteral(Vec<Expr>),
@@ -550,6 +555,7 @@ pub enum Expr {
         seq: Box<Expr>,
         prefix: Box<Expr>,
     },
+    SeqElements(Box<Expr>),
     Len(Box<Expr>),
     Head(Box<Expr>),
     MapKeys(Box<Expr>),
@@ -584,6 +590,7 @@ impl Expr {
             Self::Bool(_)
             | Self::U64(_)
             | Self::String(_)
+            | Self::NamedVariant { .. }
             | Self::EmptySet
             | Self::EmptyMap
             | Self::None
@@ -735,6 +742,16 @@ impl Expr {
                     bindings,
                 )?;
                 prefix.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+            }
+            Self::SeqElements(inner) => {
+                inner.validate(
                     phase_names,
                     field_names,
                     input_variants,

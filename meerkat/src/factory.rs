@@ -453,6 +453,7 @@ impl AgentBuildConfig {
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
             shell_env: self.shell_env.clone(),
+            checkpointer: None,
         }
     }
 }

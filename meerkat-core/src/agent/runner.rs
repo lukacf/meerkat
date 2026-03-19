@@ -251,6 +251,7 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
+    #[allow(dead_code)] // Phase 9-10 host-mode rewire pending
     pub(crate) async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
         if let Some(ref cp) = self.checkpointer {
@@ -534,6 +535,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+        self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
         self.extraction_mode = false;
         self.extraction_attempts = 0;
         self.extraction_result = None;
@@ -622,6 +624,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
+        self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
         self.extraction_mode = false;
         self.extraction_attempts = 0;
         self.extraction_result = None;
@@ -659,6 +662,19 @@ where
     /// Cancel the current run
     pub fn cancel(&mut self) {
         if !self.state.is_terminal() {
+            // Route through the authority when an active run exists.
+            if let Some(run_id) = self.turn_authority.active_run().cloned() {
+                use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
+                if let Ok(transition) = self
+                    .turn_authority
+                    .apply(TurnExecutionInput::CancelNow { run_id })
+                {
+                    self.state = transition.next_phase.to_loop_state();
+                    return;
+                }
+            }
+            // Fallback: direct observable state mutation for edge cases
+            // (e.g. no active run, or phase doesn't accept CancelNow).
             let _ = self.state.transition(LoopState::Cancelling);
         }
     }

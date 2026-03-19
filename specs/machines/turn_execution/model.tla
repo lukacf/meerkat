@@ -200,6 +200,7 @@ BoundaryContinue(run_id) ==
 BoundaryContinueCancelsAfterBoundary(run_id) ==
     /\ phase = "DrainingBoundary"
     /\ (active_run = Some(run_id))
+    /\ (primitive_kind = "ConversationTurn")
     /\ (cancel_after_boundary = TRUE)
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1

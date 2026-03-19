@@ -20,6 +20,7 @@ meerkat = { workspace = true, features = ["comms", "skills", "session-compaction
 meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
 meerkat-runtime = { workspace = true }
+meerkat-machine-kernels = { workspace = true }
 
 # Async runtime
 async-trait = { workspace = true }

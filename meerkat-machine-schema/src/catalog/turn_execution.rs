@@ -991,6 +991,13 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ),
                     },
                     Guard {
+                        name: "conversation_turn".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("primitive_kind".into())),
+                            Box::new(Expr::String("ConversationTurn".into())),
+                        ),
+                    },
+                    Guard {
                         name: "boundary_cancel_requested".into(),
                         expr: Expr::Eq(
                             Box::new(Expr::Field("cancel_after_boundary".into())),

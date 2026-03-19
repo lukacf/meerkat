@@ -79,6 +79,7 @@ pub fn input_lifecycle_machine() -> MachineSchema {
                     )],
                 },
                 variant("Consume"),
+                variant("ConsumeOnAccept"),
                 variant("Supersede"),
                 variant("Coalesce"),
                 variant("Abandon"),
@@ -245,6 +246,30 @@ pub fn input_lifecycle_machine() -> MachineSchema {
                 from: vec!["AppliedPendingConsumption".into()],
                 on: InputMatch {
                     variant: "Consume".into(),
+                    bindings: vec![],
+                },
+                guards: vec![],
+                updates: vec![Update::Assign {
+                    field: "terminal_outcome".into(),
+                    expr: Expr::Some(Box::new(Expr::String("Consumed".into()))),
+                }],
+                to: "Consumed".into(),
+                emit: vec![
+                    notice("Consumed"),
+                    EffectEmit {
+                        variant: "RecordTerminalOutcome".into(),
+                        fields: IndexMap::from([(
+                            "outcome".into(),
+                            Expr::String("Consumed".into()),
+                        )]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "ConsumeOnAccept".into(),
+                from: vec!["Accepted".into()],
+                on: InputMatch {
+                    variant: "ConsumeOnAccept".into(),
                     bindings: vec![],
                 },
                 guards: vec![],

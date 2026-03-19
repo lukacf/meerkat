@@ -161,6 +161,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `BoundaryContinue`(run_id)
 - Guards:
   - `run_matches_active`
+  - `conversation_turn`
   - `boundary_cancel_requested`
 - Emits: `RunCancelled`
 - To: `Cancelled`

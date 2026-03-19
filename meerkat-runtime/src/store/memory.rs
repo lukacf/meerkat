@@ -91,8 +91,9 @@ impl RuntimeStore for InMemoryRuntimeStore {
         )?;
         let mut input_updates = input_updates;
         for state in &mut input_updates {
-            state.last_run_id = Some(receipt.run_id.clone());
-            state.last_boundary_sequence = Some(receipt.sequence);
+            state
+                .authority_mut()
+                .stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
         }
 
         inner
@@ -352,7 +353,7 @@ mod tests {
 
         // Second write with updated state
         let mut state2 = InputState::new_accepted(input_id.clone());
-        state2.current_state = crate::input_state::InputLifecycleState::Queued;
+        let _ = state2.apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted);
         store
             .atomic_apply(
                 &rid,
@@ -367,7 +368,7 @@ mod tests {
         let states = store.load_input_states(&rid).await.unwrap();
         assert_eq!(states.len(), 1);
         assert_eq!(
-            states[0].current_state,
+            states[0].current_state(),
             crate::input_state::InputLifecycleState::Queued
         );
     }

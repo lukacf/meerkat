@@ -982,7 +982,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("runtime_control", "AdmissionAcceptedRunningQueue"),
@@ -993,11 +993,11 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "runtime_control",
                         "AdmissionAcceptedIdleQueue",
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -1120,7 +1120,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("runtime_control", "Initialize"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("runtime_control", "AdmissionAcceptedRunningSteer"),
@@ -1131,11 +1131,11 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "runtime_control",
                         "AdmissionAcceptedIdleQueue",
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -1277,7 +1277,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("runtime_control", "AdmissionAcceptedRunningSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
@@ -1296,7 +1296,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "runtime_ingress",
                         "AdmitQueuedSteer",
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -1379,17 +1379,17 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Completed"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -1403,7 +1403,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_ingress",
-                        "RunCompleted",
+                        "RunCompletedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -1476,17 +1476,17 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Failed"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
-                    witness_transition("runtime_ingress", "RunFailed"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
                     witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -1500,7 +1500,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_ingress",
-                        "RunFailed",
+                        "RunFailedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -1578,18 +1578,18 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Cancelled"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
-                    witness_transition("runtime_ingress", "RunCancelled"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
                     witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -1603,7 +1603,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "CancellationObserved",
                         "runtime_ingress",
-                        "RunCancelled",
+                        "RunCancelledFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -1703,20 +1703,20 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                     witness_state("turn_execution", Some("Cancelled"), vec![]),
                 ],
                 expected_transitions: vec![
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
                     witness_transition("turn_execution", "CancelAfterBoundaryFromCallingLlm"),
                     witness_transition("turn_execution", "LlmReturnedTerminal"),
                     witness_transition("turn_execution", "BoundaryCompleteCancelsAfterBoundary"),
-                    witness_transition("runtime_ingress", "RunCancelled"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
                     witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -1742,7 +1742,7 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryCompleteCancelsAfterBoundary",
                         "runtime_ingress",
-                        "RunCancelled",
+                        "RunCancelledFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -3248,11 +3248,11 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -3270,7 +3270,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -3374,11 +3374,11 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
-                    witness_transition("runtime_ingress", "RunFailed"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
                     witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -3392,7 +3392,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_ingress",
-                        "RunFailed",
+                        "RunFailedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -3502,12 +3502,12 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
-                    witness_transition("runtime_ingress", "RunCancelled"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
                     witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -3521,7 +3521,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "CancellationObserved",
                         "runtime_ingress",
-                        "RunCancelled",
+                        "RunCancelledFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -4069,11 +4069,11 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("runtime_control", "Initialize"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
                     witness_transition("runtime_ingress", "AdmitQueuedQueue"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -4085,7 +4085,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -4099,7 +4099,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_ingress",
-                        "RunCompleted",
+                        "RunCompletedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -4220,11 +4220,11 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("runtime_control", "Initialize"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
                     witness_transition("runtime_ingress", "AdmitQueuedQueue"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -4236,7 +4236,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -4250,7 +4250,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_ingress",
-                        "RunCompleted",
+                        "RunCompletedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -4344,11 +4344,11 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
                     witness_transition("runtime_ingress", "AdmitQueuedQueue"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
-                    witness_transition("runtime_ingress", "RunFailed"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
                     witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -4360,7 +4360,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -4374,7 +4374,7 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_ingress",
-                        "RunFailed",
+                        "RunFailedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -4793,11 +4793,11 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -4809,7 +4809,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -4823,7 +4823,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_ingress",
-                        "RunCompleted",
+                        "RunCompletedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -4935,11 +4935,11 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 expected_transitions: vec![
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -4951,7 +4951,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -4965,7 +4965,7 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_ingress",
-                        "RunCompleted",
+                        "RunCompletedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -5536,10 +5536,48 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "flow_run".into(),
                         input_variant: "CreateRun".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "step_ids".into(),
-                            expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
-                        }],
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
                     },
                     CompositionWitnessInput {
                         machine: "mob_orchestrator".into(),
@@ -5705,11 +5743,11 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("flow_run", "DispatchStep"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "BoundaryComplete"),
-                    witness_transition("runtime_ingress", "RunCompleted"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
                     witness_transition("runtime_control", "RunCompletedToIdle"),
                     witness_transition("flow_run", "CompleteStep"),
                     witness_transition("flow_run", "RecordStepOutput"),
@@ -5762,7 +5800,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -5776,7 +5814,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "BoundaryComplete",
                         "runtime_ingress",
-                        "RunCompleted",
+                        "RunCompletedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -5999,10 +6037,48 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "flow_run".into(),
                         input_variant: "CreateRun".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "step_ids".into(),
-                            expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
-                        }],
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
                     },
                     CompositionWitnessInput {
                         machine: "flow_run".into(),
@@ -6076,11 +6152,11 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("flow_run", "DispatchStep"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
-                    witness_transition("runtime_ingress", "RunFailed"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
                     witness_transition("runtime_control", "RunFailedToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -6098,7 +6174,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -6112,7 +6188,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "FatalFailureFromApplyingPrimitive",
                         "runtime_ingress",
-                        "RunFailed",
+                        "RunFailedFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",
@@ -6143,10 +6219,48 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     CompositionWitnessInput {
                         machine: "flow_run".into(),
                         input_variant: "CreateRun".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "step_ids".into(),
-                            expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
-                        }],
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
                     },
                     CompositionWitnessInput {
                         machine: "flow_run".into(),
@@ -6228,12 +6342,12 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     witness_transition("flow_run", "DispatchStep"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
-                    witness_transition("runtime_ingress", "StageDrainSnapshot"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
                     witness_transition("runtime_control", "BeginRunFromIdle"),
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
                     witness_transition("turn_execution", "CancellationObserved"),
-                    witness_transition("runtime_ingress", "RunCancelled"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
                     witness_transition("runtime_control", "RunCancelledToIdle"),
                 ],
                 expected_transition_order: vec![
@@ -6251,7 +6365,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     ),
                     witness_transition_order(
                         "runtime_ingress",
-                        "StageDrainSnapshot",
+                        "StageDrainSnapshotFromActive",
                         "runtime_control",
                         "BeginRunFromIdle",
                     ),
@@ -6271,7 +6385,7 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         "turn_execution",
                         "CancellationObserved",
                         "runtime_ingress",
-                        "RunCancelled",
+                        "RunCancelledFromActive",
                     ),
                     witness_transition_order(
                         "turn_execution",

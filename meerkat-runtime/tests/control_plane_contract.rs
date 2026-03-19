@@ -159,9 +159,9 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
     );
 
     let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Abandoned);
+    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome,
+        state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })
@@ -235,9 +235,9 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
     );
 
     let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Abandoned);
+    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome,
+        state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Destroyed,
         })
@@ -308,7 +308,7 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
     );
 
     let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Consumed);
+    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
 }
 
 #[tokio::test]
@@ -350,9 +350,9 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
     );
 
     let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Abandoned);
+    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome,
+        state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Retired,
         })

@@ -101,6 +101,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `operation_running_or_retiring`
   - `operation_is_mob_member_child`
+  - `peer_not_already_ready`
 - Emits: `ExposeOperationPeer`
 - To: `Active`
 

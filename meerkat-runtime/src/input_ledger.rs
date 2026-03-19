@@ -120,8 +120,7 @@ impl InputLedger {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::input_machine::InputStateMachine;
-    use crate::input_state::InputLifecycleState;
+    use crate::input_lifecycle_authority::InputLifecycleInput;
 
     #[test]
     fn accept_and_retrieve() {
@@ -164,7 +163,7 @@ mod tests {
 
         let id2 = InputId::new();
         let mut state2 = InputState::new_accepted(id2);
-        InputStateMachine::transition(&mut state2, InputLifecycleState::Consumed, None).unwrap();
+        state2.apply(InputLifecycleInput::ConsumeOnAccept).unwrap();
         ledger.accept(state2);
 
         let active: Vec<_> = ledger.iter_non_terminal().collect();
@@ -181,7 +180,8 @@ mod tests {
 
         let id3 = InputId::new();
         let mut state3 = InputState::new_accepted(id3);
-        InputStateMachine::transition(&mut state3, InputLifecycleState::Superseded, None).unwrap();
+        state3.apply(InputLifecycleInput::QueueAccepted).unwrap();
+        state3.apply(InputLifecycleInput::Supersede).unwrap();
         ledger.accept(state3);
 
         assert_eq!(ledger.len(), 3);

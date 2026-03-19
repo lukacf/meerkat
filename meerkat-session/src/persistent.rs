@@ -27,9 +27,8 @@ use meerkat_core::service::{
 use meerkat_core::types::{RunResult, SessionId};
 use meerkat_core::{InputId, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
-use meerkat_runtime::input_state::{
-    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
-};
+use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
+use meerkat_runtime::input_state::InputState;
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
 use meerkat_store::SessionStore;
@@ -121,6 +120,11 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// immediately reloading durable archived snapshots on hot history reads.
     archived_sessions: Mutex<IndexMap<SessionId, Session>>,
     archived_history_capacity: usize,
+    /// Gates for active host-mode checkpointers, keyed by session ID.
+    /// Archive acquires the gate's lock, sets cancelled, then saves the
+    /// archived snapshot -- mutual exclusion prevents a concurrent checkpoint
+    /// from overwriting the archived row with a live one.
+    checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
 }
 
 /// Extract session labels from a metadata map.
@@ -202,17 +206,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .iter()
                     .find(|candidate| &candidate.input_id == input_id)?
                     .clone();
-                let previous = state.current_state;
-                state.last_run_id = Some(run_id.clone());
-                state.last_boundary_sequence = Some(sequence);
-                state.current_state = InputLifecycleState::Consumed;
-                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: state.updated_at,
-                    from: previous,
-                    to: InputLifecycleState::Consumed,
-                    reason: Some("runtime boundary applied and durably committed".into()),
-                });
+                // Stamp the run association and boundary sequence onto the authority,
+                // then apply the Consume transition through the canonical lifecycle.
+                state
+                    .authority_mut()
+                    .stamp_receipt_metadata(run_id.clone(), sequence);
+                let _ = state.apply(InputLifecycleInput::Consume);
                 Some(state)
             })
             .collect())
@@ -374,6 +373,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub async fn discard_live_session(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.discard_live_session(id).await?;
+        self.checkpointer_gates.lock().await.remove(id);
         Ok(())
     }
 
@@ -390,6 +390,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             runtime_store,
             archived_sessions: Mutex::new(IndexMap::new()),
             archived_history_capacity: max_sessions.max(1),
+            checkpointer_gates: Mutex::new(HashMap::new()),
         }
     }
 
@@ -399,6 +400,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
         self.runtime_store.clone()
+    }
+
+    async fn gate_for_session(&self, id: &SessionId) -> Arc<CheckpointerGate> {
+        let mut gates = self.checkpointer_gates.lock().await;
+        Arc::clone(gates.entry(id.clone()).or_insert_with(|| {
+            Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            })
+        }))
+    }
+
+    async fn existing_gate_for_session(&self, id: &SessionId) -> Option<Arc<CheckpointerGate>> {
+        let gates = self.checkpointer_gates.lock().await;
+        gates.get(id).cloned()
     }
 
     async fn cached_archived_session(&self, id: &SessionId) -> Option<Session> {
@@ -816,6 +831,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         // Gate guard is dropped here — any in-flight checkpoint that was
         // blocked on the lock will now see cancelled == true and bail out.
         drop(gate_guard.take());
+        self.checkpointer_gates.lock().await.remove(id);
 
         match (&live_result, in_store) {
             // At least one side had the session — success.
@@ -940,6 +956,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         None => {
                             if created_gate {
                                 drop(gate_guard);
+                                self.checkpointer_gates.lock().await.remove(id);
                             }
                             return Err(SessionControlError::Session(SessionError::Agent(
                                 meerkat_core::error::AgentError::InternalError(
@@ -955,6 +972,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
                         Err(err) => {
                             if created_gate && matches!(err, SessionError::NotFound { .. }) {
                                 drop(gate_guard);
+                                self.checkpointer_gates.lock().await.remove(id);
                             }
                             return Err(SessionControlError::Session(err));
                         }
@@ -1025,6 +1043,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
         {
             Some(session) => session,
             None => {
+                self.checkpointer_gates.lock().await.remove(id);
                 return Err(SessionControlError::Session(SessionError::NotFound {
                     id: id.clone(),
                 }));
@@ -1077,6 +1096,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// Shut down all sessions.
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
+    }
+
+    /// Cancel all active checkpointer gates.
+    ///
+    /// After this call, in-flight checkpoints that are past the gate check
+    /// will complete their current save, but subsequent checkpoint calls on
+    /// any session will be no-ops. Use this during `stop()` to prevent
+    /// checkpoint writes from racing with external cleanup operations.
+    pub async fn cancel_all_checkpointers(&self) {
+        let gates = self.checkpointer_gates.lock().await;
+        for gate in gates.values() {
+            let mut cancelled = gate.cancelled.lock().await;
+            *cancelled = true;
+        }
+    }
+
+    /// Re-enable checkpointer gates for all tracked sessions.
+    ///
+    /// Call this during `resume()` after `cancel_all_checkpointers()` was
+    /// used during stop. Gates that were removed by `archive()` are not
+    /// affected.
+    pub async fn rearm_all_checkpointers(&self) {
+        let gates = self.checkpointer_gates.lock().await;
+        for gate in gates.values() {
+            let mut cancelled = gate.cancelled.lock().await;
+            *cancelled = false;
+        }
     }
 
     /// Subscribe to session-wide events from the live inner service.
@@ -1840,7 +1886,10 @@ mod tests {
             .await
             .expect_err("unknown session must fail");
         assert_eq!(err.code(), "SESSION_NOT_FOUND");
-        assert!("unknown-session append must not allocate a checkpointer gate");
+        assert!(
+            service.checkpointer_gates.lock().await.is_empty(),
+            "unknown-session append must not allocate a checkpointer gate"
+        );
     }
 
     #[tokio::test]

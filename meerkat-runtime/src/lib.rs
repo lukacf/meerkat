@@ -33,16 +33,21 @@ pub mod durability;
 pub mod identifiers;
 pub mod input;
 pub mod input_ledger;
+pub mod input_lifecycle_authority;
 pub mod input_machine;
 pub mod input_scope;
 pub mod input_state;
 pub mod lifecycle_ops;
 pub mod mob_adapter;
 pub mod ops_lifecycle;
+#[allow(dead_code)] // Authority not yet wired; integration pending
+pub(crate) mod ops_lifecycle_authority;
 pub mod policy;
 pub mod policy_table;
 pub mod queue;
+pub mod runtime_control_authority;
 pub mod runtime_event;
+pub mod runtime_ingress_authority;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
@@ -71,6 +76,10 @@ pub use input::{
     ResponseProgressPhase, ResponseTerminalStatus,
 };
 pub use input_ledger::InputLedger;
+pub use input_lifecycle_authority::{
+    InputLifecycleAuthority, InputLifecycleEffect, InputLifecycleError, InputLifecycleInput,
+    InputLifecycleMutator, InputLifecycleTransition,
+};
 pub use input_machine::{InputStateMachine, InputStateMachineError};
 pub use input_scope::InputScope;
 pub use input_state::{
@@ -85,9 +94,18 @@ pub use policy::{
 };
 pub use policy_table::{DEFAULT_POLICY_VERSION, DefaultPolicyTable};
 pub use queue::InputQueue;
+pub use runtime_control_authority::{
+    HandlingMode, RuntimeControlAuthority, RuntimeControlEffect, RuntimeControlInput,
+    RuntimeControlMutator, RuntimeControlTransition,
+};
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
+};
+pub use runtime_ingress_authority::{
+    ContentShape, IngressPhase, RequestId, ReservationKey, RuntimeIngressAuthority,
+    RuntimeIngressEffect, RuntimeIngressError, RuntimeIngressInput, RuntimeIngressMutator,
+    RuntimeIngressTransition,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};

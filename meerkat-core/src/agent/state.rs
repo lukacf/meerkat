@@ -6,9 +6,13 @@ use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
 };
+use crate::lifecycle::RunId;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::turn_execution_authority::{
+    ContentShape, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition,
+};
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
     UserMessage,
@@ -109,6 +113,17 @@ where
         Ok(())
     }
 
+    /// Apply a typed input to the turn-execution authority and sync the
+    /// observable `LoopState` from the resulting canonical phase.
+    fn apply_turn_input(
+        &mut self,
+        input: TurnExecutionInput,
+    ) -> Result<TurnExecutionTransition, AgentError> {
+        let transition = self.turn_authority.apply(input)?;
+        self.state = transition.next_phase.to_loop_state();
+        Ok(transition)
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -119,6 +134,19 @@ where
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
+
+        // --- Authority lifecycle: start a conversation run ---
+        let run_id = RunId(uuid::Uuid::new_v4());
+        self.apply_turn_input(TurnExecutionInput::StartConversationRun {
+            run_id: run_id.clone(),
+        })?;
+        // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
+        self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
+            run_id: run_id.clone(),
+            admitted_content_shape: ContentShape("conversation".to_string()),
+            vision_enabled: false,
+            image_tool_results_enabled: false,
+        })?;
 
         // Helper to conditionally emit events (only when listener exists).
         // Also forwards to the event tap for interaction-scoped subscribers.
@@ -151,7 +179,12 @@ where
 
             // Check turn limit
             if turn_count >= max_turns {
-                self.state.transition(LoopState::Completed)?;
+                self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                    run_id: run_id.clone(),
+                })?;
+                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                    run_id: run_id.clone(),
+                })?;
                 return Ok(self.build_result(turn_count, tool_call_count).await);
             }
 
@@ -163,7 +196,12 @@ where
                     limit: self.budget.remaining(),
                     percent: 1.0,
                 });
-                self.state.transition(LoopState::Completed)?;
+                self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                    run_id: run_id.clone(),
+                })?;
+                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                    run_id: run_id.clone(),
+                })?;
                 return Ok(self.build_result(turn_count, tool_call_count).await);
             }
 
@@ -514,7 +552,11 @@ where
                         }
 
                         // Transition to waiting for ops
-                        self.state.transition(LoopState::WaitingForOps)?;
+                        let tc_count = assistant_msg.tool_calls().count() as u32;
+                        self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
+                            run_id: run_id.clone(),
+                            tool_count: tc_count,
+                        })?;
 
                         // Execute tool calls in parallel
                         let tool_calls: Vec<ToolCallOwned> = assistant_msg
@@ -795,18 +837,24 @@ where
                             }
                         }
 
-                        // No pending ops — go through DrainingEvents to CallingLlm
-                        self.state.transition(LoopState::DrainingEvents)?;
+                        // No pending ops — tool calls resolved, drain boundary, continue
+                        self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
+                            run_id: run_id.clone(),
+                        })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
-                        self.state.transition(LoopState::CallingLlm)?;
+                        self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                            run_id: run_id.clone(),
+                        })?;
                         turn_count += 1;
                     } else if self.extraction_mode {
                         // Extraction turn response — validate against schema
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
                         // Drain turn boundary (fires TurnBoundary hooks, drains comms)
-                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                            run_id: run_id.clone(),
+                        })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
                         emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
@@ -871,13 +919,19 @@ where
                                         );
                                         self.session
                                             .push(Message::User(UserMessage::text(retry_prompt)));
-                                        self.state.transition(LoopState::CallingLlm)?;
+                                        self.apply_turn_input(
+                                            TurnExecutionInput::BoundaryContinue {
+                                                run_id: run_id.clone(),
+                                            },
+                                        )?;
                                         turn_count += 1;
                                         continue;
                                     }
 
                                     // Retries exhausted
-                                    self.state.transition(LoopState::Completed)?;
+                                    self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                                        run_id: run_id.clone(),
+                                    })?;
                                     if let Err(e) = self.store.save(&self.session).await {
                                         tracing::warn!("Failed to save session: {}", e);
                                     }
@@ -893,7 +947,9 @@ where
 
                                 // Validation passed — store result for RunResult assembly
                                 self.extraction_result = Some(normalized);
-                                self.state.transition(LoopState::Completed)?;
+                                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                                    run_id: run_id.clone(),
+                                })?;
                                 if let Err(e) = self.store.save(&self.session).await {
                                     tracing::warn!("Failed to save session: {}", e);
                                 }
@@ -923,13 +979,17 @@ where
                                     );
                                     self.session
                                         .push(Message::User(UserMessage::text(retry_prompt)));
-                                    self.state.transition(LoopState::CallingLlm)?;
+                                    self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                                        run_id: run_id.clone(),
+                                    })?;
                                     turn_count += 1;
                                     continue;
                                 }
 
                                 // Retries exhausted
-                                self.state.transition(LoopState::Completed)?;
+                                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                                    run_id: run_id.clone(),
+                                })?;
                                 if let Err(e) = self.store.save(&self.session).await {
                                     tracing::warn!("Failed to save session: {}", e);
                                 }
@@ -948,7 +1008,9 @@ where
                         let final_text = assistant_text.clone();
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
-                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                            run_id: run_id.clone(),
+                        })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
 
@@ -986,14 +1048,17 @@ where
                             self.session.push(Message::User(UserMessage::text(prompt)));
 
                             // Re-enter main loop via CallingLlm
-                            self.state.transition(LoopState::CallingLlm)?;
+                            self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                                run_id: run_id.clone(),
+                            })?;
                             turn_count += 1;
                             continue;
                         }
 
                         // No extraction needed - complete normally
-                        // Transition to completed
-                        self.state.transition(LoopState::Completed)?;
+                        self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                            run_id: run_id.clone(),
+                        })?;
 
                         // Save session
                         if let Err(e) = self.store.save(&self.session).await {
@@ -1028,24 +1093,34 @@ where
                             self.pending_ops.clear();
                         }
                     }
-                    self.state.transition(LoopState::DrainingEvents)?;
+                    self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
+                        run_id: run_id.clone(),
+                    })?;
                     self.drain_turn_boundary(turn_count, event_tx.as_ref())
                         .await?;
-                    self.state.transition(LoopState::CallingLlm)?;
+                    self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                        run_id: run_id.clone(),
+                    })?;
                     turn_count += 1;
                 }
                 LoopState::DrainingEvents => {
                     // Wait for any pending events to be processed
-                    self.state.transition(LoopState::Completed)?;
+                    self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 LoopState::Cancelling => {
                     // Handle cancellation
-                    self.state.transition(LoopState::Completed)?;
+                    self.apply_turn_input(TurnExecutionInput::CancellationObserved {
+                        run_id: run_id.clone(),
+                    })?;
                     return Ok(self.build_result(turn_count, tool_call_count).await);
                 }
                 LoopState::ErrorRecovery => {
                     // Attempt recovery
-                    self.state.transition(LoopState::CallingLlm)?;
+                    self.apply_turn_input(TurnExecutionInput::RetryRequested {
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 LoopState::Completed => {
                     return Ok(self.build_result(turn_count, tool_call_count).await);

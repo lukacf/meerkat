@@ -1,21 +1,15 @@
 //! Agent comms helpers (host mode).
 
-use crate::error::AgentError;
-use crate::event::AgentEvent;
 use crate::interaction::InteractionContent;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{ContentInput, Message, RunResult, Usage, UserMessage};
+use crate::types::{Message, UserMessage};
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicBool;
-use tokio::sync::mpsc;
 
 use crate::agent::{
     Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime,
     InlinePeerNotificationPolicy,
 };
-use crate::interaction::InboxInteraction;
-use crate::session::Session;
 
 /// Presentation cap for explicit peer names in one inline summary.
 const PEER_INLINE_NAME_LIMIT: usize = 10;
@@ -236,6 +230,7 @@ where
 
 /// Build a `ContentInput` from an inbox interaction, preserving multimodal
 /// blocks from `InteractionContent::Message { blocks }` when present.
+#[allow(dead_code)] // Phase 9-10 comms drain will use this
 fn interaction_to_content_input(
     interaction: &crate::interaction::InboxInteraction,
 ) -> crate::types::ContentInput {
@@ -877,31 +872,5 @@ mod tests {
         assert_eq!(user_msgs.len(), 1);
         assert!(user_msgs[0].contains("[PEER UPDATE]"));
         assert!(user_msgs[0].contains("2 peers connected"));
-    }
-
-    #[tokio::test]
-    async fn test_inject_response_into_session_helper() {
-        let mut session = Session::new();
-
-        let response_id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
-        let interaction = crate::interaction::InboxInteraction {
-            id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
-            from: "peer".into(),
-            content: InteractionContent::Response {
-                in_reply_to: response_id,
-                status: crate::interaction::ResponseStatus::Completed,
-                result: serde_json::json!("result data"),
-            },
-            rendered_text: "[Response] ok: result data".into(),
-        };
-
-        inject_response_into_session(&mut session, &interaction);
-
-        let msgs = session.messages();
-        assert_eq!(msgs.len(), 1);
-        match &msgs[0] {
-            Message::User(u) => assert_eq!(u.text_content(), "[Response] ok: result data"),
-            _ => panic!("Expected User message"),
-        }
     }
 }

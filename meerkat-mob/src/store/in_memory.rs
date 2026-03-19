@@ -11,6 +11,7 @@ use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
+use meerkat_machine_kernels::KernelState;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -151,6 +152,50 @@ impl MobRunStore for InMemoryMobRunStore {
         }
         let terminal = next.is_terminal();
         run.status = next;
+        if terminal && run.completed_at.is_none() {
+            run.completed_at = Some(Utc::now());
+        }
+        Ok(true)
+    }
+
+    async fn cas_flow_state(
+        &self,
+        run_id: &RunId,
+        expected: &KernelState,
+        next: &KernelState,
+    ) -> Result<bool, MobError> {
+        let mut runs = self.runs.write().await;
+        let Some(run) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if &run.flow_state != expected {
+            return Ok(false);
+        }
+        run.flow_state = next.clone();
+        Ok(true)
+    }
+
+    async fn cas_run_snapshot(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &KernelState,
+        next_status: MobRunStatus,
+        next_flow_state: &KernelState,
+    ) -> Result<bool, MobError> {
+        let mut runs = self.runs.write().await;
+        let Some(run) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if run.status != expected_status
+            || run.status.is_terminal()
+            || &run.flow_state != expected_flow_state
+        {
+            return Ok(false);
+        }
+        let terminal = next_status.is_terminal();
+        run.status = next_status;
+        run.flow_state = next_flow_state.clone();
         if terminal && run.completed_at.is_none() {
             run.completed_at = Some(Utc::now());
         }
@@ -343,6 +388,7 @@ mod tests {
             mob_id: MobId::from("mob"),
             flow_id: FlowId::from("flow-a"),
             status,
+            flow_state: MobRun::flow_state_for_steps([StepId::from("step-1")]).unwrap(),
             activation_params: serde_json::json!({"a":1}),
             created_at: Utc::now(),
             completed_at: None,

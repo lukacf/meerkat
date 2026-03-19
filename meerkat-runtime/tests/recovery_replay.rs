@@ -42,9 +42,24 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> InputS
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
-    state.current_state = InputLifecycleState::AppliedPendingConsumption;
-    state.last_run_id = Some(run_id.clone());
-    state.last_boundary_sequence = Some(sequence);
+    // Transition through authority: Accepted -> Queued -> Staged -> Applied -> AppliedPendingConsumption
+    use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
+    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
+    state
+        .apply(InputLifecycleInput::StageForRun {
+            run_id: run_id.clone(),
+        })
+        .unwrap();
+    state
+        .apply(InputLifecycleInput::MarkApplied {
+            run_id: run_id.clone(),
+        })
+        .unwrap();
+    state
+        .apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+            boundary_sequence: sequence,
+        })
+        .unwrap();
     state
 }
 
@@ -89,16 +104,16 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
 
     for input_id in [&first_id, &second_id] {
         let state = driver.input_state(input_id).expect("driver input state");
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
+        assert_eq!(state.current_state(), InputLifecycleState::Queued);
 
         let stored = store
             .load_input_state(&runtime_id, input_id)
             .await
             .expect("load persisted state")
             .expect("persisted input record");
-        assert_eq!(stored.current_state, InputLifecycleState::Queued);
-        assert_eq!(stored.last_run_id, Some(run_id.clone()));
-        assert_eq!(stored.last_boundary_sequence, Some(0));
+        assert_eq!(stored.current_state(), InputLifecycleState::Queued);
+        assert_eq!(stored.last_run_id().cloned(), Some(run_id.clone()));
+        assert_eq!(stored.last_boundary_sequence(), Some(0));
     }
 
     let replayed = vec![

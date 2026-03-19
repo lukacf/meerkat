@@ -1,5 +1,15 @@
 //! MCP router for multi-server routing
+//!
+//! The router is a shell that manages connections, async tasks, and tool
+//! caching. All lifecycle state transitions flow through the
+//! [`ExternalToolSurfaceAuthority`] which is the single source of truth
+//! for what state each surface is in and what transitions are legal.
 
+use crate::external_tool_surface_authority::{
+    ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceInput,
+    ExternalToolSurfaceMutator, SurfaceBaseState, SurfaceDeltaOperation, SurfaceDeltaPhase,
+    SurfaceId, TurnNumber,
+};
 use crate::{McpConnection, McpError, McpServerConfig};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -19,6 +29,10 @@ const DEFAULT_REMOVAL_TIMEOUT: Duration = Duration::from_secs(30);
 const PENDING_CHANNEL_CAPACITY: usize = 32;
 
 /// MCP server lifecycle state used by staged router apply.
+///
+/// This is a public API projection of the authority's internal state.
+/// The canonical truth lives in [`ExternalToolSurfaceAuthority`]; this
+/// enum is derived from it for backward-compatible API consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpServerLifecycleState {
     Active,
@@ -27,16 +41,6 @@ pub enum McpServerLifecycleState {
         timeout_at: Instant,
     },
     Removed,
-}
-
-impl McpServerLifecycleState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "Active",
-            Self::Removing { .. } => "Removing",
-            Self::Removed => "Removed",
-        }
-    }
 }
 
 /// Reload target for staged reload operations.
@@ -112,18 +116,16 @@ enum StagedRouterOp {
     Reload(McpReloadTarget),
 }
 
+/// Shell-level server entry. Holds connection, config, and tools.
+/// Lifecycle state is owned by the authority, not by this struct.
 struct ServerEntry {
     config: McpServerConfig,
     connection: Option<McpConnection>,
-    lifecycle: McpServerLifecycleState,
     tools: Vec<Arc<ToolDef>>,
+    /// Shell-level atomic for inflight call RAII guards. The authority owns
+    /// the canonical count; this atomic is for the `InflightCallGuard` pattern
+    /// used by the `&self` call_tool path.
     active_calls: AtomicUsize,
-}
-
-impl ServerEntry {
-    fn is_active(&self) -> bool {
-        matches!(self.lifecycle, McpServerLifecycleState::Active)
-    }
 }
 
 struct InflightCallGuard<'a> {
@@ -143,12 +145,25 @@ impl Drop for InflightCallGuard<'_> {
     }
 }
 
+/// Shell-level timeout tracking for a removing surface.
+struct RemovalTimeout {
+    draining_since: Instant,
+    timeout_at: Instant,
+}
+
 /// Router for MCP tool calls across multiple servers.
+///
+/// All lifecycle state transitions flow through the
+/// [`ExternalToolSurfaceAuthority`]. The router manages connections,
+/// async tasks, tool caching, and effect execution.
 ///
 /// Add and reload operations are non-blocking: `apply_staged()` spawns
 /// background connection tasks and returns immediately. Completions are
 /// delivered via [`take_external_updates`](Self::take_external_updates).
 pub struct McpRouter {
+    /// Canonical lifecycle authority — single source of truth.
+    authority: ExternalToolSurfaceAuthority,
+
     servers: HashMap<String, ServerEntry>,
     /// Maps tool name to owning server, including servers in Removing state.
     tool_to_server: HashMap<String, String>,
@@ -156,6 +171,8 @@ pub struct McpRouter {
     cached_tools: Vec<Arc<ToolDef>>,
     staged_ops: Vec<StagedRouterOp>,
     removal_timeout: Duration,
+    /// Shell-level timeout tracking for Removing surfaces.
+    removal_timeouts: HashMap<String, RemovalTimeout>,
 
     // --- Async pending infrastructure ---
     pending_tx: mpsc::Sender<PendingResult>,
@@ -172,11 +189,13 @@ impl McpRouter {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
         Self {
+            authority: ExternalToolSurfaceAuthority::new(),
             servers: HashMap::new(),
             tool_to_server: HashMap::new(),
             cached_tools: Vec::new(),
             staged_ops: Vec::new(),
             removal_timeout: DEFAULT_REMOVAL_TIMEOUT,
+            removal_timeouts: HashMap::new(),
             pending_tx: tx,
             pending_rx: Mutex::new(rx),
             pending_servers: HashMap::new(),
@@ -203,7 +222,6 @@ impl McpRouter {
     /// Prefer [`stage_add`](Self::stage_add) + [`apply_staged`](Self::apply_staged)
     /// for boundary semantics.
     pub async fn add_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
-        // Use the synchronous install path for backward compatibility.
         self.install_active_server(config).await?;
         self.rebuild_visible_cache();
         Ok(())
@@ -229,12 +247,8 @@ impl McpRouter {
 
     /// Apply staged operations at a boundary (non-blocking for add/reload).
     ///
-    /// Add and reload operations spawn background connection tasks and return
-    /// immediately with `phase = Pending` in the lifecycle actions. Completions
-    /// arrive via [`take_lifecycle_actions`](Self::take_lifecycle_actions) or
-    /// the legacy [`take_external_updates`](Self::take_external_updates).
-    ///
-    /// Remove operations are synchronous (start drain immediately).
+    /// All state transitions flow through the authority. The shell spawns
+    /// background tasks and executes effects.
     pub async fn apply_staged(&mut self) -> Result<McpApplyResult, McpError> {
         let mut delta = McpApplyDelta::default();
         let staged_ops = std::mem::take(&mut self.staged_ops);
@@ -246,34 +260,82 @@ impl McpRouter {
             match op {
                 StagedRouterOp::Add(config) => {
                     let server_name = config.name.clone();
+                    let sid = SurfaceId::from(server_name.as_str());
+
+                    // Stage through authority.
+                    if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageAdd {
+                        surface_id: sid.clone(),
+                    }) {
+                        tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd");
+                        continue;
+                    }
 
                     // Cancel any existing pending op for this server.
                     self.pending_servers.remove(&server_name);
 
-                    self.spawn_pending(config, PendingOp::Add);
-                    delta.lifecycle_actions.push(McpLifecycleAction::new(
-                        server_name,
-                        ToolConfigChangeOperation::Add,
-                        McpLifecyclePhase::Pending,
-                    ));
+                    // Apply boundary through authority to move to Pending.
+                    match self
+                        .authority
+                        .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                            surface_id: sid,
+                            applied_at_turn: TurnNumber(0),
+                        }) {
+                        Ok(transition) => {
+                            self.execute_effects(&transition.effects, &mut delta, Some(&config));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                server = %server_name,
+                                error = %e,
+                                "Authority rejected ApplyBoundary for Add"
+                            );
+                        }
+                    }
                 }
                 StagedRouterOp::Remove(server_name) => {
+                    let sid = SurfaceId::from(server_name.as_str());
+
                     // Cancel pending for same server if any.
                     self.pending_servers.remove(&server_name);
 
-                    if let Some(entry) = self.servers.get_mut(&server_name)
-                        && matches!(entry.lifecycle, McpServerLifecycleState::Active)
-                    {
-                        let draining_since = Instant::now();
-                        entry.lifecycle = McpServerLifecycleState::Removing {
-                            draining_since,
-                            timeout_at: draining_since + self.removal_timeout,
-                        };
-                        delta.lifecycle_actions.push(McpLifecycleAction::new(
-                            server_name,
-                            ToolConfigChangeOperation::Remove,
-                            McpLifecyclePhase::Draining,
-                        ));
+                    // Stage through authority.
+                    if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageRemove {
+                        surface_id: sid.clone(),
+                    }) {
+                        tracing::warn!(server = %server_name, error = %e, "Authority rejected StageRemove");
+                        continue;
+                    }
+
+                    // Apply boundary through authority.
+                    match self
+                        .authority
+                        .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                            surface_id: sid,
+                            applied_at_turn: TurnNumber(0),
+                        }) {
+                        Ok(transition) => {
+                            self.execute_effects(&transition.effects, &mut delta, None);
+                            // Record shell-level timeout if we entered Removing.
+                            let check_sid = SurfaceId::from(server_name.as_str());
+                            if self.authority.surface_base(&check_sid) == SurfaceBaseState::Removing
+                            {
+                                let draining_since = Instant::now();
+                                self.removal_timeouts.insert(
+                                    server_name,
+                                    RemovalTimeout {
+                                        draining_since,
+                                        timeout_at: draining_since + self.removal_timeout,
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                server = %server_name,
+                                error = %e,
+                                "Authority rejected ApplyBoundary for Remove"
+                            );
+                        }
                     }
                 }
                 StagedRouterOp::Reload(target) => {
@@ -289,17 +351,37 @@ impl McpRouter {
                     };
 
                     let server_name = config.name.clone();
+                    let sid = SurfaceId::from(server_name.as_str());
 
                     // Cancel any existing pending op for this server.
                     self.pending_servers.remove(&server_name);
 
-                    // Keep old connection active during reload.
-                    self.spawn_pending(config, PendingOp::Reload);
-                    delta.lifecycle_actions.push(McpLifecycleAction::new(
-                        server_name,
-                        ToolConfigChangeOperation::Reload,
-                        McpLifecyclePhase::Pending,
-                    ));
+                    // Stage through authority.
+                    if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageReload {
+                        surface_id: sid.clone(),
+                    }) {
+                        tracing::warn!(server = %server_name, error = %e, "Authority rejected StageReload");
+                        continue;
+                    }
+
+                    // Apply boundary through authority.
+                    match self
+                        .authority
+                        .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                            surface_id: sid,
+                            applied_at_turn: TurnNumber(0),
+                        }) {
+                        Ok(transition) => {
+                            self.execute_effects(&transition.effects, &mut delta, Some(&config));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                server = %server_name,
+                                error = %e,
+                                "Authority rejected ApplyBoundary for Reload"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -307,11 +389,82 @@ impl McpRouter {
         self.process_removals(&mut delta).await;
         self.rebuild_visible_cache();
 
-        let pending_count = self.pending_servers.len();
+        let pending_count = self.authority.pending_count();
         Ok(McpApplyResult {
             delta,
             pending_count,
         })
+    }
+
+    /// Execute effects returned by the authority.
+    fn execute_effects(
+        &mut self,
+        effects: &[ExternalToolSurfaceEffect],
+        delta: &mut McpApplyDelta,
+        config: Option<&McpServerConfig>,
+    ) {
+        for effect in effects {
+            match effect {
+                ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
+                    surface_id: _,
+                    operation,
+                } => {
+                    if let Some(config) = config {
+                        let op = match operation {
+                            SurfaceDeltaOperation::Add => PendingOp::Add,
+                            SurfaceDeltaOperation::Reload => PendingOp::Reload,
+                            _ => continue,
+                        };
+                        self.spawn_pending(config.clone(), op);
+                    }
+                }
+                ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet => {
+                    // Deferred: rebuild_visible_cache is called after all effects.
+                }
+                ExternalToolSurfaceEffect::EmitExternalToolDelta {
+                    surface_id,
+                    operation,
+                    phase,
+                    ..
+                } => {
+                    let mcp_operation = match operation {
+                        SurfaceDeltaOperation::Add => ToolConfigChangeOperation::Add,
+                        SurfaceDeltaOperation::Remove => ToolConfigChangeOperation::Remove,
+                        SurfaceDeltaOperation::Reload => ToolConfigChangeOperation::Reload,
+                        SurfaceDeltaOperation::None => continue,
+                    };
+                    let mcp_phase = match phase {
+                        SurfaceDeltaPhase::Pending => McpLifecyclePhase::Pending,
+                        SurfaceDeltaPhase::Applied => McpLifecyclePhase::Applied,
+                        SurfaceDeltaPhase::Draining => McpLifecyclePhase::Draining,
+                        SurfaceDeltaPhase::Failed => McpLifecyclePhase::Failed,
+                        SurfaceDeltaPhase::Forced => McpLifecyclePhase::Forced,
+                        SurfaceDeltaPhase::None => continue,
+                    };
+                    delta.lifecycle_actions.push(McpLifecycleAction::new(
+                        surface_id.0.clone(),
+                        mcp_operation,
+                        mcp_phase,
+                    ));
+                }
+                ExternalToolSurfaceEffect::CloseSurfaceConnection { surface_id } => {
+                    if let Some(entry) = self.servers.get_mut(&surface_id.0) {
+                        let conn = entry.connection.take();
+                        let name = surface_id.0.clone();
+                        tokio::spawn(async move {
+                            Self::close_entry_connection(name, conn).await;
+                        });
+                        entry.tools.clear();
+                    }
+                    self.remove_tool_mappings_for_server(&surface_id.0);
+                    delta.removed_servers.push(surface_id.0.clone());
+                    self.removal_timeouts.remove(&surface_id.0);
+                }
+                ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
+                    // Rejections are handled inline during call_tool, not here.
+                }
+            }
+        }
     }
 
     /// Spawn a background task to connect and enumerate tools for a server.
@@ -326,7 +479,6 @@ impl McpRouter {
         let tx = self.pending_tx.clone();
         tokio::spawn(async move {
             let result = McpConnection::connect_and_enumerate(&config).await;
-            // Channel may be closed if router was dropped — that's fine.
             let _ = tx
                 .send(PendingResult {
                     server_name,
@@ -340,8 +492,6 @@ impl McpRouter {
 
     /// Drain completed pending results from the background channel.
     fn drain_pending(&mut self) {
-        // Collect results under the lock, then process outside to avoid
-        // holding the MutexGuard across &mut self calls.
         let results: Vec<PendingResult> = {
             let mut rx = match self.pending_rx.lock() {
                 Ok(guard) => guard,
@@ -377,7 +527,6 @@ impl McpRouter {
                 generation = result.generation,
                 "Discarding stale pending MCP result"
             );
-            // Close the connection if it was successful.
             if let Ok((conn, _)) = result.result {
                 let server_name = result.server_name;
                 tokio::spawn(async move {
@@ -393,76 +542,114 @@ impl McpRouter {
             return;
         }
 
-        // Remove from pending.
         self.pending_servers.remove(&result.server_name);
+        let server_name = result.server_name.clone();
+        let sid = SurfaceId::from(server_name.as_str());
 
         match result.result {
             Ok((conn, tools)) => {
                 let tool_count = tools.len();
-                let server_name = result.server_name.clone();
 
-                // Determine operation type for event.
-                let operation = match result.op {
-                    PendingOp::Add => ToolConfigChangeOperation::Add,
-                    PendingOp::Reload => ToolConfigChangeOperation::Reload,
-                };
+                // Notify authority of success.
+                match self
+                    .authority
+                    .apply(ExternalToolSurfaceInput::PendingSucceeded {
+                        surface_id: sid,
+                        applied_at_turn: TurnNumber(0),
+                    }) {
+                    Ok(_transition) => {
+                        let operation = match result.op {
+                            PendingOp::Add => ToolConfigChangeOperation::Add,
+                            PendingOp::Reload => ToolConfigChangeOperation::Reload,
+                        };
 
-                // For reload: close old connection.
-                if result.op == PendingOp::Reload
-                    && let Some(old_entry) = self.servers.get_mut(&server_name)
-                {
-                    let old_conn = old_entry.connection.take();
-                    let name = server_name.clone();
-                    tokio::spawn(async move {
-                        Self::close_entry_connection(name, old_conn).await;
-                    });
-                }
+                        // For reload: close old connection.
+                        if result.op == PendingOp::Reload
+                            && let Some(old_entry) = self.servers.get_mut(&server_name)
+                        {
+                            let old_conn = old_entry.connection.take();
+                            let name = server_name.clone();
+                            tokio::spawn(async move {
+                                Self::close_entry_connection(name, old_conn).await;
+                            });
+                        }
 
-                // Install the new entry (or replace existing).
-                let config = conn.config().clone();
-                let new_entry = ServerEntry {
-                    config,
-                    connection: Some(conn),
-                    lifecycle: McpServerLifecycleState::Active,
-                    tools,
-                    active_calls: AtomicUsize::new(0),
-                };
+                        // Install the new entry (or replace existing).
+                        let config = conn.config().clone();
+                        let new_entry = ServerEntry {
+                            config,
+                            connection: Some(conn),
+                            tools,
+                            active_calls: AtomicUsize::new(0),
+                        };
 
-                if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry) {
-                    // For Add: close any leftover connection.
-                    if result.op == PendingOp::Add {
-                        let old_name = old_entry.config.name.clone();
-                        let old_conn = old_entry.connection;
+                        if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry)
+                            && result.op == PendingOp::Add
+                        {
+                            let old_name = old_entry.config.name.clone();
+                            let old_conn = old_entry.connection;
+                            tokio::spawn(async move {
+                                Self::close_entry_connection(old_name, old_conn).await;
+                            });
+                        }
+
+                        // Update tool mappings.
+                        self.remove_tool_mappings_for_server(&server_name);
+                        if let Some(entry) = self.servers.get(&server_name) {
+                            for tool in &entry.tools {
+                                self.tool_to_server
+                                    .insert(tool.name.clone(), server_name.clone());
+                            }
+                        }
+
+                        self.completed_updates.push_back(CompletedLifecycleUpdate {
+                            action: McpLifecycleAction::new(
+                                server_name,
+                                operation,
+                                McpLifecyclePhase::Applied,
+                            )
+                            .with_tool_count(Some(tool_count)),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            server = %server_name,
+                            error = %e,
+                            "Authority rejected PendingSucceeded"
+                        );
+                        let name = server_name;
                         tokio::spawn(async move {
-                            Self::close_entry_connection(old_name, old_conn).await;
+                            if let Err(e) = conn.close().await {
+                                tracing::debug!(
+                                    "Error closing rejected MCP connection '{}': {}",
+                                    name,
+                                    e
+                                );
+                            }
                         });
                     }
                 }
-
-                // Update tool mappings.
-                self.remove_tool_mappings_for_server(&server_name);
-                if let Some(entry) = self.servers.get(&server_name) {
-                    for tool in &entry.tools {
-                        self.tool_to_server
-                            .insert(tool.name.clone(), server_name.clone());
-                    }
-                }
-
-                self.completed_updates.push_back(CompletedLifecycleUpdate {
-                    action: McpLifecycleAction::new(
-                        server_name,
-                        operation,
-                        McpLifecyclePhase::Applied,
-                    )
-                    .with_tool_count(Some(tool_count)),
-                });
             }
             Err(err) => {
-                let server_name = result.server_name.clone();
                 let operation = match result.op {
                     PendingOp::Add => ToolConfigChangeOperation::Add,
                     PendingOp::Reload => ToolConfigChangeOperation::Reload,
                 };
+
+                // Notify authority of failure.
+                if let Err(e) = self
+                    .authority
+                    .apply(ExternalToolSurfaceInput::PendingFailed {
+                        surface_id: SurfaceId::from(server_name.as_str()),
+                        applied_at_turn: TurnNumber(0),
+                    })
+                {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %e,
+                        "Authority rejected PendingFailed"
+                    );
+                }
 
                 tracing::warn!(
                     server = %server_name,
@@ -470,9 +657,6 @@ impl McpRouter {
                     op = ?result.op,
                     "MCP server background connection failed"
                 );
-
-                // For reload failure: keep old connection active.
-                // For add failure: nothing to keep.
 
                 self.completed_updates.push_back(CompletedLifecycleUpdate {
                     action: McpLifecycleAction::new(
@@ -497,8 +681,6 @@ impl McpRouter {
     }
 
     /// Drain pending results and return queued external update notices.
-    ///
-    /// Called by the adapter's `poll_external_updates()` implementation.
     pub fn take_external_updates(&mut self) -> ExternalToolUpdate {
         self.drain_pending();
         self.rebuild_visible_cache();
@@ -518,14 +700,42 @@ impl McpRouter {
         !self.pending_servers.is_empty() || !self.completed_updates.is_empty()
     }
 
+    /// Backward-compatible immediate install path. Bypasses staged/boundary
+    /// flow and directly drives the authority through Stage -> Apply -> Success.
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
         let (conn, tools) = McpConnection::connect_and_enumerate(&config).await?;
 
         let server_name = config.name.clone();
+        let sid = SurfaceId::from(server_name.as_str());
+
+        // Drive authority: StageAdd -> ApplyBoundary -> PendingSucceeded.
+        if let Err(e) = self.authority.apply(ExternalToolSurfaceInput::StageAdd {
+            surface_id: sid.clone(),
+        }) {
+            tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd in install path");
+        }
+        if let Err(e) = self
+            .authority
+            .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                surface_id: sid.clone(),
+                applied_at_turn: TurnNumber(0),
+            })
+        {
+            tracing::warn!(server = %server_name, error = %e, "Authority rejected ApplyBoundary in install path");
+        }
+        if let Err(e) = self
+            .authority
+            .apply(ExternalToolSurfaceInput::PendingSucceeded {
+                surface_id: sid,
+                applied_at_turn: TurnNumber(0),
+            })
+        {
+            tracing::warn!(server = %server_name, error = %e, "Authority rejected PendingSucceeded in install path");
+        }
+
         let new_entry = ServerEntry {
             config,
             connection: Some(conn),
-            lifecycle: McpServerLifecycleState::Active,
             tools,
             active_calls: AtomicUsize::new(0),
         };
@@ -545,43 +755,53 @@ impl McpRouter {
         Ok(())
     }
 
+    /// Process removal finalization based on shell-level timeout tracking.
     async fn process_removals(&mut self, delta: &mut McpApplyDelta) {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
 
-        for (server_name, entry) in &self.servers {
-            if let McpServerLifecycleState::Removing { timeout_at, .. } = entry.lifecycle {
-                let inflight = entry.active_calls.load(Ordering::Acquire);
-                if inflight == 0 {
-                    finalized.push((server_name.clone(), false));
-                } else if now >= timeout_at {
-                    finalized.push((server_name.clone(), true));
-                }
+        let removing: Vec<SurfaceId> = self.authority.removing_surfaces().cloned().collect();
+        for sid in &removing {
+            let inflight = self.authority.inflight_call_count(sid);
+            let timeout = self.removal_timeouts.get(&sid.0);
+
+            if inflight == 0 {
+                finalized.push((sid.0.clone(), false));
+            } else if let Some(timeout) = timeout
+                && now >= timeout.timeout_at
+            {
+                finalized.push((sid.0.clone(), true));
             }
         }
 
         for (server_name, degraded) in finalized {
-            if let Some(entry) = self.servers.get_mut(&server_name) {
-                let conn = entry.connection.take();
-                Self::close_entry_connection(server_name.clone(), conn).await;
-                entry.tools.clear();
-                entry.lifecycle = McpServerLifecycleState::Removed;
-            }
+            let sid = SurfaceId::from(server_name.as_str());
+            let input = if degraded {
+                ExternalToolSurfaceInput::FinalizeRemovalForced {
+                    surface_id: sid,
+                    applied_at_turn: TurnNumber(0),
+                }
+            } else {
+                ExternalToolSurfaceInput::FinalizeRemovalClean {
+                    surface_id: sid,
+                    applied_at_turn: TurnNumber(0),
+                }
+            };
 
-            self.remove_tool_mappings_for_server(&server_name);
-            delta.removed_servers.push(server_name.clone());
-            delta.lifecycle_actions.push(McpLifecycleAction::new(
-                server_name.clone(),
-                ToolConfigChangeOperation::Remove,
-                if degraded {
-                    McpLifecyclePhase::Forced
-                } else {
-                    McpLifecyclePhase::Applied
-                },
-            ));
-
-            if degraded {
-                delta.degraded_removals.push(server_name);
+            match self.authority.apply(input) {
+                Ok(transition) => {
+                    self.execute_effects(&transition.effects, delta, None);
+                    if degraded {
+                        delta.degraded_removals.push(server_name);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %e,
+                        "Authority rejected finalize removal"
+                    );
+                }
             }
         }
     }
@@ -600,36 +820,53 @@ impl McpRouter {
     }
 
     fn rebuild_visible_cache(&mut self) {
-        let mut tools: Vec<Arc<ToolDef>> = self
-            .servers
-            .values()
-            .filter(|entry| entry.is_active())
-            .flat_map(|entry| entry.tools.iter().cloned())
-            .collect();
-
+        let mut tools: Vec<Arc<ToolDef>> = Vec::new();
+        for sid in self.authority.visible_surfaces() {
+            if let Some(entry) = self.servers.get(&sid.0) {
+                tools.extend(entry.tools.iter().cloned());
+            }
+        }
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         self.cached_tools = tools;
     }
 
     /// Get current lifecycle state for a server.
+    ///
+    /// Derives the lifecycle state from the authority's canonical state.
     pub fn server_lifecycle_state(&self, server_name: &str) -> Option<McpServerLifecycleState> {
-        self.servers.get(server_name).map(|entry| entry.lifecycle)
+        let sid = SurfaceId::from(server_name);
+        let base = self.authority.surface_base(&sid);
+        match base {
+            SurfaceBaseState::Active => Some(McpServerLifecycleState::Active),
+            SurfaceBaseState::Removing => {
+                let timeout = self.removal_timeouts.get(server_name);
+                match timeout {
+                    Some(t) => Some(McpServerLifecycleState::Removing {
+                        draining_since: t.draining_since,
+                        timeout_at: t.timeout_at,
+                    }),
+                    None => Some(McpServerLifecycleState::Removing {
+                        draining_since: Instant::now(),
+                        timeout_at: Instant::now() + self.removal_timeout,
+                    }),
+                }
+            }
+            SurfaceBaseState::Removed => Some(McpServerLifecycleState::Removed),
+            SurfaceBaseState::Absent => None,
+        }
     }
 
     /// List names of all active (non-removed) servers.
     pub fn active_server_names(&self) -> Vec<String> {
-        self.servers
-            .iter()
-            .filter(|(_, entry)| matches!(entry.lifecycle, McpServerLifecycleState::Active))
-            .map(|(name, _)| name.clone())
+        self.authority
+            .visible_surfaces()
+            .map(|sid| sid.0.clone())
             .collect()
     }
 
     /// Returns true if any server is currently in Removing state.
     pub fn has_removing_servers(&self) -> bool {
-        self.servers
-            .values()
-            .any(|entry| matches!(entry.lifecycle, McpServerLifecycleState::Removing { .. }))
+        self.authority.removing_surfaces().next().is_some()
     }
 
     /// List all visible tools from active servers.
@@ -657,11 +894,13 @@ impl McpRouter {
             .get(server_name)
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
-        let lifecycle = entry.lifecycle;
-        if !matches!(lifecycle, McpServerLifecycleState::Active) {
+        // Check the authority for lifecycle state.
+        let sid = SurfaceId::from(server_name.as_str());
+        let base = self.authority.surface_base(&sid);
+        if base != SurfaceBaseState::Active {
             return Err(McpError::ServerUnavailable {
                 server: server_name.clone(),
-                state: lifecycle.as_str().to_string(),
+                state: base.to_string(),
             });
         }
 
@@ -675,10 +914,8 @@ impl McpRouter {
     }
 
     /// Gracefully shutdown all connections.
-    ///
-    /// Drops the pending sender to signal background tasks, then closes
-    /// all active connections.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
+        let _ = self.authority.apply(ExternalToolSurfaceInput::Shutdown);
         drop(self.pending_tx);
         for (_, entry) in self.servers {
             Self::close_entry_connection(entry.config.name, entry.connection).await;
@@ -775,7 +1012,6 @@ mod tests {
 
         let mut router = McpRouter::new();
 
-        // Use add_server (synchronous path) for setup.
         router
             .add_server(test_server_config("test-server", &server_path))
             .await
@@ -786,12 +1022,10 @@ mod tests {
             Some(McpServerLifecycleState::Active)
         ));
 
-        // Stage reload (async path) and wait for completion.
         router.stage_reload("test-server");
         let result = router.apply_staged().await.expect("apply staged reload");
         assert!(result.pending_count > 0 || !result.delta.reloaded_servers.is_empty());
 
-        // Wait for pending to resolve.
         tokio::time::sleep(Duration::from_millis(500)).await;
         let ext = router.take_external_updates();
         assert!(
@@ -911,7 +1145,6 @@ mod tests {
         router.stage_add(test_server_config("test-server", &server_path));
         let result = router.apply_staged().await.expect("apply staged add");
 
-        // Should be pending, not immediately active.
         assert!(
             result.pending_count > 0,
             "server should be pending after non-blocking add"
@@ -922,7 +1155,6 @@ mod tests {
                 && action.phase == McpLifecyclePhase::Pending
         }));
 
-        // Poll until the background connect completes.
         let deadline = Instant::now() + async_connect_test_timeout();
         loop {
             let ext = router.take_external_updates();
@@ -940,7 +1172,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Tools should now be visible.
         assert!(
             !router.list_tools().is_empty(),
             "tools should be visible after activation"
@@ -950,7 +1181,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "exercises real subprocess timeout behavior"]
     async fn connect_and_enumerate_times_out() {
-        // Use a config with a very short timeout pointing at a command that hangs.
         let mut config = McpServerConfig::stdio(
             "hang-server",
             "sleep",
@@ -976,21 +1206,17 @@ mod tests {
 
         let mut router = McpRouter::new();
 
-        // Add server (non-blocking).
         router.stage_add(test_server_config("test-server", &server_path));
         let result = router.apply_staged().await.expect("first add");
         assert_eq!(result.pending_count, 1);
 
-        // Immediately remove (cancels the pending add).
         router.stage_remove("test-server");
         router.apply_staged().await.expect("remove");
 
-        // Add again with a new generation.
         router.stage_add(test_server_config("test-server", &server_path));
         let result = router.apply_staged().await.expect("second add");
         assert_eq!(result.pending_count, 1);
 
-        // Wait for the SECOND add to complete (first should be discarded).
         let deadline = Instant::now() + async_connect_test_timeout();
         loop {
             let ext = router.take_external_updates();
@@ -1008,7 +1234,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Should be active from the second add.
         assert!(matches!(
             router.server_lifecycle_state("test-server"),
             Some(McpServerLifecycleState::Active)

@@ -587,564 +587,46 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     },
                 ],
             },
-            TransitionSchema {
-                name: "StageDrainSnapshot".into(),
-                from: vec!["Active".into(), "Retired".into()],
-                on: InputMatch {
-                    variant: "StageDrainSnapshot".into(),
-                    bindings: vec!["run_id".into(), "contributing_work_ids".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "no_current_run".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Field("current_run".into())),
-                            Box::new(Expr::None),
-                        ),
-                    },
-                    Guard {
-                        name: "contributors_non_empty".into(),
-                        expr: Expr::Gt(
-                            Box::new(Expr::Len(Box::new(Expr::Binding(
-                                "contributing_work_ids".into(),
-                            )))),
-                            Box::new(Expr::U64(0)),
-                        ),
-                    },
-                    Guard {
-                        name: "contributors_match_current_drain_source".into(),
-                        expr: Expr::Or(vec![
-                            Expr::And(vec![
-                                Expr::Gt(
-                                    Box::new(Expr::Len(Box::new(Expr::Field(
-                                        "steer_queue".into(),
-                                    )))),
-                                    Box::new(Expr::U64(0)),
-                                ),
-                                Expr::SeqStartsWith {
-                                    seq: Box::new(Expr::Field("steer_queue".into())),
-                                    prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
-                                },
-                            ]),
-                            Expr::And(vec![
-                                Expr::Eq(
-                                    Box::new(Expr::Len(Box::new(Expr::Field(
-                                        "steer_queue".into(),
-                                    )))),
-                                    Box::new(Expr::U64(0)),
-                                ),
-                                Expr::SeqStartsWith {
-                                    seq: Box::new(Expr::Field("queue".into())),
-                                    prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
-                                },
-                            ]),
-                        ]),
-                    },
-                    Guard {
-                        name: "all_contributors_are_queued".into(),
-                        expr: Expr::Quantified {
-                            quantifier: Quantifier::All,
-                            binding: "work_id".into(),
-                            over: Box::new(Expr::Binding("contributing_work_ids".into())),
-                            body: Box::new(Expr::Eq(
-                                Box::new(Expr::MapGet {
-                                    map: Box::new(Expr::Field("lifecycle".into())),
-                                    key: Box::new(Expr::Binding("work_id".into())),
-                                }),
-                                Box::new(Expr::String("Queued".into())),
-                            )),
-                        },
-                    },
-                ],
-                updates: vec![
-                    Update::Conditional {
-                        condition: Expr::Gt(
-                            Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
-                            Box::new(Expr::U64(0)),
-                        ),
-                        then_updates: vec![Update::SeqRemoveAll {
-                            field: "steer_queue".into(),
-                            values: Expr::Binding("contributing_work_ids".into()),
-                        }],
-                        else_updates: vec![Update::SeqRemoveAll {
-                            field: "queue".into(),
-                            values: Expr::Binding("contributing_work_ids".into()),
-                        }],
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::Some(Box::new(Expr::Binding("run_id".into()))),
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::Binding("contributing_work_ids".into()),
-                    },
-                    Update::Assign {
-                        field: "wake_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Binding("contributing_work_ids".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "last_run".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::Binding("run_id".into()))),
-                            },
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Staged".into()),
-                            },
-                        ],
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "ReadyForRun".into(),
-                    fields: IndexMap::from([
-                        ("run_id".into(), Expr::Binding("run_id".into())),
-                        (
-                            "contributing_work_ids".into(),
-                            Expr::Binding("contributing_work_ids".into()),
-                        ),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "BoundaryApplied".into(),
-                from: vec!["Active".into(), "Retired".into()],
-                on: InputMatch {
-                    variant: "BoundaryApplied".into(),
-                    bindings: vec!["run_id".into(), "boundary_sequence".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "run_matches_current".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Field("current_run".into())),
-                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                        ),
-                    },
-                    Guard {
-                        name: "contributors_are_staged".into(),
-                        expr: Expr::Quantified {
-                            quantifier: Quantifier::All,
-                            binding: "work_id".into(),
-                            over: Box::new(Expr::Field("current_run_contributors".into())),
-                            body: Box::new(Expr::Eq(
-                                Box::new(Expr::MapGet {
-                                    map: Box::new(Expr::Field("lifecycle".into())),
-                                    key: Box::new(Expr::Binding("work_id".into())),
-                                }),
-                                Box::new(Expr::String("Staged".into())),
-                            )),
-                        },
-                    },
-                ],
-                updates: vec![Update::ForEach {
-                    binding: "work_id".into(),
-                    over: Expr::Field("current_run_contributors".into()),
-                    updates: vec![
-                        Update::MapInsert {
-                            field: "lifecycle".into(),
-                            key: Expr::Binding("work_id".into()),
-                            value: Expr::String("AppliedPendingConsumption".into()),
-                        },
-                        Update::MapInsert {
-                            field: "last_boundary_sequence".into(),
-                            key: Expr::Binding("work_id".into()),
-                            value: Expr::Some(Box::new(Expr::Binding("boundary_sequence".into()))),
-                        },
-                    ],
-                }],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("BoundaryApplied".into())),
-                        (
-                            "detail".into(),
-                            Expr::String("ContributorsPendingConsumption".into()),
-                        ),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "RunCompleted".into(),
-                from: vec!["Active".into(), "Retired".into()],
-                on: InputMatch {
-                    variant: "RunCompleted".into(),
-                    bindings: vec!["run_id".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "run_matches_current".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Field("current_run".into())),
-                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                        ),
-                    },
-                    Guard {
-                        name: "contributors_pending_consumption".into(),
-                        expr: Expr::Quantified {
-                            quantifier: Quantifier::All,
-                            binding: "work_id".into(),
-                            over: Box::new(Expr::Field("current_run_contributors".into())),
-                            body: Box::new(Expr::Eq(
-                                Box::new(Expr::MapGet {
-                                    map: Box::new(Expr::Field("lifecycle".into())),
-                                    key: Box::new(Expr::Binding("work_id".into())),
-                                }),
-                                Box::new(Expr::String("AppliedPendingConsumption".into())),
-                            )),
-                        },
-                    },
-                ],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("current_run_contributors".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Consumed".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("Consumed".into()))),
-                            },
-                        ],
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "IngressNotice".into(),
-                        fields: IndexMap::from([
-                            ("kind".into(), Expr::String("RunCompleted".into())),
-                            ("detail".into(), Expr::String("ContributorsConsumed".into())),
-                        ]),
-                    },
-                    EffectEmit {
-                        variant: "CompletionResolved".into(),
-                        fields: IndexMap::from([
-                            (
-                                "work_id".into(),
-                                Expr::Head(Box::new(Expr::Field(
-                                    "current_run_contributors".into(),
-                                ))),
-                            ),
-                            ("outcome".into(), Expr::String("Consumed".into())),
-                        ]),
-                    },
-                ],
-            },
-            TransitionSchema {
-                name: "RunFailed".into(),
-                from: vec!["Active".into(), "Retired".into()],
-                on: InputMatch {
-                    variant: "RunFailed".into(),
-                    bindings: vec!["run_id".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "run_matches_current".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Field("current_run".into())),
-                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                        ),
-                    },
-                    Guard {
-                        name: "contributors_are_staged".into(),
-                        expr: Expr::Quantified {
-                            quantifier: Quantifier::All,
-                            binding: "work_id".into(),
-                            over: Box::new(Expr::Field("current_run_contributors".into())),
-                            body: Box::new(Expr::Eq(
-                                Box::new(Expr::MapGet {
-                                    map: Box::new(Expr::Field("lifecycle".into())),
-                                    key: Box::new(Expr::Binding("work_id".into())),
-                                }),
-                                Box::new(Expr::String("Staged".into())),
-                            )),
-                        },
-                    },
-                ],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("current_run_contributors".into()),
-                        updates: vec![Update::MapInsert {
-                            field: "lifecycle".into(),
-                            key: Expr::Binding("work_id".into()),
-                            value: Expr::String("Queued".into()),
-                        }],
-                    },
-                    Update::Conditional {
-                        condition: Expr::Gt(
-                            Box::new(Expr::Len(Box::new(Expr::Field(
-                                "current_run_contributors".into(),
-                            )))),
-                            Box::new(Expr::U64(0)),
-                        ),
-                        then_updates: vec![
-                            Update::SeqPrepend {
-                                field: "queue".into(),
-                                values: Expr::Field("current_run_contributors".into()),
-                            },
-                            Update::Assign {
-                                field: "wake_requested".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
-                        else_updates: vec![],
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("RunFailed".into())),
-                        ("detail".into(), Expr::String("ContributorsRequeued".into())),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "RunCancelled".into(),
-                from: vec!["Active".into(), "Retired".into()],
-                on: InputMatch {
-                    variant: "RunCancelled".into(),
-                    bindings: vec!["run_id".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "run_matches_current".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::Field("current_run".into())),
-                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                        ),
-                    },
-                    Guard {
-                        name: "contributors_are_staged".into(),
-                        expr: Expr::Quantified {
-                            quantifier: Quantifier::All,
-                            binding: "work_id".into(),
-                            over: Box::new(Expr::Field("current_run_contributors".into())),
-                            body: Box::new(Expr::Eq(
-                                Box::new(Expr::MapGet {
-                                    map: Box::new(Expr::Field("lifecycle".into())),
-                                    key: Box::new(Expr::Binding("work_id".into())),
-                                }),
-                                Box::new(Expr::String("Staged".into())),
-                            )),
-                        },
-                    },
-                ],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("current_run_contributors".into()),
-                        updates: vec![Update::MapInsert {
-                            field: "lifecycle".into(),
-                            key: Expr::Binding("work_id".into()),
-                            value: Expr::String("Queued".into()),
-                        }],
-                    },
-                    Update::Conditional {
-                        condition: Expr::Gt(
-                            Box::new(Expr::Len(Box::new(Expr::Field(
-                                "current_run_contributors".into(),
-                            )))),
-                            Box::new(Expr::U64(0)),
-                        ),
-                        then_updates: vec![
-                            Update::SeqPrepend {
-                                field: "queue".into(),
-                                values: Expr::Field("current_run_contributors".into()),
-                            },
-                            Update::Assign {
-                                field: "wake_requested".into(),
-                                expr: Expr::Bool(true),
-                            },
-                        ],
-                        else_updates: vec![],
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("RunCancelled".into())),
-                        ("detail".into(), Expr::String("ContributorsRequeued".into())),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "SupersedeQueuedInput".into(),
-                from: vec!["Active".into()],
-                on: InputMatch {
-                    variant: "SupersedeQueuedInput".into(),
-                    bindings: vec!["new_work_id".into(), "old_work_id".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "new_input_is_admitted".into(),
-                        expr: Expr::Contains {
-                            collection: Box::new(Expr::Field("admitted_inputs".into())),
-                            value: Box::new(Expr::Binding("new_work_id".into())),
-                        },
-                    },
-                    Guard {
-                        name: "old_input_is_queued".into(),
-                        expr: Expr::Eq(
-                            Box::new(Expr::MapGet {
-                                map: Box::new(Expr::Field("lifecycle".into())),
-                                key: Box::new(Expr::Binding("old_work_id".into())),
-                            }),
-                            Box::new(Expr::String("Queued".into())),
-                        ),
-                    },
-                ],
-                updates: vec![
-                    Update::SeqRemoveValue {
-                        field: "queue".into(),
-                        value: Expr::Binding("old_work_id".into()),
-                    },
-                    Update::SeqRemoveValue {
-                        field: "steer_queue".into(),
-                        value: Expr::Binding("old_work_id".into()),
-                    },
-                    Update::MapInsert {
-                        field: "lifecycle".into(),
-                        key: Expr::Binding("old_work_id".into()),
-                        value: Expr::String("Superseded".into()),
-                    },
-                    Update::MapInsert {
-                        field: "terminal_outcome".into(),
-                        key: Expr::Binding("old_work_id".into()),
-                        value: Expr::Some(Box::new(Expr::String("Superseded".into()))),
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("SupersedeQueuedInput".into())),
-                        (
-                            "detail".into(),
-                            Expr::String("QueuedInputSuperseded".into()),
-                        ),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "CoalesceQueuedInputs".into(),
-                from: vec!["Active".into()],
-                on: InputMatch {
-                    variant: "CoalesceQueuedInputs".into(),
-                    bindings: vec!["aggregate_work_id".into(), "source_work_ids".into()],
-                },
-                guards: vec![
-                    Guard {
-                        name: "aggregate_input_is_admitted".into(),
-                        expr: Expr::Contains {
-                            collection: Box::new(Expr::Field("admitted_inputs".into())),
-                            value: Box::new(Expr::Binding("aggregate_work_id".into())),
-                        },
-                    },
-                    Guard {
-                        name: "sources_non_empty".into(),
-                        expr: Expr::Gt(
-                            Box::new(Expr::Len(Box::new(Expr::Binding("source_work_ids".into())))),
-                            Box::new(Expr::U64(0)),
-                        ),
-                    },
-                    Guard {
-                        name: "all_sources_are_queued".into(),
-                        expr: Expr::Quantified {
-                            quantifier: Quantifier::All,
-                            binding: "work_id".into(),
-                            over: Box::new(Expr::Binding("source_work_ids".into())),
-                            body: Box::new(Expr::Eq(
-                                Box::new(Expr::MapGet {
-                                    map: Box::new(Expr::Field("lifecycle".into())),
-                                    key: Box::new(Expr::Binding("work_id".into())),
-                                }),
-                                Box::new(Expr::String("Queued".into())),
-                            )),
-                        },
-                    },
-                ],
-                updates: vec![
-                    Update::SeqRemoveAll {
-                        field: "queue".into(),
-                        values: Expr::Binding("source_work_ids".into()),
-                    },
-                    Update::SeqRemoveAll {
-                        field: "steer_queue".into(),
-                        values: Expr::Binding("source_work_ids".into()),
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Binding("source_work_ids".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Coalesced".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("Coalesced".into()))),
-                            },
-                        ],
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("CoalesceQueuedInputs".into())),
-                        (
-                            "detail".into(),
-                            Expr::String("SourcesCoalescedIntoAggregate".into()),
-                        ),
-                    ]),
-                }],
-            },
+            // Fix 1: Split StageDrainSnapshot into phase-preserving transitions
+            runtime_ingress_stage_drain_snapshot_transition(
+                "StageDrainSnapshotFromActive",
+                "Active",
+            ),
+            runtime_ingress_stage_drain_snapshot_transition(
+                "StageDrainSnapshotFromRetired",
+                "Retired",
+            ),
+            // Fix 1: Split BoundaryApplied into phase-preserving transitions
+            runtime_ingress_boundary_applied_transition("BoundaryAppliedFromActive", "Active"),
+            runtime_ingress_boundary_applied_transition("BoundaryAppliedFromRetired", "Retired"),
+            // Fix 1: Split RunCompleted into phase-preserving transitions
+            // Fix 2: Per-contributor InputLifecycleNotice + CompletionResolved effects
+            runtime_ingress_run_completed_transition("RunCompletedFromActive", "Active"),
+            runtime_ingress_run_completed_transition("RunCompletedFromRetired", "Retired"),
+            // Fix 1+3+4: Split RunFailed, conditional rollback per handling_mode,
+            // only process Staged contributors
+            runtime_ingress_run_rollback_transition("RunFailedFromActive", "RunFailed", "Active"),
+            runtime_ingress_run_rollback_transition("RunFailedFromRetired", "RunFailed", "Retired"),
+            // Fix 1+3+4: Split RunCancelled, conditional rollback per handling_mode,
+            // only process Staged contributors
+            runtime_ingress_run_rollback_transition(
+                "RunCancelledFromActive",
+                "RunCancelled",
+                "Active",
+            ),
+            runtime_ingress_run_rollback_transition(
+                "RunCancelledFromRetired",
+                "RunCancelled",
+                "Retired",
+            ),
+            // Fix 2: Per-input InputLifecycleNotice + CompletionResolved effects
+            // Authority also accepts from Active|Retired (phase-preserving)
+            runtime_ingress_supersede_transition("SupersedeQueuedInputFromActive", "Active"),
+            runtime_ingress_supersede_transition("SupersedeQueuedInputFromRetired", "Retired"),
+            // Fix 2: Per-source InputLifecycleNotice + CompletionResolved effects
+            // Authority also accepts from Active|Retired (phase-preserving)
+            runtime_ingress_coalesce_transition("CoalesceQueuedInputsFromActive", "Active"),
+            runtime_ingress_coalesce_transition("CoalesceQueuedInputsFromRetired", "Retired"),
             TransitionSchema {
                 name: "Retire".into(),
                 from: vec!["Active".into()],
@@ -1163,291 +645,14 @@ pub fn runtime_ingress_machine() -> MachineSchema {
                     ]),
                 }],
             },
-            TransitionSchema {
-                name: "ResetFromActive".into(),
-                from: vec!["Active".into()],
-                on: InputMatch {
-                    variant: "Reset".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("queue".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
-                            },
-                        ],
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("steer_queue".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
-                            },
-                        ],
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("current_run_contributors".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
-                            },
-                        ],
-                    },
-                    Update::Assign {
-                        field: "queue".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "steer_queue".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "wake_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("Reset".into())),
-                        (
-                            "detail".into(),
-                            Expr::String("NonTerminalInputsAbandoned".into()),
-                        ),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "ResetFromRetired".into(),
-                from: vec!["Retired".into()],
-                on: InputMatch {
-                    variant: "Reset".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("queue".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
-                            },
-                        ],
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("steer_queue".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
-                            },
-                        ],
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("current_run_contributors".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
-                            },
-                        ],
-                    },
-                    Update::Assign {
-                        field: "queue".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "steer_queue".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "wake_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                ],
-                to: "Active".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("Reset".into())),
-                        (
-                            "detail".into(),
-                            Expr::String("NonTerminalInputsAbandoned".into()),
-                        ),
-                    ]),
-                }],
-            },
-            TransitionSchema {
-                name: "Destroy".into(),
-                from: vec!["Active".into(), "Retired".into()],
-                on: InputMatch {
-                    variant: "Destroy".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("queue".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String(
-                                    "AbandonedDestroyed".into(),
-                                ))),
-                            },
-                        ],
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("steer_queue".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String(
-                                    "AbandonedDestroyed".into(),
-                                ))),
-                            },
-                        ],
-                    },
-                    Update::ForEach {
-                        binding: "work_id".into(),
-                        over: Expr::Field("current_run_contributors".into()),
-                        updates: vec![
-                            Update::MapInsert {
-                                field: "lifecycle".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::String("Abandoned".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("work_id".into()),
-                                value: Expr::Some(Box::new(Expr::String(
-                                    "AbandonedDestroyed".into(),
-                                ))),
-                            },
-                        ],
-                    },
-                    Update::Assign {
-                        field: "queue".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "steer_queue".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "current_run".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
-                        field: "current_run_contributors".into(),
-                        expr: Expr::SeqLiteral(vec![]),
-                    },
-                    Update::Assign {
-                        field: "wake_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                    Update::Assign {
-                        field: "process_requested".into(),
-                        expr: Expr::Bool(false),
-                    },
-                ],
-                to: "Destroyed".into(),
-                emit: vec![EffectEmit {
-                    variant: "IngressNotice".into(),
-                    fields: IndexMap::from([
-                        ("kind".into(), Expr::String("Destroy".into())),
-                        ("detail".into(), Expr::String("IngressDestroyed".into())),
-                    ]),
-                }],
-            },
+            // Fix 5+2: Iterate all non-terminal lifecycle entries for abandon,
+            // with per-input InputLifecycleNotice + CompletionResolved effects.
+            // Authority has no_current_run guard.
+            runtime_ingress_reset_transition("ResetFromActive", "Active"),
+            runtime_ingress_reset_transition("ResetFromRetired", "Retired"),
+            // Fix 5+2: Iterate all non-terminal lifecycle entries for abandon,
+            // with per-input InputLifecycleNotice + CompletionResolved effects.
+            runtime_ingress_destroy_transition(),
             TransitionSchema {
                 name: "RecoverFromActive".into(),
                 from: vec!["Active".into()],
@@ -1613,6 +818,8 @@ pub fn runtime_ingress_machine() -> MachineSchema {
 
 fn runtime_ingress_admit_queued_transition(name: &str, handling_mode: &str) -> TransitionSchema {
     let is_steer = handling_mode == "Steer";
+    // Authority emits WakeRuntime for both Queue and Steer modes;
+    // Steer additionally emits RequestImmediateProcessing.
     let mut emit = vec![
         EffectEmit {
             variant: "IngressAccepted".into(),
@@ -1625,12 +832,12 @@ fn runtime_ingress_admit_queued_transition(name: &str, handling_mode: &str) -> T
                 ("new_state".into(), Expr::String("Queued".into())),
             ]),
         },
-    ];
-    if is_steer {
-        emit.push(EffectEmit {
+        EffectEmit {
             variant: "WakeRuntime".into(),
             fields: IndexMap::new(),
-        });
+        },
+    ];
+    if is_steer {
         emit.push(EffectEmit {
             variant: "RequestImmediateProcessing".into(),
             fields: IndexMap::new(),
@@ -1729,12 +936,10 @@ fn runtime_ingress_admit_queued_transition(name: &str, handling_mode: &str) -> T
                 },
                 value: Expr::Binding("work_id".into()),
             },
+            // Fix 6: Authority unconditionally sets wake_requested = true for both modes
             Update::Assign {
                 field: "wake_requested".into(),
-                expr: Expr::Or(vec![
-                    Expr::Field("wake_requested".into()),
-                    Expr::Bool(is_steer),
-                ]),
+                expr: Expr::Bool(true),
             },
             Update::Assign {
                 field: "process_requested".into(),
@@ -1746,6 +951,691 @@ fn runtime_ingress_admit_queued_transition(name: &str, handling_mode: &str) -> T
         ],
         to: "Active".into(),
         emit,
+    }
+}
+
+/// Helper: StageDrainSnapshot transition for a specific phase (Fix 1).
+fn runtime_ingress_stage_drain_snapshot_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: "StageDrainSnapshot".into(),
+            bindings: vec!["run_id".into(), "contributing_work_ids".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "no_current_run".into(),
+                expr: Expr::Eq(
+                    Box::new(Expr::Field("current_run".into())),
+                    Box::new(Expr::None),
+                ),
+            },
+            Guard {
+                name: "contributors_non_empty".into(),
+                expr: Expr::Gt(
+                    Box::new(Expr::Len(Box::new(Expr::Binding(
+                        "contributing_work_ids".into(),
+                    )))),
+                    Box::new(Expr::U64(0)),
+                ),
+            },
+            Guard {
+                name: "contributors_match_current_drain_source".into(),
+                expr: Expr::Or(vec![
+                    Expr::And(vec![
+                        Expr::Gt(
+                            Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
+                            Box::new(Expr::U64(0)),
+                        ),
+                        Expr::SeqStartsWith {
+                            seq: Box::new(Expr::Field("steer_queue".into())),
+                            prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
+                        },
+                    ]),
+                    Expr::And(vec![
+                        Expr::Eq(
+                            Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
+                            Box::new(Expr::U64(0)),
+                        ),
+                        Expr::SeqStartsWith {
+                            seq: Box::new(Expr::Field("queue".into())),
+                            prefix: Box::new(Expr::Binding("contributing_work_ids".into())),
+                        },
+                    ]),
+                ]),
+            },
+            Guard {
+                name: "all_contributors_are_queued".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "work_id".into(),
+                    over: Box::new(Expr::Binding("contributing_work_ids".into())),
+                    body: Box::new(Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("lifecycle".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("Queued".into())),
+                    )),
+                },
+            },
+        ],
+        updates: vec![
+            Update::Conditional {
+                condition: Expr::Gt(
+                    Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
+                    Box::new(Expr::U64(0)),
+                ),
+                then_updates: vec![Update::SeqRemoveAll {
+                    field: "steer_queue".into(),
+                    values: Expr::Binding("contributing_work_ids".into()),
+                }],
+                else_updates: vec![Update::SeqRemoveAll {
+                    field: "queue".into(),
+                    values: Expr::Binding("contributing_work_ids".into()),
+                }],
+            },
+            Update::Assign {
+                field: "current_run".into(),
+                expr: Expr::Some(Box::new(Expr::Binding("run_id".into()))),
+            },
+            Update::Assign {
+                field: "current_run_contributors".into(),
+                expr: Expr::Binding("contributing_work_ids".into()),
+            },
+            Update::Assign {
+                field: "wake_requested".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "process_requested".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::ForEach {
+                binding: "work_id".into(),
+                over: Expr::Binding("contributing_work_ids".into()),
+                updates: vec![
+                    Update::MapInsert {
+                        field: "last_run".into(),
+                        key: Expr::Binding("work_id".into()),
+                        value: Expr::Some(Box::new(Expr::Binding("run_id".into()))),
+                    },
+                    Update::MapInsert {
+                        field: "lifecycle".into(),
+                        key: Expr::Binding("work_id".into()),
+                        value: Expr::String("Staged".into()),
+                    },
+                ],
+            },
+        ],
+        to: phase.into(),
+        emit: vec![EffectEmit {
+            variant: "ReadyForRun".into(),
+            fields: IndexMap::from([
+                ("run_id".into(), Expr::Binding("run_id".into())),
+                (
+                    "contributing_work_ids".into(),
+                    Expr::Binding("contributing_work_ids".into()),
+                ),
+            ]),
+        }],
+    }
+}
+
+/// Helper: BoundaryApplied transition for a specific phase (Fix 1).
+fn runtime_ingress_boundary_applied_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: "BoundaryApplied".into(),
+            bindings: vec!["run_id".into(), "boundary_sequence".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "run_matches_current".into(),
+                expr: Expr::Eq(
+                    Box::new(Expr::Field("current_run".into())),
+                    Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                ),
+            },
+            Guard {
+                name: "contributors_are_staged".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "work_id".into(),
+                    over: Box::new(Expr::Field("current_run_contributors".into())),
+                    body: Box::new(Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("lifecycle".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("Staged".into())),
+                    )),
+                },
+            },
+        ],
+        updates: vec![Update::ForEach {
+            binding: "work_id".into(),
+            over: Expr::Field("current_run_contributors".into()),
+            updates: vec![
+                Update::MapInsert {
+                    field: "lifecycle".into(),
+                    key: Expr::Binding("work_id".into()),
+                    value: Expr::String("AppliedPendingConsumption".into()),
+                },
+                Update::MapInsert {
+                    field: "last_boundary_sequence".into(),
+                    key: Expr::Binding("work_id".into()),
+                    value: Expr::Some(Box::new(Expr::Binding("boundary_sequence".into()))),
+                },
+            ],
+        }],
+        to: phase.into(),
+        emit: vec![EffectEmit {
+            variant: "IngressNotice".into(),
+            fields: IndexMap::from([
+                ("kind".into(), Expr::String("BoundaryApplied".into())),
+                (
+                    "detail".into(),
+                    Expr::String("ContributorsPendingConsumption".into()),
+                ),
+            ]),
+        }],
+    }
+}
+
+/// Helper: RunCompleted transition for a specific phase (Fix 1 + Fix 2).
+///
+/// Authority emits per-contributor InputLifecycleNotice + CompletionResolved.
+/// The schema DSL doesn't support per-element effect emission in ForEach,
+/// so we document that the per-contributor effects are implicit from the
+/// lifecycle/terminal_outcome updates. The IngressNotice is retained as a
+/// summary effect.
+fn runtime_ingress_run_completed_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: "RunCompleted".into(),
+            bindings: vec!["run_id".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "run_matches_current".into(),
+                expr: Expr::Eq(
+                    Box::new(Expr::Field("current_run".into())),
+                    Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                ),
+            },
+            Guard {
+                name: "contributors_pending_consumption".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "work_id".into(),
+                    over: Box::new(Expr::Field("current_run_contributors".into())),
+                    body: Box::new(Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("lifecycle".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("AppliedPendingConsumption".into())),
+                    )),
+                },
+            },
+        ],
+        updates: vec![
+            // Consume all contributors, emit per-contributor effects
+            Update::ForEach {
+                binding: "work_id".into(),
+                over: Expr::Field("current_run_contributors".into()),
+                updates: vec![
+                    Update::MapInsert {
+                        field: "lifecycle".into(),
+                        key: Expr::Binding("work_id".into()),
+                        value: Expr::String("Consumed".into()),
+                    },
+                    Update::MapInsert {
+                        field: "terminal_outcome".into(),
+                        key: Expr::Binding("work_id".into()),
+                        value: Expr::Some(Box::new(Expr::String("Consumed".into()))),
+                    },
+                ],
+            },
+            Update::Assign {
+                field: "current_run".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "current_run_contributors".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+        ],
+        to: phase.into(),
+        // Authority emits per-contributor InputLifecycleNotice + CompletionResolved.
+        // Schema emits summary IngressNotice; per-contributor effects are derived
+        // from the lifecycle/terminal_outcome map mutations by the authority.
+        emit: vec![EffectEmit {
+            variant: "IngressNotice".into(),
+            fields: IndexMap::from([
+                ("kind".into(), Expr::String("RunCompleted".into())),
+                ("detail".into(), Expr::String("ContributorsConsumed".into())),
+            ]),
+        }],
+    }
+}
+
+/// Helper: RunFailed / RunCancelled rollback transition (Fix 1 + Fix 3 + Fix 4).
+///
+/// - Only processes contributors that are in Staged state (defensive, Fix 4)
+/// - Routes re-enqueue by handling_mode: Steer→steer_queue, Queue→queue (Fix 3)
+/// - Emits WakeRuntime when queues are non-empty after rollback (Fix 2)
+/// - Per-contributor InputLifecycleNotice for rolled-back items (Fix 2)
+fn runtime_ingress_run_rollback_transition(
+    name: &str,
+    input_variant: &str,
+    phase: &str,
+) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: input_variant.into(),
+            bindings: vec!["run_id".into()],
+        },
+        // Fix 4: Authority only has run_matches_current guard (no contributors_are_staged)
+        guards: vec![Guard {
+            name: "run_matches_current".into(),
+            expr: Expr::Eq(
+                Box::new(Expr::Field("current_run".into())),
+                Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+            ),
+        }],
+        updates: vec![
+            // Fix 4: Only rollback contributors that are in Staged state
+            // Fix 3: Route re-enqueue by handling_mode
+            Update::ForEach {
+                binding: "work_id".into(),
+                over: Expr::Field("current_run_contributors".into()),
+                updates: vec![Update::Conditional {
+                    condition: Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("lifecycle".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("Staged".into())),
+                    ),
+                    then_updates: vec![
+                        Update::MapInsert {
+                            field: "lifecycle".into(),
+                            key: Expr::Binding("work_id".into()),
+                            value: Expr::String("Queued".into()),
+                        },
+                        // Fix 3: Route to steer_queue or queue based on handling_mode
+                        Update::Conditional {
+                            condition: Expr::Eq(
+                                Box::new(Expr::MapGet {
+                                    map: Box::new(Expr::Field("handling_mode".into())),
+                                    key: Box::new(Expr::Binding("work_id".into())),
+                                }),
+                                Box::new(Expr::String("Steer".into())),
+                            ),
+                            then_updates: vec![Update::SeqPrepend {
+                                field: "steer_queue".into(),
+                                values: Expr::SeqLiteral(vec![Expr::Binding("work_id".into())]),
+                            }],
+                            else_updates: vec![Update::SeqPrepend {
+                                field: "queue".into(),
+                                values: Expr::SeqLiteral(vec![Expr::Binding("work_id".into())]),
+                            }],
+                        },
+                    ],
+                    else_updates: vec![],
+                }],
+            },
+            // Wake if queues are non-empty after rollback
+            Update::Conditional {
+                condition: Expr::Or(vec![
+                    Expr::Gt(
+                        Box::new(Expr::Len(Box::new(Expr::Field("queue".into())))),
+                        Box::new(Expr::U64(0)),
+                    ),
+                    Expr::Gt(
+                        Box::new(Expr::Len(Box::new(Expr::Field("steer_queue".into())))),
+                        Box::new(Expr::U64(0)),
+                    ),
+                ]),
+                then_updates: vec![Update::Assign {
+                    field: "wake_requested".into(),
+                    expr: Expr::Bool(true),
+                }],
+                else_updates: vec![],
+            },
+            Update::Assign {
+                field: "current_run".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "current_run_contributors".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+        ],
+        to: phase.into(),
+        // Authority emits per-contributor InputLifecycleNotice for rolled-back items,
+        // WakeRuntime if queues non-empty, and summary IngressNotice.
+        emit: vec![EffectEmit {
+            variant: "IngressNotice".into(),
+            fields: IndexMap::from([
+                ("kind".into(), Expr::String(input_variant.into())),
+                ("detail".into(), Expr::String("StagedRolledBack".into())),
+            ]),
+        }],
+    }
+}
+
+/// Helper: SupersedeQueuedInput transition for a specific phase (Fix 2).
+///
+/// Authority emits InputLifecycleNotice + CompletionResolved for old_work_id.
+fn runtime_ingress_supersede_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: "SupersedeQueuedInput".into(),
+            bindings: vec!["new_work_id".into(), "old_work_id".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "new_input_is_admitted".into(),
+                expr: Expr::Contains {
+                    collection: Box::new(Expr::Field("admitted_inputs".into())),
+                    value: Box::new(Expr::Binding("new_work_id".into())),
+                },
+            },
+            Guard {
+                name: "old_input_is_queued".into(),
+                expr: Expr::Eq(
+                    Box::new(Expr::MapGet {
+                        map: Box::new(Expr::Field("lifecycle".into())),
+                        key: Box::new(Expr::Binding("old_work_id".into())),
+                    }),
+                    Box::new(Expr::String("Queued".into())),
+                ),
+            },
+        ],
+        updates: vec![
+            Update::SeqRemoveValue {
+                field: "queue".into(),
+                value: Expr::Binding("old_work_id".into()),
+            },
+            Update::SeqRemoveValue {
+                field: "steer_queue".into(),
+                value: Expr::Binding("old_work_id".into()),
+            },
+            Update::MapInsert {
+                field: "lifecycle".into(),
+                key: Expr::Binding("old_work_id".into()),
+                value: Expr::String("Superseded".into()),
+            },
+            Update::MapInsert {
+                field: "terminal_outcome".into(),
+                key: Expr::Binding("old_work_id".into()),
+                value: Expr::Some(Box::new(Expr::String("Superseded".into()))),
+            },
+        ],
+        to: phase.into(),
+        emit: vec![
+            EffectEmit {
+                variant: "InputLifecycleNotice".into(),
+                fields: IndexMap::from([
+                    ("work_id".into(), Expr::Binding("old_work_id".into())),
+                    ("new_state".into(), Expr::String("Superseded".into())),
+                ]),
+            },
+            EffectEmit {
+                variant: "CompletionResolved".into(),
+                fields: IndexMap::from([
+                    ("work_id".into(), Expr::Binding("old_work_id".into())),
+                    ("outcome".into(), Expr::String("Superseded".into())),
+                ]),
+            },
+        ],
+    }
+}
+
+/// Helper: CoalesceQueuedInputs transition for a specific phase (Fix 2).
+///
+/// Authority emits per-source InputLifecycleNotice + CompletionResolved.
+fn runtime_ingress_coalesce_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: "CoalesceQueuedInputs".into(),
+            bindings: vec!["aggregate_work_id".into(), "source_work_ids".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "aggregate_input_is_admitted".into(),
+                expr: Expr::Contains {
+                    collection: Box::new(Expr::Field("admitted_inputs".into())),
+                    value: Box::new(Expr::Binding("aggregate_work_id".into())),
+                },
+            },
+            Guard {
+                name: "sources_non_empty".into(),
+                expr: Expr::Gt(
+                    Box::new(Expr::Len(Box::new(Expr::Binding("source_work_ids".into())))),
+                    Box::new(Expr::U64(0)),
+                ),
+            },
+            Guard {
+                name: "all_sources_are_queued".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "work_id".into(),
+                    over: Box::new(Expr::Binding("source_work_ids".into())),
+                    body: Box::new(Expr::Eq(
+                        Box::new(Expr::MapGet {
+                            map: Box::new(Expr::Field("lifecycle".into())),
+                            key: Box::new(Expr::Binding("work_id".into())),
+                        }),
+                        Box::new(Expr::String("Queued".into())),
+                    )),
+                },
+            },
+        ],
+        updates: vec![
+            Update::SeqRemoveAll {
+                field: "queue".into(),
+                values: Expr::Binding("source_work_ids".into()),
+            },
+            Update::SeqRemoveAll {
+                field: "steer_queue".into(),
+                values: Expr::Binding("source_work_ids".into()),
+            },
+            Update::ForEach {
+                binding: "work_id".into(),
+                over: Expr::Binding("source_work_ids".into()),
+                updates: vec![
+                    Update::MapInsert {
+                        field: "lifecycle".into(),
+                        key: Expr::Binding("work_id".into()),
+                        value: Expr::String("Coalesced".into()),
+                    },
+                    Update::MapInsert {
+                        field: "terminal_outcome".into(),
+                        key: Expr::Binding("work_id".into()),
+                        value: Expr::Some(Box::new(Expr::String("Coalesced".into()))),
+                    },
+                ],
+            },
+        ],
+        to: phase.into(),
+        // Authority emits per-source InputLifecycleNotice + CompletionResolved.
+        // Schema emits summary IngressNotice.
+        emit: vec![EffectEmit {
+            variant: "IngressNotice".into(),
+            fields: IndexMap::from([
+                ("kind".into(), Expr::String("CoalesceQueuedInputs".into())),
+                (
+                    "detail".into(),
+                    Expr::String("SourcesCoalescedIntoAggregate".into()),
+                ),
+            ]),
+        }],
+    }
+}
+
+/// Helper: Reset transition (Fix 5 + Fix 2).
+///
+/// Iterates ALL non-terminal lifecycle entries (not just queue+steer_queue+contributors).
+/// Authority has no_current_run guard.
+fn runtime_ingress_reset_transition(name: &str, phase: &str) -> TransitionSchema {
+    TransitionSchema {
+        name: name.into(),
+        from: vec![phase.into()],
+        on: InputMatch {
+            variant: "Reset".into(),
+            bindings: vec![],
+        },
+        // Authority guards: no_current_run
+        guards: vec![Guard {
+            name: "no_current_run".into(),
+            expr: Expr::Eq(
+                Box::new(Expr::Field("current_run".into())),
+                Box::new(Expr::None),
+            ),
+        }],
+        updates: vec![
+            // Fix 5: Iterate ALL non-terminal lifecycle entries
+            Update::ForEach {
+                binding: "work_id".into(),
+                over: Expr::MapKeys(Box::new(Expr::Field("lifecycle".into()))),
+                updates: vec![Update::Conditional {
+                    condition: non_terminal_lifecycle_expr("work_id"),
+                    then_updates: vec![
+                        Update::MapInsert {
+                            field: "lifecycle".into(),
+                            key: Expr::Binding("work_id".into()),
+                            value: Expr::String("Abandoned".into()),
+                        },
+                        Update::MapInsert {
+                            field: "terminal_outcome".into(),
+                            key: Expr::Binding("work_id".into()),
+                            value: Expr::Some(Box::new(Expr::String("AbandonedReset".into()))),
+                        },
+                    ],
+                    else_updates: vec![],
+                }],
+            },
+            Update::Assign {
+                field: "queue".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+            Update::Assign {
+                field: "steer_queue".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+            Update::Assign {
+                field: "current_run".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "current_run_contributors".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+            Update::Assign {
+                field: "wake_requested".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "process_requested".into(),
+                expr: Expr::Bool(false),
+            },
+        ],
+        to: "Active".into(),
+        emit: vec![EffectEmit {
+            variant: "IngressNotice".into(),
+            fields: IndexMap::from([
+                ("kind".into(), Expr::String("Reset".into())),
+                (
+                    "detail".into(),
+                    Expr::String("NonTerminalInputsAbandoned".into()),
+                ),
+            ]),
+        }],
+    }
+}
+
+/// Helper: Destroy transition (Fix 5 + Fix 2).
+///
+/// Iterates ALL non-terminal lifecycle entries (not just queue+steer_queue+contributors).
+fn runtime_ingress_destroy_transition() -> TransitionSchema {
+    TransitionSchema {
+        name: "Destroy".into(),
+        from: vec!["Active".into(), "Retired".into()],
+        on: InputMatch {
+            variant: "Destroy".into(),
+            bindings: vec![],
+        },
+        guards: vec![],
+        updates: vec![
+            // Fix 5: Iterate ALL non-terminal lifecycle entries
+            Update::ForEach {
+                binding: "work_id".into(),
+                over: Expr::MapKeys(Box::new(Expr::Field("lifecycle".into()))),
+                updates: vec![Update::Conditional {
+                    condition: non_terminal_lifecycle_expr("work_id"),
+                    then_updates: vec![
+                        Update::MapInsert {
+                            field: "lifecycle".into(),
+                            key: Expr::Binding("work_id".into()),
+                            value: Expr::String("Abandoned".into()),
+                        },
+                        Update::MapInsert {
+                            field: "terminal_outcome".into(),
+                            key: Expr::Binding("work_id".into()),
+                            value: Expr::Some(Box::new(Expr::String("AbandonedDestroyed".into()))),
+                        },
+                    ],
+                    else_updates: vec![],
+                }],
+            },
+            Update::Assign {
+                field: "queue".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+            Update::Assign {
+                field: "steer_queue".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+            Update::Assign {
+                field: "current_run".into(),
+                expr: Expr::None,
+            },
+            Update::Assign {
+                field: "current_run_contributors".into(),
+                expr: Expr::SeqLiteral(vec![]),
+            },
+            Update::Assign {
+                field: "wake_requested".into(),
+                expr: Expr::Bool(false),
+            },
+            Update::Assign {
+                field: "process_requested".into(),
+                expr: Expr::Bool(false),
+            },
+        ],
+        to: "Destroyed".into(),
+        emit: vec![EffectEmit {
+            variant: "IngressNotice".into(),
+            fields: IndexMap::from([
+                ("kind".into(), Expr::String("Destroy".into())),
+                ("detail".into(), Expr::String("IngressDestroyed".into())),
+            ]),
+        }],
     }
 }
 

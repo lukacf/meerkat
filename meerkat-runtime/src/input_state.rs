@@ -1,7 +1,9 @@
-//! §13 InputState — the lifecycle state machine for inputs.
+//! §13 InputState -- the lifecycle state machine for inputs.
 //!
 //! Every accepted input has an InputState that tracks its progression
-//! through the runtime lifecycle.
+//! through the runtime lifecycle. Canonical lifecycle state is owned by
+//! [`InputLifecycleAuthority`] -- all transitions flow through
+//! `authority().apply()`.
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -9,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::identifiers::PolicyVersion;
 use crate::input::Input;
+use crate::input_lifecycle_authority::{
+    InputLifecycleAuthority, InputLifecycleError, InputLifecycleInput, InputLifecycleMutator,
+    InputLifecycleTransition,
+};
 use crate::policy::PolicyDecision;
 
 /// The lifecycle state of an input.
@@ -126,49 +132,37 @@ pub struct InputStateEvent {
 }
 
 /// Full state of an input in the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Canonical lifecycle state (phase, terminal_outcome, history, last_run_id,
+/// last_boundary_sequence, updated_at) is owned by the embedded
+/// [`InputLifecycleAuthority`]. All transitions must flow through
+/// [`InputState::apply`]. Direct mutation of canonical fields is not possible.
+///
+/// Operational fields (input_id, policy, durability, idempotency_key, etc.)
+/// are caller-managed and do not participate in the state machine.
+#[derive(Debug, Clone)]
 pub struct InputState {
     /// The input ID.
     pub input_id: InputId,
-    /// Current lifecycle state.
-    pub current_state: InputLifecycleState,
+    /// The canonical lifecycle authority -- owns phase, terminal_outcome,
+    /// history, last_run_id, last_boundary_sequence, updated_at.
+    authority: InputLifecycleAuthority,
     /// Policy snapshot applied to this input.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicySnapshot>,
-    /// Terminal outcome (set when state becomes terminal).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_outcome: Option<InputTerminalOutcome>,
     /// Durability requirement (retained for recovery correctness).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub durability: Option<crate::input::InputDurability>,
     /// Idempotency key (retained for dedup across restarts).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
     /// Number of times this input has been applied (for crash-loop detection).
-    #[serde(default)]
     pub attempt_count: u32,
     /// Number of times this input has been recovered.
-    #[serde(default)]
     pub recovery_count: u32,
-    /// State transition history.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<InputStateHistoryEntry>,
     /// How to reconstruct this input (for derived inputs).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reconstruction_source: Option<ReconstructionSource>,
     /// Persisted input payload used to rebuild queued work after recovery.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted_input: Option<Input>,
-    /// Last run that touched this input.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_id: Option<RunId>,
-    /// Boundary receipt sequence for the last applied run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_boundary_sequence: Option<u64>,
     /// When the input was created.
     pub created_at: DateTime<Utc>,
-    /// When the input was last updated.
-    pub updated_at: DateTime<Utc>,
 }
 
 impl InputState {
@@ -177,26 +171,170 @@ impl InputState {
         let now = Utc::now();
         Self {
             input_id,
-            current_state: InputLifecycleState::Accepted,
+            authority: InputLifecycleAuthority::new(),
             policy: None,
-            terminal_outcome: None,
             durability: None,
             idempotency_key: None,
             attempt_count: 0,
             recovery_count: 0,
-            history: Vec::new(),
             reconstruction_source: None,
             persisted_input: None,
-            last_run_id: None,
-            last_boundary_sequence: None,
             created_at: now,
-            updated_at: now,
         }
+    }
+
+    // ---- Canonical field accessors (delegate to authority) ----
+
+    /// Current lifecycle state.
+    pub fn current_state(&self) -> InputLifecycleState {
+        self.authority.phase()
     }
 
     /// Check if the input is in a terminal state.
     pub fn is_terminal(&self) -> bool {
-        self.current_state.is_terminal()
+        self.authority.is_terminal()
+    }
+
+    /// Terminal outcome (set when state becomes terminal).
+    pub fn terminal_outcome(&self) -> Option<&InputTerminalOutcome> {
+        self.authority.terminal_outcome()
+    }
+
+    /// State transition history.
+    pub fn history(&self) -> &[InputStateHistoryEntry] {
+        self.authority.history()
+    }
+
+    /// Last run that touched this input.
+    pub fn last_run_id(&self) -> Option<&RunId> {
+        self.authority.last_run_id()
+    }
+
+    /// Boundary receipt sequence for the last applied run.
+    pub fn last_boundary_sequence(&self) -> Option<u64> {
+        self.authority.last_boundary_sequence()
+    }
+
+    /// When the input was last updated.
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.authority.updated_at()
+    }
+
+    // ---- Authority access ----
+
+    /// Apply a lifecycle input through the authority.
+    ///
+    /// This is the ONLY way to mutate canonical lifecycle state.
+    pub fn apply(
+        &mut self,
+        input: InputLifecycleInput,
+    ) -> Result<InputLifecycleTransition, InputLifecycleError> {
+        self.authority.apply(input)
+    }
+
+    /// Check if a transition would be accepted without applying it.
+    pub fn can_accept(&self, input: &InputLifecycleInput) -> bool {
+        self.authority.can_accept(input)
+    }
+
+    /// Set the terminal outcome after a transition (for Superseded/Coalesced
+    /// which need caller-provided data).
+    pub fn set_terminal_outcome(&mut self, outcome: InputTerminalOutcome) {
+        self.authority.set_terminal_outcome(outcome);
+    }
+
+    /// Get a reference to the authority (for advanced read-only operations).
+    pub fn authority(&self) -> &InputLifecycleAuthority {
+        &self.authority
+    }
+
+    /// Get a mutable reference to the authority (for recovery paths).
+    pub fn authority_mut(&mut self) -> &mut InputLifecycleAuthority {
+        &mut self.authority
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Serialize/Deserialize to preserve wire format
+// ---------------------------------------------------------------------------
+
+/// Serialization helper to keep the same wire format as the old InputState.
+#[derive(Serialize, Deserialize)]
+struct InputStateSerde {
+    input_id: InputId,
+    current_state: InputLifecycleState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<PolicySnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_outcome: Option<InputTerminalOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durability: Option<crate::input::InputDurability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idempotency_key: Option<crate::identifiers::IdempotencyKey>,
+    #[serde(default)]
+    attempt_count: u32,
+    #[serde(default)]
+    recovery_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    history: Vec<InputStateHistoryEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reconstruction_source: Option<ReconstructionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    persisted_input: Option<Input>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_run_id: Option<RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_boundary_sequence: Option<u64>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl Serialize for InputState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let helper = InputStateSerde {
+            input_id: self.input_id.clone(),
+            current_state: self.authority.phase(),
+            policy: self.policy.clone(),
+            terminal_outcome: self.authority.terminal_outcome().cloned(),
+            durability: self.durability,
+            idempotency_key: self.idempotency_key.clone(),
+            attempt_count: self.attempt_count,
+            recovery_count: self.recovery_count,
+            history: self.authority.history().to_vec(),
+            reconstruction_source: self.reconstruction_source.clone(),
+            persisted_input: self.persisted_input.clone(),
+            last_run_id: self.authority.last_run_id().cloned(),
+            last_boundary_sequence: self.authority.last_boundary_sequence(),
+            created_at: self.created_at,
+            updated_at: self.authority.updated_at(),
+        };
+        helper.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InputState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let helper = InputStateSerde::deserialize(deserializer)?;
+        let authority = InputLifecycleAuthority::restore(
+            helper.current_state,
+            helper.terminal_outcome,
+            helper.last_run_id,
+            helper.last_boundary_sequence,
+            helper.history,
+            helper.updated_at,
+        );
+        Ok(InputState {
+            input_id: helper.input_id,
+            authority,
+            policy: helper.policy,
+            durability: helper.durability,
+            idempotency_key: helper.idempotency_key,
+            attempt_count: helper.attempt_count,
+            recovery_count: helper.recovery_count,
+            reconstruction_source: helper.reconstruction_source,
+            persisted_input: helper.persisted_input,
+            created_at: helper.created_at,
+        })
     }
 }
 
@@ -247,10 +385,10 @@ mod tests {
         let id = InputId::new();
         let state = InputState::new_accepted(id.clone());
         assert_eq!(state.input_id, id);
-        assert_eq!(state.current_state, InputLifecycleState::Accepted);
+        assert_eq!(state.current_state(), InputLifecycleState::Accepted);
         assert!(!state.is_terminal());
-        assert!(state.history.is_empty());
-        assert!(state.terminal_outcome.is_none());
+        assert!(state.history().is_empty());
+        assert!(state.terminal_outcome().is_none());
         assert!(state.policy.is_none());
     }
 
@@ -272,18 +410,13 @@ mod tests {
                 policy_version: PolicyVersion(1),
             },
         });
-        state.history.push(InputStateHistoryEntry {
-            timestamp: Utc::now(),
-            from: InputLifecycleState::Accepted,
-            to: InputLifecycleState::Queued,
-            reason: Some("policy resolved".into()),
-        });
+        state.apply(InputLifecycleInput::QueueAccepted).unwrap();
 
         let json = serde_json::to_value(&state).unwrap();
         let parsed: InputState = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.input_id, state.input_id);
-        assert_eq!(parsed.current_state, state.current_state);
-        assert_eq!(parsed.history.len(), 1);
+        assert_eq!(parsed.current_state(), state.current_state());
+        assert_eq!(parsed.history().len(), 1);
     }
 
     #[test]
@@ -348,7 +481,6 @@ mod tests {
         ];
         for source in sources {
             let json = serde_json::to_value(&source).unwrap();
-            // Verify the tag is present
             assert!(json["source_type"].is_string());
             let parsed: ReconstructionSource = serde_json::from_value(json).unwrap();
             let _ = parsed;

@@ -3122,7 +3122,6 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        runtime_adapter_for_sink: Some(runtime_adapter.clone()),
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3632,7 +3631,6 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        runtime_adapter_for_sink: Some(resume_adapter.clone()),
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -9198,6 +9196,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            flow_state: Default::default(),
         };
 
         let run_json = render_flow_status_json(Some(run)).expect("encode run json");
@@ -9234,6 +9233,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             completed_at: Some(now),
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
+                            flow_state: Default::default(),
                         },
                     ),
                     (
@@ -9248,6 +9248,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             completed_at: None,
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
+                            flow_state: Default::default(),
                         },
                     ),
                 ]),

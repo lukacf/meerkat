@@ -787,6 +787,16 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                             Box::new(Expr::String("MobMemberChild".into())),
                         ),
                     },
+                    Guard {
+                        name: "peer_not_already_ready".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Call {
+                                helper: "peer_ready_of".into(),
+                                args: vec![Expr::Binding("operation_id".into())],
+                            }),
+                            Box::new(Expr::Bool(false)),
+                        ),
+                    },
                 ],
                 updates: vec![Update::MapInsert {
                     field: "peer_ready".into(),
@@ -913,7 +923,7 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
             terminal_transition(
                 "RetireCompleted",
                 "RetireCompleted",
-                &["Retiring"],
+                &["Running", "Retiring"],
                 "Retired",
                 "Retired",
             ),
@@ -991,8 +1001,12 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     }],
                 }],
                 to: "Active".into(),
+                // Authority emits NotifyOpWatcher + RetainTerminalRecord per terminated op
+                // inside the ForEach loop. Schema DSL cannot express per-iteration effects,
+                // so these are documented here rather than in the emit list.
                 emit: vec![],
             },
+            // Phase B: not yet implemented in authority
             // Phase B: WaitAll — registers watchers for all specified operations
             TransitionSchema {
                 name: "WaitAll".into(),
@@ -1012,6 +1026,7 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     )]),
                 }],
             },
+            // Phase B: not yet implemented in authority
             // Phase B: CollectCompleted — drain all buffered terminal operations
             TransitionSchema {
                 name: "CollectCompleted".into(),

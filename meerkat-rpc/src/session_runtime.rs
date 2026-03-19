@@ -943,10 +943,6 @@ impl SessionRuntime {
                 None
             };
 
-            // Inject runtime adapter so the factory can construct a per-session
-            // RuntimeInputSink for host-mode comms routing.
-            build_config.runtime_adapter_for_sink = Some(self.runtime_adapter.clone());
-
             let mut build = build_config.to_session_build_options();
             build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
@@ -1107,7 +1103,6 @@ impl SessionRuntime {
             app_context: None,
             additional_instructions: None,
             shell_env: None,
-            runtime_adapter_for_sink: Some(self.runtime_adapter.clone()),
         };
         self.service
             .create_session(CreateSessionRequest {
@@ -1392,8 +1387,6 @@ impl SessionRuntime {
             } else {
                 None
             };
-
-            build_config.runtime_adapter_for_sink = Some(self.runtime_adapter.clone());
 
             let mut build = build_config.to_session_build_options();
             build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());

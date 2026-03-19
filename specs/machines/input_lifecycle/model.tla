@@ -78,6 +78,14 @@ Consume ==
     /\ UNCHANGED << last_run_id, last_boundary_sequence >>
 
 
+ConsumeOnAccept ==
+    /\ phase = "Accepted"
+    /\ phase' = "Consumed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = Some("Consumed")
+    /\ UNCHANGED << last_run_id, last_boundary_sequence >>
+
+
 Supersede ==
     /\ phase = "Queued"
     /\ phase' = "Superseded"
@@ -109,6 +117,7 @@ Next ==
     \/ \E run_id \in RunIdValues : MarkApplied(run_id)
     \/ \E boundary_sequence \in BoundarySequenceValues : MarkAppliedPendingConsumption(boundary_sequence)
     \/ Consume
+    \/ ConsumeOnAccept
     \/ Supersede
     \/ Coalesce
     \/ Abandon

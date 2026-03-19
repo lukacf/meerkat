@@ -181,6 +181,8 @@ pub struct SessionBuildOptions {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
+    /// Optional session checkpointer for host-mode persistence.
+    pub checkpointer: Option<std::sync::Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -231,6 +233,7 @@ impl Default for SessionBuildOptions {
             instance_id: None,
             backend: None,
             config_generation: None,
+            checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: None,
@@ -263,6 +266,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
             .field("config_generation", &self.config_generation)
+            .field("checkpointer", &self.checkpointer.is_some())
             .field("silent_comms_intents", &self.silent_comms_intents)
             .field(
                 "max_inline_peer_notifications",

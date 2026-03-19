@@ -134,7 +134,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.stage_input(input_id, run_id)
     }
 
@@ -143,7 +143,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.apply_input(input_id, run_id)
     }
 
@@ -151,7 +151,7 @@ impl PersistentRuntimeDriver {
     pub fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.rollback_staged(input_ids)
     }
 
@@ -160,7 +160,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.consume_inputs(input_ids, run_id)
     }
 
@@ -347,38 +347,59 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         // dedup correctness and filters out Ephemeral inputs.
         for mut state in stored_states {
             if matches!(
-                state.current_state,
+                state.current_state(),
                 InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
             ) {
-                let has_receipt = match (state.last_run_id.clone(), state.last_boundary_sequence) {
-                    (Some(run_id), Some(sequence)) => self
-                        .store
-                        .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
-                        .await
-                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                        .is_some(),
-                    _ => false,
-                };
+                let has_receipt =
+                    match (state.last_run_id().cloned(), state.last_boundary_sequence()) {
+                        (Some(run_id), Some(sequence)) => self
+                            .store
+                            .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
+                            .await
+                            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                            .is_some(),
+                        _ => false,
+                    };
                 let now = Utc::now();
+                let from = state.current_state();
                 if has_receipt {
-                    state.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: state.current_state,
-                        to: InputLifecycleState::Consumed,
-                        reason: Some("recovery: boundary receipt already committed".into()),
-                    });
-                    state.current_state = InputLifecycleState::Consumed;
-                    state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                    state.updated_at = now;
+                    let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                        InputLifecycleState::Consumed,
+                        Some(InputTerminalOutcome::Consumed),
+                        state.last_run_id().cloned(),
+                        state.last_boundary_sequence(),
+                        {
+                            let mut h = state.history().to_vec();
+                            h.push(InputStateHistoryEntry {
+                                timestamp: now,
+                                from,
+                                to: InputLifecycleState::Consumed,
+                                reason: Some("recovery: boundary receipt already committed".into()),
+                            });
+                            h
+                        },
+                        now,
+                    );
+                    *state.authority_mut() = auth;
                 } else {
-                    state.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: state.current_state,
-                        to: InputLifecycleState::Queued,
-                        reason: Some("recovery: missing boundary receipt".into()),
-                    });
-                    state.current_state = InputLifecycleState::Queued;
-                    state.updated_at = now;
+                    let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                        InputLifecycleState::Queued,
+                        None,
+                        state.last_run_id().cloned(),
+                        state.last_boundary_sequence(),
+                        {
+                            let mut h = state.history().to_vec();
+                            h.push(InputStateHistoryEntry {
+                                timestamp: now,
+                                from,
+                                to: InputLifecycleState::Queued,
+                                reason: Some("recovery: missing boundary receipt".into()),
+                            });
+                            h
+                        },
+                        now,
+                    );
+                    *state.authority_mut() = auth;
                 }
             }
 
@@ -396,7 +417,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
 
         for (input_id, input) in recovered_payloads {
             let should_requeue = self.inner.input_state(&input_id).is_some_and(|state| {
-                state.current_state == crate::input_state::InputLifecycleState::Queued
+                state.current_state() == crate::input_state::InputLifecycleState::Queued
             });
             if should_requeue && !self.inner.has_queued_input(&input_id) {
                 self.inner.enqueue_recovered_input(input_id, input);

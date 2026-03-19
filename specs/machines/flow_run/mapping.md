@@ -81,6 +81,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordStepOutput`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `create-dispatch-complete`
+- `ConditionPassed`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `ConditionRejected`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `FailStepEscalating`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `terminalize-on-failure-or-cancel`
 - `FailStep`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `terminalize-on-failure-or-cancel`
@@ -88,6 +97,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `terminalize-on-failure-or-cancel`
 - `CancelStep`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `terminalize-on-failure-or-cancel`
+- `RegisterTargets`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `RecordTargetSuccess`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `RecordTargetTerminalFailure`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `terminalize-on-failure-or-cancel`
+- `RecordTargetCanceled`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `terminalize-on-failure-or-cancel`
+- `RecordTargetFailure`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `terminalize-on-failure-or-cancel`
 - `TerminalizeCompleted`
@@ -119,6 +143,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FlowTerminalized`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `create-dispatch-complete`
+- `EscalateSupervisor`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `ProjectTargetSuccess`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `ProjectTargetFailure`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `terminalize-on-failure-or-cancel`
+- `ProjectTargetCanceled`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `terminalize-on-failure-or-cancel`
 
 ### Invariants
 - `output_only_follows_completed_steps`

@@ -561,9 +561,9 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "runtime-owned continuation scheduling contract",
                 ),
                 anchor(
-                    "runtime_comms_sink",
-                    "meerkat-runtime/src/comms_sink.rs",
-                    "host continuation precursor slated for deletion",
+                    "runtime_comms_drain",
+                    "meerkat-runtime/src/comms_drain.rs",
+                    "comms inbox drain feeding typed inputs into the runtime adapter",
                 ),
                 anchor(
                     "agent_comms_impl",

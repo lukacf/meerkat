@@ -220,7 +220,7 @@ async fn retire_preserves_inputs_for_drain() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        stored.current_state,
+        stored.current_state(),
         meerkat_runtime::input_state::InputLifecycleState::Queued
     );
 }
@@ -244,7 +244,7 @@ async fn reset_persists_abandoned_inputs() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        stored.current_state,
+        stored.current_state(),
         meerkat_runtime::input_state::InputLifecycleState::Abandoned
     );
 }
@@ -264,9 +264,24 @@ async fn recover_consumes_committed_applied_pending_inputs() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
-    state.current_state = InputLifecycleState::AppliedPendingConsumption;
-    state.last_run_id = Some(run_id.clone());
-    state.last_boundary_sequence = Some(0);
+    // Transition through authority: Accepted -> Queued -> Staged -> Applied -> AppliedPendingConsumption
+    use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
+    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
+    state
+        .apply(InputLifecycleInput::StageForRun {
+            run_id: run_id.clone(),
+        })
+        .unwrap();
+    state
+        .apply(InputLifecycleInput::MarkApplied {
+            run_id: run_id.clone(),
+        })
+        .unwrap();
+    state
+        .apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+            boundary_sequence: 0,
+        })
+        .unwrap();
     store.persist_input_state(&rid, &state).await.unwrap();
     store
         .atomic_apply(
@@ -297,7 +312,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
     let Some(recovered) = recovered else {
         unreachable!("asserted some recovery state above");
     };
-    assert_eq!(recovered.current_state, InputLifecycleState::Consumed);
+    assert_eq!(recovered.current_state(), InputLifecycleState::Consumed);
     assert!(
         driver.active_input_ids().is_empty(),
         "committed applied inputs should not stay active after recovery"

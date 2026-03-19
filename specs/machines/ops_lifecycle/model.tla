@@ -108,6 +108,7 @@ PeerReady(operation_id) ==
     /\ phase = "Active"
     /\ ((status_of(operation_id) = "Running") \/ (status_of(operation_id) = "Retiring"))
     /\ (kind_of(operation_id) = "MobMemberChild")
+    /\ (peer_ready_of(operation_id) = FALSE)
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ peer_ready' = MapSet(peer_ready, operation_id, TRUE)
@@ -182,7 +183,7 @@ RetireRequested(operation_id) ==
 
 RetireCompleted(operation_id) ==
     /\ phase = "Active"
-    /\ (status_of(operation_id) = "Retiring")
+    /\ ((status_of(operation_id) = "Running") \/ (status_of(operation_id) = "Retiring"))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ operation_status' = MapSet(operation_status, operation_id, "Retired")

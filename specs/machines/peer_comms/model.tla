@@ -24,7 +24,7 @@ VARIABLES phase, model_step_count, trusted_peers, raw_item_peer, raw_item_kind, 
 
 vars == << phase, model_step_count, trusted_peers, raw_item_peer, raw_item_kind, classified_as, text_projection, content_shape, request_id, reservation_key, trusted_snapshot, submission_queue >>
 
-ClassFor(raw_kind) == (IF (raw_kind = "request") THEN "ActionableRequest" ELSE (IF (raw_kind = "response_terminal") THEN "InlineResponseTerminal" ELSE (IF (raw_kind = "response_progress") THEN "InlineResponseProgress" ELSE (IF (raw_kind = "plain_event") THEN "ActionableEvent" ELSE (IF (raw_kind = "silent_request") THEN "InlineSilentRequest" ELSE "ActionableMessage")))))
+ClassFor(raw_kind) == (IF (raw_kind = "request") THEN "ActionableRequest" ELSE (IF (raw_kind = "response_terminal") THEN "Response" ELSE (IF (raw_kind = "response_progress") THEN "Response" ELSE (IF (raw_kind = "plain_event") THEN "PlainEvent" ELSE (IF (raw_kind = "silent_request") THEN "SilentRequest" ELSE "ActionableMessage")))))
 
 Init ==
     /\ phase = "Absent"

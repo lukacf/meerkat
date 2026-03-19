@@ -94,6 +94,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Consume`
   - anchors: `input_state`, `input_machine`, `input_ledger`
   - scenarios: `queue-stage-apply-consume`
+- `ConsumeOnAccept`
+  - anchors: `input_state`, `input_machine`, `input_ledger`
+  - scenarios: `queue-stage-apply-consume`
 - `Supersede`
   - anchors: `input_state`, `input_machine`, `input_ledger`
   - scenarios: `supersede-coalesce`

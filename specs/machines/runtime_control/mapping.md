@@ -105,6 +105,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginRunFromAttached`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`
+- `BeginRunFromRecovering`
+  - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
+  - scenarios: `retire-stop-destroy`, `reset-terminates-waiters`
 - `RunCompletedToIdle`
   - anchors: `runtime_state`, `runtime_state_machine`, `runtime_loop`, `runtime_control_plane`, `runtime_session_adapter`
   - scenarios: `begin-run-complete`

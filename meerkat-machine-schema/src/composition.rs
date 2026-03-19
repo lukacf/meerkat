@@ -1183,7 +1183,12 @@ impl std::error::Error for CompositionSchemaError {}
 
 fn route_literal_expr_allowed(expr: &Expr) -> bool {
     match expr {
-        Expr::Bool(_) | Expr::U64(_) | Expr::String(_) | Expr::None => true,
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::None
+        | Expr::EmptyMap => true,
         Expr::Some(inner) => route_literal_expr_allowed(inner),
         Expr::SeqLiteral(items) => items.iter().all(route_literal_expr_allowed),
         _ => false,
@@ -1195,8 +1200,10 @@ fn literal_matches_type(expr: &Expr, ty: &TypeRef) -> bool {
         (Expr::Bool(_), TypeRef::Bool) => true,
         (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
         (Expr::String(_), TypeRef::String | TypeRef::Named(_)) => true,
+        (Expr::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) => enum_name == name,
         (Expr::None, TypeRef::Option(_)) => true,
         (Expr::Some(inner), TypeRef::Option(inner_ty)) => literal_matches_type(inner, inner_ty),
+        (Expr::EmptyMap, TypeRef::Map(_, _)) => true,
         (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => {
             items.iter().all(|item| literal_matches_type(item, inner))
         }

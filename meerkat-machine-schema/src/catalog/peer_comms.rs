@@ -166,25 +166,25 @@ pub fn peer_comms_machine() -> MachineSchema {
                         Box::new(Expr::Binding("raw_kind".into())),
                         Box::new(Expr::String("response_terminal".into())),
                     )),
-                    then_expr: Box::new(Expr::String("InlineResponseTerminal".into())),
+                    then_expr: Box::new(Expr::String("Response".into())),
                     else_expr: Box::new(Expr::IfElse {
                         condition: Box::new(Expr::Eq(
                             Box::new(Expr::Binding("raw_kind".into())),
                             Box::new(Expr::String("response_progress".into())),
                         )),
-                        then_expr: Box::new(Expr::String("InlineResponseProgress".into())),
+                        then_expr: Box::new(Expr::String("Response".into())),
                         else_expr: Box::new(Expr::IfElse {
                             condition: Box::new(Expr::Eq(
                                 Box::new(Expr::Binding("raw_kind".into())),
                                 Box::new(Expr::String("plain_event".into())),
                             )),
-                            then_expr: Box::new(Expr::String("ActionableEvent".into())),
+                            then_expr: Box::new(Expr::String("PlainEvent".into())),
                             else_expr: Box::new(Expr::IfElse {
                                 condition: Box::new(Expr::Eq(
                                     Box::new(Expr::Binding("raw_kind".into())),
                                     Box::new(Expr::String("silent_request".into())),
                                 )),
-                                then_expr: Box::new(Expr::String("InlineSilentRequest".into())),
+                                then_expr: Box::new(Expr::String("SilentRequest".into())),
                                 else_expr: Box::new(Expr::String("ActionableMessage".into())),
                             }),
                         }),

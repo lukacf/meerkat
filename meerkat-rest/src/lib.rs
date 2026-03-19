@@ -540,7 +540,6 @@ async fn apply_runtime_turn(
                 app_context: None,
                 additional_instructions: None,
                 shell_env: None,
-                runtime_adapter_for_sink: Some(context.runtime_adapter.clone()),
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -2098,7 +2097,6 @@ async fn create_session(
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
         shell_env: req.shell_env,
-        runtime_adapter_for_sink: Some(state.runtime_adapter.clone()),
     };
 
     let svc_req = SvcCreateSessionRequest {

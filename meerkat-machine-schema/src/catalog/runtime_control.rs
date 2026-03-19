@@ -371,6 +371,44 @@ pub fn runtime_control_machine() -> MachineSchema {
                     fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
                 }],
             },
+            TransitionSchema {
+                name: "BeginRunFromRecovering".into(),
+                from: vec!["Recovering".into()],
+                on: InputMatch {
+                    variant: "BeginRun".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "no_active_run".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("current_run_id".into())),
+                        Box::new(Expr::None),
+                    ),
+                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "current_run_id".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("run_id".into()))),
+                    },
+                    Update::Assign {
+                        field: "pre_run_state".into(),
+                        expr: Expr::Some(Box::new(Expr::Phase("Recovering".into()))),
+                    },
+                    Update::Assign {
+                        field: "wake_pending".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "process_pending".into(),
+                        expr: Expr::Bool(false),
+                    },
+                ],
+                to: "Running".into(),
+                emit: vec![EffectEmit {
+                    variant: "SubmitRunPrimitive".into(),
+                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                }],
+            },
             // RunCompleted — split by pre_run_state guard
             // RunCompleted — split by pre_run_state
             run_terminal_transition("RunCompletedToIdle", "RunCompleted", "Idle"),
@@ -1094,7 +1132,7 @@ fn run_terminal_transition(
     target_phase: &str,
 ) -> TransitionSchema {
     let guard_expr = if target_phase == "Idle" {
-        // Idle is the default — matches None or Some(Idle)
+        // Idle is the default — matches None, Some(Idle), or Some(Recovering)
         Expr::Or(vec![
             Expr::Eq(
                 Box::new(Expr::Field("pre_run_state".into())),
@@ -1103,6 +1141,10 @@ fn run_terminal_transition(
             Expr::Eq(
                 Box::new(Expr::Field("pre_run_state".into())),
                 Box::new(Expr::Some(Box::new(Expr::Phase("Idle".into())))),
+            ),
+            Expr::Eq(
+                Box::new(Expr::Field("pre_run_state".into())),
+                Box::new(Expr::Some(Box::new(Expr::Phase("Recovering".into())))),
             ),
         ])
     } else {

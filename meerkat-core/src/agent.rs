@@ -505,6 +505,7 @@ where
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
     /// Optional session checkpointer for host-mode persistence.
+    #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
@@ -518,6 +519,7 @@ where
     /// When true, the host-mode compatibility loop owns the inbox drain cycle.
     /// `drain_comms_inbox()` becomes a no-op to avoid stealing
     /// interaction-scoped messages through the compatibility path.
+    #[allow(dead_code)] // Phase 9-10 host-mode rewire pending
     pub(crate) host_drain_active: bool,
     /// Optional bridge for routing host-mode peer/event work through the runtime.
     /// When set, ordinary comms execution stays runtime-backed instead of
@@ -530,6 +532,8 @@ where
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Operation IDs to wait on in WaitingForOps state.
     pub(crate) pending_ops: Vec<crate::ops::OperationId>,
+    /// Machine authority for turn-execution state transitions (RMAT).
+    pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
     /// True after the agentic loop completes when `output_schema` is set.
     /// Causes the next `CallingLlm` iteration to use extraction parameters
     /// (no tools, temperature 0.0, structured_output provider params).

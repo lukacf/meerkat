@@ -15,6 +15,7 @@ use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meerkat_machine_kernels::KernelState;
 
 /// Trait for persisting and querying mob events.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -61,6 +62,20 @@ pub trait MobRunStore: Send + Sync {
         run_id: &RunId,
         expected: MobRunStatus,
         next: MobRunStatus,
+    ) -> Result<bool, MobError>;
+    async fn cas_flow_state(
+        &self,
+        run_id: &RunId,
+        expected: &KernelState,
+        next: &KernelState,
+    ) -> Result<bool, MobError>;
+    async fn cas_run_snapshot(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &KernelState,
+        next_status: MobRunStatus,
+        next_flow_state: &KernelState,
     ) -> Result<bool, MobError>;
     async fn append_step_entry(
         &self,

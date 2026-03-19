@@ -213,8 +213,9 @@ CREATE TABLE IF NOT EXISTS runtime_states (
                 )?;
                 let mut input_updates = input_updates;
                 for state in &mut input_updates {
-                    state.last_run_id = Some(receipt.run_id.clone());
-                    state.last_boundary_sequence = Some(receipt.sequence);
+                    state
+                        .authority_mut()
+                        .stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
                 }
 
                 write_session_snapshot_in_txn(&tx, &session_snapshot)

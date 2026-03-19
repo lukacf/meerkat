@@ -398,7 +398,7 @@ async fn failed_executor_requeues_input() {
     // Input should be rolled back to Queued (not stranded in APC)
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state,
+        is.current_state(),
         InputLifecycleState::Queued,
         "Failed execution should roll input back to Queued, not strand in AppliedPendingConsumption"
     );
@@ -478,7 +478,7 @@ async fn failed_executor_continues_processing_backlog() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(second_state.current_state, InputLifecycleState::Consumed);
+    assert_eq!(second_state.current_state(), InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Idle
@@ -490,7 +490,7 @@ async fn failed_executor_continues_processing_backlog() {
     let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
     assert!(
         matches!(
-            first_state.current_state,
+            first_state.current_state(),
             InputLifecycleState::Queued | InputLifecycleState::Consumed
         ),
         "the initially failed input should have been safely rolled back or retried after the backlog drained"
@@ -574,7 +574,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
 
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state,
+        is.current_state(),
         InputLifecycleState::Consumed,
         "the pre-upgrade queued input should be processed once the loop is attached"
     );
@@ -659,7 +659,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
         "the racy registration path should still attach a live runtime loop"
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Consumed);
+    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
 }
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
         RuntimeState::Idle
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Queued);
+    assert_eq!(state.current_state(), InputLifecycleState::Queued);
 }
 
 #[tokio::test]
@@ -781,7 +781,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
         RuntimeState::Idle
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state, InputLifecycleState::Queued);
+    assert_eq!(state.current_state(), InputLifecycleState::Queued);
 }
 
 #[tokio::test]
@@ -1305,7 +1305,7 @@ async fn successful_execution_fires_boundary_applied() {
     // Input should have gone through full lifecycle: Queued → Staged → Applied → APC → Consumed
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state,
+        is.current_state(),
         InputLifecycleState::Consumed,
         "Successful execution should consume the input"
     );

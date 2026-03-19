@@ -63,6 +63,7 @@ pub struct SessionSnapshot {
 // ---------------------------------------------------------------------------
 
 /// Commands sent from the service to a session task.
+#[allow(dead_code)] // host_mode field used in Phase 9-10 attached command loop
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
@@ -1039,7 +1040,7 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StartTurn {
                 prompt,
-                host_mode,
+                host_mode: _,
                 event_tx,
                 result_tx,
                 skill_references,

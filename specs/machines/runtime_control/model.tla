@@ -90,10 +90,21 @@ BeginRunFromAttached(run_id) ==
     /\ process_pending' = FALSE
 
 
+BeginRunFromRecovering(run_id) ==
+    /\ phase = "Recovering"
+    /\ (current_run_id = None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = Some(run_id)
+    /\ pre_run_state' = Some("Recovering")
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+
+
 RunCompletedToIdle(run_id) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
-    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")))
+    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")) \/ (pre_run_state = Some("Recovering")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -126,7 +137,7 @@ RunCompletedToRetired(run_id) ==
 RunFailedToIdle(run_id) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
-    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")))
+    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")) \/ (pre_run_state = Some("Recovering")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -159,7 +170,7 @@ RunFailedToRetired(run_id) ==
 RunCancelledToIdle(run_id) ==
     /\ phase = "Running"
     /\ (current_run_id = Some(run_id))
-    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")))
+    /\ ((pre_run_state = None) \/ (pre_run_state = Some("Idle")) \/ (pre_run_state = Some("Recovering")))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -482,6 +493,7 @@ Next ==
     \/ \E run_id \in RunIdValues : BeginRunFromIdle(run_id)
     \/ \E run_id \in RunIdValues : BeginRunFromRetired(run_id)
     \/ \E run_id \in RunIdValues : BeginRunFromAttached(run_id)
+    \/ \E run_id \in RunIdValues : BeginRunFromRecovering(run_id)
     \/ \E run_id \in RunIdValues : RunCompletedToIdle(run_id)
     \/ \E run_id \in RunIdValues : RunCompletedToAttached(run_id)
     \/ \E run_id \in RunIdValues : RunCompletedToRetired(run_id)

@@ -90,6 +90,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
+### `BeginRunFromRecovering`
+- From: `Recovering`
+- On: `BeginRun`(run_id)
+- Guards:
+  - `no_active_run`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
+
 ### `RunCompletedToIdle`
 - From: `Running`
 - On: `RunCompleted`(run_id)

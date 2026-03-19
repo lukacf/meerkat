@@ -72,7 +72,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_is_new`
   - `handling_mode_is_queue`
-- Emits: `IngressAccepted`, `InputLifecycleNotice`
+- Emits: `IngressAccepted`, `InputLifecycleNotice`, `WakeRuntime`
 - To: `Active`
 
 ### `AdmitQueuedSteer`
@@ -92,8 +92,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressAccepted`, `InputLifecycleNotice`, `CompletionResolved`
 - To: `Active`
 
-### `StageDrainSnapshot`
-- From: `Active`, `Retired`
+### `StageDrainSnapshotFromActive`
+- From: `Active`
 - On: `StageDrainSnapshot`(run_id, contributing_work_ids)
 - Guards:
   - `no_current_run`
@@ -103,8 +103,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `ReadyForRun`
 - To: `Active`
 
-### `BoundaryApplied`
-- From: `Active`, `Retired`
+### `StageDrainSnapshotFromRetired`
+- From: `Retired`
+- On: `StageDrainSnapshot`(run_id, contributing_work_ids)
+- Guards:
+  - `no_current_run`
+  - `contributors_non_empty`
+  - `contributors_match_current_drain_source`
+  - `all_contributors_are_queued`
+- Emits: `ReadyForRun`
+- To: `Retired`
+
+### `BoundaryAppliedFromActive`
+- From: `Active`
 - On: `BoundaryApplied`(run_id, boundary_sequence)
 - Guards:
   - `run_matches_current`
@@ -112,43 +123,84 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressNotice`
 - To: `Active`
 
-### `RunCompleted`
-- From: `Active`, `Retired`
+### `BoundaryAppliedFromRetired`
+- From: `Retired`
+- On: `BoundaryApplied`(run_id, boundary_sequence)
+- Guards:
+  - `run_matches_current`
+  - `contributors_are_staged`
+- Emits: `IngressNotice`
+- To: `Retired`
+
+### `RunCompletedFromActive`
+- From: `Active`
 - On: `RunCompleted`(run_id)
 - Guards:
   - `run_matches_current`
   - `contributors_pending_consumption`
-- Emits: `IngressNotice`, `CompletionResolved`
+- Emits: `IngressNotice`
 - To: `Active`
 
-### `RunFailed`
-- From: `Active`, `Retired`
+### `RunCompletedFromRetired`
+- From: `Retired`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `contributors_pending_consumption`
+- Emits: `IngressNotice`
+- To: `Retired`
+
+### `RunFailedFromActive`
+- From: `Active`
 - On: `RunFailed`(run_id)
 - Guards:
   - `run_matches_current`
-  - `contributors_are_staged`
 - Emits: `IngressNotice`
 - To: `Active`
 
-### `RunCancelled`
-- From: `Active`, `Retired`
+### `RunFailedFromRetired`
+- From: `Retired`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `run_matches_current`
+- Emits: `IngressNotice`
+- To: `Retired`
+
+### `RunCancelledFromActive`
+- From: `Active`
 - On: `RunCancelled`(run_id)
 - Guards:
   - `run_matches_current`
-  - `contributors_are_staged`
 - Emits: `IngressNotice`
 - To: `Active`
 
-### `SupersedeQueuedInput`
+### `RunCancelledFromRetired`
+- From: `Retired`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `run_matches_current`
+- Emits: `IngressNotice`
+- To: `Retired`
+
+### `SupersedeQueuedInputFromActive`
 - From: `Active`
 - On: `SupersedeQueuedInput`(new_work_id, old_work_id)
 - Guards:
   - `new_input_is_admitted`
   - `old_input_is_queued`
-- Emits: `IngressNotice`
+- Emits: `InputLifecycleNotice`, `CompletionResolved`
 - To: `Active`
 
-### `CoalesceQueuedInputs`
+### `SupersedeQueuedInputFromRetired`
+- From: `Retired`
+- On: `SupersedeQueuedInput`(new_work_id, old_work_id)
+- Guards:
+  - `new_input_is_admitted`
+  - `old_input_is_queued`
+- Emits: `InputLifecycleNotice`, `CompletionResolved`
+- To: `Retired`
+
+### `CoalesceQueuedInputsFromActive`
 - From: `Active`
 - On: `CoalesceQueuedInputs`(aggregate_work_id, source_work_ids)
 - Guards:
@@ -157,6 +209,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `all_sources_are_queued`
 - Emits: `IngressNotice`
 - To: `Active`
+
+### `CoalesceQueuedInputsFromRetired`
+- From: `Retired`
+- On: `CoalesceQueuedInputs`(aggregate_work_id, source_work_ids)
+- Guards:
+  - `aggregate_input_is_admitted`
+  - `sources_non_empty`
+  - `all_sources_are_queued`
+- Emits: `IngressNotice`
+- To: `Retired`
 
 ### `Retire`
 - From: `Active`
@@ -167,12 +229,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ResetFromActive`
 - From: `Active`
 - On: `Reset`()
+- Guards:
+  - `no_current_run`
 - Emits: `IngressNotice`
 - To: `Active`
 
 ### `ResetFromRetired`
 - From: `Retired`
 - On: `Reset`()
+- Guards:
+  - `no_current_run`
 - Emits: `IngressNotice`
 - To: `Active`
 

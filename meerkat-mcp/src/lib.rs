@@ -5,6 +5,7 @@
 mod adapter;
 mod connection;
 mod error;
+pub mod external_tool_surface_authority;
 mod protocol;
 mod router;
 mod transport;

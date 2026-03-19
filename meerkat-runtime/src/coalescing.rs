@@ -9,8 +9,8 @@ use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
 use crate::input::{Input, PeerConvention};
-use crate::input_machine::{InputStateMachine, InputStateMachineError};
-use crate::input_state::{InputLifecycleState, InputState, InputTerminalOutcome};
+use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
+use crate::input_state::{InputState, InputTerminalOutcome};
 
 /// Whether an input is eligible for coalescing.
 pub fn is_coalescing_eligible(input: &Input) -> bool {
@@ -80,16 +80,9 @@ pub fn check_supersession(
 pub fn apply_supersession(
     superseded_state: &mut InputState,
     superseded_by: InputId,
-) -> Result<(), InputStateMachineError> {
-    InputStateMachine::transition(
-        superseded_state,
-        InputLifecycleState::Superseded,
-        Some(format!("superseded by {superseded_by}")),
-    )?;
-    InputStateMachine::set_terminal_outcome(
-        superseded_state,
-        InputTerminalOutcome::Superseded { superseded_by },
-    );
+) -> Result<(), InputLifecycleError> {
+    superseded_state.apply(InputLifecycleInput::Supersede)?;
+    superseded_state.set_terminal_outcome(InputTerminalOutcome::Superseded { superseded_by });
     Ok(())
 }
 
@@ -97,16 +90,9 @@ pub fn apply_supersession(
 pub fn apply_coalescing(
     source_state: &mut InputState,
     aggregate_id: InputId,
-) -> Result<(), InputStateMachineError> {
-    InputStateMachine::transition(
-        source_state,
-        InputLifecycleState::Coalesced,
-        Some(format!("coalesced into {aggregate_id}")),
-    )?;
-    InputStateMachine::set_terminal_outcome(
-        source_state,
-        InputTerminalOutcome::Coalesced { aggregate_id },
-    );
+) -> Result<(), InputLifecycleError> {
+    source_state.apply(InputLifecycleInput::Coalesce)?;
+    source_state.set_terminal_outcome(InputTerminalOutcome::Coalesced { aggregate_id });
     Ok(())
 }
 
@@ -281,11 +267,17 @@ mod tests {
     #[test]
     fn apply_supersession_transitions_state() {
         let mut state = InputState::new_accepted(InputId::new());
+        state
+            .apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted)
+            .unwrap();
         let superseder = InputId::new();
         apply_supersession(&mut state, superseder).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Superseded);
+        assert_eq!(
+            state.current_state(),
+            crate::input_state::InputLifecycleState::Superseded
+        );
         assert!(matches!(
-            state.terminal_outcome,
+            state.terminal_outcome().cloned(),
             Some(InputTerminalOutcome::Superseded { .. })
         ));
     }
@@ -293,11 +285,17 @@ mod tests {
     #[test]
     fn apply_coalescing_transitions_state() {
         let mut state = InputState::new_accepted(InputId::new());
+        state
+            .apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted)
+            .unwrap();
         let aggregate = InputId::new();
         apply_coalescing(&mut state, aggregate).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Coalesced);
+        assert_eq!(
+            state.current_state(),
+            crate::input_state::InputLifecycleState::Coalesced
+        );
         assert!(matches!(
-            state.terminal_outcome,
+            state.terminal_outcome().cloned(),
             Some(InputTerminalOutcome::Coalesced { .. })
         ));
     }

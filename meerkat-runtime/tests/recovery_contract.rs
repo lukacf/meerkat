@@ -114,9 +114,24 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> InputS
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
-    state.current_state = InputLifecycleState::AppliedPendingConsumption;
-    state.last_run_id = Some(run_id.clone());
-    state.last_boundary_sequence = Some(sequence);
+    // Transition through authority: Accepted -> Queued -> Staged -> Applied -> AppliedPendingConsumption
+    use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
+    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
+    state
+        .apply(InputLifecycleInput::StageForRun {
+            run_id: run_id.clone(),
+        })
+        .unwrap();
+    state
+        .apply(InputLifecycleInput::MarkApplied {
+            run_id: run_id.clone(),
+        })
+        .unwrap();
+    state
+        .apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+            boundary_sequence: sequence,
+        })
+        .unwrap();
     state
 }
 
@@ -202,25 +217,25 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
             .unwrap()
             .unwrap();
         assert_eq!(
-            first_state.last_run_id,
+            first_state.last_run_id().cloned(),
             Some(run_id.clone()),
             "{}: first contributor should record the authoritative run id",
             harness.name
         );
         assert_eq!(
-            first_state.last_boundary_sequence,
+            first_state.last_boundary_sequence(),
             Some(0),
             "{}: first contributor should record the authoritative boundary sequence",
             harness.name
         );
         assert_eq!(
-            second_state.last_run_id,
+            second_state.last_run_id().cloned(),
             Some(run_id.clone()),
             "{}: second contributor should record the authoritative run id",
             harness.name
         );
         assert_eq!(
-            second_state.last_boundary_sequence,
+            second_state.last_boundary_sequence(),
             Some(0),
             "{}: second contributor should record the authoritative boundary sequence",
             harness.name
@@ -289,7 +304,7 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
         for input_id in [&first_id, &second_id] {
             let state = driver.input_state(input_id).unwrap();
             assert_eq!(
-                state.current_state,
+                state.current_state(),
                 InputLifecycleState::Queued,
                 "{}: missing receipts should roll applied contributors back to queued",
                 harness.name
@@ -301,7 +316,7 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                stored.current_state,
+                stored.current_state(),
                 InputLifecycleState::Queued,
                 "{}: recovered replay state should be persisted back to the store",
                 harness.name
@@ -426,13 +441,13 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
         for input_id in [&first_id, &second_id] {
             let recovered = driver.input_state(input_id).unwrap();
             assert_eq!(
-                recovered.current_state,
+                recovered.current_state(),
                 InputLifecycleState::Consumed,
                 "{}: committed contributors should recover as consumed",
                 harness.name
             );
             assert_eq!(
-                recovered.terminal_outcome,
+                recovered.terminal_outcome().cloned(),
                 Some(InputTerminalOutcome::Consumed),
                 "{}: committed contributors should recover with a consumed terminal outcome",
                 harness.name
@@ -445,7 +460,7 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                stored.current_state,
+                stored.current_state(),
                 InputLifecycleState::Consumed,
                 "{}: consumed recovery state should be persisted back to the store",
                 harness.name
@@ -524,7 +539,7 @@ async fn recovery_ephemeral_driver_contract_keeps_applied_boundary_inputs_out_of
     for input_id in [&first_id, &second_id] {
         let state = driver.input_state(input_id).unwrap();
         assert_eq!(
-            state.current_state,
+            state.current_state(),
             InputLifecycleState::AppliedPendingConsumption,
             "ephemeral recovery should not replay already-applied contributors"
         );

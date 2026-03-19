@@ -259,6 +259,7 @@ impl AgentBuilder {
             runtime_input_sink: self.runtime_input_sink,
             ops_lifecycle: self.ops_lifecycle,
             pending_ops: Vec::new(),
+            turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
             extraction_mode: false,
             extraction_attempts: 0,
             extraction_result: None,

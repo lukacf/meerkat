@@ -2644,6 +2644,7 @@ name = "meerkat-machine-kernels"
 version = "0.4.11"
 dependencies = [
  "meerkat-machine-schema",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -2735,6 +2736,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-comms",
  "meerkat-core",
+ "meerkat-machine-kernels",
  "meerkat-runtime",
  "meerkat-session",
  "meerkat-store",

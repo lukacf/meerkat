@@ -57,6 +57,10 @@ mod events;
 mod flow;
 mod flow_run_kernel;
 mod handle;
+#[allow(dead_code)] // Authority partially wired; remaining inputs used during Phase B
+mod mob_lifecycle_authority;
+#[allow(dead_code)] // Authority partially wired; remaining inputs used during Phase B
+mod mob_orchestrator_authority;
 mod ops_adapter;
 mod orchestrator_kernel;
 mod path;
@@ -90,7 +94,7 @@ pub use handle::{
     HelperOptions, HelperResult, MemberExecutionSnapshot, MemberExecutionStatus, MemberHandle,
     MobEventsView, MobHandle, SpawnMemberSpec,
 };
-pub use orchestrator_kernel::{MobOrchestratorKernel, MobOrchestratorSnapshot};
+pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 pub use state::MobState;

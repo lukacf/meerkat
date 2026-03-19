@@ -134,7 +134,7 @@ fn peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage(
 
     assert_eq!(
         delivered.effects[0].fields.get("peer_input_class"),
-        Some(&string("InlineResponseTerminal"))
+        Some(&string("Response"))
     );
     assert_ne!(
         delivered.effects[0].fields.get("peer_input_class"),

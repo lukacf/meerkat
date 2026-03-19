@@ -1,5 +1,5 @@
 #[cfg(test)]
-use super::orchestrator_kernel::MobOrchestratorSnapshot;
+use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
 #[cfg(target_arch = "wasm32")]
@@ -57,12 +57,14 @@ impl std::fmt::Display for MobState {
 }
 
 /// Narrow lifecycle owner for top-level mob state and tracked flow cleanup.
+#[allow(dead_code)] // state/expect_transition/require_state/set_state now delegated to authority
 #[derive(Clone)]
 pub(super) struct MobLifecycleOwner {
     state: Arc<AtomicU8>,
     tracked_flows: Arc<AtomicUsize>,
 }
 
+#[allow(dead_code)]
 impl MobLifecycleOwner {
     pub(super) fn new(state: Arc<AtomicU8>) -> Self {
         Self {

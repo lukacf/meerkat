@@ -28,7 +28,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `docs/architecture/0.5/meerkat_host_mode_cutover_spec.md` — runtime-owned continuation scheduling contract
-- `meerkat-runtime/src/comms_sink.rs` — host continuation precursor slated for deletion
+- `meerkat-runtime/src/comms_drain.rs` — comms inbox drain feeding typed inputs into the runtime adapter
 - `meerkat-core/src/agent/comms_impl.rs` — terminal peer response continuation precursor
 - `meerkat-core/src/agent/runner.rs` — continuation acceptance precursor
 

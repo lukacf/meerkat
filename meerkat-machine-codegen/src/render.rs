@@ -277,7 +277,7 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "use crate::runtime::{{");
     pushln!(
         &mut out,
-        "    GeneratedMachineKernel, KernelInput, KernelState, TransitionOutcome, TransitionRefusal,"
+        "    GeneratedMachineKernel, KernelInput, KernelState, KernelValue, TransitionOutcome, TransitionRefusal,"
     );
     pushln!(&mut out, "}};");
     pushln!(&mut out);
@@ -307,6 +307,20 @@ pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
         ") -> Result<TransitionOutcome, TransitionRefusal> {{"
     );
     pushln!(&mut out, "    kernel().transition(state, input)");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(&mut out, "pub fn evaluate_helper(");
+    pushln!(&mut out, "    state: &KernelState,");
+    pushln!(&mut out, "    helper_name: &str,");
+    pushln!(
+        &mut out,
+        "    args: &std::collections::BTreeMap<String, KernelValue>,"
+    );
+    pushln!(&mut out, ") -> Result<KernelValue, TransitionRefusal> {{");
+    pushln!(
+        &mut out,
+        "    kernel().evaluate_helper(state, helper_name, args)"
+    );
     pushln!(&mut out, "}}");
 
     out
@@ -653,6 +667,7 @@ fn render_expr(expr: &Expr) -> String {
         Expr::Bool(value) => value.to_string().to_uppercase(),
         Expr::U64(value) => value.to_string(),
         Expr::String(value) => tla_string(value),
+        Expr::NamedVariant { variant, .. } => tla_string(variant),
         Expr::EmptySet => "{}".to_owned(),
         Expr::EmptyMap => "[x \\in {} |-> None]".to_owned(),
         Expr::SeqLiteral(items) => format!(
@@ -692,6 +707,7 @@ fn render_expr(expr: &Expr) -> String {
         Expr::SeqStartsWith { seq, prefix } => {
             format!("StartsWith({}, {})", render_expr(seq), render_expr(prefix))
         }
+        Expr::SeqElements(inner) => format!("SeqElements({})", render_expr(inner)),
         Expr::Len(inner) => format!("Len({})", render_expr(inner)),
         Expr::Head(inner) => format!("Head({})", render_expr(inner)),
         Expr::MapKeys(inner) => format!("DOMAIN {}", render_expr(inner)),
@@ -740,7 +756,7 @@ fn render_type_ref(ty: &TypeRef) -> String {
         TypeRef::U32 => "Nat".to_owned(),
         TypeRef::U64 => "Nat".to_owned(),
         TypeRef::String => "String".to_owned(),
-        TypeRef::Named(name) => name.clone(),
+        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
         TypeRef::Option(inner) => format!("Option({})", render_type_ref(inner)),
         TypeRef::Set(inner) => format!("Set({})", render_type_ref(inner)),
         TypeRef::Seq(inner) => format!("Seq({})", render_type_ref(inner)),

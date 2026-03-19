@@ -3,20 +3,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, TransitionSchema, TypeRef, Update,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum KernelValue {
     Bool(bool),
     U64(u64),
     String(String),
+    NamedVariant { enum_name: String, variant: String },
     Seq(Vec<KernelValue>),
     Set(BTreeSet<KernelValue>),
     Map(BTreeMap<KernelValue, KernelValue>),
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelState {
     pub phase: String,
     pub fields: BTreeMap<String, KernelValue>,
@@ -235,6 +237,46 @@ impl GeneratedMachineKernel {
             next_state,
             effects,
         })
+    }
+
+    pub fn evaluate_helper(
+        &self,
+        state: &KernelState,
+        helper_name: &str,
+        args: &BTreeMap<String, KernelValue>,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        let helper = self
+            .schema
+            .helpers
+            .iter()
+            .chain(self.schema.derived.iter())
+            .find(|candidate| candidate.name == helper_name)
+            .ok_or_else(|| TransitionRefusal::EvaluationError {
+                machine: self.schema.machine.clone(),
+                transition: "<helper>".to_string(),
+                reason: format!("unknown helper `{helper_name}`"),
+            })?;
+
+        let mut bindings = BTreeMap::new();
+        for param in &helper.params {
+            let Some(value) = args.get(&param.name) else {
+                return Err(TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: "<helper>".to_string(),
+                    reason: format!("missing helper arg `{}`", param.name),
+                });
+            };
+            if !value_matches_type(value, &param.ty) {
+                return Err(TransitionRefusal::EvaluationError {
+                    machine: self.schema.machine.clone(),
+                    transition: "<helper>".to_string(),
+                    reason: format!("helper arg `{}` does not match declared type", param.name),
+                });
+            }
+            bindings.insert(param.name.clone(), value.clone());
+        }
+
+        self.eval_helper(state, &bindings, helper, "<helper>")
     }
 
     fn render_effect(
@@ -457,6 +499,10 @@ impl GeneratedMachineKernel {
             Expr::Bool(value) => Ok(KernelValue::Bool(*value)),
             Expr::U64(value) => Ok(KernelValue::U64(*value)),
             Expr::String(value) => Ok(KernelValue::String(value.clone())),
+            Expr::NamedVariant { enum_name, variant } => Ok(KernelValue::NamedVariant {
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
+            }),
             Expr::EmptySet => Ok(KernelValue::Set(BTreeSet::new())),
             Expr::EmptyMap => Ok(KernelValue::Map(BTreeMap::new())),
             Expr::SeqLiteral(items) => Ok(KernelValue::Seq(
@@ -594,7 +640,10 @@ impl GeneratedMachineKernel {
                         KernelValue::String(needle) => items.contains(&needle),
                         _ => false,
                     },
-                    KernelValue::Bool(_) | KernelValue::U64(_) | KernelValue::None => false,
+                    KernelValue::NamedVariant { .. }
+                    | KernelValue::Bool(_)
+                    | KernelValue::U64(_)
+                    | KernelValue::None => false,
                 }))
             }
             Expr::SeqStartsWith { seq, prefix } => {
@@ -608,6 +657,13 @@ impl GeneratedMachineKernel {
                     .map_err(|reason| self.eval_error(transition_name, reason))?;
                 Ok(KernelValue::Bool(seq.starts_with(&prefix)))
             }
+            Expr::SeqElements(inner) => {
+                let inner = self.eval_expr(state, bindings, inner, transition_name)?;
+                let seq = inner
+                    .into_seq()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                Ok(KernelValue::Set(seq.into_iter().collect()))
+            }
             Expr::Len(inner) => {
                 let inner = self.eval_expr(state, bindings, inner, transition_name)?;
                 let len = match inner {
@@ -615,7 +671,10 @@ impl GeneratedMachineKernel {
                     KernelValue::Set(items) => items.len(),
                     KernelValue::Map(items) => items.len(),
                     KernelValue::String(items) => items.chars().count(),
-                    KernelValue::Bool(_) | KernelValue::U64(_) | KernelValue::None => {
+                    KernelValue::NamedVariant { .. }
+                    | KernelValue::Bool(_)
+                    | KernelValue::U64(_)
+                    | KernelValue::None => {
                         return Err(self.eval_error(
                             transition_name,
                             "Len expects seq, set, map, or string".to_string(),
@@ -760,6 +819,25 @@ impl KernelValue {
         }
     }
 
+    pub fn as_string(&self) -> Result<&str, String> {
+        match self {
+            Self::String(value) => Ok(value.as_str()),
+            other => Err(format!("expected string, found {other:?}")),
+        }
+    }
+
+    pub fn as_named_variant(&self, expected_enum: &str) -> Result<&str, String> {
+        match self {
+            Self::NamedVariant { enum_name, variant } if enum_name == expected_enum => {
+                Ok(variant.as_str())
+            }
+            Self::NamedVariant { enum_name, .. } => Err(format!(
+                "expected named variant of enum `{expected_enum}`, found enum `{enum_name}`"
+            )),
+            other => Err(format!("expected named variant, found {other:?}")),
+        }
+    }
+
     fn into_seq(self) -> Result<Vec<KernelValue>, String> {
         match self {
             Self::Seq(items) => Ok(items),
@@ -798,6 +876,10 @@ fn default_value_for_type(ty: &TypeRef) -> KernelValue {
         TypeRef::String => KernelValue::String(String::new()),
         TypeRef::Named(name) if named_type_is_u64(name) => KernelValue::U64(0),
         TypeRef::Named(_) => KernelValue::String(String::new()),
+        TypeRef::Enum(name) => KernelValue::NamedVariant {
+            enum_name: name.clone(),
+            variant: String::new(),
+        },
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
@@ -812,6 +894,9 @@ fn value_matches_type(value: &KernelValue, ty: &TypeRef) -> bool {
         (KernelValue::String(_), TypeRef::String) => true,
         (KernelValue::U64(_), TypeRef::Named(name)) if named_type_is_u64(name) => true,
         (KernelValue::String(_), TypeRef::Named(name)) if !named_type_is_u64(name) => true,
+        (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) if enum_name == name => {
+            true
+        }
         (KernelValue::None, TypeRef::Option(_)) => true,
         (inner, TypeRef::Option(inner_ty)) => value_matches_type(inner, inner_ty),
         (KernelValue::Set(values), TypeRef::Set(inner_ty)) => values
@@ -841,7 +926,9 @@ mod tests {
         canonical_machine_schemas, input_lifecycle_machine, runtime_control_machine,
     };
 
-    use super::{GeneratedMachineKernel, KernelInput, KernelValue, TransitionRefusal};
+    use super::{
+        GeneratedMachineKernel, KernelInput, KernelValue, TransitionOutcome, TransitionRefusal,
+    };
 
     #[allow(clippy::expect_used)]
     #[test]
@@ -914,6 +1001,729 @@ mod tests {
         assert!(matches!(
             refusal,
             TransitionRefusal::InvalidInputPayload { .. }
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_rejects_string_payloads_for_enum_fields() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let refusal = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "CreateRun".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "step_ids".into(),
+                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
+                        ),
+                        (
+                            "ordered_steps".into(),
+                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
+                        ),
+                        (
+                            "step_has_conditions".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::Bool(false),
+                            )])),
+                        ),
+                        (
+                            "step_dependencies".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::Seq(vec![]),
+                            )])),
+                        ),
+                        (
+                            "step_dependency_modes".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::NamedVariant {
+                                    enum_name: "DependencyMode".into(),
+                                    variant: "All".into(),
+                                },
+                            )])),
+                        ),
+                        (
+                            "step_branches".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::None,
+                            )])),
+                        ),
+                        (
+                            "step_collection_policies".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::String("All".into()),
+                            )])),
+                        ),
+                        (
+                            "step_quorum_thresholds".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::U64(0),
+                            )])),
+                        ),
+                        ("escalation_threshold".into(), KernelValue::U64(0)),
+                        ("max_step_retries".into(), KernelValue::U64(0)),
+                    ]),
+                },
+            )
+            .expect_err("string enum payload should fail");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::InvalidInputPayload { .. }
+        ));
+    }
+
+    fn flow_named_variant(enum_name: &str, variant: &str) -> KernelValue {
+        KernelValue::NamedVariant {
+            enum_name: enum_name.into(),
+            variant: variant.into(),
+        }
+    }
+
+    fn flow_create_run_input(
+        step_ids: &[&str],
+        step_has_conditions: &[(&str, bool)],
+        step_dependencies: &[(&str, &[&str])],
+        step_dependency_modes: &[(&str, &str)],
+        step_branches: &[(&str, Option<&str>)],
+    ) -> KernelInput {
+        let ordered_steps = step_ids
+            .iter()
+            .map(|step_id| KernelValue::String((*step_id).into()))
+            .collect::<Vec<_>>();
+        let step_ids = ordered_steps.clone();
+        let step_has_conditions = step_has_conditions
+            .iter()
+            .map(|(step_id, has_conditions)| {
+                (
+                    KernelValue::String((*step_id).into()),
+                    KernelValue::Bool(*has_conditions),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let step_dependencies = step_dependencies
+            .iter()
+            .map(|(step_id, dependencies)| {
+                (
+                    KernelValue::String((*step_id).into()),
+                    KernelValue::Seq(
+                        dependencies
+                            .iter()
+                            .map(|dependency| KernelValue::String((*dependency).into()))
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let step_dependency_modes = step_dependency_modes
+            .iter()
+            .map(|(step_id, mode)| {
+                (
+                    KernelValue::String((*step_id).into()),
+                    flow_named_variant("DependencyMode", mode),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let step_branches = step_branches
+            .iter()
+            .map(|(step_id, branch)| {
+                (
+                    KernelValue::String((*step_id).into()),
+                    match branch {
+                        Some(branch_id) => KernelValue::String((*branch_id).into()),
+                        None => KernelValue::None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let step_collection_policies = step_dependency_modes
+            .keys()
+            .map(|step_id| {
+                (
+                    step_id.clone(),
+                    flow_named_variant("CollectionPolicyKind", "All"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let step_quorum_thresholds = step_dependency_modes
+            .keys()
+            .map(|step_id| (step_id.clone(), KernelValue::U64(0)))
+            .collect::<BTreeMap<_, _>>();
+
+        KernelInput {
+            variant: "CreateRun".into(),
+            fields: BTreeMap::from([
+                ("step_ids".into(), KernelValue::Seq(step_ids)),
+                ("ordered_steps".into(), KernelValue::Seq(ordered_steps)),
+                (
+                    "step_has_conditions".into(),
+                    KernelValue::Map(step_has_conditions),
+                ),
+                (
+                    "step_dependencies".into(),
+                    KernelValue::Map(step_dependencies),
+                ),
+                (
+                    "step_dependency_modes".into(),
+                    KernelValue::Map(step_dependency_modes),
+                ),
+                ("step_branches".into(), KernelValue::Map(step_branches)),
+                (
+                    "step_collection_policies".into(),
+                    KernelValue::Map(step_collection_policies),
+                ),
+                (
+                    "step_quorum_thresholds".into(),
+                    KernelValue::Map(step_quorum_thresholds),
+                ),
+                ("escalation_threshold".into(), KernelValue::U64(0)),
+                ("max_step_retries".into(), KernelValue::U64(0)),
+            ]),
+        }
+    }
+
+    fn flow_step_input(variant: &str, step_id: &str) -> KernelInput {
+        KernelInput {
+            variant: variant.into(),
+            fields: BTreeMap::from([("step_id".into(), KernelValue::String(step_id.into()))]),
+        }
+    }
+
+    fn flow_has_effect(outcome: &TransitionOutcome, variant: &str) -> bool {
+        outcome
+            .effects
+            .iter()
+            .any(|effect| effect.variant == variant)
+    }
+
+    fn flow_helper_bool(
+        kernel: &GeneratedMachineKernel,
+        state: &super::KernelState,
+        helper_name: &str,
+        step_id: &str,
+    ) -> bool {
+        match kernel
+            .evaluate_helper(
+                state,
+                helper_name,
+                &BTreeMap::from([("step_id".into(), KernelValue::String(step_id.into()))]),
+            )
+            .expect("helper evaluation should succeed")
+        {
+            KernelValue::Bool(value) => value,
+            other => panic!("expected bool helper result, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_dispatch_requires_recorded_true_condition() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &flow_create_run_input(
+                    &["conditional"],
+                    &[("conditional", true)],
+                    &[("conditional", &[])],
+                    &[("conditional", "All")],
+                    &[("conditional", None)],
+                ),
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+
+        let refusal = kernel
+            .transition(
+                &running.next_state,
+                &flow_step_input("DispatchStep", "conditional"),
+            )
+            .expect_err("dispatch should be refused before condition result");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::NoMatchingTransition { .. }
+        ));
+
+        let condition_passed = kernel
+            .transition(
+                &running.next_state,
+                &flow_step_input("ConditionPassed", "conditional"),
+            )
+            .expect("record condition");
+        let dispatched = kernel
+            .transition(
+                &condition_passed.next_state,
+                &flow_step_input("DispatchStep", "conditional"),
+            )
+            .expect("dispatch after condition passed");
+        assert_eq!(dispatched.transition, "DispatchStep");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_dispatch_requires_dependencies_to_be_ready() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &flow_create_run_input(
+                    &["dep", "gated"],
+                    &[("dep", false), ("gated", false)],
+                    &[("dep", &[]), ("gated", &["dep"])],
+                    &[("dep", "All"), ("gated", "All")],
+                    &[("dep", None), ("gated", None)],
+                ),
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+
+        let refusal = kernel
+            .transition(
+                &running.next_state,
+                &flow_step_input("DispatchStep", "gated"),
+            )
+            .expect_err("dispatch should be refused before dependency completes");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::NoMatchingTransition { .. }
+        ));
+
+        let dep_dispatched = kernel
+            .transition(&running.next_state, &flow_step_input("DispatchStep", "dep"))
+            .expect("dispatch dependency");
+        let dep_completed = kernel
+            .transition(
+                &dep_dispatched.next_state,
+                &flow_step_input("CompleteStep", "dep"),
+            )
+            .expect("complete dependency");
+        let gated_dispatched = kernel
+            .transition(
+                &dep_completed.next_state,
+                &flow_step_input("DispatchStep", "gated"),
+            )
+            .expect("dispatch gated step after dependency");
+        assert_eq!(gated_dispatched.transition, "DispatchStep");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_dispatch_blocks_losing_branch_after_winner_completes() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &flow_create_run_input(
+                    &["first", "second"],
+                    &[("first", false), ("second", false)],
+                    &[("first", &[]), ("second", &[])],
+                    &[("first", "All"), ("second", "All")],
+                    &[("first", Some("winner")), ("second", Some("winner"))],
+                ),
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+        let first_dispatched = kernel
+            .transition(
+                &running.next_state,
+                &flow_step_input("DispatchStep", "first"),
+            )
+            .expect("dispatch first");
+        let first_completed = kernel
+            .transition(
+                &first_dispatched.next_state,
+                &flow_step_input("CompleteStep", "first"),
+            )
+            .expect("complete first");
+        let refusal = kernel
+            .transition(
+                &first_completed.next_state,
+                &flow_step_input("DispatchStep", "second"),
+            )
+            .expect_err("dispatch should be refused once branch winner completed");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::NoMatchingTransition { .. }
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_condition_rejection_skips_step_and_blocks_later_dispatch() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &flow_create_run_input(
+                    &["conditional"],
+                    &[("conditional", true)],
+                    &[("conditional", &[])],
+                    &[("conditional", "All")],
+                    &[("conditional", None)],
+                ),
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+        let rejected = kernel
+            .transition(
+                &running.next_state,
+                &flow_step_input("ConditionRejected", "conditional"),
+            )
+            .expect("reject condition");
+        assert!(flow_has_effect(&rejected, "EmitStepNotice"));
+
+        let refusal = kernel
+            .transition(
+                &rejected.next_state,
+                &flow_step_input("DispatchStep", "conditional"),
+            )
+            .expect_err("skipped step should no longer dispatch");
+        assert!(matches!(
+            refusal,
+            TransitionRefusal::NoMatchingTransition { .. }
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_fail_step_emits_supervisor_escalation_at_threshold() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "CreateRun".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "step_ids".into(),
+                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
+                        ),
+                        (
+                            "ordered_steps".into(),
+                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
+                        ),
+                        (
+                            "step_has_conditions".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::Bool(false),
+                            )])),
+                        ),
+                        (
+                            "step_dependencies".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::Seq(vec![]),
+                            )])),
+                        ),
+                        (
+                            "step_dependency_modes".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                flow_named_variant("DependencyMode", "All"),
+                            )])),
+                        ),
+                        (
+                            "step_branches".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::None,
+                            )])),
+                        ),
+                        (
+                            "step_collection_policies".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                flow_named_variant("CollectionPolicyKind", "All"),
+                            )])),
+                        ),
+                        (
+                            "step_quorum_thresholds".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::U64(0),
+                            )])),
+                        ),
+                        ("escalation_threshold".into(), KernelValue::U64(1)),
+                        ("max_step_retries".into(), KernelValue::U64(0)),
+                    ]),
+                },
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+        let dispatched = kernel
+            .transition(
+                &running.next_state,
+                &flow_step_input("DispatchStep", "step-a"),
+            )
+            .expect("dispatch step");
+        let failed = kernel
+            .transition(
+                &dispatched.next_state,
+                &flow_step_input("FailStep", "step-a"),
+            )
+            .expect("fail step");
+        assert!(flow_has_effect(&failed, "AppendFailureLedger"));
+        assert!(flow_has_effect(&failed, "EscalateSupervisor"));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_any_dependency_all_skipped_sets_skip_truth() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &flow_create_run_input(
+                    &["dep_a", "dep_b", "gated"],
+                    &[("dep_a", false), ("dep_b", false), ("gated", false)],
+                    &[
+                        ("dep_a", &[]),
+                        ("dep_b", &[]),
+                        ("gated", &["dep_a", "dep_b"]),
+                    ],
+                    &[("dep_a", "All"), ("dep_b", "All"), ("gated", "Any")],
+                    &[("dep_a", None), ("dep_b", None), ("gated", None)],
+                ),
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+        let dep_a_skipped = kernel
+            .transition(&running.next_state, &flow_step_input("SkipStep", "dep_a"))
+            .expect("skip dep_a");
+        let dep_b_skipped = kernel
+            .transition(
+                &dep_a_skipped.next_state,
+                &flow_step_input("SkipStep", "dep_b"),
+            )
+            .expect("skip dep_b");
+
+        assert!(flow_helper_bool(
+            &kernel,
+            &dep_b_skipped.next_state,
+            "StepDependencyShouldSkip",
+            "gated",
+        ));
+        assert!(!flow_helper_bool(
+            &kernel,
+            &dep_b_skipped.next_state,
+            "StepDependencyReady",
+            "gated",
+        ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn flow_run_quorum_collection_truth_is_machine_derived() {
+        use meerkat_machine_schema::flow_run_machine;
+
+        let kernel = GeneratedMachineKernel::new(flow_run_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let created = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: "CreateRun".into(),
+                    fields: BTreeMap::from([
+                        (
+                            "step_ids".into(),
+                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
+                        ),
+                        (
+                            "ordered_steps".into(),
+                            KernelValue::Seq(vec![KernelValue::String("step-a".into())]),
+                        ),
+                        (
+                            "step_has_conditions".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::Bool(false),
+                            )])),
+                        ),
+                        (
+                            "step_dependencies".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::Seq(vec![]),
+                            )])),
+                        ),
+                        (
+                            "step_dependency_modes".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                flow_named_variant("DependencyMode", "All"),
+                            )])),
+                        ),
+                        (
+                            "step_branches".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::None,
+                            )])),
+                        ),
+                        (
+                            "step_collection_policies".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                flow_named_variant("CollectionPolicyKind", "Quorum"),
+                            )])),
+                        ),
+                        (
+                            "step_quorum_thresholds".into(),
+                            KernelValue::Map(BTreeMap::from([(
+                                KernelValue::String("step-a".into()),
+                                KernelValue::U64(2),
+                            )])),
+                        ),
+                        ("escalation_threshold".into(), KernelValue::U64(0)),
+                        ("max_step_retries".into(), KernelValue::U64(0)),
+                    ]),
+                },
+            )
+            .expect("create run");
+        let running = kernel
+            .transition(
+                &created.next_state,
+                &KernelInput {
+                    variant: "StartRun".into(),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("start run");
+        let registered = kernel
+            .transition(
+                &running.next_state,
+                &KernelInput {
+                    variant: "RegisterTargets".into(),
+                    fields: BTreeMap::from([
+                        ("step_id".into(), KernelValue::String("step-a".into())),
+                        ("target_count".into(), KernelValue::U64(3)),
+                    ]),
+                },
+            )
+            .expect("register targets");
+        let dispatched = kernel
+            .transition(
+                &registered.next_state,
+                &flow_step_input("DispatchStep", "step-a"),
+            )
+            .expect("dispatch step");
+        let first_success = kernel
+            .transition(
+                &dispatched.next_state,
+                &KernelInput {
+                    variant: "RecordTargetSuccess".into(),
+                    fields: BTreeMap::from([
+                        ("step_id".into(), KernelValue::String("step-a".into())),
+                        ("target_id".into(), KernelValue::String("worker-1".into())),
+                    ]),
+                },
+            )
+            .expect("record first success");
+        assert!(flow_helper_bool(
+            &kernel,
+            &first_success.next_state,
+            "CollectionFeasible",
+            "step-a",
+        ));
+        assert!(!flow_helper_bool(
+            &kernel,
+            &first_success.next_state,
+            "CollectionSatisfied",
+            "step-a",
+        ));
+        let second_success = kernel
+            .transition(
+                &first_success.next_state,
+                &KernelInput {
+                    variant: "RecordTargetSuccess".into(),
+                    fields: BTreeMap::from([
+                        ("step_id".into(), KernelValue::String("step-a".into())),
+                        ("target_id".into(), KernelValue::String("worker-2".into())),
+                    ]),
+                },
+            )
+            .expect("record second success");
+        assert!(flow_helper_bool(
+            &kernel,
+            &second_success.next_state,
+            "CollectionSatisfied",
+            "step-a",
         ));
     }
 

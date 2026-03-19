@@ -113,27 +113,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitConsumedOnAccept`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
-- `StageDrainSnapshot`
+- `StageDrainSnapshotFromActive`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
-- `BoundaryApplied`
+- `StageDrainSnapshotFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `recover-retire-reset-destroy`
+- `BoundaryAppliedFromActive`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
-- `RunCompleted`
+- `BoundaryAppliedFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `recover-retire-reset-destroy`
+- `RunCompletedFromActive`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
-- `RunFailed`
+- `RunCompletedFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `recover-retire-reset-destroy`
+- `RunFailedFromActive`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `rollback-on-failure`
-- `RunCancelled`
+- `RunFailedFromRetired`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `rollback-on-failure`
-- `SupersedeQueuedInput`
+- `RunCancelledFromActive`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `rollback-on-failure`
+- `RunCancelledFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `rollback-on-failure`
+- `SupersedeQueuedInputFromActive`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
-- `CoalesceQueuedInputs`
+- `SupersedeQueuedInputFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `recover-retire-reset-destroy`
+- `CoalesceQueuedInputsFromActive`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `admit-and-stage-prefix`
+- `CoalesceQueuedInputsFromRetired`
+  - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
+  - scenarios: `recover-retire-reset-destroy`
 - `Retire`
   - anchors: `runtime_input_taxonomy`, `runtime_queue`, `runtime_ephemeral_driver`, `runtime_persistent_driver`, `runtime_loop`
   - scenarios: `recover-retire-reset-destroy`

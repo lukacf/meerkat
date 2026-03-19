@@ -1261,6 +1261,34 @@ impl MobRunStore for RecordingRunStore {
         self.inner.cas_run_status(run_id, expected, next).await
     }
 
+    async fn cas_flow_state(
+        &self,
+        run_id: &RunId,
+        expected: &meerkat_machine_kernels::KernelState,
+        next: &meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobError> {
+        self.inner.cas_flow_state(run_id, expected, next).await
+    }
+
+    async fn cas_run_snapshot(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &meerkat_machine_kernels::KernelState,
+        next_status: MobRunStatus,
+        next_flow_state: &meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_run_snapshot(
+                run_id,
+                expected_status,
+                expected_flow_state,
+                next_status,
+                next_flow_state,
+            )
+            .await
+    }
+
     async fn append_step_entry(
         &self,
         run_id: &RunId,

@@ -24,7 +24,7 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_machine::InputStateMachineError;
+use crate::input_lifecycle_authority::InputLifecycleError;
 use crate::input_state::InputState;
 use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
@@ -164,7 +164,7 @@ impl DriverEntry {
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
             DriverEntry::Ephemeral(d) => d.stage_input(input_id, run_id),
             DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
@@ -177,7 +177,7 @@ impl DriverEntry {
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
             DriverEntry::Ephemeral(d) => d.apply_input(input_id, run_id),
             DriverEntry::Persistent(d) => d.apply_input(input_id, run_id),
@@ -190,7 +190,7 @@ impl DriverEntry {
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
             DriverEntry::Ephemeral(d) => d.consume_inputs(input_ids, run_id),
             DriverEntry::Persistent(d) => d.consume_inputs(input_ids, run_id),
@@ -202,7 +202,7 @@ impl DriverEntry {
     pub(crate) fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
             DriverEntry::Ephemeral(d) => d.rollback_staged(input_ids),
             DriverEntry::Persistent(d) => d.rollback_staged(input_ids),
@@ -710,7 +710,7 @@ impl RuntimeSessionAdapter {
                     let is_terminal = driver
                         .as_driver()
                         .input_state(input_id)
-                        .map(|state| state.current_state.is_terminal())
+                        .map(|state| state.current_state().is_terminal())
                         .unwrap_or(true);
                     let handle = if is_terminal {
                         None
@@ -728,7 +728,7 @@ impl RuntimeSessionAdapter {
                     // Check if the existing input is already terminal
                     let existing_state = driver.as_driver().input_state(existing_id);
                     let is_terminal = existing_state
-                        .map(|s| s.current_state.is_terminal())
+                        .map(|s| s.current_state().is_terminal())
                         .unwrap_or(true); // missing state = already cleaned up = terminal
 
                     if is_terminal {

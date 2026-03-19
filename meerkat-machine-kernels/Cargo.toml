@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-machine-schema.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [lints]

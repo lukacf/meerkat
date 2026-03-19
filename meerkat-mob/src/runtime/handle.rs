@@ -932,9 +932,17 @@ impl MobHandle {
             (None, 0, false)
         };
 
-        let is_final = !is_active && status != MemberExecutionStatus::Active;
+        // A member is final when its session is no longer active. The roster
+        // may still show Active (not yet retired), but the session completing
+        // is the authoritative signal.
+        let effective_status = if !is_active && status == MemberExecutionStatus::Active {
+            MemberExecutionStatus::Completed
+        } else {
+            status
+        };
+        let is_final = !is_active;
         Ok(MemberExecutionSnapshot {
-            status,
+            status: effective_status,
             output_preview,
             error: None,
             tokens_used,

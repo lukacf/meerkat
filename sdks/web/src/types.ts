@@ -80,7 +80,7 @@ export type RenderSalience = 'background' | 'normal' | 'important' | 'urgent';
 
 /** Normalized rendering metadata for injected work. */
 export interface RenderMetadata {
-  renderClass?: string;
+  class?: string;
   salience?: RenderSalience;
 }
 

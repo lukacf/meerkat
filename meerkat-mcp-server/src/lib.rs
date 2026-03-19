@@ -2294,6 +2294,8 @@ async fn handle_meerkat_run(
     }
 
     // Spawn comms drain for host_mode sessions — tracked for cleanup.
+    // Abort any existing drain for this session before spawning a new one
+    // to prevent duplicate tasks racing on the same inbox.
     #[cfg(feature = "comms")]
     if host_mode
         && result.is_ok()
@@ -2304,11 +2306,10 @@ async fn handle_meerkat_run(
             session_id.clone(),
             comms,
         );
-        state
-            .comms_drain_handles
-            .lock()
-            .await
-            .insert(session_id.clone(), drain_handle);
+        let mut handles = state.comms_drain_handles.lock().await;
+        if let Some(old) = handles.insert(session_id.clone(), drain_handle) {
+            old.abort();
+        }
     }
 
     format_agent_result(result, &session_id)
@@ -2550,6 +2551,8 @@ async fn handle_meerkat_resume(
     }
 
     // Spawn comms drain for host_mode sessions — tracked for cleanup.
+    // Abort any existing drain for this session before spawning a new one
+    // to prevent duplicate tasks racing on the same inbox.
     #[cfg(feature = "comms")]
     if host_mode
         && result.is_ok()
@@ -2560,11 +2563,10 @@ async fn handle_meerkat_resume(
             session_id.clone(),
             comms,
         );
-        state
-            .comms_drain_handles
-            .lock()
-            .await
-            .insert(session_id.clone(), drain_handle);
+        let mut handles = state.comms_drain_handles.lock().await;
+        if let Some(old) = handles.insert(session_id.clone(), drain_handle) {
+            old.abort();
+        }
     }
 
     format_agent_result(result, &session_id)

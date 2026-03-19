@@ -101,25 +101,46 @@ pub fn spawn_comms_drain(
                         // drain_comms_inbox at turn boundaries. Skip here.
                     }
                     PeerInputClass::Response => {
-                        // Terminal response — inject continuation.
-                        let request_id = match &ci.interaction.content {
+                        // Distinguish progress responses from terminal responses.
+                        let (is_terminal, request_id) = match &ci.interaction.content {
                             meerkat_core::interaction::InteractionContent::Response {
                                 in_reply_to,
+                                status,
                                 ..
-                            } => Some(in_reply_to.0.to_string()),
-                            _ => None,
+                            } => {
+                                let terminal = matches!(
+                                    status,
+                                    meerkat_core::interaction::ResponseStatus::Completed
+                                        | meerkat_core::interaction::ResponseStatus::Failed
+                                );
+                                (terminal, Some(in_reply_to.0.to_string()))
+                            }
+                            _ => (false, None),
                         };
-                        let input = Input::Continuation(
-                            ContinuationInput::terminal_peer_response_for_request(
-                                "terminal peer response injected into session state",
-                                request_id,
-                            ),
-                        );
-                        if let Err(err) = adapter.accept_input(&session_id, input).await {
-                            tracing::warn!(
-                                error = %err,
-                                "comms_drain: failed to inject terminal response continuation"
+
+                        if is_terminal {
+                            // Terminal response — inject continuation to advance the runtime.
+                            let input = Input::Continuation(
+                                ContinuationInput::terminal_peer_response_for_request(
+                                    "terminal peer response injected into session state",
+                                    request_id,
+                                ),
                             );
+                            if let Err(err) = adapter.accept_input(&session_id, input).await {
+                                tracing::warn!(
+                                    error = %err,
+                                    "comms_drain: failed to inject terminal response continuation"
+                                );
+                            }
+                        } else {
+                            // Progress response — route as peer input for checkpoint-style handling.
+                            let input = interaction_to_runtime_input(&ci.interaction, &runtime_id);
+                            if let Err(err) = adapter.accept_input(&session_id, input).await {
+                                tracing::warn!(
+                                    error = %err,
+                                    "comms_drain: failed to inject progress response"
+                                );
+                            }
                         }
                     }
                     PeerInputClass::SilentRequest

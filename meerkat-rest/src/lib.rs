@@ -1493,6 +1493,8 @@ pub struct CommsSendRequest {
     pub stream: Option<String>,
     #[serde(default)]
     pub allow_self_session: Option<bool>,
+    #[serde(default)]
+    pub handling_mode: Option<String>,
 }
 
 /// Canonical comms peers request body.
@@ -1586,7 +1588,7 @@ fn build_comms_command(
         source: req.source.clone(),
         stream: req.stream.clone(),
         allow_self_session: req.allow_self_session,
-        handling_mode: None,
+        handling_mode: req.handling_mode.clone(),
     };
 
     request.parse(session_id).map_err(|errors| {

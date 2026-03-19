@@ -36,6 +36,8 @@ pub struct CommsSendParams {
     pub stream: Option<String>,
     #[serde(default)]
     pub allow_self_session: Option<bool>,
+    #[serde(default)]
+    pub handling_mode: Option<String>,
 }
 
 /// Parameters for `comms/peers`.
@@ -195,7 +197,7 @@ pub(crate) fn build_comms_command(
         source: params.source.clone(),
         stream: params.stream.clone(),
         allow_self_session: params.allow_self_session,
-        handling_mode: None,
+        handling_mode: params.handling_mode.clone(),
     };
     request.parse(session_id)
 }

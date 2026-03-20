@@ -18,7 +18,7 @@ meerkat-core          (depends on meerkat-models — pure types, traits, agent l
   ├── meerkat-memory      (semantic memory: HNSW, simple)
   └── meerkat-mcp         (MCP protocol client)
 
-meerkat-machine-schema    (formal machine/composition catalog — 10 machines, 7 compositions)
+meerkat-machine-schema    (formal machine/composition catalog + seam/handoff protocol metadata)
 meerkat-machine-kernels   (generated kernel interpreter — centralized, no owner-crate re-exports)
 meerkat-machine-codegen   (TLA+ generation, TLC verification, drift detection)
 
@@ -97,7 +97,7 @@ Surface binaries:
 
 With branches: `ErrorRecovery`, `Cancelling`
 
-**WaitingForOps** is a real all-complete barrier. Agent owns `pending_ops: HashSet<OperationId>`. Tool dispatch registers operations in `OpsLifecycleRegistry`. Loop awaits all completions before transitioning to DrainingEvents.
+**WaitingForOps** is a real barrier state, but the load-bearing truth is barrier membership, not a raw bag of operation IDs. The architecture is moving toward typed async-op references and explicit wait policy so long-lived detached work does not accidentally become a turn barrier.
 
 ## Session Lifecycle
 
@@ -115,6 +115,10 @@ start_turn(id, prompt, handling_mode) → RunResult
 
 interrupt(id) → set interrupt flag, notify session task
 archive(id) → remove handle, drop session task
+
+Host mode is part of the session lifecycle contract. Runtime-backed and direct
+session-service paths may realize it differently internally, but they are
+expected to preserve the same drain lifecycle truth.
 ```
 
 ## Mob Lifecycle

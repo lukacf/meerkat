@@ -8,9 +8,12 @@ The short version:
 - canonical semantic truth must come from machine definitions
 - generated machine authority code must be the only place allowed to mutate
   canonical state
-- handwritten code may classify, route, persist, schedule, and execute effects
+- handwritten code may capture evidence, route, persist, schedule, and execute
+  effects
 - handwritten code may not invent parallel semantic state or handwritten
   reducers
+- semantically meaningful async seams must be modeled and closed through the
+  formal composition layer, not left to shell folklore
 
 ## Core Rule
 
@@ -43,7 +46,8 @@ Canonical truth includes:
 
 Handwritten shell code is allowed to:
 
-- classify raw inputs into typed machine inputs
+- classify raw inputs into typed machine inputs when that classification is
+  already constrained by machine or protocol truth
 - route inputs to the right machine owner
 - schedule and execute effects
 - manage channels, tasks, notifiers, and completion waiters
@@ -58,6 +62,32 @@ Handwritten shell code is not allowed to:
 - invent duplicate semantic enums/status models
 - hide transition-relevant truth in side maps/booleans that the machine does
   not own
+- choose ad hoc semantic feedback for a machine-owned async seam
+- invent surfaced terminal classification branches that diverge from machine
+  terminal truth
+
+## Seams And Handoffs
+
+Single-machine sealed mutators are necessary, but they are not the whole story.
+
+Meerkat also has semantic seams between:
+
+- a machine and owner-realized async work
+- a machine phase and the associated wait-set or obligation that gives that
+  phase meaning
+- a machine terminal outcome and the surfaced result/error classification
+
+RMAT treats those as first-class proof surfaces by extending the existing
+composition ontology with:
+
+- composition actors that may be `Machine` or `Owner`
+- effect handoff protocols attached to existing effect-disposition rules
+- outstanding-obligation validation in closed-world compositions
+- generated seam helper APIs for owner feedback
+- generated terminal classification derived from machine truth
+
+This is not a second actor system or a second effect transport system. It is an
+extension of the current composition/effect model.
 
 ## Enforcement Model
 
@@ -171,6 +201,33 @@ This is a known gap in the type-level enforcement model. Rust types can prevent
 parallel reducers for one machine; they do not by themselves prove composition
 correctness.
 
+The seam layer narrows that gap:
+
+- transport disposition still stays inside `Local`, `External`, or `Routed`
+- an effect may additionally declare a handoff protocol when owner realization
+  and later feedback are semantically meaningful
+- compositions then prove structural coverage and safety for those obligations,
+  plus scoped liveness only where explicitly modeled
+
+## Proof Classes
+
+Every important RMAT claim should be labeled explicitly:
+
+- **Structural coverage**: the seam is named, protocolized, and wired
+- **Safety**: no invalid seam state or transition is reachable
+- **Liveness**: under explicit fairness assumptions, required feedback
+  eventually arrives
+
+Tranche 1 seam work proves:
+
+- structural coverage for owner handoffs
+- safety for comms drain seam closure
+- safety for the initial barrier fix inside `TurnExecution`
+- safety for terminal outcome alignment
+- one explicit liveness claim for comms drain feedback closure
+
+Tranche 2 is where the stronger cross-machine op-barrier proof lands.
+
 ## Shell vs Authority Boundary
 
 Generated authority owns:
@@ -189,7 +246,20 @@ Handwritten shell owns:
 - effect execution
 - transport plumbing
 
-The shell may observe state. It may not decide truth.
+The shell may observe state and capture raw evidence. It may not decide truth.
+
+Concretely:
+
+- shell may notice that a task exited or a wait completed
+- shell may not choose an arbitrary semantic exit reason or closure class
+- shell may assemble result payload data
+- shell may not invent terminal classification outside generated machine-derived
+  helpers
+
+Hot-path observable projections are still allowed when they are derived from
+machine truth. For example, a lock-free suppression cache is acceptable if it
+is updated only from the machine/protocol path and never becomes a second source
+of truth.
 
 ## Forbidden Patterns
 

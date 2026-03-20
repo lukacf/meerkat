@@ -210,7 +210,7 @@ let hook_engine = create_default_hook_engine(layered_hooks);
 
 ## Comms delivery and observation
 
-Public comms injection is now a pure delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues an external event for the session's next host-mode drain cycle.
+Public comms injection is a delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues an external event for the session's active host-mode owner path to consume.
 
 ```rust
 use meerkat::{EventInjector, PlainEventSource};
@@ -226,13 +226,15 @@ injector.inject(
 
 <Accordion title="How it works">
 
-1. `inject()` queues a plain event into the session inbox for the next host-mode drain cycle.
-2. The host loop drains the inbox and processes the event during the next turn boundary.
+1. `inject()` queues a plain event into the session inbox.
+2. The active host-mode owner path consumes that inbox item and turns it into a new session turn.
 3. Observation is selected independently:
    - use the session's primary `event_tx` for full session activity,
    - use mob member subscriptions for agent-scoped activity,
    - use mob event subscriptions for attributed mob-wide activity.
 4. Public callers no longer receive an interaction-scoped stream from injection.
+
+This distinction matters: queueing an event and consuming it are no longer treated as the same seam. The host-mode/drain lifecycle owns consumption truth.
 
 **Requirements:**
 - Agent must be in host mode if you want the host loop to drain inbox events.

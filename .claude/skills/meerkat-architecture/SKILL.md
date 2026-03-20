@@ -16,6 +16,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 5. **Runtime conforms to machines** — the runtime must follow the verified machine model, not the other way around.
 6. **Mob is the only multi-agent path** — there is no sub-agent system. All delegated/forked/helper work routes through mob orchestration.
 7. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
+8. **Seams are formal too** — async owner handoffs, wait barriers, and surfaced terminal classes are part of the architecture and should be modeled/protocolized, not left to shell convention.
 
 ## Crate Ownership
 
@@ -35,7 +36,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 | `meerkat-web-runtime` | WASM browser deployment (wasm_bindgen exports) | — |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
-| `meerkat-machine-schema` | Rust-native machine/composition catalog (10 machines, 7 compositions) — the formal authority | — |
+| `meerkat-machine-schema` | Rust-native machine/composition catalog plus seam/handoff protocol metadata — the formal authority | — |
 | `meerkat-machine-kernels` | Generated kernel interpreter for all machines | `GeneratedMachineKernel` |
 | `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
 | `meerkat` (facade) | AgentFactory, FactoryAgentBuilder, build_ephemeral_service, re-exports | Wires everything together |
@@ -44,13 +45,29 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 
 ## Machine Authority
 
-The system is formally modeled as 10 state machines with 7 compositions, verified by TLC/TLA+.
+The system is formally modeled as canonical machines plus closed-world compositions, and is being extended with explicit seam/handoff protocols for async owner boundaries.
 
 **Design rule:** centralized `meerkat-machine-kernels` is the enforced layout. Owner crates do NOT have `machines/mod.rs` re-export modules. The xtask verification explicitly rejects parallel owner modules.
 
-**Machines:** InputLifecycleMachine, RuntimeControlMachine, RuntimeIngressMachine, OpsLifecycleMachine, PeerCommsMachine, ExternalToolSurfaceMachine, TurnExecutionMachine, MobLifecycleMachine, FlowRunMachine, MobOrchestratorMachine.
+**Machines:** InputLifecycleMachine, RuntimeControlMachine, RuntimeIngressMachine, OpsLifecycleMachine, PeerCommsMachine, ExternalToolSurfaceMachine, TurnExecutionMachine, MobLifecycleMachine, FlowRunMachine, MobOrchestratorMachine, plus seam-focused machines such as CommsDrainLifecycleMachine where an async boundary has its own lifecycle truth.
 
 **Verification:** `cargo xtask machine-codegen --all` (regenerate), `cargo xtask machine-check-drift --all` (detect stale artifacts), `cargo xtask machine-verify --all` (TLC model checking + owner tests).
+
+### Seam closure model
+
+Meerkat does not solve composition correctness by collapsing everything into one giant machine. Instead it:
+
+- reuses the existing composition actor model
+- extends effect-disposition rules with handoff protocol metadata
+- treats semantically relevant owner handoffs as outstanding obligations
+- generates helper APIs so owner feedback is correlation-safe and not ad hoc shell code
+- derives surfaced terminal classification from machine truth
+
+Use this mental model when reviewing changes:
+
+- single-machine mutators protect local truth
+- compositions protect routed truth
+- seam protocols protect owner-realized async truth
 
 ## Agent Construction Pipeline
 
@@ -76,7 +93,7 @@ The system is formally modeled as 10 state machines with 7 compositions, verifie
 
 With branches: `ErrorRecovery`, `Cancelling`
 
-**WaitingForOps is real.** The agent state owns a `pending_ops` set. Tool dispatch registers each tool call as an operation in `OpsLifecycleRegistry` and adds its ID to the pending set. The loop transitions to WaitingForOps and awaits completions. This is an **all-complete barrier** — the loop stays in WaitingForOps until every pending operation reaches terminal state. No incremental partial re-entry. Progress events can be forwarded while waiting.
+**WaitingForOps is real, but the important truth is the barrier membership.** The machine must own which async operations are barriers for the active run. Raw operation IDs are no longer enough on their own; the architecture is moving toward typed async-op references and explicit wait policy (`Barrier` vs `Detached`) so long-lived background work cannot accidentally block the turn forever.
 
 ## Runtime Control Plane
 
@@ -95,6 +112,8 @@ With branches: `ErrorRecovery`, `Cancelling`
 
 **Silent intent override:** If an incoming peer intent matches the session's `silent_comms_intents` list, the policy is overridden to `ApplyMode::Ignore`, `WakeMode::None` — no LLM turn triggered. This is canonical runtime-owned behavior.
 
+**Host-mode drain ownership:** host mode is not "just a loop that drains at turn boundaries." Runtime-backed and direct session-service paths must both follow canonical drain lifecycle truth. Suppression of turn-boundary drain is a projection of drain lifecycle state, not a free shell boolean.
+
 **Respawn semantics:** Same member identity (MeerkatId), spec, and peer wiring — **new session ID**. Old session archived. Used for "agent is confused, restart it" recovery.
 
 ## OpsLifecycleRegistry
@@ -102,6 +121,12 @@ With branches: `ErrorRecovery`, `Cancelling`
 Trait in `meerkat-core/src/ops_lifecycle.rs`, concrete impl (`RuntimeOpsLifecycleRegistry`) in `meerkat-runtime/src/ops_lifecycle.rs`.
 
 **Capabilities:** register/complete/fail/cancel/retire operations, `wait_all`, `collect_completed`, bounded completed-operation retention (FIFO eviction, default 256), multi-listener completion observation, peer info in snapshots, wall-clock timestamps (`created_at_ms`, `completed_at_ms`, `elapsed_ms` from SystemTime anchor), per-parent concurrency enforcement (`max_concurrent`).
+
+Important current boundary:
+
+- `OpsLifecycleRegistry` is still the authority-backed source of async operation truth
+- tranche 1 barrier fixes stay inside `TurnExecution`
+- tranche 2 is where barrier satisfaction gets reconciled end-to-end with authority truth instead of shell `wait_all` folklore
 
 ## Session Service
 
@@ -215,6 +240,7 @@ MobActor is composed of narrowly-scoped service objects:
 - **Wiring** — bidirectional trust. Each peer has `TrustedPeerSpec`.
 - **Unified trust state** — single `Arc<parking_lot::RwLock<TrustedPeers>>`.
 - **Not all mob members are peers.** Wiring rules control which members can communicate.
+- **Comms drain lifecycle** — background inbox consumption is a real lifecycle seam. Spawn/abort/exit feedback must return through the formal lifecycle path; turn-boundary suppression is a local projection of that truth.
 
 ## Key Architectural Invariants
 
@@ -222,11 +248,12 @@ MobActor is composed of narrowly-scoped service objects:
 2. **Never import implementations in business logic** — use traits from meerkat-core.
 3. **No sub-agent system** — all multi-agent work goes through mobs. No SubAgentManager, no agent_spawn/agent_fork.
 4. **Runtime conforms to machines** — runtime behavior must match verified machine schemas. No owner-crate `machines/mod.rs` re-exports; centralized `meerkat-machine-kernels` is the enforced design.
-5. **Errors separate mechanism from policy** — `ToolError → AgentError → SessionError`.
-6. **Wire types ≠ domain types** — `meerkat-contracts` owns wire format; `meerkat-core` owns domain types.
-7. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
-8. **No backward compatibility aliases** — 0.5 is a clean cut. No serde aliases for old names.
-9. **No `.unwrap()`/`.expect()`/`panic!()` in library code** — use `?` propagation or explicit error handling.
+5. **Shell may execute mechanics; it may not invent seam semantics** — evidence capture is allowed, but feedback mapping, barrier membership, and terminal class must be protocol-constrained or machine-derived.
+6. **Errors separate mechanism from policy** — `ToolError → AgentError → SessionError`.
+7. **Wire types ≠ domain types** — `meerkat-contracts` owns wire format; `meerkat-core` owns domain types.
+8. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
+9. **No backward compatibility aliases** — 0.5 is a clean cut. No serde aliases for old names.
+10. **No `.unwrap()`/`.expect()`/`panic!()` in library code** — use `?` propagation or explicit error handling.
 
 ## Key Files
 

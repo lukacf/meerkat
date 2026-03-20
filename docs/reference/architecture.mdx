@@ -13,6 +13,7 @@ Meerkat is a library-first, modular agent engine built in Rust. It provides the 
 3. **No I/O in core** -- `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
 4. **Streaming-first** -- all LLM interactions use streaming for responsive user experiences
 5. **Budget-aware** -- built-in resource tracking for tokens, time, and tool calls
+6. **Formal seam closure** -- async owner handoffs, wait barriers, and terminal classes are moving under formal machine/protocol ownership instead of shell-only glue
 
 ## High-level architecture
 
@@ -77,6 +78,13 @@ graph TD
 **SessionService routing:** All surfaces (CLI, REST, MCP Server, JSON-RPC, SDKs) route through
 `SessionService` for the full session lifecycle. `AgentFactory::build_agent()` centralizes all
 agent construction. Zero `AgentBuilder::new()` calls in surface crates.
+</Note>
+
+<Note>
+**Formal seam closure:** Meerkat is extending machine authority beyond isolated reducers. The
+current architecture work adds protocolized owner handoffs for semantically meaningful async seams
+so runtime-backed and direct session paths cannot silently diverge on drain lifecycle, wait
+barriers, or surfaced terminal truth.
 </Note>
 
 <Note>
@@ -221,6 +229,10 @@ Session service orchestration:
 - **PersistentSessionService**: durable session lifecycle over `SessionStore` backends
 - **DefaultCompactor**: context compaction implementation (feature: `session-compaction`)
 
+Host mode is part of the session contract. Runtime-backed and direct session-service paths are
+expected to follow the same lifecycle truth for inbox consumption and drain ownership, even though
+their mechanics differ internally.
+
 Feature gates: `session-store`, `session-compaction`.
 </Accordion>
 
@@ -269,7 +281,7 @@ Inter-agent communication system:
 - **Ed25519 identity**: cryptographic signing and verification of messages
 - **Trust model**: `TrustedPeers` with explicit peer verification
 - **Transports**: inproc (in-process), TCP, and UDS
-- **Inbox**: bounded message queue drained at turn boundaries
+- **Inbox**: bounded message queue consumed by the active host-mode/drain owner path
 - **Message types**: `Message`, `Request`, `Response`, `Ack`
 - **Host mode**: keeps agent alive listening for messages
 
@@ -408,7 +420,7 @@ stateDiagram-v2
 | State | Description |
 |-------|-------------|
 | `CallingLlm` | Sending request to LLM, streaming response |
-| `WaitingForOps` | No LLM work, waiting for tool operations to complete |
+| `WaitingForOps` | No LLM work, waiting for machine-owned barrier operations to complete |
 | `DrainingEvents` | Processing buffered operation events at turn boundary |
 | `Cancelling` | Gracefully stopping after cancel signal or budget exhaustion |
 | `ErrorRecovery` | Attempting recovery from transient LLM error |
@@ -442,7 +454,7 @@ Turn boundaries are critical moments where:
 
 1. Tool results are injected into the session
 2. Steering messages (from parent agents) are applied
-3. Comms inbox is drained and messages injected (for inter-agent communication)
+3. Any local projections or staged updates that follow canonical seam truth are applied
 4. Delegated-work projections are collected and injected
 5. Budget is checked
 6. Session is checkpointed
@@ -520,7 +532,7 @@ The `meerkat-comms` crate provides inter-agent communication with a layered arch
 
 **Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
 
-**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. The `Inbox` is drained at turn boundaries (step 8 in the agent loop), injecting received messages into the session.
+**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. Inbox delivery and inbox consumption are separate concerns: the inbox queues transport work, while the active host-mode/drain lifecycle path decides when those messages become session input.
 
 ### Data flow through the agent loop
 

@@ -195,7 +195,7 @@ Discover trusted peers visible to a running session.
 
 ## External event injection
 
-Push external events from outside systems into a running agent. Events are drained at turn boundaries and injected as user messages.
+Push external events from outside systems into a running agent. Events are queued into the session inbox, then consumed by the active host-mode owner path and injected as user messages.
 
 <Tabs>
   <Tab title="CLI">

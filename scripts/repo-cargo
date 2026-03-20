@@ -27,8 +27,8 @@ else
   cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/rust-workspaces"
 fi
 
-export CARGO_HOME="${cache_root}/${repo_key}/cargo-home"
-export CARGO_TARGET_DIR="${cache_root}/${repo_key}/targets/${lane_key}"
+export CARGO_HOME="${CARGO_HOME:-${cache_root}/${repo_key}/cargo-home}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/${repo_key}/targets/${lane_key}}"
 
 mkdir -p "${CARGO_HOME}" "${CARGO_TARGET_DIR}"
 

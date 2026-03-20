@@ -186,7 +186,7 @@ check:
 # block behind unrelated workspace cargo activity.
 xtask-build:
 	@echo "$(GREEN)Building xtask in $(XTASK_TARGET_DIR)...$(NC)"
-	CARGO_TARGET_DIR="$(XTASK_TARGET_DIR)" $(CARGO) build -p xtask
+	CARGO_TARGET_DIR="$(XTASK_TARGET_DIR)" $(CARGO) build -p xtask --features machine-authority
 
 # Generate all machine/composition authority artifacts.
 machine-codegen: xtask-build

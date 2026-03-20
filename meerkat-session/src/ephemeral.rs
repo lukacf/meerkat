@@ -1135,12 +1135,10 @@ async fn session_task<A: SessionAgent>(
                                         effect,
                                         CommsDrainLifecycleEffect::SpawnDrainTask { .. }
                                     )
-                                }) {
-                                    if let Ok(spawned) =
-                                        host_mode_drain.apply(CommsDrainLifecycleInput::TaskSpawned)
-                                    {
-                                        apply_comms_drain_effects(&mut agent, &spawned.effects);
-                                    }
+                                }) && let Ok(spawned) =
+                                    host_mode_drain.apply(CommsDrainLifecycleInput::TaskSpawned)
+                                {
+                                    apply_comms_drain_effects(&mut agent, &spawned.effects);
                                 }
                             }
                             Err(error) => {
@@ -1284,7 +1282,7 @@ async fn session_task<A: SessionAgent>(
                 control.interrupt_requested.store(false, Ordering::Release);
 
                 match pump_result {
-                    Ok(HostModePollOutcome::Idle) | Ok(HostModePollOutcome::Ran(_)) => {}
+                    Ok(HostModePollOutcome::Idle | HostModePollOutcome::Ran(_)) => {}
                     Ok(HostModePollOutcome::Dismissed) => {
                         if let Ok(transition) =
                             host_mode_drain.apply(CommsDrainLifecycleInput::TaskExited {

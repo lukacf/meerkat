@@ -47,12 +47,16 @@ where
                 Err(e) => {
                     // Check if we should retry
                     if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
-                        // Use server's retry-after hint if available and longer
-                        // than our computed backoff delay.
+                        // Use server's retry-after hint if available. For rate
+                        // limits without a hint, use a longer minimum (30s)
+                        // to avoid retry storms when multiple agents share a key.
+                        // (Gemini free/Tier 1 has 25 RPM and sends no Retry-After.)
                         let hint = e.retry_after_hint();
                         let computed = self.retry_policy.delay_for_attempt(attempt + 1);
+                        let is_rate_limited = e.is_rate_limited();
                         let delay = match hint {
                             Some(h) if h > computed => h,
+                            _ if is_rate_limited => computed.max(std::time::Duration::from_secs(30)),
                             _ => computed,
                         };
                         tracing::warn!(

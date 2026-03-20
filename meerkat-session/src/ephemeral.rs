@@ -1163,6 +1163,24 @@ async fn session_task<A: SessionAgent>(
                         }
                     }
 
+                    // If the turn failed, emit RunFailed through the session
+                    // broadcast so the mob event router (and user) can see it.
+                    // Without this, host loop failures are only logged via
+                    // tracing and are invisible to the user.
+                    if let Err(ref error) = r {
+                        let fail_event = meerkat_core::event::AgentEvent::RunFailed {
+                            session_id: agent.session_id(),
+                            error: error.to_string(),
+                        };
+                        let envelope = stamp_event_envelope(&mut next_seq, &source_id, fail_event);
+                        let _ = control.session_event_tx.send(envelope.clone());
+                        if event_stream_open {
+                            if let Some(ref tx) = event_tx {
+                                let _ = tx.send(envelope).await;
+                            }
+                        }
+                    }
+
                     r
                 }; // run_fut dropped here
 

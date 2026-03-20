@@ -296,6 +296,17 @@ impl AgentError {
         }
     }
 
+    /// Whether this is a rate-limit error.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Self::Llm {
+                reason: LlmFailureReason::RateLimited { .. },
+                ..
+            }
+        )
+    }
+
     /// Extract the server's retry-after hint, if this is a rate-limit error.
     pub fn retry_after_hint(&self) -> Option<std::time::Duration> {
         match self {

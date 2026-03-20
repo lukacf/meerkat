@@ -23,6 +23,12 @@ machine-authority = ["dep:meerkat-machine-codegen", "dep:which"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+serde.workspace = true
+serde_json.workspace = true
+syn = { version = "2", features = ["full", "visit"] }
+toml.workspace = true
 which = { workspace = true, optional = true }
 meerkat-machine-codegen = { path = "../meerkat-machine-codegen", optional = true }
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }

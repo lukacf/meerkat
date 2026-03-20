@@ -138,12 +138,12 @@ fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec
         .map(|wanted| {
             entries
                 .iter()
-                .cloned()
                 .find(|entry| {
                     entry.schema.machine == *wanted
                         || entry.slug == *wanted
                         || entry.schema.machine.strip_suffix("Machine") == Some(wanted.as_str())
                 })
+                .cloned()
                 .ok_or_else(|| anyhow!("unknown machine selection `{wanted}`"))
         })
         .collect()
@@ -162,8 +162,8 @@ fn select_compositions(
         .map(|wanted| {
             entries
                 .iter()
-                .cloned()
                 .find(|entry| entry.schema.name == *wanted || entry.slug == *wanted)
+                .cloned()
                 .ok_or_else(|| anyhow!("unknown composition selection `{wanted}`"))
         })
         .collect()
@@ -265,12 +265,14 @@ fn composition_dir(root: &Path, slug: &str) -> PathBuf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 struct OwnerTestSpec {
     package: &'static str,
     target: &'static str,
     filter: &'static str,
 }
 
+#[allow(dead_code)]
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const PEER_COMMS: &[OwnerTestSpec] = &[
         OwnerTestSpec {

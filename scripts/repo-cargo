@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && git rev-parse --path-format=absolute --show-toplevel)"
+workspace_root="${repo_root}"
+git_common_dir="$(cd "${repo_root}" && git rev-parse --path-format=absolute --git-common-dir)"
+worktree_root="$(cd "${repo_root}" && git rev-parse --path-format=absolute --show-toplevel)"
+
+hash_path() {
+  printf '%s' "$1" | shasum | cut -c1-10
+}
+
+repo_slug="$(basename "${repo_root}")"
+repo_key="${repo_slug}-$(hash_path "${git_common_dir}")"
+
+if [[ -n "${RUST_LANE_ID:-}" ]]; then
+  lane_key="${RUST_LANE_ID}"
+else
+  worktree_name="$(basename "${worktree_root}")"
+  lane_key="${worktree_name}-$(hash_path "${worktree_root}")"
+fi
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  cache_root="${HOME}/Library/Caches/rust-workspaces"
+else
+  cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/rust-workspaces"
+fi
+
+export CARGO_HOME="${cache_root}/${repo_key}/cargo-home"
+export CARGO_TARGET_DIR="${cache_root}/${repo_key}/targets/${lane_key}"
+
+mkdir -p "${CARGO_HOME}" "${CARGO_TARGET_DIR}"
+
+if [[ "${1-}" == "--print-env" ]]; then
+  cat <<EOF
+repo_root=${repo_root}
+workspace_root=${workspace_root}
+repo_key=${repo_key}
+lane_key=${lane_key}
+CARGO_HOME=${CARGO_HOME}
+CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
+EOF
+  exit 0
+fi
+
+if [[ "${1-}" == "--doctor" ]]; then
+  if [[ "${CARGO_HOME}" == "${repo_root}"* || "${CARGO_TARGET_DIR}" == "${repo_root}"* ]]; then
+    echo "error: cache path resolved inside repo tree" >&2
+    exit 1
+  fi
+  [[ -w "${CARGO_HOME}" ]] || { echo "error: CARGO_HOME not writable" >&2; exit 1; }
+  [[ -w "${CARGO_TARGET_DIR}" ]] || { echo "error: CARGO_TARGET_DIR not writable" >&2; exit 1; }
+  cat <<EOF
+doctor=ok
+repo_root=${repo_root}
+workspace_root=${workspace_root}
+repo_key=${repo_key}
+lane_key=${lane_key}
+CARGO_HOME=${CARGO_HOME}
+CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
+EOF
+  exit 0
+fi
+
+cd "${workspace_root}"
+exec cargo "$@"

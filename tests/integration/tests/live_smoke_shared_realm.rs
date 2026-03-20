@@ -21,6 +21,17 @@ fn workspace_root() -> PathBuf {
 }
 
 fn binary_path(name: &str) -> Option<PathBuf> {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let candidates = [
+            target_dir.join(format!("debug/{name}")),
+            target_dir.join(format!("release/{name}")),
+        ];
+        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
+            return Some(candidate);
+        }
+    }
+
     let root = workspace_root();
     [
         root.join(format!("target/debug/{name}")),
@@ -51,7 +62,9 @@ fn smoke_model() -> String {
 
 fn skip_if_missing_binary(path: &Option<PathBuf>, name: &str) -> bool {
     if path.is_none() {
-        eprintln!("Skipping: binary '{name}' not found under target/debug or target/release");
+        eprintln!(
+            "Skipping: binary '{name}' not found under CARGO_TARGET_DIR or repo target/debug|release"
+        );
         return true;
     }
     false

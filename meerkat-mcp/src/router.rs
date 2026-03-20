@@ -1033,6 +1033,10 @@ mod tests {
     }
 
     fn test_server_path() -> PathBuf {
+        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+            return PathBuf::from(target_dir).join("debug/mcp-test-server");
+        }
+
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let workspace_root = PathBuf::from(manifest_dir)
             .parent()

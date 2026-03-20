@@ -4,6 +4,7 @@
 CRATE_NAME := meerkat
 XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
+CARGO ?= ./scripts/repo-cargo
 
 # Colors for terminal output
 GREEN := \033[0;32m
@@ -19,93 +20,93 @@ all: ci
 # Build the project
 build:
 	@echo "$(GREEN)Building $(CRATE_NAME)...$(NC)"
-	cargo build --workspace
+	$(CARGO) build --workspace
 
 # Build release version
 release:
 	@echo "$(GREEN)Building release version...$(NC)"
-	cargo build --workspace --release
+	$(CARGO) build --workspace --release
 
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
 	@echo "$(GREEN)Running fast tests (unit + integration-fast)...$(NC)"
-	cargo nextest run --workspace --show-progress none --status-level none --final-status-level fail
+	$(CARGO) nextest run --workspace --show-progress none --status-level none --final-status-level fail
 
 # Unit tests only
 test-unit:
 	@echo "$(GREEN)Running unit tests...$(NC)"
-	cargo nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
+	$(CARGO) nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
 
 # Integration-fast tests only (no unit tests)
 test-int:
 	@echo "$(GREEN)Running integration-fast tests...$(NC)"
-	cargo nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail
+	$(CARGO) nextest run --workspace --tests --show-progress none --status-level none --final-status-level fail
 
 # Integration-real tests (ignored by default)
 test-int-real:
 	@echo "$(YELLOW)Running integration-real tests (ignored by default)...$(NC)"
-	cargo nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1
+	$(CARGO) nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1
 
 # End-to-end tests (ignored by default)
 test-e2e:
 	@echo "$(YELLOW)Running e2e tests (ignored by default)...$(NC)"
-	cargo nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1
+	$(CARGO) nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1
 
 # Full test suite (for CI)
 # Includes all tests with all features
 test-all:
 	@echo "$(GREEN)Running full test suite...$(NC)"
-	cargo nextest run --workspace --all-features
+	$(CARGO) nextest run --workspace --all-features
 
 # Minimal builds without optional features
 test-minimal:
 	@echo "$(GREEN)Running minimal build checks...$(NC)"
-	cargo check -p meerkat-core
-	cargo check -p meerkat-client --no-default-features
-	cargo check -p meerkat-store --no-default-features
-	cargo check -p meerkat-tools --no-default-features
-	cargo check -p meerkat --no-default-features
-	cargo nextest run -p meerkat-core
+	$(CARGO) check -p meerkat-core
+	$(CARGO) check -p meerkat-client --no-default-features
+	$(CARGO) check -p meerkat-store --no-default-features
+	$(CARGO) check -p meerkat-tools --no-default-features
+	$(CARGO) check -p meerkat --no-default-features
+	$(CARGO) nextest run -p meerkat-core
 
 # Library crate feature combinations
 test-feature-matrix-lib:
 	@echo "$(GREEN)Running library feature matrix checks...$(NC)"
-	cargo check -p meerkat-tools --no-default-features --features comms
-	cargo check -p meerkat-tools --no-default-features --features mcp
-	cargo check -p meerkat-tools --no-default-features --features comms,mcp
-	cargo check -p meerkat --no-default-features --features openai,memory-store
-	cargo check -p meerkat --no-default-features --features gemini,jsonl-store
-	cargo check -p meerkat --features all-providers,comms,mcp
-	cargo nextest run -p meerkat --features all-providers,comms,mcp
+	$(CARGO) check -p meerkat-tools --no-default-features --features comms
+	$(CARGO) check -p meerkat-tools --no-default-features --features mcp
+	$(CARGO) check -p meerkat-tools --no-default-features --features comms,mcp
+	$(CARGO) check -p meerkat --no-default-features --features openai,memory-store
+	$(CARGO) check -p meerkat --no-default-features --features gemini,jsonl-store
+	$(CARGO) check -p meerkat --features all-providers,comms,mcp
+	$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp
 
 # Surface crate feature combinations
 test-feature-matrix-surface:
 	@echo "$(GREEN)Running surface feature matrix checks...$(NC)"
-	cargo check -p meerkat-rpc --no-default-features
-	cargo check -p meerkat-rpc --no-default-features --features comms,mcp
-	cargo check -p meerkat-rest --no-default-features
-	cargo check -p meerkat-rest --no-default-features --features comms
-	cargo check -p meerkat-mcp-server --no-default-features
-	cargo check -p meerkat-mcp-server --no-default-features --features comms
-	cargo check -p rkat --no-default-features --features session-store
-	cargo check -p rkat --no-default-features --features session-store,mcp
-	cargo nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
-	cargo check -p rkat --no-default-features --features session-store,comms,mcp
+	$(CARGO) check -p meerkat-rpc --no-default-features
+	$(CARGO) check -p meerkat-rpc --no-default-features --features comms,mcp
+	$(CARGO) check -p meerkat-rest --no-default-features
+	$(CARGO) check -p meerkat-rest --no-default-features --features comms
+	$(CARGO) check -p meerkat-mcp-server --no-default-features
+	$(CARGO) check -p meerkat-mcp-server --no-default-features --features comms
+	$(CARGO) check -p rkat --no-default-features --features session-store
+	$(CARGO) check -p rkat --no-default-features --features session-store,mcp
+	$(CARGO) nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
+	$(CARGO) check -p rkat --no-default-features --features session-store,comms,mcp
 
 # Session capability matrix (A-F builds from spec)
 test-session-matrix:
 	@echo "$(GREEN)Running session capability matrix...$(NC)"
 	@echo "  Build A: no-default-features (ephemeral only)"
-	cargo check -p meerkat-session --no-default-features
-	cargo nextest run -p meerkat-session --no-default-features
+	$(CARGO) check -p meerkat-session --no-default-features
+	$(CARGO) nextest run -p meerkat-session --no-default-features
 	@echo "  Build B: session-store"
-	cargo check -p meerkat-session --no-default-features --features session-store
+	$(CARGO) check -p meerkat-session --no-default-features --features session-store
 	@echo "  Build C: (memory-store — Phase 6)"
 	@echo "  Build D: session-compaction"
-	cargo check -p meerkat-session --no-default-features --features session-compaction
+	$(CARGO) check -p meerkat-session --no-default-features --features session-compaction
 	@echo "  Build E: session-store (Phase 6 combo)"
 	@echo "  Build F: all session features"
-	cargo check -p meerkat-session --no-default-features --features session-store,session-compaction
+	$(CARGO) check -p meerkat-session --no-default-features --features session-store,session-compaction
 
 # Full feature matrix
 test-feature-matrix: test-feature-matrix-lib test-feature-matrix-surface
@@ -118,36 +119,36 @@ test-surface-modularity:
 # Run clippy linter
 lint:
 	@echo "$(GREEN)Running clippy...$(NC)"
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 # Run clippy across key feature combinations (not just --all-features)
 lint-feature-matrix:
 	@echo "$(GREEN)Running clippy feature matrix...$(NC)"
-	cargo clippy -p meerkat-tools --no-default-features --features comms,mcp
-	cargo clippy -p meerkat --no-default-features --features openai,memory-store
-	cargo clippy -p meerkat --features all-providers,comms,mcp
-	cargo clippy -p rkat --no-default-features --features session-store,mcp
-	cargo clippy -p meerkat-rpc --no-default-features
+	$(CARGO) clippy -p meerkat-tools --no-default-features --features comms,mcp
+	$(CARGO) clippy -p meerkat --no-default-features --features openai,memory-store
+	$(CARGO) clippy -p meerkat --features all-providers,comms,mcp
+	$(CARGO) clippy -p rkat --no-default-features --features session-store,mcp
+	$(CARGO) clippy -p meerkat-rpc --no-default-features
 
 # Check formatting
 fmt-check:
 	@echo "$(GREEN)Checking formatting...$(NC)"
-	cargo fmt --all -- --check
+	$(CARGO) fmt --all -- --check
 
 # Fix formatting
 fmt:
 	@echo "$(GREEN)Fixing formatting...$(NC)"
-	cargo fmt --all
+	$(CARGO) fmt --all
 
 # Security audit using cargo-deny
 audit:
 	@echo "$(GREEN)Running security audit...$(NC)"
-	cargo deny check
+	$(CARGO) deny check
 
 # Alternative audit using cargo-audit (if cargo-deny not available)
 audit-alt:
 	@echo "$(GREEN)Running cargo-audit...$(NC)"
-	cargo audit
+	$(CARGO) audit
 
 # Full CI pipeline - runs everything
 ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity audit
@@ -179,13 +180,13 @@ legacy-surface-inventory:
 # Quick check - compile without producing output
 check:
 	@echo "$(GREEN)Running cargo check...$(NC)"
-	cargo check --workspace --all-targets --all-features
+	$(CARGO) check --workspace --all-targets --all-features
 
 # Build xtask in an isolated target dir so machine-authority commands do not
 # block behind unrelated workspace cargo activity.
 xtask-build:
 	@echo "$(GREEN)Building xtask in $(XTASK_TARGET_DIR)...$(NC)"
-	CARGO_TARGET_DIR="$(XTASK_TARGET_DIR)" cargo build -p xtask
+	CARGO_TARGET_DIR="$(XTASK_TARGET_DIR)" $(CARGO) build -p xtask
 
 # Generate all machine/composition authority artifacts.
 machine-codegen: xtask-build
@@ -205,22 +206,22 @@ machine-check-drift: xtask-build
 # Generate documentation
 doc:
 	@echo "$(GREEN)Generating documentation...$(NC)"
-	cargo doc --workspace --no-deps --all-features
+	$(CARGO) doc --workspace --no-deps --all-features
 
 # Open documentation in browser
 doc-open:
 	@echo "$(GREEN)Opening documentation...$(NC)"
-	cargo doc --workspace --no-deps --all-features --open
+	$(CARGO) doc --workspace --no-deps --all-features --open
 
 # Test coverage using cargo-tarpaulin
 coverage:
 	@echo "$(GREEN)Generating test coverage...$(NC)"
-	cargo tarpaulin --workspace --all-features --timeout 120 --out Html
+	$(CARGO) tarpaulin --workspace --all-features --timeout 120 --out Html
 
 # Clean build artifacts
 clean:
 	@echo "$(YELLOW)Cleaning build artifacts...$(NC)"
-	cargo clean
+	$(CARGO) clean
 
 # Install pre-commit hooks
 install-hooks:
@@ -243,17 +244,17 @@ pre-commit-all:
 # Update dependencies
 update:
 	@echo "$(GREEN)Updating dependencies...$(NC)"
-	cargo update
+	$(CARGO) update
 
 # Show outdated dependencies
 outdated:
 	@echo "$(GREEN)Checking for outdated dependencies...$(NC)"
-	cargo outdated
+	$(CARGO) outdated
 
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	cargo bench --workspace
+	$(CARGO) bench --workspace
 
 # ── Version parity & release targets ────────────────────────────────────────
 
@@ -272,7 +273,7 @@ bump-sdk-versions:
 # Re-emit schemas and regenerate SDK types from Rust source of truth
 regen-schemas:
 	@echo "$(GREEN)Emitting schemas...$(NC)"
-	cargo run -p meerkat-contracts --features schema --bin emit-schemas
+	$(CARGO) run -p meerkat-contracts --features schema --bin emit-schemas
 	@echo "$(GREEN)Running SDK codegen...$(NC)"
 	python3 tools/sdk-codegen/generate.py
 	@echo "$(GREEN)Schemas and SDK types regenerated$(NC)"
@@ -292,7 +293,7 @@ release-preflight: ci verify-schema-freshness
 	@echo "  3. Schema artifacts are fresh (above)"
 	@echo ""
 	@echo "$(GREEN)Ready to release. Run:$(NC)"
-	@echo "  cargo release <patch|minor|major>"
+	@echo "  $(CARGO) release <patch|minor|major>"
 
 # Smoke pre-release checklist.
 # Useful for local iteration; skips full feature-matrix expansion.
@@ -363,7 +364,7 @@ publish-dry-run:
 # Verify version matches tag (for release validation)
 verify-version:
 	@echo "$(GREEN)Verifying version...$(NC)"
-	@VERSION=$$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "meerkat") | .version'); \
+	@VERSION=$$($(CARGO) metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "meerkat") | .version'); \
 	TAG=$$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//'); \
 	if [ -z "$$TAG" ]; then \
 		echo "$(YELLOW)No tag found on current commit$(NC)"; \

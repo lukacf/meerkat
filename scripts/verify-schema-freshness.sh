@@ -8,6 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 
 red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
 green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
@@ -26,7 +27,7 @@ trap 'rm -rf "$FRESH_DIR" "$TEMP_ROOT"' EXIT
 mkdir -p "$TEMP_ROOT/artifacts/schemas"
 
 # Build and run emit-schemas, capturing output
-cargo run -p meerkat-contracts --features schema --bin emit-schemas \
+"$CARGO" run -p meerkat-contracts --features schema --bin emit-schemas \
     --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
 
 # The binary writes to artifacts/schemas/ relative to the workspace root.
@@ -64,7 +65,7 @@ done
 echo ""
 if [ $FAIL -ne 0 ]; then
     red "Schema freshness check FAILED"
-    red "Run: cargo run -p meerkat-contracts --features schema --bin emit-schemas"
+    red "Run: ./scripts/repo-cargo run -p meerkat-contracts --features schema --bin emit-schemas"
     red "Then: python3 tools/sdk-codegen/generate.py"
     red "Then commit the updated artifacts."
     exit 1

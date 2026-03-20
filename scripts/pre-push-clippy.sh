@@ -3,6 +3,9 @@
 # Falls back to workspace clippy when root Cargo.toml/Cargo.lock changes.
 set -euo pipefail
 
+ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
+
 # Determine the remote tracking ref to diff against.
 UPSTREAM=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
 if [ -z "$UPSTREAM" ]; then
@@ -11,7 +14,7 @@ fi
 MERGE_BASE=$(git merge-base "$UPSTREAM" HEAD 2>/dev/null || echo "")
 if [ -z "$MERGE_BASE" ]; then
   echo "No merge base with $UPSTREAM; running full workspace clippy."
-  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  "$CARGO" clippy --workspace --all-targets --all-features -- -D warnings
   exit $?
 fi
 
@@ -26,7 +29,7 @@ fi
 # Root workspace manifest changes → full workspace clippy
 if echo "$CHANGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
   echo "Workspace manifest changed — running full workspace clippy."
-  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  "$CARGO" clippy --workspace --all-targets --all-features -- -D warnings
   exit $?
 fi
 
@@ -61,4 +64,4 @@ fi
 
 echo "Clippy on changed crates:$PKG_FLAGS"
 # shellcheck disable=SC2086
-cargo clippy $PKG_FLAGS --all-targets --all-features -- -D warnings
+"$CARGO" clippy $PKG_FLAGS --all-targets --all-features -- -D warnings

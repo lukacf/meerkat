@@ -362,6 +362,10 @@ pub mod tests {
 
     /// Get path to the test server binary
     fn test_server_path() -> PathBuf {
+        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+            return PathBuf::from(target_dir).join("debug/mcp-test-server");
+        }
+
         // Build path relative to workspace root
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let workspace_root = PathBuf::from(manifest_dir).parent().unwrap().to_path_buf();

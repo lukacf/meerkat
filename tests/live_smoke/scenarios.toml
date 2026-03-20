@@ -391,7 +391,7 @@ test_name = "test_smoke_scenario_37_full_lifecycle_and_capabilities"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "37"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 38
@@ -412,7 +412,7 @@ test_name = "test_smoke_scenario_38_inject_context_and_streaming"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "38"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 39
@@ -433,7 +433,7 @@ test_name = "test_smoke_scenario_39_persistent_reconnect_and_runtime_accept"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "39"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 40
@@ -454,7 +454,7 @@ test_name = "test_smoke_scenario_40_mixed_provider_swarm_probe"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "40"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 41
@@ -478,7 +478,7 @@ test_name = "Scenario 41"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "41"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 42
@@ -502,7 +502,7 @@ test_name = "Scenario 42"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "42"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 43
@@ -526,7 +526,7 @@ test_name = "Scenario 43"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "43"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 44
@@ -550,7 +550,7 @@ test_name = "Scenario 44"
 
 [scenario.env]
 LIVE_SMOKE_SCENARIO = "44"
-MEERKAT_BIN_PATH = "{repo_root}/target/debug/rkat-rpc"
+MEERKAT_BIN_PATH = "{cargo_target_dir}/debug/rkat-rpc"
 
 [[scenario]]
 id = 45

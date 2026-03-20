@@ -7,6 +7,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 FAIL=0
 
 red()    { printf '\033[0;31m%s\033[0m\n' "$*"; }
@@ -15,7 +16,7 @@ yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 
 # ── 1. Package version parity ──────────────────────────────────────────────
 
-CARGO_VER=$(cargo metadata --manifest-path "$ROOT/Cargo.toml" \
+CARGO_VER=$("$CARGO" metadata --manifest-path "$ROOT/Cargo.toml" \
     --no-deps --format-version 1 \
     | jq -r '.packages[] | select(.name == "meerkat") | .version')
 
@@ -91,7 +92,7 @@ echo "  TypeScript SDK (generated): ${TS_CONTRACT:-<missing>}"
 
 CONTRACT_OK=true
 if [ -n "$ARTIFACT_CONTRACT" ] && [ "$RUST_CONTRACT" != "$ARTIFACT_CONTRACT" ]; then
-    red "FAIL: artifacts/schemas/version.json is stale (run: cargo run -p meerkat-contracts --features schema --bin emit-schemas)"
+    red "FAIL: artifacts/schemas/version.json is stale (run: ./scripts/repo-cargo run -p meerkat-contracts --features schema --bin emit-schemas)"
     CONTRACT_OK=false
     FAIL=1
 fi

@@ -16,6 +16,18 @@ fn rkat_binary_path() -> Option<PathBuf> {
         }
     }
 
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let debug = target_dir.join("debug/rkat");
+        if debug.exists() {
+            return Some(debug);
+        }
+        let release = target_dir.join("release/rkat");
+        if release.exists() {
+            return Some(release);
+        }
+    }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?;
     let debug = workspace_root.join("target/debug/rkat");

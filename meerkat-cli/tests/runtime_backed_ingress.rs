@@ -3,6 +3,14 @@
 use std::path::PathBuf;
 
 fn candidate_binaries() -> Vec<PathBuf> {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        return vec![
+            target_dir.join("debug/rkat"),
+            target_dir.join("release/rkat"),
+        ];
+    }
+
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
@@ -17,6 +25,6 @@ fn candidate_binaries() -> Vec<PathBuf> {
 fn runtime_backed_ingress_red_ok_cli_target_names_runtime_backed_binary_entrypoint() {
     let binaries = candidate_binaries();
     assert_eq!(binaries.len(), 2);
-    assert!(binaries[0].ends_with("target/debug/rkat"));
-    assert!(binaries[1].ends_with("target/release/rkat"));
+    assert!(binaries[0].ends_with("debug/rkat"));
+    assert!(binaries[1].ends_with("release/rkat"));
 }

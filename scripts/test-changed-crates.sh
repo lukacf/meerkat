@@ -3,6 +3,9 @@
 # Uses the default target dir for warm incremental cache.
 set -euo pipefail
 
+ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
+
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '\.(rs|toml)$' || true)
 
@@ -14,7 +17,7 @@ fi
 # Workspace manifest changes → cargo check --workspace (fast with warm cache)
 if echo "$STAGED_FILES" | grep -qE '^Cargo\.(toml|lock)$'; then
   echo "Workspace manifest changed — running cargo check."
-  cargo check --workspace
+  "$CARGO" check --workspace
   exit $?
 fi
 
@@ -51,7 +54,7 @@ echo "Checking changed crates:$PKG_FLAGS"
 
 # Clippy first — catches type errors + lint issues in one pass
 # shellcheck disable=SC2086
-cargo clippy $PKG_FLAGS -- -D warnings
+"$CARGO" clippy $PKG_FLAGS -- -D warnings
 
 # Unit tests only (--lib) — fast, no integration tests
 LIB_FLAGS=""
@@ -65,6 +68,6 @@ if [ -n "$LIB_FLAGS" ]; then
   # shellcheck disable=SC2086
   # --no-tests=pass: crates with zero unit tests (e.g. meerkat-web-runtime)
   # return exit code 4, which would fail under set -e.
-  cargo nextest run $LIB_FLAGS --lib --no-tests=pass \
+  "$CARGO" nextest run $LIB_FLAGS --lib --no-tests=pass \
     --show-progress none --status-level none --final-status-level fail
 fi

@@ -26,6 +26,17 @@ fn workspace_root() -> PathBuf {
 }
 
 fn binary_path(name: &str) -> PathBuf {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let candidates = [
+            target_dir.join(format!("debug/{name}")),
+            target_dir.join(format!("release/{name}")),
+        ];
+        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
+            return candidate;
+        }
+    }
+
     let root = workspace_root();
     [
         root.join(format!("target/debug/{name}")),
@@ -33,7 +44,9 @@ fn binary_path(name: &str) -> PathBuf {
     ]
     .into_iter()
     .find(|candidate| candidate.exists())
-    .unwrap_or_else(|| panic!("binary '{name}' not found; build it before running this test"))
+    .unwrap_or_else(|| {
+        panic!("binary '{name}' not found; build it in CARGO_TARGET_DIR or repo target")
+    })
 }
 
 async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {

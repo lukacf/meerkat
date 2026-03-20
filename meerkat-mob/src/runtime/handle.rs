@@ -1,15 +1,15 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use meerkat_core::types::{HandlingMode, RenderMetadata};
-use serde::Serialize;
+use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
+use serde::{Deserialize, Serialize};
 
-/// Point-in-time snapshot of a member's execution state.
+/// Point-in-time snapshot of a mob member's execution state.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
-pub struct MemberExecutionSnapshot {
+pub struct MobMemberSnapshot {
     /// Current lifecycle status.
-    pub status: MemberExecutionStatus,
+    pub status: MobMemberStatus,
     /// Preview of the last assistant output (if any).
     pub output_preview: Option<String>,
     /// Error description (if the member errored).
@@ -18,13 +18,15 @@ pub struct MemberExecutionSnapshot {
     pub tokens_used: u64,
     /// Whether the member has reached a terminal state.
     pub is_final: bool,
+    /// Current session ID (if a session bridge exists).
+    pub current_session_id: Option<SessionId>,
 }
 
 /// Execution status for a mob member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum MemberExecutionStatus {
+pub enum MobMemberStatus {
     /// Member is active and potentially running.
     Active,
     /// Member is in the process of retiring.
@@ -33,6 +35,68 @@ pub enum MemberExecutionStatus {
     Completed,
     /// Member is not in the roster.
     Unknown,
+}
+
+/// Receipt returned by a successful member respawn.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct MemberRespawnReceipt {
+    /// The member identity that was respawned.
+    pub member_id: MeerkatId,
+    /// Session ID of the retired (old) session.
+    pub old_session_id: Option<SessionId>,
+    /// Session ID of the newly spawned session.
+    pub new_session_id: Option<SessionId>,
+}
+
+/// Structured error for direct-Rust respawn failures.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobRespawnError {
+    /// Member has no current session bridge to retire.
+    #[error("no current session bridge for member {member_id}")]
+    NoSessionBridge { member_id: MeerkatId },
+
+    /// Spawn failed after the old member was retired.
+    #[error("spawn failed after retire for member {member_id}: {reason}")]
+    SpawnAfterRetire {
+        member_id: MeerkatId,
+        reason: String,
+    },
+
+    /// Topology restore failed after replacement spawn.
+    /// The replacement receipt is carried so callers can still use the new session.
+    #[error("topology restore failed for member {}: {} peer(s) failed", receipt.member_id, failed_peer_ids.len())]
+    TopologyRestoreFailed {
+        receipt: MemberRespawnReceipt,
+        failed_peer_ids: Vec<MeerkatId>,
+    },
+
+    /// An underlying mob error occurred before mutation.
+    #[error(transparent)]
+    Mob(#[from] MobError),
+}
+
+/// Receipt returned by member message delivery.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct MemberDeliveryReceipt {
+    /// The member that received the message.
+    pub member_id: MeerkatId,
+    /// The session ID the message was delivered to.
+    pub session_id: SessionId,
+    /// How the message was handled.
+    pub handling_mode: HandlingMode,
+}
+
+/// Reference to a member's current session bridge.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct MemberSessionRef {
+    /// The member identity.
+    pub member_id: MeerkatId,
+    /// The current session ID.
+    pub session_id: SessionId,
 }
 
 /// Options for helper convenience spawns.
@@ -589,15 +653,16 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Retire a member and enqueue a respawn with the same profile.
+    /// Retire a member and respawn with the same profile, labels, wiring, and mode.
     ///
-    /// Returns `Ok(())` once retire completes and spawn is enqueued.
-    /// The new member becomes available when `MeerkatSpawned` is emitted.
+    /// This is a helper convenience over primitive mob behavior, not a
+    /// machine-owned primitive. Returns a receipt on full success, or a
+    /// structured error on failure. No rollback is attempted after retire.
     pub async fn respawn(
         &self,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
-    ) -> Result<(), MobError> {
+    ) -> Result<MemberRespawnReceipt, MobRespawnError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Respawn {
@@ -656,7 +721,7 @@ impl MobHandle {
         &self,
         meerkat_id: MeerkatId,
         message: impl Into<meerkat_core::types::ContentInput>,
-    ) -> Result<(), MobError> {
+    ) -> Result<MemberDeliveryReceipt, MobError> {
         self.member(&meerkat_id).await?.internal_turn(message).await
     }
 
@@ -687,7 +752,7 @@ impl MobHandle {
         &self,
         meerkat_id: MeerkatId,
         message: meerkat_core::types::ContentInput,
-    ) -> Result<(), MobError> {
+    ) -> Result<SessionId, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::InternalTurn {
@@ -899,21 +964,22 @@ impl MobHandle {
     pub async fn member_status(
         &self,
         meerkat_id: &MeerkatId,
-    ) -> Result<MemberExecutionSnapshot, MobError> {
+    ) -> Result<MobMemberSnapshot, MobError> {
         let roster = self.roster.read().await;
         let entry = roster.get(meerkat_id);
         let Some(entry) = entry else {
-            return Ok(MemberExecutionSnapshot {
-                status: MemberExecutionStatus::Unknown,
+            return Ok(MobMemberSnapshot {
+                status: MobMemberStatus::Unknown,
                 output_preview: None,
                 error: None,
                 tokens_used: 0,
                 is_final: true,
+                current_session_id: None,
             });
         };
         let status = match entry.state {
-            crate::roster::MemberState::Active => MemberExecutionStatus::Active,
-            crate::roster::MemberState::Retiring => MemberExecutionStatus::Retiring,
+            crate::roster::MemberState::Active => MobMemberStatus::Active,
+            crate::roster::MemberState::Retiring => MobMemberStatus::Retiring,
         };
         let session_id = entry.member_ref.session_id().cloned();
         drop(roster);
@@ -935,31 +1001,29 @@ impl MobHandle {
         // A member is final when its session is no longer active. The roster
         // may still show Active (not yet retired), but the session completing
         // is the authoritative signal.
-        let effective_status = if !is_active && status == MemberExecutionStatus::Active {
-            MemberExecutionStatus::Completed
+        let effective_status = if !is_active && status == MobMemberStatus::Active {
+            MobMemberStatus::Completed
         } else {
             status
         };
         let is_final = !is_active;
-        Ok(MemberExecutionSnapshot {
+        Ok(MobMemberSnapshot {
             status: effective_status,
             output_preview,
             error: None,
             tokens_used,
             is_final,
+            current_session_id: session_id,
         })
     }
 
     /// Wait for a specific member to reach a terminal state, then return its snapshot.
     ///
     /// Polls the session state until the member is no longer active.
-    pub async fn wait_one(
-        &self,
-        meerkat_id: &MeerkatId,
-    ) -> Result<MemberExecutionSnapshot, MobError> {
+    pub async fn wait_one(&self, meerkat_id: &MeerkatId) -> Result<MobMemberSnapshot, MobError> {
         loop {
             let snapshot = self.member_status(meerkat_id).await?;
-            if snapshot.is_final || snapshot.status == MemberExecutionStatus::Unknown {
+            if snapshot.is_final || snapshot.status == MobMemberStatus::Unknown {
                 return Ok(snapshot);
             }
             // Check if session is still active
@@ -990,7 +1054,7 @@ impl MobHandle {
     pub async fn wait_all(
         &self,
         meerkat_ids: &[MeerkatId],
-    ) -> Result<Vec<MemberExecutionSnapshot>, MobError> {
+    ) -> Result<Vec<MobMemberSnapshot>, MobError> {
         let futs = meerkat_ids
             .iter()
             .map(|id| self.wait_one(id))
@@ -1000,7 +1064,7 @@ impl MobHandle {
     }
 
     /// Collect snapshots for all members that have reached terminal states.
-    pub async fn collect_completed(&self) -> Vec<(MeerkatId, MemberExecutionSnapshot)> {
+    pub async fn collect_completed(&self) -> Vec<(MeerkatId, MobMemberSnapshot)> {
         let entries = self.list_all_members().await;
         let mut completed = Vec::new();
         for entry in entries {
@@ -1101,7 +1165,7 @@ impl MemberHandle {
         &self,
         content: impl Into<meerkat_core::types::ContentInput>,
         handling_mode: HandlingMode,
-    ) -> Result<meerkat_core::types::SessionId, MobError> {
+    ) -> Result<MemberDeliveryReceipt, MobError> {
         self.send_with_render_metadata(content, handling_mode, None)
             .await
     }
@@ -1112,29 +1176,66 @@ impl MemberHandle {
         content: impl Into<meerkat_core::types::ContentInput>,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
-    ) -> Result<meerkat_core::types::SessionId, MobError> {
-        self.mob
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        let session_id = self
+            .mob
             .external_turn_for_member(
                 self.meerkat_id.clone(),
                 content.into(),
                 handling_mode,
                 render_metadata,
             )
-            .await
+            .await?;
+        Ok(MemberDeliveryReceipt {
+            member_id: self.meerkat_id.clone(),
+            session_id,
+            handling_mode,
+        })
     }
 
     /// Submit internal work to this member without external addressability checks.
     pub async fn internal_turn(
         &self,
         content: impl Into<meerkat_core::types::ContentInput>,
-    ) -> Result<(), MobError> {
-        self.mob
+    ) -> Result<MemberDeliveryReceipt, MobError> {
+        let session_id = self
+            .mob
             .internal_turn_for_member(self.meerkat_id.clone(), content.into())
-            .await
+            .await?;
+        Ok(MemberDeliveryReceipt {
+            member_id: self.meerkat_id.clone(),
+            session_id,
+            handling_mode: HandlingMode::Queue,
+        })
+    }
+
+    /// Current session ID for this member, if a session bridge exists.
+    pub async fn current_session_id(&self) -> Result<Option<SessionId>, MobError> {
+        let roster = self.mob.roster.read().await;
+        Ok(roster
+            .get(&self.meerkat_id)
+            .and_then(|e| e.member_ref.session_id().cloned()))
+    }
+
+    /// Session reference for this member, if a session bridge exists.
+    pub async fn session_ref(&self) -> Result<Option<MemberSessionRef>, MobError> {
+        let roster = self.mob.roster.read().await;
+        Ok(roster
+            .get(&self.meerkat_id)
+            .and_then(|e| e.member_ref.session_id().cloned())
+            .map(|session_id| MemberSessionRef {
+                member_id: self.meerkat_id.clone(),
+                session_id,
+            }))
+    }
+
+    /// Get a point-in-time execution snapshot for this member.
+    pub async fn status(&self) -> Result<MobMemberSnapshot, MobError> {
+        self.mob.member_status(&self.meerkat_id).await
     }
 
     /// Subscribe to this member's agent events.
-    pub async fn subscribe_events(&self) -> Result<EventStream, MobError> {
+    pub async fn events(&self) -> Result<EventStream, MobError> {
         self.mob.subscribe_agent_events(&self.meerkat_id).await
     }
 }

@@ -1961,7 +1961,7 @@ pub async fn mob_member_send(
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
-    let session_id = mob_state
+    let receipt = mob_state
         .mob_member_send(
             &id,
             mid,
@@ -1971,12 +1971,12 @@ pub async fn mob_member_send(
         )
         .await
         .map_err(err_mob)?;
-    Ok(session_id.to_string())
+    Ok(serde_json::json!(receipt).to_string())
 }
 
 /// Retire and re-spawn a meerkat with the same profile.
 ///
-/// Returns JSON: `{ "meerkat_id", "status": "respawn_enqueued" }`
+/// Returns JSON result envelope with receipt.
 #[wasm_bindgen]
 pub async fn mob_respawn(
     mob_id: &str,
@@ -1986,15 +1986,27 @@ pub async fn mob_respawn(
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
-    mob_state
-        .mob_respawn(&id, mid, initial_message)
-        .await
-        .map_err(err_mob)?;
-    let result = serde_json::json!({
-        "meerkat_id": meerkat_id,
-        "status": "respawn_enqueued",
-    });
-    Ok(JsValue::from_str(&result.to_string()))
+    match mob_state.mob_respawn(&id, mid, initial_message).await {
+        Ok(receipt) => {
+            let result = serde_json::json!({
+                "status": "completed",
+                "receipt": receipt,
+            });
+            Ok(JsValue::from_str(&result.to_string()))
+        }
+        Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
+            receipt,
+            failed_peer_ids,
+        }) => {
+            let result = serde_json::json!({
+                "status": "topology_restore_failed",
+                "receipt": receipt,
+                "failed_peer_ids": failed_peer_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            });
+            Ok(JsValue::from_str(&result.to_string()))
+        }
+        Err(e) => Err(JsValue::from_str(&e.to_string())),
+    }
 }
 
 /// Start a configured flow run.

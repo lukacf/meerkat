@@ -60,8 +60,6 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 variant("DestroyOrchestrator"),
                 // Phase C: force-cancel a member's in-flight turn
                 variant("ForceCancelMember"),
-                // Phase D: respawn a member with new session
-                variant("RespawnMember"),
             ],
         },
         effects: EnumSchema {
@@ -74,8 +72,6 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 variant("EmitOrchestratorNotice"),
                 // Phase C: member force-cancel initiated
                 variant("MemberForceCancelled"),
-                // Phase D: member respawn initiated
-                variant("MemberRespawnInitiated"),
             ],
         },
         helpers: vec![],
@@ -452,37 +448,6 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                     },
                 ],
             },
-            // Phase D: RespawnMember — same identity, new session
-            TransitionSchema {
-                name: "RespawnMember".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    variant: "RespawnMember".into(),
-                    bindings: vec![],
-                },
-                guards: vec![Guard {
-                    name: "coordinator_is_bound".into(),
-                    expr: Expr::Eq(
-                        Box::new(Expr::Field("coordinator_bound".into())),
-                        Box::new(Expr::Bool(true)),
-                    ),
-                }],
-                updates: vec![Update::Increment {
-                    field: "topology_revision".into(),
-                    amount: 1,
-                }],
-                to: "Running".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "MemberRespawnInitiated".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "EmitOrchestratorNotice".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
-            },
         ],
         effect_dispositions: vec![
             disposition(
@@ -512,12 +477,6 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
             disposition("EmitOrchestratorNotice", EffectDisposition::External),
             disposition(
                 "MemberForceCancelled",
-                EffectDisposition::Routed {
-                    consumer_machines: vec!["RuntimeControlMachine".into()],
-                },
-            ),
-            disposition(
-                "MemberRespawnInitiated",
                 EffectDisposition::Routed {
                     consumer_machines: vec!["RuntimeControlMachine".into()],
                 },

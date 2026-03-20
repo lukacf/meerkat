@@ -89,8 +89,9 @@ pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
 pub use handle::{
-    HelperOptions, HelperResult, MemberExecutionSnapshot, MemberExecutionStatus, MemberHandle,
-    MobEventsView, MobHandle, SpawnMemberSpec,
+    HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
+    MemberSessionRef, MobEventsView, MobHandle, MobMemberSnapshot, MobMemberStatus,
+    MobRespawnError, SpawnMemberSpec,
 };
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 pub use session_service::MobSessionService;

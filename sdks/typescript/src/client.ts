@@ -650,8 +650,8 @@ export class MeerkatClient {
     await this.request("mob/retire", { mob_id: mobId, meerkat_id: meerkatId });
   }
 
-  async respawnMobMember(mobId: string, meerkatId: string, initialMessage?: string): Promise<void> {
-    await this.request("mob/respawn", { mob_id: mobId, meerkat_id: meerkatId, initial_message: initialMessage });
+  async respawnMobMember(mobId: string, meerkatId: string, initialMessage?: string): Promise<Record<string, unknown>> {
+    return this.request("mob/respawn", { mob_id: mobId, meerkat_id: meerkatId, initial_message: initialMessage }) as Promise<Record<string, unknown>>;
   }
 
   async forceCancelMobMember(mobId: string, meerkatId: string): Promise<void> {

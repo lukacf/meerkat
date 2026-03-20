@@ -9,17 +9,15 @@
 //! the machine schema in `meerkat-machine-schema/src/catalog/mob_orchestrator.rs`:
 //!
 //! - 5 states: Creating, Running, Stopped, Completed, Destroyed
-//! - 12 inputs: InitializeOrchestrator, BindCoordinator, UnbindCoordinator,
+//! - 11 inputs: InitializeOrchestrator, BindCoordinator, UnbindCoordinator,
 //!   StageSpawn, CompleteSpawn, StartFlow, CompleteFlow, StopOrchestrator,
-//!   ResumeOrchestrator, MarkCompleted, DestroyOrchestrator, ForceCancelMember,
-//!   RespawnMember
+//!   ResumeOrchestrator, MarkCompleted, DestroyOrchestrator, ForceCancelMember
 //! - 5 fields: coordinator_bound (bool), pending_spawn_count (u32),
 //!   active_flow_count (u32), topology_revision (u32), supervisor_active (bool)
 //! - 1 invariant: destroyed_is_terminal
-//! - 14 transitions with guards
-//! - 7 effects: ActivateSupervisor, DeactivateSupervisor, FlowActivated,
-//!   FlowDeactivated, EmitOrchestratorNotice, MemberForceCancelled,
-//!   MemberRespawnInitiated
+//! - 13 transitions with guards
+//! - 6 effects: ActivateSupervisor, DeactivateSupervisor, FlowActivated,
+//!   FlowDeactivated, EmitOrchestratorNotice, MemberForceCancelled
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -50,7 +48,6 @@ pub(crate) enum MobOrchestratorInput {
     MarkCompleted,
     DestroyOrchestrator,
     ForceCancelMember,
-    RespawnMember,
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +67,6 @@ pub(crate) enum MobOrchestratorEffect {
     FlowDeactivated,
     EmitOrchestratorNotice,
     MemberForceCancelled,
-    MemberRespawnInitiated,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +219,8 @@ impl MobOrchestratorAuthority {
     ) -> Result<(MobState, MobOrchestratorFields, Vec<MobOrchestratorEffect>), MobError> {
         use MobOrchestratorInput::{
             BindCoordinator, CompleteFlow, CompleteSpawn, DestroyOrchestrator, ForceCancelMember,
-            InitializeOrchestrator, MarkCompleted, RespawnMember, ResumeOrchestrator, StageSpawn,
-            StartFlow, StopOrchestrator, UnbindCoordinator,
+            InitializeOrchestrator, MarkCompleted, ResumeOrchestrator, StageSpawn, StartFlow,
+            StopOrchestrator, UnbindCoordinator,
         };
         use MobState::{Completed, Creating, Destroyed, Running, Stopped};
 
@@ -435,22 +431,6 @@ impl MobOrchestratorAuthority {
                 Running
             }
 
-            // RespawnMember: Running -> Running
-            // Guards: coordinator_is_bound
-            // Updates: topology_revision += 1
-            // Emits: MemberRespawnInitiated, EmitOrchestratorNotice
-            (Running, RespawnMember) => {
-                if !fields.coordinator_bound {
-                    return Err(MobError::Internal(
-                        "guard failed: coordinator is not bound (respawn requires bound coordinator)".into(),
-                    ));
-                }
-                fields.topology_revision = fields.topology_revision.saturating_add(1);
-                effects.push(MobOrchestratorEffect::MemberRespawnInitiated);
-                effects.push(MobOrchestratorEffect::EmitOrchestratorNotice);
-                Running
-            }
-
             // All other combinations are illegal.
             _ => {
                 let target = match input {
@@ -461,8 +441,7 @@ impl MobOrchestratorAuthority {
                     | CompleteSpawn
                     | StartFlow
                     | CompleteFlow
-                    | ForceCancelMember
-                    | RespawnMember => Running,
+                    | ForceCancelMember => Running,
                     UnbindCoordinator | StopOrchestrator => Stopped,
                     MarkCompleted => Completed,
                     DestroyOrchestrator => Destroyed,
@@ -799,22 +778,6 @@ mod tests {
         assert!(
             t.effects
                 .contains(&MobOrchestratorEffect::MemberForceCancelled)
-        );
-    }
-
-    #[test]
-    fn respawn_member_increments_revision() {
-        let mut auth = make_running_authority();
-        auth.apply(MobOrchestratorInput::BindCoordinator)
-            .expect("bind");
-        let t = auth
-            .apply(MobOrchestratorInput::RespawnMember)
-            .expect("respawn");
-        assert_eq!(t.next_phase, MobState::Running);
-        assert_eq!(t.snapshot.topology_revision, 2);
-        assert!(
-            t.effects
-                .contains(&MobOrchestratorEffect::MemberRespawnInitiated)
         );
     }
 

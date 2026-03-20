@@ -81,7 +81,7 @@ Surface binaries:
 | `MemberLaunchMode` | Fresh / Resume / Fork (how to start a member) |
 | `ForkContext` | FullHistory (CoW) / LastMessages(n) (how much history to fork) |
 | `BudgetSplitPolicy` | Equal / Proportional / Remaining / Fixed(u64) |
-| `MemberExecutionSnapshot` | Status, output, error, timestamps, tokens, is_final, peer_metadata |
+| `MobMemberSnapshot` | Status, output, error, timestamps, tokens, is_final, peer_metadata |
 
 ### Multimodal types (defined in meerkat-core)
 

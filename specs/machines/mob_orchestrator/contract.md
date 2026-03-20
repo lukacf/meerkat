@@ -26,7 +26,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkCompleted`
 - `DestroyOrchestrator`
 - `ForceCancelMember`
-- `RespawnMember`
 
 ## Effects
 - `ActivateSupervisor`
@@ -35,7 +34,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FlowDeactivated`
 - `EmitOrchestratorNotice`
 - `MemberForceCancelled`
-- `MemberRespawnInitiated`
 
 ## Invariants
 - `destroyed_is_terminal`
@@ -136,14 +134,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `coordinator_is_bound`
 - Emits: `MemberForceCancelled`, `EmitOrchestratorNotice`
-- To: `Running`
-
-### `RespawnMember`
-- From: `Running`
-- On: `RespawnMember`()
-- Guards:
-  - `coordinator_is_bound`
-- Emits: `MemberRespawnInitiated`, `EmitOrchestratorNotice`
 - To: `Running`
 
 ## Coverage

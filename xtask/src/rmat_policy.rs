@@ -217,9 +217,6 @@ fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) 
         ("MobOrchestratorMachine", "MemberForceCancelled", "RuntimeControlMachine") => {
             "CancelRequested".to_string()
         }
-        ("MobOrchestratorMachine", "MemberRespawnInitiated", "RuntimeControlMachine") => {
-            "RecycleRequested".to_string()
-        }
         ("PeerCommsMachine", "SubmitPeerInputCandidate", "RuntimeControlMachine") => {
             "SubmitIngressEffect".to_string()
         }

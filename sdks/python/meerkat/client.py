@@ -693,8 +693,8 @@ class MeerkatClient:
     async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
-    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | None = None) -> None:
-        await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
+    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | None = None) -> dict:
+        return await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
 
     async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})

@@ -1051,7 +1051,10 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         120,
     )
     .await?;
-    assert_eq!(sent_after_respawn["sent"], true);
+    assert!(
+        sent_after_respawn["session_id"].is_string(),
+        "mob/send should return delivery receipt"
+    );
 
     let read_after_respawn = rpc_call(
         &mut surface,

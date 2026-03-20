@@ -86,9 +86,6 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `mob_escalate_supervisor_stops_orchestrator`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-child-report-back`
-- `mob_member_respawn_destroys_runtime`
-  - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
-  - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`
 - `mob_cleanup_destroys_orchestrator`
   - anchors: `mob_runtime_actor`, `mob_member_handle`, `flow_runtime`, `peer_runtime`, `wasm_example_031`, `wasm_example_032`, `wasm_example_033`
   - scenarios: `mob-peer-orchestration`, `wasm-mob-examples`

@@ -582,6 +582,8 @@ impl MobBuilder {
                                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
                                 host_mode: false,
+                                host_mode_owner:
+                                    meerkat_core::service::HostModeOwner::SessionService,
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,

@@ -184,6 +184,11 @@ impl SessionBackend {
                     .unwrap_or(meerkat_core::types::HandlingMode::Queue),
                 event_tx,
                 host_mode: meta.as_ref().and_then(|m| m.host_mode).unwrap_or(false),
+                host_mode_owner: if meta.as_ref().and_then(|m| m.host_mode).unwrap_or(false) {
+                    meerkat_core::service::HostModeOwner::ExternalRuntime
+                } else {
+                    meerkat_core::service::HostModeOwner::SessionService
+                },
                 skill_references: meta.as_ref().and_then(|m| m.skill_references.clone()),
                 flow_tool_overlay: meta.as_ref().and_then(|m| m.flow_tool_overlay.clone()),
                 additional_instructions: meta
@@ -315,6 +320,15 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.host_mode)
                     .unwrap_or(false),
+                host_mode_owner: if primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.host_mode)
+                    .unwrap_or(false)
+                {
+                    meerkat_core::service::HostModeOwner::ExternalRuntime
+                } else {
+                    meerkat_core::service::HostModeOwner::SessionService
+                },
                 skill_references: primitive
                     .turn_metadata()
                     .and_then(|meta| meta.skill_references.clone()),

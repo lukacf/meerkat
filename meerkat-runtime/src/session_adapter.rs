@@ -68,15 +68,6 @@ impl DriverEntry {
         }
     }
 
-    /// Check if the runtime is specifically in the Idle state (no executor attached).
-    #[allow(dead_code)]
-    pub(crate) fn is_idle(&self) -> bool {
-        match self {
-            DriverEntry::Ephemeral(d) => d.is_idle(),
-            DriverEntry::Persistent(d) => d.is_idle(),
-        }
-    }
-
     /// Check if the runtime is idle or attached (quiescent with or without executor).
     pub(crate) fn is_idle_or_attached(&self) -> bool {
         match self {
@@ -151,27 +142,10 @@ impl DriverEntry {
         }
     }
 
-    /// Look up the persisted input for a given ID.
-    #[allow(dead_code)]
-    pub(crate) fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.persisted_input(input_id),
-            DriverEntry::Persistent(d) => d.persisted_input(input_id),
-        }
-    }
     pub(crate) fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
         match self {
             DriverEntry::Ephemeral(d) => d.has_queued_input_outside(excluded),
             DriverEntry::Persistent(d) => d.has_queued_input_outside(excluded),
-        }
-    }
-
-    /// Requeue an input at the front of the queue.
-    #[allow(dead_code)]
-    pub(crate) fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {
-        match self {
-            DriverEntry::Ephemeral(d) => d.enqueue_front_input(input_id, input),
-            DriverEntry::Persistent(d) => d.enqueue_front_input(input_id, input),
         }
     }
 
@@ -203,34 +177,7 @@ impl DriverEntry {
         }
     }
 
-    /// Apply an input after successful immediate execution.
-    #[allow(dead_code)]
-    pub(crate) fn apply_input(
-        &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.apply_input(input_id, run_id),
-            DriverEntry::Persistent(d) => d.apply_input(input_id, run_id),
-        }
-    }
-
-    /// Consume an input after successful immediate execution.
-    #[allow(dead_code)]
-    pub(crate) fn consume_inputs(
-        &mut self,
-        input_ids: &[InputId],
-        run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.consume_inputs(input_ids, run_id),
-            DriverEntry::Persistent(d) => d.consume_inputs(input_ids, run_id),
-        }
-    }
-
-    /// Roll back staged inputs after failed immediate execution.
-    #[allow(dead_code)]
+    /// Roll back staged inputs after a failed staging attempt.
     pub(crate) fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
@@ -794,18 +741,6 @@ impl RuntimeSessionAdapter {
         }
 
         Ok((outcome, handle))
-    }
-
-    /// Get the shared completion registry for a session.
-    ///
-    /// Used by the runtime loop to resolve waiters on input consumption.
-    #[allow(dead_code)]
-    pub(crate) async fn completion_registry(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<SharedCompletionRegistry> {
-        let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|e| e.completions.clone())
     }
 
     /// Get the shared ops lifecycle registry for a session/runtime instance.

@@ -31,14 +31,16 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
-    PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
-    SessionServiceHistoryExt, encode_llm_client_override_for_service, open_realm_persistence_in,
+    PersistentSessionService, Session, SessionId, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, encode_llm_client_override_for_service,
+    open_realm_persistence_in,
 };
 use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::service::HostModeOwner;
 use meerkat_core::service::{
     AppendSystemContextRequest as SvcAppendSystemContextRequest,
     CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
@@ -442,6 +444,7 @@ async fn apply_runtime_turn(
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(event_tx.clone()),
         host_mode,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: primitive
             .turn_metadata()
             .and_then(|meta| meta.skill_references.clone()),
@@ -556,6 +559,7 @@ async fn apply_runtime_turn(
                 ),
                 event_tx: None,
                 host_mode: stored_metadata.as_ref().is_some_and(|meta| meta.host_mode),
+                host_mode_owner: HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: Some(build),
@@ -577,6 +581,7 @@ async fn apply_runtime_turn(
                             .turn_metadata()
                             .and_then(|meta| meta.host_mode)
                             .unwrap_or(false),
+                        host_mode_owner: HostModeOwner::ExternalRuntime,
                         skill_references: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.skill_references.clone()),
@@ -2109,6 +2114,7 @@ async fn create_session(
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: skill_references.clone(),
         initial_turn: InitialTurnPolicy::Defer,
         build: Some(build),
@@ -2143,6 +2149,8 @@ async fn create_session(
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
+        let control = state.session_service.comms_drain_control(&session_id).await;
+        adapter.set_comms_drain_control(&session_id, control).await;
         adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
             .await;
@@ -2465,6 +2473,7 @@ async fn continue_session(
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(caller_event_tx.clone()),
         host_mode,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: skill_references.clone(),
         flow_tool_overlay: req.flow_tool_overlay.clone(),
         additional_instructions: req.additional_instructions.clone(),
@@ -2483,6 +2492,8 @@ async fn continue_session(
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
+        let control = state.session_service.comms_drain_control(&session_id).await;
+        adapter.set_comms_drain_control(&session_id, control).await;
         adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
             .await;
@@ -3239,6 +3250,7 @@ mod tests {
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 host_mode: false,
+                host_mode_owner: HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: Some(SessionBuildOptions {
@@ -3311,6 +3323,7 @@ mod tests {
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 host_mode: false,
+                host_mode_owner: HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: Some(SessionBuildOptions {
@@ -3379,6 +3392,7 @@ mod tests {
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 host_mode: false,
+                host_mode_owner: HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: Some(SessionBuildOptions {
@@ -3433,6 +3447,7 @@ mod tests {
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
                 host_mode: false,
+                host_mode_owner: HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 build: Some(SessionBuildOptions {
@@ -3457,6 +3472,7 @@ mod tests {
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
+                    host_mode_owner: HostModeOwner::ExternalRuntime,
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

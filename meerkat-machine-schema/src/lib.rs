@@ -5,7 +5,7 @@ mod machine;
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_schemas, comms_drain_lifecycle_machine,
     external_tool_bundle_composition, external_tool_surface_machine, flow_run_machine,
     input_lifecycle_machine, mob_bundle_composition, mob_lifecycle_machine,
     mob_orchestrator_machine, ops_lifecycle_machine, ops_peer_bundle_composition,

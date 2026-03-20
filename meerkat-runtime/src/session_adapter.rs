@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
@@ -20,6 +21,10 @@ use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 
 use crate::accept::AcceptOutcome;
+use crate::comms_drain_lifecycle_authority::{
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleInput,
+    CommsDrainLifecycleMutator, CommsDrainMode,
+};
 use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
@@ -218,6 +223,26 @@ struct RuntimeSessionEntry {
     _loop_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Per-session comms drain slot, driven by `CommsDrainLifecycleAuthority`.
+///
+/// ALL state transitions go through the authority -- no manual
+/// `handle.is_finished()` checks in shell code.
+struct CommsDrainSlot {
+    authority: CommsDrainLifecycleAuthority,
+    handle: Option<tokio::task::JoinHandle<()>>,
+    control: Option<Arc<AtomicBool>>,
+}
+
+impl CommsDrainSlot {
+    fn new() -> Self {
+        Self {
+            authority: CommsDrainLifecycleAuthority::new(),
+            handle: None,
+            control: None,
+        }
+    }
+}
+
 /// Wraps a SessionService to provide v9 runtime capabilities.
 ///
 /// Maintains a per-session RuntimeDriver registry. When sessions are registered
@@ -231,18 +256,30 @@ pub struct RuntimeSessionAdapter {
     mode: RuntimeMode,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
-    /// Active comms drain task handles, keyed by session.
-    comms_drain_handles: RwLock<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
+    /// Per-session comms drain lifecycle, driven by machine authority.
+    comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
 }
 
 impl RuntimeSessionAdapter {
+    pub async fn set_comms_drain_control(
+        &self,
+        session_id: &SessionId,
+        control: Option<Arc<AtomicBool>>,
+    ) {
+        let mut slots = self.comms_drain_slots.write().await;
+        let slot = slots
+            .entry(session_id.clone())
+            .or_insert_with(CommsDrainSlot::new);
+        slot.control = control;
+    }
+
     /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
     pub fn ephemeral() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: None,
-            comms_drain_handles: RwLock::new(HashMap::new()),
+            comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
 
@@ -252,7 +289,7 @@ impl RuntimeSessionAdapter {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
-            comms_drain_handles: RwLock::new(HashMap::new()),
+            comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
 
@@ -756,58 +793,193 @@ impl RuntimeSessionAdapter {
 
     /// Spawn a comms drain for a host-mode session if one is not already running.
     ///
-    /// Returns `true` if a new drain was spawned.
+    /// Returns `true` if a new drain was spawned. All state transitions go
+    /// through `CommsDrainLifecycleAuthority` -- no manual `handle.is_finished()`
+    /// checks.
     pub async fn maybe_spawn_comms_drain(
         self: &Arc<Self>,
         session_id: &SessionId,
         host_mode: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
-        if !host_mode {
-            return false;
-        }
+        let mode = if host_mode {
+            CommsDrainMode::PersistentHost
+        } else {
+            CommsDrainMode::Timed
+        };
+
+        let comms = match comms_runtime {
+            Some(c) => c,
+            None => return false,
+        };
+
+        let mut slots = self.comms_drain_slots.write().await;
+        let slot = slots
+            .entry(session_id.clone())
+            .or_insert_with(CommsDrainSlot::new);
+
+        let transition = match slot
+            .authority
+            .apply(CommsDrainLifecycleInput::EnsureRunning { mode })
         {
-            let mut handles = self.comms_drain_handles.write().await;
-            if let Some(handle) = handles.get(session_id) {
-                if !handle.is_finished() {
-                    // Drain is still running — don't spawn a duplicate.
-                    return false;
+            Ok(t) => t,
+            Err(e) => {
+                tracing::trace!(error = %e, "comms drain authority rejected EnsureRunning");
+                return false;
+            }
+        };
+
+        // Execute effects from the transition
+        for effect in &transition.effects {
+            match effect {
+                CommsDrainLifecycleEffect::SpawnDrainTask { mode: spawn_mode } => {
+                    let idle_timeout = match spawn_mode {
+                        CommsDrainMode::PersistentHost => Some(std::time::Duration::MAX),
+                        CommsDrainMode::Timed => None,
+                    };
+                    let handle = crate::comms_drain::spawn_comms_drain(
+                        Arc::clone(self),
+                        session_id.clone(),
+                        comms.clone(),
+                        idle_timeout,
+                    );
+                    // Immediately confirm the task was spawned
+                    let _ = slot.authority.apply(CommsDrainLifecycleInput::TaskSpawned);
+                    slot.handle = Some(handle);
                 }
-                // Previous drain exited (idle timeout, DISMISS, etc.) — remove
-                // the stale handle so we can respawn below.
-                handles.remove(session_id);
+                CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
+                    if let Some(control) = &slot.control {
+                        control.store(
+                            slot.authority.suppresses_turn_boundary_drain(),
+                            Ordering::Release,
+                        );
+                    }
+                }
+                CommsDrainLifecycleEffect::AbortDrainTask => {
+                    if let Some(handle) = slot.handle.take() {
+                        handle.abort();
+                    }
+                }
             }
         }
-        if let Some(comms) = comms_runtime {
-            // Host-mode drains are long-lived — no idle timeout. They run
-            // until DISMISS, budget exhaustion, or explicit abort.
-            let handle = crate::comms_drain::spawn_comms_drain(
-                Arc::clone(self),
-                session_id.clone(),
-                comms,
-                Some(std::time::Duration::MAX),
-            );
-            let mut handles = self.comms_drain_handles.write().await;
-            handles.insert(session_id.clone(), handle);
-            true
-        } else {
-            false
+        true
+    }
+
+    /// Check whether a background comms drain is suppressing turn-boundary
+    /// drain for the given session.
+    pub async fn comms_drain_suppresses_turn_boundary(&self, session_id: &SessionId) -> bool {
+        let slots = self.comms_drain_slots.read().await;
+        slots
+            .get(session_id)
+            .map(|slot| slot.authority.suppresses_turn_boundary_drain())
+            .unwrap_or(false)
+    }
+
+    /// Notify the authority that a drain task has exited with the given reason.
+    ///
+    /// Called from drain task exit paths (or by wrappers that detect task
+    /// completion). The authority decides whether to enter ExitedRespawnable
+    /// (PersistentHost + Failed) or Stopped.
+    pub async fn notify_comms_drain_exited(
+        &self,
+        session_id: &SessionId,
+        reason: crate::comms_drain_lifecycle_authority::DrainExitReason,
+    ) {
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id) {
+            slot.handle.take(); // clean up finished handle
+            match slot
+                .authority
+                .apply(CommsDrainLifecycleInput::TaskExited { reason })
+            {
+                Ok(transition) => {
+                    for effect in &transition.effects {
+                        if matches!(
+                            effect,
+                            CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. }
+                        ) && let Some(control) = &slot.control
+                        {
+                            control.store(
+                                slot.authority.suppresses_turn_boundary_drain(),
+                                Ordering::Release,
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
+                }
+            }
         }
     }
 
     /// Abort all active comms drain tasks.
     pub async fn abort_comms_drains(&self) {
-        let mut handles = self.comms_drain_handles.write().await;
-        for (_, handle) in handles.drain() {
-            handle.abort();
+        let mut slots = self.comms_drain_slots.write().await;
+        for (_, slot) in slots.iter_mut() {
+            if let Ok(transition) = slot
+                .authority
+                .apply(CommsDrainLifecycleInput::StopRequested)
+            {
+                for effect in &transition.effects {
+                    match effect {
+                        CommsDrainLifecycleEffect::AbortDrainTask => {
+                            if let Some(handle) = slot.handle.take() {
+                                handle.abort();
+                            }
+                        }
+                        CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
+                            if let Some(control) = &slot.control {
+                                control.store(
+                                    slot.authority.suppresses_turn_boundary_drain(),
+                                    Ordering::Release,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                // Already stopped or inactive -- just clean up the handle
+                if let Some(handle) = slot.handle.take() {
+                    handle.abort();
+                }
+            }
         }
     }
 
     /// Abort the comms drain task for a specific session.
     pub async fn abort_comms_drain(&self, session_id: &SessionId) {
-        let mut handles = self.comms_drain_handles.write().await;
-        if let Some(handle) = handles.remove(session_id) {
-            handle.abort();
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id) {
+            if let Ok(transition) = slot
+                .authority
+                .apply(CommsDrainLifecycleInput::StopRequested)
+            {
+                for effect in &transition.effects {
+                    match effect {
+                        CommsDrainLifecycleEffect::AbortDrainTask => {
+                            if let Some(handle) = slot.handle.take() {
+                                handle.abort();
+                            }
+                        }
+                        CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
+                            if let Some(control) = &slot.control {
+                                control.store(
+                                    slot.authority.suppresses_turn_boundary_drain(),
+                                    Ordering::Release,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                // Already stopped or inactive -- just clean up the handle
+                if let Some(handle) = slot.handle.take() {
+                    handle.abort();
+                }
+            }
         }
     }
 
@@ -816,8 +988,10 @@ impl RuntimeSessionAdapter {
     /// Returns immediately if no drain is active for the session.
     pub async fn wait_comms_drain(&self, session_id: &SessionId) {
         let handle = {
-            let mut handles = self.comms_drain_handles.write().await;
-            handles.remove(session_id)
+            let mut slots = self.comms_drain_slots.write().await;
+            slots
+                .get_mut(session_id)
+                .and_then(|slot| slot.handle.take())
         };
         if let Some(handle) = handle {
             let _ = handle.await;

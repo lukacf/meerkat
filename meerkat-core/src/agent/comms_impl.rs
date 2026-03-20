@@ -83,7 +83,10 @@ where
     pub(super) async fn drain_comms_inbox(&mut self) -> bool {
         // When a dedicated comms drain task is active, suppress turn-boundary
         // draining so the session service is the sole inbox consumer.
-        if self.comms_drain_active {
+        if self
+            .comms_drain_active
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return false;
         }
 

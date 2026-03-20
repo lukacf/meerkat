@@ -251,6 +251,8 @@ impl MobActor {
                                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
                                 host_mode: false,
+                                host_mode_owner:
+                                    meerkat_core::service::HostModeOwner::SessionService,
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,
@@ -412,11 +414,18 @@ impl MobActor {
         let runtime_adapter = self.session_service.runtime_adapter();
         let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
         let drain_session_id = member_ref.session_id().cloned();
+        let drain_control = match &drain_session_id {
+            Some(session_id) => self.session_service.comms_drain_control(session_id).await,
+            None => None,
+        };
 
         let handle = tokio::spawn(async move {
             // Spawn comms drain alongside the host loop when all wiring is available.
             let drain_spawned = match (&runtime_adapter, &drain_session_id) {
                 (Some(adapter), Some(session_id)) => {
+                    adapter
+                        .set_comms_drain_control(session_id, drain_control.clone())
+                        .await;
                     let spawned = adapter
                         .maybe_spawn_comms_drain(session_id, true, comms_runtime.clone())
                         .await;
@@ -449,6 +458,7 @@ impl MobActor {
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: None,
                         host_mode: true,
+                        host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                         skill_references: None,
                         flow_tool_overlay: None,
                         additional_instructions: None,
@@ -2459,25 +2469,23 @@ impl MobActor {
                 tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed during reset");
             }
         }
-        if prior_state == MobState::Completed {
-            if let Err(error) = self
-                .lifecycle_authority
-                .apply(MobLifecycleInput::BeginCleanup)
-            {
-                tracing::warn!(
-                    error = %error,
-                    "authority rejected BeginCleanup while preparing completed-state reset"
-                );
-            }
-            if let Err(error) = self
-                .lifecycle_authority
-                .apply(MobLifecycleInput::FinishCleanup)
-            {
-                tracing::warn!(
-                    error = %error,
-                    "authority rejected FinishCleanup while preparing completed-state reset"
-                );
-            }
+        if let Err(error) = self
+            .lifecycle_authority
+            .apply(MobLifecycleInput::BeginCleanup)
+        {
+            tracing::trace!(
+                error = %error,
+                "authority rejected BeginCleanup during reset"
+            );
+        }
+        if let Err(error) = self
+            .lifecycle_authority
+            .apply(MobLifecycleInput::FinishCleanup)
+        {
+            tracing::trace!(
+                error = %error,
+                "authority rejected FinishCleanup during reset"
+            );
         }
         if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Resume) {
             tracing::warn!(error = %e, "authority rejected Resume during reset");
@@ -2748,6 +2756,7 @@ impl MobActor {
                     handling_mode,
                     event_tx: None,
                     host_mode: false,
+                    host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

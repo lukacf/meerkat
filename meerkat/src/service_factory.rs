@@ -153,12 +153,24 @@ impl SessionAgent for FactoryAgent {
         self.agent.comms_arc()?.interaction_event_injector()
     }
 
-    fn seal_comms_drain_active(&mut self) {
-        self.agent.seal_comms_drain_active();
+    fn set_comms_drain_active(&mut self, active: bool) {
+        self.agent.set_comms_drain_active(active);
+    }
+
+    async fn poll_host_mode(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<meerkat_core::HostModePollOutcome, meerkat_core::error::AgentError> {
+        self.agent.poll_host_mode_with_events(event_tx).await
     }
 
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.agent.comms_arc()
+    }
+
+    fn comms_drain_control(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        self.agent.comms_arc()?;
+        Some(self.agent.comms_drain_control())
     }
 }
 
@@ -426,6 +438,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -463,6 +476,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: None,

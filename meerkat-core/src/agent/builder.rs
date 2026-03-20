@@ -254,13 +254,12 @@ impl AgentBuilder {
             system_context_state,
             default_event_tx: self.default_event_tx,
             ops_lifecycle: self.ops_lifecycle,
-            pending_ops: Vec::new(),
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
             extraction_mode: false,
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,
-            comms_drain_active: false,
+            comms_drain_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         if let Some(raw_filter) = agent

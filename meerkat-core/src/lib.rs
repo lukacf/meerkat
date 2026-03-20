@@ -18,6 +18,7 @@ pub mod agent;
 pub mod budget;
 pub mod checkpoint;
 pub mod comms;
+pub mod comms_drain_lifecycle_authority;
 pub mod compact;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,7 +60,7 @@ pub mod wait_interrupt;
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
-    LlmStreamResult,
+    HostModePollOutcome, LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
@@ -67,6 +68,11 @@ pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
     StreamScope,
+};
+pub use comms_drain_lifecycle_authority::{
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
+    CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainLifecycleTransition,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason,
 };
 pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
@@ -138,7 +144,7 @@ pub use schema::{
 };
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, SessionBuildOptions, SessionControlError, SessionError,
+    CreateSessionRequest, HostModeOwner, SessionBuildOptions, SessionControlError, SessionError,
     SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
     SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,

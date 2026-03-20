@@ -6,14 +6,14 @@
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::{
-    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService, ToolError,
-    ToolResult,
+    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService,
+    SessionServiceCommsExt, ToolError, ToolResult,
 };
 use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
-    SessionServiceHistoryExt, StartTurnRequest,
+    CreateSessionRequest, HostModeOwner, InitialTurnPolicy, SessionBuildOptions, SessionError,
+    SessionService, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
@@ -2268,6 +2268,7 @@ async fn handle_meerkat_run(
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
         host_mode,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
@@ -2290,6 +2291,11 @@ async fn handle_meerkat_run(
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
+        let control = state.service.comms_drain_control(&session_id).await;
+        state
+            .runtime_adapter
+            .set_comms_drain_control(&session_id, control)
+            .await;
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
@@ -2481,6 +2487,7 @@ async fn handle_meerkat_resume(
             max_tokens,
             event_tx: event_tx.clone(),
             host_mode,
+            host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -2496,6 +2503,7 @@ async fn handle_meerkat_resume(
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: event_tx.clone(),
             host_mode,
+            host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
             additional_instructions: input.additional_instructions.clone(),
@@ -2511,6 +2519,7 @@ async fn handle_meerkat_resume(
                     max_tokens,
                     event_tx: event_tx.clone(),
                     host_mode,
+                    host_mode_owner: HostModeOwner::ExternalRuntime,
                     skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
                     build: Some(build),
@@ -2538,6 +2547,11 @@ async fn handle_meerkat_resume(
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
+        let control = state.service.comms_drain_control(&session_id).await;
+        state
+            .runtime_adapter
+            .set_comms_drain_control(&session_id, control)
+            .await;
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)

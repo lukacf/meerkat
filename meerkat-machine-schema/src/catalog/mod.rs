@@ -1,3 +1,4 @@
+mod comms_drain_lifecycle;
 mod compositions;
 mod coverage;
 mod external_tool_surface;
@@ -13,6 +14,7 @@ mod turn_execution;
 
 use crate::{CompositionSchema, MachineSchema};
 
+pub use comms_drain_lifecycle::comms_drain_lifecycle_machine;
 pub use compositions::{
     continuation_runtime_bundle_composition, external_tool_bundle_composition,
     mob_bundle_composition, ops_peer_bundle_composition, ops_runtime_bundle_composition,
@@ -47,6 +49,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         mob_lifecycle_machine(),
         flow_run_machine(),
         mob_orchestrator_machine(),
+        comms_drain_lifecycle_machine(),
     ]
 }
 

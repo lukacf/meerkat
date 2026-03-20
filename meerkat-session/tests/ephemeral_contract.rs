@@ -9,9 +9,9 @@ use futures::StreamExt;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, InitialTurnPolicy,
-    SessionError, SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
-    SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, HostModeOwner,
+    InitialTurnPolicy, SessionError, SessionHistoryQuery, SessionQuery, SessionService,
+    SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef,
@@ -506,6 +506,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         max_tokens: None,
         event_tx: None,
         host_mode: false,
+        host_mode_owner: HostModeOwner::SessionService,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -527,6 +528,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         handling_mode: HandlingMode::Queue,
         event_tx: None,
         host_mode: false,
+        host_mode_owner: HostModeOwner::SessionService,
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,

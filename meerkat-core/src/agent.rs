@@ -35,9 +35,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub use builder::AgentBuilder;
-pub use runner::AgentRunner;
+pub use runner::{AgentRunner, HostModePollOutcome};
 
 /// Special error prefix to signal tool calls that must be routed externally.
 ///
@@ -516,11 +517,9 @@ where
     pub(crate) peer_notification_suppression_active: bool,
     /// Optional shared lifecycle registry for async operations.
     ///
-    /// When set, the WaitingForOps state awaits pending operations
-    /// registered in this registry before transitioning to DrainingEvents.
+    /// When set, the agent loop waits on the exact turn-local operation IDs
+    /// registered in `turn_authority.pending_op_ids()`.
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
-    /// Operation IDs to wait on in WaitingForOps state.
-    pub(crate) pending_ops: Vec<crate::ops::OperationId>,
     /// Machine authority for turn-execution state transitions (RMAT).
     pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
     /// True after the agentic loop completes when `output_schema` is set.
@@ -533,16 +532,13 @@ where
     pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
     /// Last validation error (for retry prompt).
     pub(crate) extraction_last_error: Option<String>,
-    /// Session-level infrastructure delegation flag (one-way latch): once
-    /// sealed to `true` via [`seal_comms_drain_active`], the turn-boundary
-    /// `drain_comms_inbox()` is permanently suppressed for this agent
-    /// instance because a dedicated comms drain task (owned by the
-    /// session/host-mode surface) is the sole inbox consumer.
+    /// Session-level infrastructure delegation flag.
     ///
-    /// **Ownership:** Sealed once by the surface that starts the drain
-    /// task. Cannot be reverted. This is explicit infrastructure
-    /// delegation, not an authority bypass.
-    pub(crate) comms_drain_active: bool,
+    /// When `true`, turn-boundary `drain_comms_inbox()` is suppressed because
+    /// an external or session-owned host-mode drain owns inbox consumption.
+    /// Shared so service/runtime shells can realize the canonical drain
+    /// lifecycle without mutating the `Agent` directly.
+    pub(crate) comms_drain_active: Arc<AtomicBool>,
 }
 
 #[cfg(test)]

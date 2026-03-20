@@ -12,8 +12,8 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
-    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, HostModeOwner, SessionBuildOptions, SessionError, SessionQuery,
+    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
@@ -2324,6 +2324,15 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 .turn_metadata()
                 .and_then(|meta| meta.host_mode)
                 .unwrap_or(false),
+            host_mode_owner: if primitive
+                .turn_metadata()
+                .and_then(|meta| meta.host_mode)
+                .unwrap_or(false)
+            {
+                HostModeOwner::ExternalRuntime
+            } else {
+                HostModeOwner::SessionService
+            },
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),
@@ -3139,6 +3148,7 @@ async fn run_agent(
         max_tokens: Some(max_tokens),
         event_tx: event_tx.clone(),
         host_mode,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: if run_initial_turn_during_create {
             canonical_skill_refs.clone()
         } else {
@@ -3223,6 +3233,10 @@ async fn run_agent(
     #[cfg(feature = "comms")]
     {
         let comms_rt = service.comms_runtime(&session_id).await;
+        let control = service.comms_drain_control(&session_id).await;
+        runtime_adapter
+            .set_comms_drain_control(&session_id, control)
+            .await;
         runtime_adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
             .await;
@@ -3667,6 +3681,7 @@ async fn resume_session_with_llm_override(
             max_tokens: Some(max_tokens),
             event_tx: event_tx.clone(),
             host_mode,
+            host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references: if run_initial_turn_during_create {
                 canonical_skill_refs.clone()
             } else {
@@ -3719,6 +3734,10 @@ async fn resume_session_with_llm_override(
     #[cfg(feature = "comms")]
     {
         let comms_rt = service.comms_runtime(&session_id).await;
+        let control = service.comms_drain_control(&session_id).await;
+        resume_adapter
+            .set_comms_drain_control(&session_id, control)
+            .await;
         resume_adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
             .await;
@@ -8570,6 +8589,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             max_tokens: Some(32),
             event_tx: None,
             host_mode: false,
+            host_mode_owner: HostModeOwner::SessionService,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),

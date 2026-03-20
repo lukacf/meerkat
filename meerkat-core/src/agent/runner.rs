@@ -17,6 +17,7 @@ use crate::types::{ContentInput, Message, RunResult};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
@@ -32,6 +33,17 @@ pub trait AgentRunner: Send {
         prompt: ContentInput,
         tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError>;
+}
+
+/// Outcome of a host-mode poll cycle.
+#[derive(Debug)]
+pub enum HostModePollOutcome {
+    /// No comms work was available.
+    Idle,
+    /// A pending comms message was drained and processed into a turn.
+    Ran(RunResult),
+    /// Peer DISMISS was observed; the host-mode drain should stop.
+    Dismissed,
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -133,17 +145,48 @@ where
         self.depth
     }
 
-    /// Seal the comms drain as active — one-way latch.
-    ///
-    /// Once called, the agent's turn-boundary `drain_comms_inbox()` is
-    /// permanently suppressed for this agent instance. The dedicated
-    /// drain task (owned by the session/host-mode surface) becomes the
-    /// sole inbox consumer.
-    ///
-    /// **Ownership:** Only the surface that starts the drain task should
-    /// call this. Cannot be reverted — construct a new agent instead.
+    /// Set whether a separate host-mode drain owns comms inbox consumption.
+    pub fn set_comms_drain_active(&mut self, active: bool) {
+        self.comms_drain_active.store(active, Ordering::Release);
+    }
+
+    /// Backward-compatible helper for older call sites that only ever sealed.
     pub fn seal_comms_drain_active(&mut self) {
-        self.comms_drain_active = true;
+        self.set_comms_drain_active(true);
+    }
+
+    /// Shared comms-drain control flag used by host-mode owners.
+    pub fn comms_drain_control(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.comms_drain_active)
+    }
+
+    /// Poll a host-mode cycle using the existing comms inbox as the next turn source.
+    pub async fn poll_host_mode_with_events(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<HostModePollOutcome, AgentError> {
+        if self
+            .comms_arc()
+            .is_some_and(|comms| comms.dismiss_received())
+        {
+            return Ok(HostModePollOutcome::Dismissed);
+        }
+
+        let drained = self.drain_comms_inbox().await;
+        if !drained {
+            return if self
+                .comms_arc()
+                .is_some_and(|comms| comms.dismiss_received())
+            {
+                Ok(HostModePollOutcome::Dismissed)
+            } else {
+                Ok(HostModePollOutcome::Idle)
+            };
+        }
+
+        self.run_pending_with_events(event_tx)
+            .await
+            .map(HostModePollOutcome::Ran)
     }
 
     /// Get the event tap for interaction-scoped streaming.

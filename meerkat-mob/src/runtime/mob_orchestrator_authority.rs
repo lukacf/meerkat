@@ -36,6 +36,7 @@ use crate::runtime::MobState;
 /// Shell code classifies raw commands into these typed inputs, then calls
 /// [`MobOrchestratorAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // All variants are part of the machine schema; some not yet used by shell code.
 pub(crate) enum MobOrchestratorInput {
     InitializeOrchestrator,
     BindCoordinator,
@@ -78,6 +79,7 @@ pub(crate) enum MobOrchestratorEffect {
 
 /// Successful transition outcome from the MobOrchestrator authority.
 #[derive(Debug)]
+#[allow(dead_code)] // Fields are part of the authority contract; inspected by tests and future shell code.
 pub(crate) struct MobOrchestratorTransition {
     /// The phase after the transition.
     pub next_phase: MobState,
@@ -197,16 +199,19 @@ impl MobOrchestratorAuthority {
     }
 
     /// Current phase (read from canonical state).
+    #[allow(dead_code)] // Part of the authority contract; used by future shell code.
     pub(crate) fn phase(&self) -> MobState {
         self.phase
     }
 
     /// Current snapshot of all fields.
+    #[allow(dead_code)] // Used by test-only FlowTrackerCounts handler + future shell code.
     pub(crate) fn snapshot(&self) -> MobOrchestratorSnapshot {
         self.fields.to_snapshot()
     }
 
     /// Check if a transition is legal without applying it.
+    #[allow(dead_code)] // Part of the authority contract; used by future shell code.
     pub(crate) fn can_accept(&self, input: MobOrchestratorInput) -> bool {
         self.evaluate(input).is_ok()
     }

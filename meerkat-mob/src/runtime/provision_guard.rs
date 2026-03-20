@@ -59,11 +59,12 @@ impl PendingProvision {
 
     /// Access the member ref without consuming.
     pub(super) fn member_ref(&self) -> &MemberRef {
-        // Safety: `member_ref` is `Some` from construction until `commit()` or
+        // `member_ref` is `Some` from construction until `commit()` or
         // `rollback()` consume `self`. Borrowing through `&self` cannot happen
-        // after consumption. The `unwrap_or` branch is structurally unreachable.
-        #[allow(clippy::unwrap_used)]
-        self.member_ref.as_ref().unwrap()
+        // after consumption.
+        self.member_ref
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("PendingProvision::member_ref consumed before access"))
     }
 
     /// The meerkat ID associated with this provision.

@@ -832,17 +832,25 @@ impl RuntimeSessionAdapter {
             return false;
         }
         {
-            let handles = self.comms_drain_handles.read().await;
-            if handles.contains_key(session_id) {
-                return false;
+            let mut handles = self.comms_drain_handles.write().await;
+            if let Some(handle) = handles.get(session_id) {
+                if !handle.is_finished() {
+                    // Drain is still running — don't spawn a duplicate.
+                    return false;
+                }
+                // Previous drain exited (idle timeout, DISMISS, etc.) — remove
+                // the stale handle so we can respawn below.
+                handles.remove(session_id);
             }
         }
         if let Some(comms) = comms_runtime {
+            // Host-mode drains are long-lived — no idle timeout. They run
+            // until DISMISS, budget exhaustion, or explicit abort.
             let handle = crate::comms_drain::spawn_comms_drain(
                 Arc::clone(self),
                 session_id.clone(),
                 comms,
-                None,
+                Some(std::time::Duration::MAX),
             );
             let mut handles = self.comms_drain_handles.write().await;
             handles.insert(session_id.clone(), handle);

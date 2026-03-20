@@ -2342,12 +2342,11 @@ impl MobActor {
         self.events.clear().await?;
         self.cleanup_namespace().await?;
         self.edge_locks.clear().await;
-        // Transition through StopOrchestrator if still Running, then Destroy.
+        // Transition through StopOrchestrator then Destroy — authority decides legality.
         if let Some(ref mut orch) = self.orchestrator {
-            if orch.phase() == MobState::Running
-                && let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator)
-            {
-                tracing::warn!(error = %error, "orchestrator StopOrchestrator failed during destroy");
+            // Authority rejects StopOrchestrator if not Running — no shell pre-check.
+            if let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator) {
+                tracing::trace!(error = %error, "orchestrator StopOrchestrator skipped during destroy (expected if not Running)");
             }
             if let Err(error) = orch.apply(MobOrchestratorInput::DestroyOrchestrator) {
                 tracing::warn!(error = %error, "orchestrator DestroyOrchestrator failed");
@@ -2449,12 +2448,11 @@ impl MobActor {
         }
 
         if let Some(ref mut orch) = self.orchestrator {
-            if prior_state == MobState::Completed
-                && let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator)
-            {
-                tracing::warn!(
+            // Authority rejects StopOrchestrator if not Running — no shell pre-check on prior_state.
+            if let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator) {
+                tracing::trace!(
                     error = %error,
-                    "orchestrator StopOrchestrator failed while preparing completed-state reset"
+                    "orchestrator StopOrchestrator skipped during reset (expected if not Running)"
                 );
             }
             if let Err(error) = orch.apply(MobOrchestratorInput::ResumeOrchestrator) {

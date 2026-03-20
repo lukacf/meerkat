@@ -41,7 +41,13 @@ fn make_stdin_external_event_input(body: String) -> meerkat_runtime::Input {
             correlation_id: None,
         },
         event_type: "stdin".to_string(),
-        payload: serde_json::json!({ "body": body }),
+        // Preserve structured JSON: if the body is valid JSON, embed the parsed
+        // value directly so downstream consumers see the original object/array
+        // instead of escaped JSON text.
+        payload: match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(parsed) => serde_json::json!({ "body": parsed }),
+            Err(_) => serde_json::json!({ "body": body }),
+        },
     })
 }
 

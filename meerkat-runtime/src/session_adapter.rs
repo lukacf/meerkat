@@ -15,16 +15,16 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use meerkat_core::comms_drain_lifecycle_authority::{
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleInput,
+    CommsDrainLifecycleMutator, CommsDrainMode, DrainExitReason,
+};
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 
 use crate::accept::AcceptOutcome;
-use crate::comms_drain_lifecycle_authority::{
-    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleInput,
-    CommsDrainLifecycleMutator, CommsDrainMode,
-};
 use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
@@ -880,11 +880,7 @@ impl RuntimeSessionAdapter {
     /// Called from drain task exit paths (or by wrappers that detect task
     /// completion). The authority decides whether to enter ExitedRespawnable
     /// (PersistentHost + Failed) or Stopped.
-    pub async fn notify_comms_drain_exited(
-        &self,
-        session_id: &SessionId,
-        reason: crate::comms_drain_lifecycle_authority::DrainExitReason,
-    ) {
+    pub async fn notify_comms_drain_exited(&self, session_id: &SessionId, reason: DrainExitReason) {
         let mut slots = self.comms_drain_slots.write().await;
         if let Some(slot) = slots.get_mut(session_id) {
             slot.handle.take(); // clean up finished handle

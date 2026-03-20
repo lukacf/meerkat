@@ -29,7 +29,7 @@ interface MobWasmBindings {
     requestJson: string,
   ) => Promise<string>;
   mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
-  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
+  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
   mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
@@ -155,9 +155,10 @@ export class Mob {
     return this.member(meerkatId).send(content, handlingMode, renderMetadata);
   }
 
-  /** Retire and re-spawn an agent with the same profile. */
-  async respawn(meerkatId: string, initialMessage?: string): Promise<void> {
-    await this.bindings.mob_respawn(this.mobId, meerkatId, initialMessage);
+  /** Retire and re-spawn an agent with the same profile. Returns a result envelope with receipt. */
+  async respawn(meerkatId: string, initialMessage?: string): Promise<Record<string, unknown>> {
+    const json = await this.bindings.mob_respawn(this.mobId, meerkatId, initialMessage);
+    return JSON.parse(json) as Record<string, unknown>;
   }
 
   /** Get mob status. */

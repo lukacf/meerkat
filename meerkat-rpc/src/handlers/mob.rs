@@ -426,7 +426,13 @@ pub async fn handle_respawn(
         )
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"respawned": true})),
+        Ok(receipt) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "status": "completed",
+                "receipt": receipt,
+            }),
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -561,10 +567,7 @@ pub async fn handle_send(
         )
         .await
     {
-        Ok(session_id) => RpcResponse::success(
-            id,
-            serde_json::json!({"sent": true, "session_id": session_id}),
-        ),
+        Ok(receipt) => RpcResponse::success(id, serde_json::json!(receipt)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -950,16 +953,7 @@ pub async fn handle_member_status(
         .mob_member_status(&mob_id, &MeerkatId::from(params.meerkat_id.as_str()))
         .await
     {
-        Ok(snapshot) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "status": format!("{:?}", snapshot.status),
-                "output_preview": snapshot.output_preview,
-                "tokens_used": snapshot.tokens_used,
-                "is_final": snapshot.is_final,
-                "error": snapshot.error,
-            }),
-        ),
+        Ok(snapshot) => RpcResponse::success(id, serde_json::json!(snapshot)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }

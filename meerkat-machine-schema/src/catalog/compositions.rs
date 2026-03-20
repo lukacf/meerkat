@@ -6067,14 +6067,6 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
-                name: "mob_member_respawn_destroys_runtime".into(),
-                from_machine: "mob_orchestrator".into(),
-                effect_variant: "MemberRespawnInitiated".into(),
-                to: RouteTarget { machine: "runtime_control".into(), input_variant: "DestroyRequested".into() },
-                bindings: vec![],
-                delivery: RouteDelivery::Immediate,
-            },
-            Route {
                 name: "mob_cleanup_destroys_orchestrator".into(),
                 from_machine: "mob_lifecycle".into(),
                 effect_variant: "RequestCleanup".into(),
@@ -7636,77 +7628,6 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     seq_limit: 8,
                     set_limit: 8,
                     map_limit: 4,
-                },
-            },
-            CompositionWitness {
-                name: "mob_respawn_destroys_runtime_path".into(),
-                preload_inputs: vec![
-                    CompositionWitnessInput {
-                        machine: "runtime_control".into(),
-                        input_variant: "Initialize".into(),
-                        fields: vec![],
-                    },
-                    CompositionWitnessInput {
-                        machine: "mob_orchestrator".into(),
-                        input_variant: "InitializeOrchestrator".into(),
-                        fields: vec![],
-                    },
-                    CompositionWitnessInput {
-                        machine: "mob_orchestrator".into(),
-                        input_variant: "BindCoordinator".into(),
-                        fields: vec![],
-                    },
-                    CompositionWitnessInput {
-                        machine: "mob_orchestrator".into(),
-                        input_variant: "RespawnMember".into(),
-                        fields: vec![],
-                    },
-                ],
-                expected_routes: vec![
-                    "mob_supervisor_activation_starts_lifecycle".into(),
-                    "mob_member_respawn_destroys_runtime".into(),
-                ],
-                expected_scheduler_rules: vec![],
-                expected_states: vec![
-                    witness_state("mob_orchestrator", Some("Running"), vec![]),
-                    witness_state("runtime_control", Some("Destroyed"), vec![]),
-                ],
-                expected_transitions: vec![
-                    witness_transition("mob_orchestrator", "InitializeOrchestrator"),
-                    witness_transition("mob_lifecycle", "Start"),
-                    witness_transition("mob_orchestrator", "BindCoordinator"),
-                    witness_transition("mob_orchestrator", "RespawnMember"),
-                    witness_transition("runtime_control", "DestroyRequested"),
-                ],
-                expected_transition_order: vec![
-                    witness_transition_order(
-                        "mob_orchestrator",
-                        "InitializeOrchestrator",
-                        "mob_lifecycle",
-                        "Start",
-                    ),
-                    witness_transition_order(
-                        "mob_orchestrator",
-                        "BindCoordinator",
-                        "mob_orchestrator",
-                        "RespawnMember",
-                    ),
-                    witness_transition_order(
-                        "mob_orchestrator",
-                        "RespawnMember",
-                        "runtime_control",
-                        "DestroyRequested",
-                    ),
-                ],
-                state_limits: CompositionStateLimits {
-                    step_limit: 6,
-                    pending_input_limit: 4,
-                    pending_route_limit: 2,
-                    delivered_route_limit: 3,
-                    emitted_effect_limit: 5,
-                    seq_limit: 4,
-                    set_limit: 4,
-                    map_limit: 2,
                 },
             },
             CompositionWitness {

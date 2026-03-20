@@ -18,7 +18,7 @@ class Member:
         *,
         handling_mode: str = "queue",
         render_metadata: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         return await self._mob._client.send_mob_member_content(
             self._mob.id,
             self.meerkat_id,
@@ -27,7 +27,7 @@ class Member:
             render_metadata=render_metadata,
         )
 
-    async def subscribe_events(self) -> EventSubscription:
+    async def events(self) -> EventSubscription:
         return await self._mob.subscribe_member_events(self.meerkat_id)
 
 
@@ -74,8 +74,8 @@ class Mob:
     async def retire(self, meerkat_id: str) -> None:
         await self._client.retire_mob_member(self.id, meerkat_id)
 
-    async def respawn(self, meerkat_id: str, initial_message: str | None = None) -> None:
-        await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
+    async def respawn(self, meerkat_id: str, initial_message: str | None = None) -> dict[str, Any]:
+        return await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
 
     async def force_cancel(self, meerkat_id: str) -> None:
         await self._client.force_cancel_mob_member(self.id, meerkat_id)

@@ -70,8 +70,9 @@ pub use run::{
 };
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
-    HelperOptions, HelperResult, MemberExecutionSnapshot, MemberExecutionStatus, MemberHandle,
-    MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle, MobSessionService, MobState,
+    HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
+    MemberSessionRef, MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle,
+    MobMemberSnapshot, MobMemberStatus, MobRespawnError, MobSessionService, MobState,
     SpawnMemberSpec, SpawnPolicy, SpawnSpec,
 };
 pub use runtime_mode::MobRuntimeMode;

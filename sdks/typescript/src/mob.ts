@@ -36,8 +36,8 @@ export class Mob {
     await this.client.retireMobMember(this.mobId, meerkatId);
   }
 
-  async respawn(meerkatId: string, initialMessage?: string): Promise<void> {
-    await this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
+  async respawn(meerkatId: string, initialMessage?: string): Promise<Record<string, unknown>> {
+    return this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
   }
 
   async forceCancel(meerkatId: string): Promise<void> {

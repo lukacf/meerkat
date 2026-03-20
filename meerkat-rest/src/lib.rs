@@ -1421,13 +1421,7 @@ async fn mob_member_status(
         .mob_member_status(&mob_id, &meerkat_id)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!({
-        "status": format!("{:?}", snapshot.status),
-        "output_preview": snapshot.output_preview,
-        "tokens_used": snapshot.tokens_used,
-        "is_final": snapshot.is_final,
-        "error": snapshot.error,
-    })))
+    Ok(Json(json!(snapshot)))
 }
 
 /// POST /mob/{id}/members/{meerkat_id}/cancel — force-cancel in-flight turn.
@@ -1457,12 +1451,25 @@ async fn mob_member_respawn(
     let meerkat_id_val = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
     let initial_message =
         body.and_then(|Json(v)| v.get("initial_message")?.as_str().map(String::from));
-    state
+    match state
         .mob_state
         .mob_respawn(&mob_id, meerkat_id_val, initial_message)
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!({"respawned": true})))
+    {
+        Ok(receipt) => Ok(Json(json!({
+            "status": "completed",
+            "receipt": receipt,
+        }))),
+        Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
+            receipt,
+            failed_peer_ids,
+        }) => Ok(Json(json!({
+            "status": "topology_restore_failed",
+            "receipt": receipt,
+            "failed_peer_ids": failed_peer_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+        }))),
+        Err(e) => Err(ApiError::BadRequest(e.to_string())),
+    }
 }
 
 /// Canonical comms send request body.

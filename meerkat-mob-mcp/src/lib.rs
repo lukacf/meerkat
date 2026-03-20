@@ -397,7 +397,7 @@ impl MobMcpState {
         content: ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
-    ) -> Result<SessionId, MobError> {
+    ) -> Result<meerkat_mob::MemberDeliveryReceipt, MobError> {
         self.handle_for(mob_id)
             .await?
             .member(&meerkat_id)
@@ -467,11 +467,9 @@ impl MobMcpState {
         mob_id: &MobId,
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
-    ) -> Result<(), MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .respawn(meerkat_id, initial_message)
-            .await
+    ) -> Result<meerkat_mob::MemberRespawnReceipt, meerkat_mob::MobRespawnError> {
+        let handle = self.handle_for(mob_id).await?;
+        handle.respawn(meerkat_id, initial_message).await
     }
 
     pub async fn mob_force_cancel(
@@ -489,7 +487,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         meerkat_id: &MeerkatId,
-    ) -> Result<meerkat_mob::MemberExecutionSnapshot, MobError> {
+    ) -> Result<meerkat_mob::MobMemberSnapshot, MobError> {
         self.handle_for(mob_id)
             .await?
             .member_status(meerkat_id)
@@ -1148,7 +1146,7 @@ impl MobMcpDispatcher {
                 "mob_respawn",
                 &format!("Retire and re-spawn a meerkat with the same profile. \
                      Required: mob_id, meerkat_id. Optional: initial_message. \
-                     Returns once retire completes and respawn is enqueued. {COMMON}"),
+                     Returns a receipt with old/new session IDs. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
             ),
             tool(
@@ -1571,7 +1569,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MessageArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let session_id = self
+                let receipt = self
                     .state
                     .mob_member_send(
                         &MobId::from(args.mob_id),
@@ -1582,28 +1580,42 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     )
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"ok": true, "session_id": session_id}))
+                encode(call, json!(receipt))
             }
             "mob_respawn" => {
                 let args: RespawnArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let meerkat_id_str = args.meerkat_id;
-                self.state
+                match self
+                    .state
                     .mob_respawn(
                         &MobId::from(args.mob_id),
                         MeerkatId::from(meerkat_id_str.as_str()),
                         args.initial_message,
                     )
                     .await
-                    .map_err(|e| map_mob_err(call, e))?;
-                encode(
-                    call,
-                    json!({
-                        "meerkat_id": meerkat_id_str,
-                        "status": "respawn_enqueued"
-                    }),
-                )
+                {
+                    Ok(receipt) => encode(
+                        call,
+                        json!({
+                            "status": "completed",
+                            "receipt": receipt,
+                        }),
+                    ),
+                    Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
+                        receipt,
+                        failed_peer_ids,
+                    }) => encode(
+                        call,
+                        json!({
+                            "status": "topology_restore_failed",
+                            "receipt": receipt,
+                            "failed_peer_ids": failed_peer_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                        }),
+                    ),
+                    Err(e) => return Err(map_mob_err(call, MobError::Internal(e.to_string()))),
+                }
             }
             "meerkat_force_cancel" => {
                 let args: ForceCancelArgs = call
@@ -1624,16 +1636,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .mob_member_status(&MobId::from(args.mob_id), &MeerkatId::from(args.meerkat_id))
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(
-                    call,
-                    json!({
-                        "status": format!("{:?}", snapshot.status),
-                        "output_preview": snapshot.output_preview,
-                        "tokens_used": snapshot.tokens_used,
-                        "is_final": snapshot.is_final,
-                        "error": snapshot.error,
-                    }),
-                )
+                encode(call, json!(snapshot))
             }
             _ => Err(ToolError::not_found(call.name)),
         };

@@ -102,7 +102,7 @@ With branches: `ErrorRecovery`, `Cancelling`
 **Key operations:**
 - `ingest` — admit an input through policy resolution
 - `retire` — graceful drain (process queue, reject new input)
-- `respawn` — retire old session, spawn fresh with same identity/spec/wiring, new session ID
+- `respawn` — helper convenience: retire old session, spawn fresh with same identity/spec/wiring, new session ID (not machine-owned)
 - `reset` — abandon pending, return to Idle
 - `recover` — replay from store for crash recovery
 - `destroy` — terminal state, no recovery
@@ -114,7 +114,7 @@ With branches: `ErrorRecovery`, `Cancelling`
 
 **Host-mode drain ownership:** host mode is not "just a loop that drains at turn boundaries." Runtime-backed and direct session-service paths must both follow canonical drain lifecycle truth. Suppression of turn-boundary drain is a projection of drain lifecycle state, not a free shell boolean.
 
-**Respawn semantics:** Same member identity (MeerkatId), spec, and peer wiring — **new session ID**. Old session archived. Used for "agent is confused, restart it" recovery.
+**Respawn semantics:** Helper convenience (not a machine-owned primitive). Same member identity (MeerkatId), spec, and peer wiring — **new session ID**. Old session archived. Used for "agent is confused, restart it" recovery.
 
 ## OpsLifecycleRegistry
 
@@ -193,8 +193,8 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 - `retire_member(id)` — archive session, remove from roster
 - `force_cancel_member(id)` — cancel in-flight turn (distinct from retire)
-- `respawn(id, initial_message)` — retire old session → enqueue spawn with same identity/profile/wiring/labels → new session ID
-- `member_status(id)` → `MemberExecutionSnapshot` (status, output, error, timestamps, tokens, is_final, peer_metadata)
+- `respawn(id, initial_message)` — helper convenience: retire old session → enqueue spawn with same identity/profile/wiring/labels → new session ID (not machine-owned)
+- `member_status(id)` → `MobMemberSnapshot` (status, output, error, timestamps, tokens, is_final, peer_metadata)
 - `wait_one(id)`, `wait_all(ids)`, `collect_completed()`
 
 ### Provisioning
@@ -268,8 +268,8 @@ MobActor is composed of narrowly-scoped service objects:
 - `meerkat-runtime/src/silent_intent.rs` — silent intent override
 - `meerkat-session/src/ephemeral.rs` — EphemeralSessionService
 - `meerkat-mob/src/launch.rs` — MemberLaunchMode, ForkContext, BudgetSplitPolicy
-- `meerkat-mob/src/runtime/handle.rs` — MobHandle, SpawnMemberSpec, MemberExecutionSnapshot
-- `meerkat-mob/src/runtime/actor.rs` — MobActor (spawn, wire, flow, respawn)
+- `meerkat-mob/src/runtime/handle.rs` — MobHandle, SpawnMemberSpec, MobMemberSnapshot
+- `meerkat-mob/src/runtime/actor.rs` — MobActor (spawn, wire, flow)
 - `meerkat-mob/src/runtime/tools.rs` — mob tool definitions
 - `meerkat-machine-schema/src/catalog/` — machine definitions (10 machines)
 - `meerkat-machine-kernels/src/runtime.rs` — GeneratedMachineKernel interpreter

@@ -4,6 +4,8 @@ pub mod machines;
 #[path = "machines_test_support.rs"]
 pub mod machines;
 pub mod public_contracts;
+pub mod rmat_audit;
+pub mod rmat_policy;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

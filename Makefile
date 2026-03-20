@@ -150,13 +150,20 @@ audit-alt:
 	cargo audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check legacy-surface-gate verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity audit
+ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate verify-version-parity lint test-all test-minimal audit
+ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint test-all test-minimal audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
+
+# RMAT read-seam lint: detect shell code that reads authority state to gate
+# authority input delivery. Shells must always call authority.apply() and let
+# the authority reject — never pre-filter inputs by reading authority state.
+rmat-read-seam-lint:
+	@echo "$(GREEN)Running RMAT read-seam lint...$(NC)"
+	@scripts/rmat-read-seam-lint.sh
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
 # or explicitly whitelisted during migration.

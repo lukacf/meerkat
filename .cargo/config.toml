@@ -26,8 +26,6 @@ test-feature-matrix-lib = "!make test-feature-matrix-lib"
 test-feature-matrix-surface = "!make test-feature-matrix-surface"
 test-feature-matrix = "!make test-feature-matrix"
 
-[build]
-target-dir = "/tmp/meerkat-target"
 
 [target.wasm32-unknown-unknown]
 runner = "wasm-bindgen-test-runner"

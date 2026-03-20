@@ -819,25 +819,36 @@ where
                             tool_call_count += 1;
                         }
 
+                        let pending_op_ids = tool_results.iter().fold(
+                            Vec::<crate::ops::OperationId>::new(),
+                            |mut acc, result| {
+                                for op_id in &result.operation_ids {
+                                    if !acc.contains(op_id) {
+                                        acc.push(op_id.clone());
+                                    }
+                                }
+                                acc
+                            },
+                        );
+
                         // Add tool results to session
                         self.session.push(Message::ToolResults {
                             results: tool_results,
                         });
 
-                        // Check for pending async operations before transitioning
-                        if let Some(ref registry) = self.ops_lifecycle {
-                            let pending: Vec<crate::ops::OperationId> = registry
-                                .list_operations()
-                                .into_iter()
-                                .filter(|snap| !snap.status.is_terminal())
-                                .map(|snap| snap.id)
-                                .collect();
-                            if !pending.is_empty() {
-                                self.pending_ops = pending;
-                                // Stay in WaitingForOps — the outer match arm
-                                // will await completion via wait_all.
-                                continue;
-                            }
+                        self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
+                            run_id: run_id.clone(),
+                            operation_ids: pending_op_ids,
+                        })?;
+
+                        if self
+                            .turn_authority
+                            .pending_op_ids()
+                            .is_some_and(|pending| !pending.is_empty())
+                        {
+                            // Stay in WaitingForOps — the outer match arm will
+                            // await completion via the machine-owned wait-set.
+                            continue;
                         }
 
                         // No pending ops — tool calls resolved, drain boundary, continue
@@ -1059,18 +1070,28 @@ where
                 }
                 LoopState::WaitingForOps => {
                     // Await completion of all pending async operations via the
-                    // lifecycle registry's all-complete barrier.
-                    if !self.pending_ops.is_empty() {
-                        if let Some(ref registry) = self.ops_lifecycle {
-                            let ids = std::mem::take(&mut self.pending_ops);
-                            let _results = registry.wait_all(&ids).await.map_err(|e| {
-                                AgentError::InternalError(format!(
-                                    "ops lifecycle wait_all failed: {e}"
-                                ))
-                            })?;
-                        } else {
-                            // No registry but pending ops — clear and proceed.
-                            self.pending_ops.clear();
+                    // machine-owned turn-local wait-set.
+                    match self.turn_authority.pending_op_ids() {
+                        Some(ids) if !ids.is_empty() => {
+                            if let Some(ref registry) = self.ops_lifecycle {
+                                let _results = registry.wait_all(ids).await.map_err(|e| {
+                                    AgentError::InternalError(format!(
+                                        "ops lifecycle wait_all failed: {e}"
+                                    ))
+                                })?;
+                            } else {
+                                return Err(AgentError::InternalError(
+                                    "pending_op_ids registered without ops_lifecycle registry"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            return Err(AgentError::InternalError(
+                                "WaitingForOps entered without registered pending_op_ids"
+                                    .to_string(),
+                            ));
                         }
                     }
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {

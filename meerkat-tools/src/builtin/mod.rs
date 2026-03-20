@@ -49,6 +49,7 @@ pub use store::TaskStore;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::ops::OperationId;
 use meerkat_core::types::ContentBlock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -99,6 +100,15 @@ pub trait BuiltinTool: Send + Sync {
     /// * `Ok(ToolOutput)` - The tool's result (JSON or multimodal blocks)
     /// * `Err(BuiltinToolError)` - If execution failed
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError>;
+
+    /// Async operation IDs started by this tool call, if any.
+    ///
+    /// Default is none. Tools that start background or delegated work should
+    /// override this so the turn machine can own the exact `WaitingForOps`
+    /// wait-set for the current turn.
+    fn operation_ids_for_output(&self, _output: &ToolOutput) -> Vec<OperationId> {
+        Vec::new()
+    }
 }
 
 /// A registry entry for a built-in tool with its enabled state

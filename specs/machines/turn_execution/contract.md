@@ -13,6 +13,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `vision_enabled`: `Bool`
 - `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u32`
+- `pending_op_ids`: `Option<Seq<OperationId>>`
 - `boundary_count`: `u32`
 - `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `TurnTerminalOutcome`
@@ -26,6 +27,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PrimitiveApplied`(run_id: RunId, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u32)
 - `LlmReturnedTerminal`(run_id: RunId)
+- `RegisterPendingOps`(run_id: RunId, operation_ids: Seq<OperationId>)
 - `ToolCallsResolved`(run_id: RunId)
 - `BoundaryContinue`(run_id: RunId)
 - `BoundaryComplete`(run_id: RunId)
@@ -61,6 +63,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ready_has_no_admitted_content`
 - `non_ready_has_active_run`
 - `waiting_for_ops_implies_pending_tools`
+- `pending_op_ids_only_used_while_waiting`
 - `ready_has_no_boundary_cancel_request`
 - `immediate_primitives_skip_llm_and_recovery`
 - `terminal_states_match_terminal_outcome`
@@ -142,12 +145,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `tool_count_positive`
 - To: `WaitingForOps`
 
+### `RegisterPendingOps`
+- From: `WaitingForOps`
+- On: `RegisterPendingOps`(run_id, operation_ids)
+- Guards:
+  - `run_matches_active`
+  - `tool_calls_pending_positive`
+- To: `WaitingForOps`
+
 ### `ToolCallsResolved`
 - From: `WaitingForOps`
 - On: `ToolCallsResolved`(run_id)
 - Guards:
   - `run_matches_active`
   - `tool_calls_pending_positive`
+  - `pending_op_ids_registered`
 - Emits: `BoundaryApplied`
 - To: `DrainingBoundary`
 

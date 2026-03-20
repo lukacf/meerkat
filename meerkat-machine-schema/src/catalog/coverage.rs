@@ -1,6 +1,7 @@
 use crate::{CompositionSchema, MachineSchema, SchedulerRule};
 
 use super::{
+    comms_drain_lifecycle::comms_drain_lifecycle_machine,
     compositions::{
         continuation_runtime_bundle_composition, external_tool_bundle_composition,
         mob_bundle_composition, ops_peer_bundle_composition, ops_runtime_bundle_composition,
@@ -443,6 +444,40 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "topology-revision",
                     "topology/orchestration revisions remain monotonic and owned",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &comms_drain_lifecycle_machine(),
+            &[
+                anchor(
+                    "comms_drain_authority",
+                    "meerkat-runtime/src/comms_drain_lifecycle_authority.rs",
+                    "comms drain lifecycle authority (sealed mutator + evaluate)",
+                ),
+                anchor(
+                    "session_adapter_drain",
+                    "meerkat-runtime/src/session_adapter.rs",
+                    "session adapter comms drain slot wiring and effect execution",
+                ),
+                anchor(
+                    "comms_drain_spawn",
+                    "meerkat-runtime/src/comms_drain.rs",
+                    "comms drain task spawn and loop implementation",
+                ),
+            ],
+            &[
+                scenario(
+                    "spawn-run-exit",
+                    "drain task spawns, runs, and exits cleanly with suppression lifecycle",
+                ),
+                scenario(
+                    "persistent-respawn",
+                    "persistent-host drain respawns after transient failure",
+                ),
+                scenario(
+                    "stop-abort",
+                    "drain task is stopped or aborted and suppression is lifted",
                 ),
             ],
         ),
@@ -1023,6 +1058,15 @@ fn machine_scenario_ids(machine: &str, item_name: &str, all_scenarios: &[String]
                 hints.extend(["flow"]);
             } else {
                 hints.extend(["topology", "coordinator", "flow"]);
+            }
+        }
+        "CommsDrainLifecycleMachine" => {
+            if normalized.contains("stop") || normalized.contains("abort") {
+                hints.extend(["stop", "abort"]);
+            } else if normalized.contains("exited") || normalized.contains("respawn") {
+                hints.extend(["respawn", "persistent"]);
+            } else {
+                hints.extend(["spawn", "run", "exit"]);
             }
         }
         _ => {}

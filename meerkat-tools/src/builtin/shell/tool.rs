@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::ops::OperationId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -440,8 +441,16 @@ impl BuiltinTool for ShellTool {
                 .await
                 .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
+            let operation_id = self
+                .job_manager
+                .get_status(&job_id)
+                .await
+                .and_then(|job| job.operation_id)
+                .map(|id| id.to_string());
+
             return Ok(ToolOutput::Json(serde_json::json!({
                 "job_id": job_id.to_string(),
+                "operation_id": operation_id,
                 "status": "running",
                 "message": format!("Command started in background with job ID: {}", job_id)
             })));
@@ -473,6 +482,18 @@ impl BuiltinTool for ShellTool {
         Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
             |e| BuiltinToolError::execution_failed(e.to_string()),
         )?))
+    }
+
+    fn operation_ids_for_output(&self, output: &ToolOutput) -> Vec<OperationId> {
+        match output {
+            ToolOutput::Json(value) => value
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<OperationId>(&format!("\"{raw}\"")).ok())
+                .into_iter()
+                .collect(),
+            ToolOutput::Blocks(_) => Vec::new(),
+        }
     }
 }
 
@@ -854,6 +875,7 @@ mod tests {
         assert!(result.is_ok());
         let val = result.unwrap().into_json().unwrap();
         assert!(val["job_id"].is_string());
+        assert!(val["operation_id"].is_string());
         assert_eq!(val["status"], "running");
     }
 

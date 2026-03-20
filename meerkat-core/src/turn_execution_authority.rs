@@ -11,16 +11,16 @@
 //!
 //! - 11 states: Ready, ApplyingPrimitive, CallingLlm, WaitingForOps,
 //!   DrainingBoundary, Extracting, ErrorRecovery, Cancelling, Completed, Failed, Cancelled
-//! - 25 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
+//! - 26 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
 //!   PrimitiveApplied, LlmReturnedToolCalls, LlmReturnedTerminal,
-//!   ToolCallsResolved, BoundaryContinue, BoundaryComplete, EnterExtraction,
+//!   RegisterPendingOps, ToolCallsResolved, BoundaryContinue, BoundaryComplete, EnterExtraction,
 //!   ExtractionValidationPassed, ExtractionRetry, ExtractionExhausted,
 //!   RecoverableFailure, FatalFailure, RetryRequested, CancelNow,
 //!   CancelAfterBoundary, CancellationObserved, AcknowledgeTerminal,
 //!   TurnLimitReached, BudgetExhausted, ForceCancelNoRun, RunCompleted,
 //!   RunFailed, RunCancelled
-//! - 11 fields: active_run, primitive_kind, admitted_content_shape,
-//!   vision_enabled, image_tool_results_enabled, tool_calls_pending,
+//! - 12 fields: active_run, primitive_kind, admitted_content_shape,
+//!   vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_ids,
 //!   boundary_count, cancel_after_boundary, terminal_outcome,
 //!   extraction_attempts, max_extraction_retries
 //! - 5 effects: RunStarted, BoundaryApplied, RunCompleted, RunFailed,
@@ -28,6 +28,7 @@
 
 use crate::error::AgentError;
 use crate::lifecycle::RunId;
+use crate::ops::OperationId;
 
 // ---------------------------------------------------------------------------
 // Phase enum — mirrors the machine schema's state variants
@@ -153,6 +154,10 @@ pub enum TurnExecutionInput {
     },
     LlmReturnedTerminal {
         run_id: RunId,
+    },
+    RegisterPendingOps {
+        run_id: RunId,
+        operation_ids: Vec<OperationId>,
     },
     ToolCallsResolved {
         run_id: RunId,
@@ -287,6 +292,7 @@ struct TurnExecutionFields {
     vision_enabled: bool,
     image_tool_results_enabled: bool,
     tool_calls_pending: u32,
+    pending_op_ids: Option<Vec<OperationId>>,
     boundary_count: u32,
     cancel_after_boundary: bool,
     terminal_outcome: TurnTerminalOutcome,
@@ -303,6 +309,7 @@ impl TurnExecutionFields {
             vision_enabled: false,
             image_tool_results_enabled: false,
             tool_calls_pending: 0,
+            pending_op_ids: None,
             boundary_count: 0,
             cancel_after_boundary: false,
             terminal_outcome: TurnTerminalOutcome::None,
@@ -406,6 +413,15 @@ impl TurnExecutionAuthority {
         self.fields.tool_calls_pending
     }
 
+    /// Exact turn-local operation IDs owned by the current WaitingForOps state.
+    ///
+    /// `None` means the wait-set has not yet been registered for the current
+    /// waiting phase. `Some([])` means registration happened and no async ops
+    /// need waiting.
+    pub fn pending_op_ids(&self) -> Option<&[OperationId]> {
+        self.fields.pending_op_ids.as_deref()
+    }
+
     /// Whether vision is enabled for the current run.
     pub fn vision_enabled(&self) -> bool {
         self.fields.vision_enabled
@@ -459,8 +475,8 @@ impl TurnExecutionAuthority {
             CancelAfterBoundary, CancelNow, CancellationObserved, EnterExtraction,
             ExtractionExhausted, ExtractionRetry, ExtractionValidationPassed, FatalFailure,
             ForceCancelNoRun, LlmReturnedTerminal, LlmReturnedToolCalls, PrimitiveApplied,
-            RecoverableFailure, RetryRequested, StartConversationRun, StartImmediateAppend,
-            StartImmediateContext, ToolCallsResolved, TurnLimitReached,
+            RecoverableFailure, RegisterPendingOps, RetryRequested, StartConversationRun,
+            StartImmediateAppend, StartImmediateContext, ToolCallsResolved, TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
@@ -485,6 +501,7 @@ impl TurnExecutionAuthority {
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
+                fields.pending_op_ids = None;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
@@ -501,6 +518,7 @@ impl TurnExecutionAuthority {
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
+                fields.pending_op_ids = None;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
@@ -517,6 +535,7 @@ impl TurnExecutionAuthority {
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
+                fields.pending_op_ids = None;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
@@ -614,6 +633,7 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 fields.tool_calls_pending = *tool_count;
+                fields.pending_op_ids = None;
                 WaitingForOps
             }
 
@@ -633,6 +653,26 @@ impl TurnExecutionAuthority {
             }
 
             // ---------------------------------------------------------------
+            // RegisterPendingOps: WaitingForOps -> WaitingForOps
+            // ---------------------------------------------------------------
+            (
+                WaitingForOps,
+                RegisterPendingOps {
+                    run_id,
+                    operation_ids,
+                },
+            ) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                if fields.tool_calls_pending == 0 {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.pending_op_ids = Some(operation_ids.clone());
+                WaitingForOps
+            }
+
+            // ---------------------------------------------------------------
             // ToolCallsResolved: WaitingForOps -> DrainingBoundary
             // ---------------------------------------------------------------
             (WaitingForOps, ToolCallsResolved { run_id }) => {
@@ -642,7 +682,11 @@ impl TurnExecutionAuthority {
                 if fields.tool_calls_pending == 0 {
                     return Err(Self::invalid(phase, input));
                 }
+                if fields.pending_op_ids.is_none() {
+                    return Err(Self::invalid(phase, input));
+                }
                 fields.tool_calls_pending = 0;
+                fields.pending_op_ids = None;
                 fields.boundary_count += 1;
                 effects.push(TurnExecutionEffect::BoundaryApplied {
                     run_id: run_id.clone(),
@@ -768,6 +812,9 @@ impl TurnExecutionAuthority {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids = None;
+                }
                 ErrorRecovery
             }
 
@@ -795,6 +842,9 @@ impl TurnExecutionAuthority {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids = None;
+                }
                 fields.terminal_outcome = TurnTerminalOutcome::Failed;
                 effects.push(TurnExecutionEffect::RunFailed {
                     run_id: run_id.clone(),
@@ -813,6 +863,9 @@ impl TurnExecutionAuthority {
             ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
+                }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids = None;
                 }
                 Cancelling
             }
@@ -860,6 +913,9 @@ impl TurnExecutionAuthority {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids = None;
+                }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::Completed;
                 effects.push(TurnExecutionEffect::BoundaryApplied {
@@ -883,6 +939,9 @@ impl TurnExecutionAuthority {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids = None;
+                }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
                 effects.push(TurnExecutionEffect::BoundaryApplied {
@@ -904,6 +963,9 @@ impl TurnExecutionAuthority {
                 | Extracting | ErrorRecovery | Cancelling,
                 ForceCancelNoRun,
             ) => {
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_ids = None;
+                }
                 fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
                 if let Some(ref run_id) = fields.active_run {
                     effects.push(TurnExecutionEffect::RunCancelled {
@@ -1031,6 +1093,11 @@ mod tests {
     /// Helper: reach DrainingBoundary via tool calls resolved.
     fn authority_at_draining_boundary() -> TurnExecutionAuthority {
         let mut auth = authority_at_waiting_for_ops();
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: test_run_id(),
+            operation_ids: vec![OperationId::new()],
+        })
+        .expect("register pending ops");
         auth.apply(TurnExecutionInput::ToolCallsResolved {
             run_id: test_run_id(),
         })
@@ -1208,6 +1275,7 @@ mod tests {
             .expect("tool calls");
         assert_eq!(t.next_phase, TurnPhase::WaitingForOps);
         assert_eq!(auth.tool_calls_pending(), 5);
+        assert_eq!(auth.pending_op_ids(), None);
     }
 
     #[test]
@@ -1242,8 +1310,28 @@ mod tests {
     // === Tool resolution and boundary ===
 
     #[test]
+    fn register_pending_ops_records_turn_local_wait_set() {
+        let mut auth = authority_at_waiting_for_ops();
+        let op_a = OperationId::new();
+        let op_b = OperationId::new();
+        let t = auth
+            .apply(TurnExecutionInput::RegisterPendingOps {
+                run_id: test_run_id(),
+                operation_ids: vec![op_a.clone(), op_b.clone()],
+            })
+            .expect("register pending ops");
+        assert_eq!(t.next_phase, TurnPhase::WaitingForOps);
+        assert_eq!(auth.pending_op_ids(), Some([op_a, op_b].as_slice()));
+    }
+
+    #[test]
     fn tool_calls_resolved() {
         let mut auth = authority_at_waiting_for_ops();
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: test_run_id(),
+            operation_ids: vec![],
+        })
+        .expect("register empty pending ops");
         let t = auth
             .apply(TurnExecutionInput::ToolCallsResolved {
                 run_id: test_run_id(),
@@ -1251,13 +1339,30 @@ mod tests {
             .expect("resolved");
         assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
         assert_eq!(auth.tool_calls_pending(), 0);
+        assert_eq!(auth.pending_op_ids(), None);
         assert_eq!(auth.boundary_count(), 1);
+    }
+
+    #[test]
+    fn tool_calls_resolved_without_registered_wait_set_rejected() {
+        let mut auth = authority_at_waiting_for_ops();
+        assert!(
+            auth.apply(TurnExecutionInput::ToolCallsResolved {
+                run_id: test_run_id(),
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn tool_calls_resolved_from_wrong_phase_rejected() {
         // After resolving, we're at DrainingBoundary — resolving again should fail.
         let mut auth = authority_at_waiting_for_ops();
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: test_run_id(),
+            operation_ids: vec![],
+        })
+        .expect("register empty pending ops");
         auth.apply(TurnExecutionInput::ToolCallsResolved {
             run_id: test_run_id(),
         })
@@ -1362,6 +1467,22 @@ mod tests {
             })
             .expect("recoverable");
         assert_eq!(t.next_phase, TurnPhase::ErrorRecovery);
+    }
+
+    #[test]
+    fn recoverable_failure_from_waiting_for_ops_clears_pending_op_ids() {
+        let mut auth = authority_at_waiting_for_ops();
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: test_run_id(),
+            operation_ids: vec![OperationId::new()],
+        })
+        .expect("register pending ops");
+        auth.apply(TurnExecutionInput::RecoverableFailure {
+            run_id: test_run_id(),
+        })
+        .expect("recoverable");
+        assert_eq!(auth.phase(), TurnPhase::ErrorRecovery);
+        assert_eq!(auth.pending_op_ids(), None);
     }
 
     #[test]
@@ -1483,6 +1604,22 @@ mod tests {
         assert_eq!(t.next_phase, TurnPhase::Cancelled);
         assert_eq!(auth.terminal_outcome(), TurnTerminalOutcome::Cancelled);
         assert!(!auth.cancel_after_boundary());
+    }
+
+    #[test]
+    fn cancel_now_from_waiting_for_ops_clears_pending_op_ids() {
+        let mut auth = authority_at_waiting_for_ops();
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: test_run_id(),
+            operation_ids: vec![OperationId::new()],
+        })
+        .expect("register pending ops");
+        auth.apply(TurnExecutionInput::CancelNow {
+            run_id: test_run_id(),
+        })
+        .expect("cancel now");
+        assert_eq!(auth.phase(), TurnPhase::Cancelling);
+        assert_eq!(auth.pending_op_ids(), None);
     }
 
     // === CancelAfterBoundary ===
@@ -1629,6 +1766,11 @@ mod tests {
         })
         .expect("tool calls");
         assert_eq!(auth.phase(), TurnPhase::WaitingForOps);
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            operation_ids: vec![OperationId::new()],
+        })
+        .expect("register pending ops");
 
         // Tools resolved
         auth.apply(TurnExecutionInput::ToolCallsResolved {
@@ -1717,6 +1859,11 @@ mod tests {
             tool_count: 1,
         })
         .expect("tool calls");
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            operation_ids: vec![],
+        })
+        .expect("register empty pending ops");
 
         // Tools resolved
         auth.apply(TurnExecutionInput::ToolCallsResolved {

@@ -44,6 +44,12 @@ pub fn turn_execution_machine() -> MachineSchema {
                 field("vision_enabled", TypeRef::Bool),
                 field("image_tool_results_enabled", TypeRef::Bool),
                 field("tool_calls_pending", TypeRef::U32),
+                field(
+                    "pending_op_ids",
+                    TypeRef::Option(Box::new(TypeRef::Seq(Box::new(TypeRef::Named(
+                        "OperationId".into(),
+                    ))))),
+                ),
                 field("boundary_count", TypeRef::U32),
                 field("cancel_after_boundary", TypeRef::Bool),
                 field(
@@ -62,6 +68,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                     init("vision_enabled", Expr::Bool(false)),
                     init("image_tool_results_enabled", Expr::Bool(false)),
                     init("tool_calls_pending", Expr::U64(0)),
+                    init("pending_op_ids", Expr::None),
                     init("boundary_count", Expr::U64(0)),
                     init("cancel_after_boundary", Expr::Bool(false)),
                     init("terminal_outcome", Expr::String("None".into())),
@@ -108,6 +115,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 VariantSchema {
                     name: "LlmReturnedTerminal".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "RegisterPendingOps".into(),
+                    fields: vec![
+                        field("run_id", TypeRef::Named("RunId".into())),
+                        field(
+                            "operation_ids",
+                            TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                        ),
+                    ],
                 },
                 VariantSchema {
                     name: "ToolCallsResolved".into(),
@@ -297,6 +314,19 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Expr::Gt(
                         Box::new(Expr::Field("tool_calls_pending".into())),
                         Box::new(Expr::U64(0)),
+                    ),
+                ]),
+            },
+            InvariantSchema {
+                name: "pending_op_ids_only_used_while_waiting".into(),
+                expr: Expr::Or(vec![
+                    Expr::Eq(
+                        Box::new(Expr::CurrentPhase),
+                        Box::new(Expr::Phase("WaitingForOps".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::Field("pending_op_ids".into())),
+                        Box::new(Expr::None),
                     ),
                 ]),
             },
@@ -955,9 +985,45 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ),
                     },
                 ],
+                updates: vec![
+                    Update::Assign {
+                        field: "tool_calls_pending".into(),
+                        expr: Expr::Binding("tool_count".into()),
+                    },
+                    Update::Assign {
+                        field: "pending_op_ids".into(),
+                        expr: Expr::None,
+                    },
+                ],
+                to: "WaitingForOps".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "RegisterPendingOps".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "RegisterPendingOps".into(),
+                    bindings: vec!["run_id".into(), "operation_ids".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "tool_calls_pending_positive".into(),
+                        expr: Expr::Gt(
+                            Box::new(Expr::Field("tool_calls_pending".into())),
+                            Box::new(Expr::U64(0)),
+                        ),
+                    },
+                ],
                 updates: vec![Update::Assign {
-                    field: "tool_calls_pending".into(),
-                    expr: Expr::Binding("tool_count".into()),
+                    field: "pending_op_ids".into(),
+                    expr: Expr::Some(Box::new(Expr::Binding("operation_ids".into()))),
                 }],
                 to: "WaitingForOps".into(),
                 emit: vec![],
@@ -984,11 +1050,22 @@ pub fn turn_execution_machine() -> MachineSchema {
                             Box::new(Expr::U64(0)),
                         ),
                     },
+                    Guard {
+                        name: "pending_op_ids_registered".into(),
+                        expr: Expr::Neq(
+                            Box::new(Expr::Field("pending_op_ids".into())),
+                            Box::new(Expr::None),
+                        ),
+                    },
                 ],
                 updates: vec![
                     Update::Assign {
                         field: "tool_calls_pending".into(),
                         expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "pending_op_ids".into(),
+                        expr: Expr::None,
                     },
                     Update::Increment {
                         field: "boundary_count".into(),
@@ -1329,7 +1406,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
                     ),
                 }],
-                updates: vec![],
+                updates: vec![Update::Assign {
+                    field: "pending_op_ids".into(),
+                    expr: Expr::None,
+                }],
                 to: "ErrorRecovery".into(),
                 emit: vec![],
             },
@@ -1440,10 +1520,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
                     ),
                 }],
-                updates: vec![Update::Assign {
-                    field: "terminal_outcome".into(),
-                    expr: Expr::String("Failed".into()),
-                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "pending_op_ids".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Failed".into()),
+                    },
+                ],
                 to: "Failed".into(),
                 emit: vec![EffectEmit {
                     variant: "RunFailed".into(),
@@ -1572,7 +1658,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
                     ),
                 }],
-                updates: vec![],
+                updates: vec![Update::Assign {
+                    field: "pending_op_ids".into(),
+                    expr: Expr::None,
+                }],
                 to: "Cancelling".into(),
                 emit: vec![],
             },
@@ -1885,6 +1974,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     ),
                 }],
                 updates: vec![
+                    Update::Assign {
+                        field: "pending_op_ids".into(),
+                        expr: Expr::None,
+                    },
                     Update::Increment {
                         field: "boundary_count".into(),
                         amount: 1,
@@ -2137,6 +2230,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     ),
                 }],
                 updates: vec![
+                    Update::Assign {
+                        field: "pending_op_ids".into(),
+                        expr: Expr::None,
+                    },
                     Update::Increment {
                         field: "boundary_count".into(),
                         amount: 1,
@@ -2343,10 +2440,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                     bindings: vec![],
                 },
                 guards: vec![],
-                updates: vec![Update::Assign {
-                    field: "terminal_outcome".into(),
-                    expr: Expr::String("Cancelled".into()),
-                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "pending_op_ids".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("Cancelled".into()),
+                    },
+                ],
                 to: "Cancelled".into(),
                 emit: vec![],
             },

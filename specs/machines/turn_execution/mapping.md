@@ -111,6 +111,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LlmReturnedToolCalls`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
+- `RegisterPendingOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `ToolCallsResolved`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
@@ -316,6 +319,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `waiting_for_ops_implies_pending_tools`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
+- `pending_op_ids_only_used_while_waiting`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `ready_has_no_boundary_cancel_request`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`

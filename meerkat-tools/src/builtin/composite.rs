@@ -313,16 +313,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     }
                     BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
                 })?;
+                let operation_ids = tool.operation_ids_for_output(&output);
                 match output {
                     ToolOutput::Json(value) => {
                         let content = match &value {
                             Value::String(s) => s.clone(),
                             _ => serde_json::to_string(&value).unwrap_or_default(),
                         };
-                        return Ok(ToolResult::new(call.id.to_string(), content, false));
+                        return Ok(ToolResult::new(call.id.to_string(), content, false)
+                            .with_operation_ids(operation_ids));
                     }
                     ToolOutput::Blocks(blocks) => {
-                        return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                        return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)
+                            .with_operation_ids(operation_ids));
                     }
                 }
             }
@@ -345,16 +348,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
                             ToolError::ExecutionFailed { message: te }
                         }
                     })?;
+                    let operation_ids = tool.operation_ids_for_output(&output);
                     match output {
                         ToolOutput::Json(value) => {
                             let content = match &value {
                                 Value::String(s) => s.clone(),
                                 _ => serde_json::to_string(&value).unwrap_or_default(),
                             };
-                            return Ok(ToolResult::new(call.id.to_string(), content, false));
+                            return Ok(ToolResult::new(call.id.to_string(), content, false)
+                                .with_operation_ids(operation_ids));
                         }
                         ToolOutput::Blocks(blocks) => {
-                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)
+                                .with_operation_ids(operation_ids));
                         }
                     }
                 }

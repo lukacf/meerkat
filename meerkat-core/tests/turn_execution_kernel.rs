@@ -72,9 +72,33 @@ fn turn_execution_kernel_tool_loop_yields_back_to_llm_after_boundary() {
         field(&waiting.next_state, "tool_calls_pending"),
         Some(&KernelValue::U64(2))
     );
+    assert_eq!(
+        field(&waiting.next_state, "pending_op_ids"),
+        Some(&KernelValue::None)
+    );
+
+    let registered = turn_execution::transition(
+        &waiting.next_state,
+        &input(
+            "RegisterPendingOps",
+            vec![
+                ("run_id", string("run-conversation")),
+                (
+                    "operation_ids",
+                    KernelValue::Seq(vec![string("op-a"), string("op-b")]),
+                ),
+            ],
+        ),
+    )
+    .expect("register pending ops");
+    assert_eq!(registered.next_state.phase, "WaitingForOps");
+    assert_eq!(
+        field(&registered.next_state, "pending_op_ids"),
+        Some(&KernelValue::Seq(vec![string("op-a"), string("op-b"),]))
+    );
 
     let draining = turn_execution::transition(
-        &waiting.next_state,
+        &registered.next_state,
         &input(
             "ToolCallsResolved",
             vec![("run_id", string("run-conversation"))],

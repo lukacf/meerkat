@@ -273,6 +273,8 @@ pub struct AgentBuildConfig {
     pub wait_for_mcp: bool,
     /// Per-agent environment variables injected into shell tool subprocesses.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Optional session checkpointer for host-mode persistence.
+    pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -370,6 +372,7 @@ impl AgentBuildConfig {
             additional_instructions: None,
             wait_for_mcp: false,
             shell_env: None,
+            checkpointer: None,
         }
     }
 
@@ -420,6 +423,7 @@ impl AgentBuildConfig {
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
+        self.checkpointer = build.checkpointer.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -453,7 +457,7 @@ impl AgentBuildConfig {
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
             shell_env: self.shell_env.clone(),
-            checkpointer: None,
+            checkpointer: self.checkpointer.clone(),
         }
     }
 }
@@ -1666,6 +1670,11 @@ impl AgentFactory {
         }
         builder =
             builder.with_max_inline_peer_notifications(build_config.max_inline_peer_notifications);
+
+        // 12g. Wire session checkpointer for host-mode persistence
+        if let Some(cp) = build_config.checkpointer {
+            builder = builder.with_checkpointer(cp);
+        }
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;

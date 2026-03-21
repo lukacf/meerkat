@@ -250,29 +250,19 @@ fn rejects_unsupported_route_literal_expression() {
 
 #[test]
 fn validates_mob_bundle_skeleton_routes() {
-    let mob_lifecycle = mob_lifecycle_machine();
-    let mob_orchestrator = mob_orchestrator_machine();
-    let flow_run = flow_run_machine();
-    let ops_lifecycle = ops_lifecycle_machine();
-    let peer_comms = peer_comms_machine();
-    let runtime_control = runtime_control_machine();
-    let runtime_ingress = runtime_ingress_machine();
-    let turn_execution = turn_execution_machine();
     let composition = mob_bundle_composition();
+    let machines = canonical_machine_schemas();
+    let machine_refs: Vec<&_> = machines
+        .iter()
+        .filter(|schema| {
+            composition
+                .machines
+                .iter()
+                .any(|instance| instance.machine_name == schema.machine)
+        })
+        .collect();
 
-    assert_eq!(
-        composition.validate_against(&[
-            &mob_lifecycle,
-            &mob_orchestrator,
-            &flow_run,
-            &ops_lifecycle,
-            &peer_comms,
-            &runtime_control,
-            &runtime_ingress,
-            &turn_execution,
-        ]),
-        Ok(())
-    );
+    assert_eq!(composition.validate_against(&machine_refs), Ok(()));
 }
 
 /// Closed-world audit gate: every Routed effect in every closed-world composition that

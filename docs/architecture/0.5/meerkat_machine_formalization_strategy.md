@@ -150,6 +150,10 @@ finished `0.5` system.
 | `RuntimeIngressMachine` | `SchemaKernel` | Admission/order/queue semantics are canonical enough to justify catalog-owned generation only if the authority/catalog stack can express recovery/coalescing/supersession honestly |
 | `RuntimeControlMachine` | `SchemaKernel` | Runtime lifecycle/preemption/control semantics are explicit and closed |
 | `MobLifecycleMachine` | `SchemaKernel` | Narrow top-level lifecycle boundary with small closed state set |
+| `MobMemberLifecycleAnchorMachine` | `SchemaKernel` | Formal observation anchor for member lifecycle boundary routes that must stay explicit while the full owner extraction matures |
+| `MobRuntimeBridgeAnchorMachine` | `SchemaKernel` | Formal observation anchor for runtime bridge run/stop routes so bridge semantics are not left as informal shell choreography |
+| `MobWiringAnchorMachine` | `SchemaKernel` | Formal observation anchor for peer-admission/runtime-work wiring routes while canonical wiring ownership remains decomposed |
+| `MobHelperResultAnchorMachine` | `SchemaKernel` | Formal observation anchor for helper-facing result classes so helper outcome surfaces remain explicit in the machine registry |
 | `OpsLifecycleMachine` | `SchemaKernel` | Shared async-operation lifecycle substrate is closed once the seam is cut explicitly |
 | `PeerCommsMachine` | `SchemaKernel` | Trust/auth/normalization/request-registry semantics are drift-sensitive and must converge to catalog-backed executable authority |
 | `ExternalToolSurfaceMachine` | `SchemaKernel` | Live add/remove/reload behavior is user-visible and must converge to catalog-backed executable authority |

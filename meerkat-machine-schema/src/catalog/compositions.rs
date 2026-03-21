@@ -1862,56 +1862,120 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
             machine_actor("turn_executor"),
             owner_actor("surface_host"),
         ],
-        handoff_protocols: vec![EffectHandoffProtocol {
-            name: "surface_completion".into(),
-            producer_instance: "external_tool_surface".into(),
-            effect_variant: "ScheduleSurfaceCompletion".into(),
-            realizing_actor: "surface_host".into(),
-            correlation_fields: vec!["surface_id".into()],
-            obligation_fields: vec![
-                "surface_id".into(),
-                "operation".into(),
-                "applied_at_turn".into(),
-            ],
-            allowed_feedback_inputs: vec![
-                FeedbackInputRef {
-                    machine_instance: "external_tool_surface".into(),
-                    input_variant: "PendingSucceeded".into(),
-                    field_bindings: vec![
-                        binding("surface_id", obligation_field("surface_id")),
-                        binding("applied_at_turn", obligation_field("applied_at_turn")),
-                    ],
-                },
-                FeedbackInputRef {
-                    machine_instance: "external_tool_surface".into(),
-                    input_variant: "PendingFailed".into(),
-                    field_bindings: vec![
-                        binding("surface_id", obligation_field("surface_id")),
-                        binding("applied_at_turn", obligation_field("applied_at_turn")),
-                    ],
-                },
-            ],
-            closure_policy: ClosurePolicy::AckRequired,
-            liveness_annotation: Some(
-                "eventual feedback under surface connection liveness".into(),
-            ),
-            rust: protocol_rust(
-                "meerkat-mcp/src/generated/protocol_surface_completion.rs",
-                ProtocolGenerationMode::EffectExtractor,
-                Some("crate::external_tool_surface_authority::ExternalToolSurfaceAuthority"),
-                Some("crate::external_tool_surface_authority::ExternalToolSurfaceMutator"),
-                Some("crate::external_tool_surface_authority::ExternalToolSurfaceInput"),
-                Some("crate::external_tool_surface_authority::ExternalToolSurfaceEffect"),
-                Some("crate::external_tool_surface_authority::ExternalToolSurfaceTransition"),
-                Some("crate::external_tool_surface_authority::ExternalToolSurfaceError"),
-                None,
-                None,
-                ProtocolHelperReturnShape::Obligations,
-                &[
-                    "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition, SurfaceDeltaOperation, SurfaceId, TurnNumber};",
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "surface_completion".into(),
+                producer_instance: "external_tool_surface".into(),
+                effect_variant: "ScheduleSurfaceCompletion".into(),
+                realizing_actor: "surface_host".into(),
+                correlation_fields: vec![
+                    "surface_id".into(),
+                    "operation".into(),
+                    "pending_task_sequence".into(),
+                    "staged_intent_sequence".into(),
+                    "applied_at_turn".into(),
                 ],
-            ),
-        }],
+                obligation_fields: vec![
+                    "surface_id".into(),
+                    "operation".into(),
+                    "pending_task_sequence".into(),
+                    "staged_intent_sequence".into(),
+                    "applied_at_turn".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "external_tool_surface".into(),
+                        input_variant: "PendingSucceeded".into(),
+                        field_bindings: vec![
+                            binding("surface_id", obligation_field("surface_id")),
+                            binding("operation", obligation_field("operation")),
+                            binding(
+                                "pending_task_sequence",
+                                obligation_field("pending_task_sequence"),
+                            ),
+                            binding(
+                                "staged_intent_sequence",
+                                obligation_field("staged_intent_sequence"),
+                            ),
+                            binding("applied_at_turn", obligation_field("applied_at_turn")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "external_tool_surface".into(),
+                        input_variant: "PendingFailed".into(),
+                        field_bindings: vec![
+                            binding("surface_id", obligation_field("surface_id")),
+                            binding("operation", obligation_field("operation")),
+                            binding(
+                                "pending_task_sequence",
+                                obligation_field("pending_task_sequence"),
+                            ),
+                            binding(
+                                "staged_intent_sequence",
+                                obligation_field("staged_intent_sequence"),
+                            ),
+                            binding("applied_at_turn", obligation_field("applied_at_turn")),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback under surface connection liveness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-mcp/src/generated/protocol_surface_completion.rs",
+                    ProtocolGenerationMode::EffectExtractor,
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceAuthority"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceMutator"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceInput"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceEffect"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceTransition"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceError"),
+                    None,
+                    None,
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition, SurfaceDeltaOperation, SurfaceId, TurnNumber};",
+                    ],
+                ),
+            },
+            EffectHandoffProtocol {
+                name: "surface_snapshot_alignment".into(),
+                producer_instance: "external_tool_surface".into(),
+                effect_variant: "RefreshVisibleSurfaceSet".into(),
+                realizing_actor: "surface_host".into(),
+                correlation_fields: vec!["snapshot_epoch".into()],
+                obligation_fields: vec!["snapshot_epoch".into()],
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: "external_tool_surface".into(),
+                    input_variant: "SnapshotAligned".into(),
+                    field_bindings: vec![binding(
+                        "snapshot_epoch",
+                        obligation_field("snapshot_epoch"),
+                    )],
+                }],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual snapshot acknowledgement under surface host liveness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs",
+                    ProtocolGenerationMode::EffectExtractor,
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceAuthority"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceMutator"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceInput"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceEffect"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceTransition"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceError"),
+                    None,
+                    None,
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition, SurfaceDeltaOperation, SurfaceId, TurnNumber};",
+                    ],
+                ),
+            },
+        ],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
@@ -1964,6 +2028,11 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                 input_variant: "FinalizeRemovalForced".into(),
             },
             EntryInput {
+                name: "snapshot_aligned".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "SnapshotAligned".into(),
+            },
+            EntryInput {
                 name: "turn_start_conversation".into(),
                 machine: "turn_execution".into(),
                 input_variant: "StartConversationRun".into(),
@@ -2007,11 +2076,11 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                 bindings: vec![
                     RouteFieldBinding {
                         to_field: "surface_id".into(),
-                        source: RouteBindingSource::Literal(Expr::String("default_surface".into())),
+                        source: RouteBindingSource::OwnerProvided,
                     },
                     RouteFieldBinding {
                         to_field: "applied_at_turn".into(),
-                        source: RouteBindingSource::Literal(Expr::String("turn_1".into())),
+                        source: RouteBindingSource::OwnerProvided,
                     },
                 ],
                 delivery: RouteDelivery::Immediate,
@@ -2043,17 +2112,22 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
             },
             CompositionInvariant {
                 name: "boundary_application_reaches_surface_authority".into(),
-                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "turn_boundary_applies_surface_changes".into(),
                     to_machine: "external_tool_surface".into(),
                     input_variant: "ApplyBoundary".into(),
                     from_machine: "turn_execution".into(),
                     effect_variant: "BoundaryApplied".into(),
                 },
                 statement:
-                    "turn-execution boundary application is reflected in the external-tool surface boundary"
+                    "turn-execution boundary application enters external-tool surface authority through the explicit owner-bridged route with owner-selected surface identity and applied_at_turn"
                         .into(),
                 references_machines: vec!["turn_execution".into(), "external_tool_surface".into()],
-                references_actors: vec!["turn_executor".into(), "surface_boundary".into()],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "surface_boundary".into(),
+                    "surface_host".into(),
+                ],
             },
             CompositionInvariant {
                 name: "control_preempts_surface_boundary".into(),
@@ -2076,6 +2150,19 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                 },
                 statement:
                     "ScheduleSurfaceCompletion effect is covered by surface_completion handoff protocol"
+                        .into(),
+                references_machines: vec!["external_tool_surface".into()],
+                references_actors: vec!["surface_host".into()],
+            },
+            CompositionInvariant {
+                name: "surface_snapshot_alignment_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "external_tool_surface".into(),
+                    effect_variant: "RefreshVisibleSurfaceSet".into(),
+                    protocol_name: "surface_snapshot_alignment".into(),
+                },
+                statement:
+                    "RefreshVisibleSurfaceSet effect is covered by surface_snapshot_alignment handoff protocol"
                         .into(),
                 references_machines: vec!["external_tool_surface".into()],
                 references_actors: vec!["surface_host".into()],
@@ -2157,14 +2244,14 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     witness_transition_order(
                         "turn_execution",
                         "LlmReturnedTerminal",
-                        "external_tool_surface",
-                        "ApplyBoundaryAdd",
-                    ),
-                    witness_transition_order(
-                        "external_tool_surface",
-                        "ApplyBoundaryAdd",
                         "turn_execution",
                         "BoundaryComplete",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
                     ),
                     witness_transition_order(
                         "external_tool_surface",
@@ -2235,7 +2322,10 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                         }],
                     },
                 ],
-                expected_routes: vec!["turn_boundary_applies_surface_changes".into()],
+                expected_routes: vec![
+                    "turn_boundary_applies_surface_changes".into(),
+                    "surface_delta_notifies_runtime_control".into(),
+                ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
                     witness_state("runtime_control", Some("Idle"), vec![]),
@@ -2248,28 +2338,28 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     witness_transition("turn_execution", "StartConversationRun"),
                     witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
                     witness_transition("turn_execution", "LlmReturnedTerminal"),
-                    witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
                     witness_transition("turn_execution", "BoundaryComplete"),
                     witness_transition("external_tool_surface", "ApplyBoundaryAdd"),
+                    witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "turn_execution",
                         "LlmReturnedTerminal",
-                        "external_tool_surface",
-                        "ApplyBoundaryAdd",
-                    ),
-                    witness_transition_order(
-                        "external_tool_surface",
-                        "ApplyBoundaryAdd",
-                        "runtime_control",
-                        "ExternalToolDeltaReceivedIdle",
-                    ),
-                    witness_transition_order(
-                        "runtime_control",
-                        "ExternalToolDeltaReceivedIdle",
                         "turn_execution",
                         "BoundaryComplete",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                    ),
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                        "runtime_control",
+                        "ExternalToolDeltaReceivedIdle",
                     ),
                 ],
                 state_limits: CompositionStateLimits {
@@ -2388,10 +2478,31 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                                 expr: Expr::String("default_surface".into()),
                             },
                             CompositionWitnessField {
+                                field: "operation".into(),
+                                expr: Expr::String("Add".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "pending_task_sequence".into(),
+                                expr: Expr::U64(1),
+                            },
+                            CompositionWitnessField {
+                                field: "staged_intent_sequence".into(),
+                                expr: Expr::U64(1),
+                            },
+                            CompositionWitnessField {
                                 field: "applied_at_turn".into(),
                                 expr: Expr::String("turn_1".into()),
                             },
                         ],
+                    },
+                    // Owner feedback: SnapshotAligned closes snapshot-alignment obligation
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "SnapshotAligned".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "snapshot_epoch".into(),
+                            expr: Expr::U64(1),
+                        }],
                     },
                 ],
                 expected_routes: vec![
@@ -2414,11 +2525,18 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     witness_transition("external_tool_surface", "ApplyBoundaryAdd"),
                     witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
                     witness_transition("external_tool_surface", "PendingSucceededAdd"),
+                    witness_transition("external_tool_surface", "SnapshotAligned"),
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
                         "turn_execution",
                         "LlmReturnedTerminal",
+                        "turn_execution",
+                        "BoundaryComplete",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
                         "external_tool_surface",
                         "ApplyBoundaryAdd",
                     ),
@@ -2429,13 +2547,19 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                         "external_tool_surface",
                         "PendingSucceededAdd",
                     ),
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "PendingSucceededAdd",
+                        "external_tool_surface",
+                        "SnapshotAligned",
+                    ),
                 ],
                 state_limits: CompositionStateLimits {
-                    step_limit: 10,
+                    step_limit: 12,
                     pending_input_limit: 8,
                     pending_route_limit: 2,
                     delivered_route_limit: 4,
-                    emitted_effect_limit: 6,
+                    emitted_effect_limit: 8,
                     seq_limit: 6,
                     set_limit: 6,
                     map_limit: 3,
@@ -6356,6 +6480,26 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 actor: "mob_orchestrator_actor".into(),
             },
             MachineInstance {
+                instance_id: "mob_member_lifecycle_anchor".into(),
+                machine_name: "MobMemberLifecycleAnchorMachine".into(),
+                actor: "mob_member_lifecycle_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_runtime_bridge_anchor".into(),
+                machine_name: "MobRuntimeBridgeAnchorMachine".into(),
+                actor: "mob_runtime_bridge_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_wiring_anchor".into(),
+                machine_name: "MobWiringAnchorMachine".into(),
+                actor: "mob_wiring_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_helper_result_anchor".into(),
+                machine_name: "MobHelperResultAnchorMachine".into(),
+                actor: "mob_helper_result_anchor_actor".into(),
+            },
+            MachineInstance {
                 instance_id: "flow_run".into(),
                 machine_name: "FlowRunMachine".into(),
                 actor: "flow_engine".into(),
@@ -6389,6 +6533,10 @@ pub fn mob_bundle_composition() -> CompositionSchema {
         actors: vec![
             machine_actor("mob_lifecycle_actor"),
             machine_actor("mob_orchestrator_actor"),
+            machine_actor("mob_member_lifecycle_anchor_actor"),
+            machine_actor("mob_runtime_bridge_anchor_actor"),
+            machine_actor("mob_wiring_anchor_actor"),
+            machine_actor("mob_helper_result_anchor_actor"),
             machine_actor("flow_engine"),
             machine_actor("ops_plane"),
             machine_actor("peer_plane"),
@@ -6543,6 +6691,32 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
+                name: "mob_peer_candidate_tracks_wiring".into(),
+                from_machine: "peer_comms".into(),
+                effect_variant: "SubmitPeerInputCandidate".into(),
+                to: RouteTarget {
+                    machine: "mob_wiring_anchor".into(),
+                    input_variant: "PeerInputAdmitted".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "raw_item_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "raw_item_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "peer_input_class".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "peer_input_class".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
                 name: "mob_admitted_work_enters_ingress".into(),
                 from_machine: "runtime_control".into(),
                 effect_variant: "SubmitAdmittedIngressEffect".into(),
@@ -6551,6 +6725,32 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "work_id".into(), allow_named_alias: true } },
                     RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Field { from_field: "handling_mode".into(), allow_named_alias: false } },
                     RouteFieldBinding { to_field: "policy".into(), source: RouteBindingSource::Literal(Expr::String("MobQueued".into())) },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_runtime_admission_tracks_wiring".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "mob_wiring_anchor".into(),
+                    input_variant: "RuntimeWorkAdmitted".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
                 ],
                 delivery: RouteDelivery::Immediate,
             },
@@ -6568,6 +6768,23 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 effect_variant: "SubmitRunPrimitive".into(),
                 to: RouteTarget { machine: "turn_execution".into(), input_variant: "StartConversationRun".into() },
                 bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_runtime_start_tracks_bridge".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunSubmitted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
                 delivery: RouteDelivery::Immediate,
             },
             Route {
@@ -6620,6 +6837,40 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
+                name: "mob_execution_completion_tracks_bridge".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_completion_anchors_helper_result".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
                 name: "mob_execution_failure_updates_ingress".into(),
                 from_machine: "turn_execution".into(),
                 effect_variant: "RunFailed".into(),
@@ -6633,6 +6884,40 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 effect_variant: "RunFailed".into(),
                 to: RouteTarget { machine: "runtime_control".into(), input_variant: "RunFailed".into() },
                 bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_failure_tracks_bridge".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_failure_anchors_helper_result".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
                 delivery: RouteDelivery::Immediate,
             },
             Route {
@@ -6652,6 +6937,40 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             Route {
+                name: "mob_execution_cancel_tracks_bridge".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_cancel_anchors_helper_result".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
                 name: "mob_deactivate_supervisor_stops_lifecycle".into(),
                 from_machine: "mob_orchestrator".into(),
                 effect_variant: "DeactivateSupervisor".into(),
@@ -6664,6 +6983,28 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 from_machine: "mob_orchestrator".into(),
                 effect_variant: "MemberForceCancelled".into(),
                 to: RouteTarget { machine: "runtime_control".into(), input_variant: "StopRequested".into() },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_member_force_cancel_tracks_bridge".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "MemberForceCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeStopRequested".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_member_force_cancel_anchors_helper_result".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "MemberForceCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorForceCancelled".into(),
+                },
                 bindings: vec![],
                 delivery: RouteDelivery::Immediate,
             },
@@ -6698,6 +7039,66 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                         allow_named_alias: true,
                     },
                 }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_peer_ready_tracks_member_lifecycle".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "ExposeOperationPeer".into(),
+                to: RouteTarget {
+                    machine: "mob_member_lifecycle_anchor".into(),
+                    input_variant: "MemberPeerExposed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "operation_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "operation_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_peer_ready_tracks_wiring".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "ExposeOperationPeer".into(),
+                to: RouteTarget {
+                    machine: "mob_wiring_anchor".into(),
+                    input_variant: "OperationPeerTrusted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "operation_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "operation_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_terminal_tracks_member_lifecycle".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "NotifyOpWatcher".into(),
+                to: RouteTarget {
+                    machine: "mob_member_lifecycle_anchor".into(),
+                    input_variant: "MemberTerminalized".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "operation_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "operation_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "terminal_outcome".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "terminal_outcome".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
                 delivery: RouteDelivery::Immediate,
             },
         ],
@@ -6822,6 +7223,42 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 ],
             },
             CompositionInvariant {
+                name: "mob_runtime_admission_is_observed_by_wiring_anchor".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_runtime_admission_tracks_wiring".into(),
+                    to_machine: "mob_wiring_anchor".into(),
+                    input_variant: "RuntimeWorkAdmitted".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "mob runtime admission effects are mirrored into the wiring observation anchor".into(),
+                references_machines: vec!["runtime_control".into(), "mob_wiring_anchor".into()],
+                references_actors: vec!["control_plane".into(), "mob_wiring_anchor_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_runtime_start_is_observed_by_bridge_anchor".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_runtime_start_tracks_bridge".into(),
+                    to_machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunSubmitted".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitRunPrimitive".into(),
+                },
+                statement:
+                    "mob run handoff into turn execution is mirrored into the runtime-bridge observation anchor".into(),
+                references_machines: vec![
+                    "runtime_control".into(),
+                    "turn_execution".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                ],
+                references_actors: vec![
+                    "control_plane".into(),
+                    "turn_executor".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
                 name: "mob_flow_terminalization_completes_orchestrator".into(),
                 kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
                     route_name: "mob_flow_terminalization_completes_orchestrator".into(),
@@ -6857,19 +7294,25 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     required_targets: vec![
                         RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunFailed".into() },
                         RouteTarget { machine: "runtime_control".into(), input_variant: "RunFailed".into() },
+                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunFailed".into() },
+                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorFailed".into() },
                     ],
                 },
                 statement:
-                    "mob turn-execution failure is handled by both ingress and runtime control".into(),
+                    "mob turn-execution failure is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
                 references_machines: vec![
                     "turn_execution".into(),
                     "runtime_ingress".into(),
                     "runtime_control".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                    "mob_helper_result_anchor".into(),
                 ],
                 references_actors: vec![
                     "turn_executor".into(),
                     "ordinary_ingress".into(),
                     "control_plane".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_helper_result_anchor_actor".into(),
                 ],
             },
             CompositionInvariant {
@@ -6880,19 +7323,54 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     required_targets: vec![
                         RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCancelled".into() },
                         RouteTarget { machine: "runtime_control".into(), input_variant: "RunCancelled".into() },
+                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunCancelled".into() },
+                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorCancelled".into() },
                     ],
                 },
                 statement:
-                    "mob turn-execution cancellation is handled by both ingress and runtime control".into(),
+                    "mob turn-execution cancellation is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
                 references_machines: vec![
                     "turn_execution".into(),
                     "runtime_ingress".into(),
                     "runtime_control".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                    "mob_helper_result_anchor".into(),
                 ],
                 references_actors: vec![
                     "turn_executor".into(),
                     "ordinary_ingress".into(),
                     "control_plane".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_helper_result_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_execution_completion_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCompleted".into(),
+                    required_targets: vec![
+                        RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCompleted".into() },
+                        RouteTarget { machine: "runtime_control".into(), input_variant: "RunCompleted".into() },
+                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunCompleted".into() },
+                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorCompleted".into() },
+                    ],
+                },
+                statement:
+                    "mob turn-execution completion is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                    "mob_helper_result_anchor".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_helper_result_anchor_actor".into(),
                 ],
             },
             CompositionInvariant {
@@ -6920,6 +7398,40 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "trust handoff assumes the exposed operation peer is identified by the operation_id alias mapping".into(),
                 references_machines: vec!["ops_lifecycle".into(), "peer_comms".into()],
                 references_actors: vec!["ops_plane".into(), "peer_plane".into()],
+            },
+            CompositionInvariant {
+                name: "mob_member_lifecycle_terminal_events_are_observed".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_ops_terminal_tracks_member_lifecycle".into(),
+                    to_machine: "mob_member_lifecycle_anchor".into(),
+                    input_variant: "MemberTerminalized".into(),
+                    from_machine: "ops_lifecycle".into(),
+                    effect_variant: "NotifyOpWatcher".into(),
+                },
+                statement:
+                    "mob member lifecycle terminal events are mirrored from ops lifecycle into the member-lifecycle observation anchor".into(),
+                references_machines: vec![
+                    "ops_lifecycle".into(),
+                    "mob_member_lifecycle_anchor".into(),
+                ],
+                references_actors: vec![
+                    "ops_plane".into(),
+                    "mob_member_lifecycle_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_wiring_anchor_tracks_peer_candidates".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_peer_candidate_tracks_wiring".into(),
+                    to_machine: "mob_wiring_anchor".into(),
+                    input_variant: "PeerInputAdmitted".into(),
+                    from_machine: "peer_comms".into(),
+                    effect_variant: "SubmitPeerInputCandidate".into(),
+                },
+                statement:
+                    "mob peer candidate admission is mirrored into the wiring observation anchor through an explicit route".into(),
+                references_machines: vec!["peer_comms".into(), "mob_wiring_anchor".into()],
+                references_actors: vec!["peer_plane".into(), "mob_wiring_anchor_actor".into()],
             },
         ],
         witnesses: vec![
@@ -7079,11 +7591,15 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_flow_activation_marks_lifecycle_run".into(),
                     "flow_step_dispatch_enters_runtime_admission".into(),
                     "mob_admitted_work_enters_ingress".into(),
+                    "mob_runtime_admission_tracks_wiring".into(),
                     "mob_ingress_ready_starts_runtime_control".into(),
                     "mob_runtime_control_starts_execution".into(),
+                    "mob_runtime_start_tracks_bridge".into(),
                     "mob_execution_boundary_updates_ingress".into(),
                     "mob_execution_completion_updates_ingress".into(),
                     "mob_execution_completion_notifies_control".into(),
+                    "mob_execution_completion_tracks_bridge".into(),
+                    "mob_execution_completion_anchors_helper_result".into(),
                     "mob_flow_terminalization_completes_orchestrator".into(),
                     "mob_flow_deactivation_finishes_lifecycle_run".into(),
                 ],
@@ -7298,6 +7814,9 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_async_op_event_enters_runtime_admission".into(),
                     "mob_admitted_work_enters_ingress".into(),
                     "mob_ops_peer_ready_trusts_peer_comms".into(),
+                    "mob_ops_peer_ready_tracks_member_lifecycle".into(),
+                    "mob_ops_peer_ready_tracks_wiring".into(),
+                    "mob_ops_terminal_tracks_member_lifecycle".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -7387,7 +7906,9 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 ],
                 expected_routes: vec![
                     "mob_peer_candidate_enters_runtime_admission".into(),
+                    "mob_peer_candidate_tracks_wiring".into(),
                     "mob_admitted_work_enters_ingress".into(),
+                    "mob_runtime_admission_tracks_wiring".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -7539,8 +8060,11 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_admitted_work_enters_ingress".into(),
                     "mob_ingress_ready_starts_runtime_control".into(),
                     "mob_runtime_control_starts_execution".into(),
+                    "mob_runtime_start_tracks_bridge".into(),
                     "mob_execution_failure_updates_ingress".into(),
                     "mob_execution_failure_notifies_control".into(),
+                    "mob_execution_failure_tracks_bridge".into(),
+                    "mob_execution_failure_anchors_helper_result".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -7729,8 +8253,11 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                     "mob_admitted_work_enters_ingress".into(),
                     "mob_ingress_ready_starts_runtime_control".into(),
                     "mob_runtime_control_starts_execution".into(),
+                    "mob_runtime_start_tracks_bridge".into(),
                     "mob_execution_cancel_updates_ingress".into(),
                     "mob_execution_cancel_notifies_control".into(),
+                    "mob_execution_cancel_tracks_bridge".into(),
+                    "mob_execution_cancel_anchors_helper_result".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![
@@ -7936,6 +8463,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 expected_routes: vec![
                     "mob_supervisor_activation_starts_lifecycle".into(),
                     "mob_member_force_cancelled_stops_runtime".into(),
+                    "mob_member_force_cancel_tracks_bridge".into(),
+                    "mob_member_force_cancel_anchors_helper_result".into(),
                 ],
                 expected_scheduler_rules: vec![],
                 expected_states: vec![

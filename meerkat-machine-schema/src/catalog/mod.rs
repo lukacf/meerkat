@@ -4,8 +4,12 @@ mod coverage;
 mod external_tool_surface;
 mod flow_run;
 mod input_lifecycle;
+mod mob_helper_result_anchor;
 mod mob_lifecycle;
+mod mob_member_lifecycle_anchor;
 mod mob_orchestrator;
+mod mob_runtime_bridge_anchor;
+mod mob_wiring_anchor;
 mod ops_lifecycle;
 mod peer_comms;
 mod runtime_control;
@@ -29,8 +33,15 @@ pub use coverage::{
 pub use external_tool_surface::external_tool_surface_machine;
 pub use flow_run::flow_run_machine;
 pub use input_lifecycle::input_lifecycle_machine;
+/// Observation anchors hold statements about what the composition has seen while
+/// canonical mob ownership schemas continue to evolve. They are not the final
+/// owners of these routes and only exist to keep the instrumentation explicit.
+pub use mob_helper_result_anchor::mob_helper_result_anchor_machine;
 pub use mob_lifecycle::mob_lifecycle_machine;
+pub use mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine;
 pub use mob_orchestrator::mob_orchestrator_machine;
+pub use mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine;
+pub use mob_wiring_anchor::mob_wiring_anchor_machine;
 pub use ops_lifecycle::ops_lifecycle_machine;
 pub use peer_comms::peer_comms_machine;
 pub use runtime_control::runtime_control_machine;
@@ -47,6 +58,14 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         external_tool_surface_machine(),
         turn_execution_machine(),
         mob_lifecycle_machine(),
+        // Observation anchors keep ownership-extraction routes explicit in the
+        // formal catalog while canonical mob ownership is still being modeled
+        // in future lifecycle/bridge/wiring/helper classifier machines. These
+        // anchors are not the canonical control points for those domains.
+        mob_member_lifecycle_anchor_machine(),
+        mob_runtime_bridge_anchor_machine(),
+        mob_wiring_anchor_machine(),
+        mob_helper_result_anchor_machine(),
         flow_run_machine(),
         mob_orchestrator_machine(),
         comms_drain_lifecycle_machine(),

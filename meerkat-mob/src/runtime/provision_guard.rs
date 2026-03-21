@@ -2,8 +2,8 @@
 //!
 //! [`PendingProvision`] wraps a provisioned [`MemberRef`] and enforces at the
 //! type level that the resource is either **committed** (added to the roster)
-//! or **rolled back** (session archived). Dropping without consuming is a bug:
-//! debug builds panic, release builds log an error.
+//! or **rolled back** (session archived). Dropping without consuming is a bug
+//! and always panics.
 //!
 //! The `#[must_use]` attribute on the type ensures the compiler warns if the
 //! value is discarded.
@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 /// A provisioned member that must be explicitly committed or rolled back.
 ///
-/// Dropping without consuming is a bug -- debug builds panic, release builds
-/// log an error. The async `rollback()` method performs the actual cleanup;
+/// Dropping without consuming is a bug and always panics. The async
+/// `rollback()` method performs the actual cleanup;
 /// the synchronous `Drop` can only detect the mistake, not fix it.
 #[must_use = "provisioned member must be committed or rolled back"]
 pub(super) struct PendingProvision {
@@ -52,9 +52,20 @@ impl PendingProvision {
 
     /// Roll back the provision, archiving the session.
     pub(super) async fn rollback(mut self) -> Result<(), MobError> {
-        self.committed = true; // prevent Drop from double-reporting
         let member_ref = self.take_member_ref("rollback")?;
-        self.provisioner.retire_member(&member_ref).await
+        match self.provisioner.retire_member(&member_ref).await {
+            Ok(()) => {
+                self.committed = true;
+                Ok(())
+            }
+            Err(error) => {
+                // Preserve drop-time invariant checking and diagnostics when
+                // rollback fails by restoring the member ref.
+                self.member_ref = Some(member_ref);
+                self.committed = false;
+                Err(error)
+            }
+        }
     }
 
     /// Access the member ref without consuming.
@@ -93,7 +104,7 @@ impl Drop for PendingProvision {
                 member_ref = ?member_ref,
                 "PendingProvision dropped without commit or rollback — resource leak"
             );
-            debug_assert!(false, "PendingProvision dropped without commit or rollback");
+            panic!("PendingProvision dropped without commit or rollback");
         }
     }
 }
@@ -184,7 +195,10 @@ mod tests {
             Err(MobError::Internal("not implemented".into()))
         }
 
-        async fn operation_id_for_member(&self, _member_ref: &MemberRef) -> Option<OperationId> {
+        async fn active_operation_id_for_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Option<OperationId> {
             None
         }
     }

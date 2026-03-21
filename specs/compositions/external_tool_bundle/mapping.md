@@ -43,6 +43,9 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `surface_completion_protocol_covered`
   - anchors: `mcp_router`, `agent_tool_state`, `surface_projection`
   - scenarios: `reload-remove-during-turns`, `browser-local-tool-surface`
+- `surface_snapshot_alignment_protocol_covered`
+  - anchors: `mcp_router`, `agent_tool_state`, `surface_projection`
+  - scenarios: `tool-delta-to-runtime`, `browser-local-tool-surface`
 
 
 <!-- GENERATED_COVERAGE_END -->

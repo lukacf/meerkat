@@ -17,10 +17,11 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 ## Structural Requirements
 - `control_preempts_surface_boundary` — runtime control outranks surface-boundary work when both are ready
 - `surface_completion_protocol_covered` — ScheduleSurfaceCompletion effect is covered by surface_completion handoff protocol
+- `surface_snapshot_alignment_protocol_covered` — RefreshVisibleSurfaceSet effect is covered by surface_snapshot_alignment handoff protocol
 
 ## Behavioral Invariants
 - `external_tool_delta_enters_runtime_control` — canonical external-tool deltas enter runtime through the runtime-control boundary
-- `boundary_application_reaches_surface_authority` — turn-execution boundary application is reflected in the external-tool surface boundary
+- `boundary_application_reaches_surface_authority` — turn-execution boundary application enters external-tool surface authority through the explicit owner-bridged route with owner-selected surface identity and applied_at_turn
 
 ## Coverage
 ### Code Anchors

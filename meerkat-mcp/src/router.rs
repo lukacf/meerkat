@@ -7,10 +7,13 @@
 
 use crate::external_tool_surface_authority::{
     ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceInput,
-    ExternalToolSurfaceMutator, SurfaceBaseState, SurfaceDeltaOperation, SurfaceDeltaPhase,
-    SurfaceId, TurnNumber,
+    ExternalToolSurfaceMutator, PendingSurfaceOp, StagedSurfaceOp, SurfaceBaseState,
+    SurfaceDeltaOperation, SurfaceDeltaPhase, SurfaceId, TurnNumber,
 };
-use crate::generated::protocol_surface_completion::{self, SurfaceCompletionObligation};
+use crate::generated::{
+    protocol_surface_completion::{self, SurfaceCompletionObligation},
+    protocol_surface_snapshot_alignment::{self, SurfaceSnapshotAlignmentObligation},
+};
 use crate::{McpConnection, McpError};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -21,7 +24,7 @@ use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigC
 use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -90,23 +93,8 @@ pub struct McpApplyResult {
     pub pending_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingOp {
-    Add,
-    Reload,
-}
-
-struct PendingState {
-    generation: u64,
-    /// Obligation token from the surface_completion handoff protocol.
-    /// Consumed when the pending result arrives (succeeded or failed).
-    obligation: SurfaceCompletionObligation,
-}
-
 struct PendingResult {
-    server_name: String,
-    generation: u64,
-    op: PendingOp,
+    obligation: SurfaceCompletionObligation,
     result: Result<(McpConnection, Vec<Arc<ToolDef>>), McpError>,
 }
 
@@ -114,11 +102,41 @@ struct CompletedLifecycleUpdate {
     action: McpLifecycleAction,
 }
 
+fn merge_snapshot_alignment(
+    slot: &mut Option<SurfaceSnapshotAlignmentObligation>,
+    candidate: SurfaceSnapshotAlignmentObligation,
+) {
+    match slot {
+        Some(current) if current.snapshot_epoch >= candidate.snapshot_epoch => {}
+        _ => *slot = Some(candidate),
+    }
+}
+
+fn latest_snapshot_alignment(
+    effects: &[ExternalToolSurfaceEffect],
+) -> Option<SurfaceSnapshotAlignmentObligation> {
+    let mut latest = None;
+    for obligation in protocol_surface_snapshot_alignment::extract_obligations(effects) {
+        merge_snapshot_alignment(&mut latest, obligation);
+    }
+    latest
+}
+
 #[derive(Debug, Clone)]
-enum StagedRouterOp {
-    Add(McpServerConfig),
-    Remove(String),
-    Reload(McpReloadTarget),
+struct RouterProjectionSnapshot {
+    epoch: u64,
+    tool_to_server: HashMap<String, String>,
+    visible_tools: Arc<[Arc<ToolDef>]>,
+}
+
+impl Default for RouterProjectionSnapshot {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            tool_to_server: HashMap::new(),
+            visible_tools: Arc::from([]),
+        }
+    }
 }
 
 /// Shell-level server entry. Holds connection, config, and tools.
@@ -166,19 +184,15 @@ pub struct McpRouter {
     authority: Mutex<ExternalToolSurfaceAuthority>,
 
     servers: HashMap<String, ServerEntry>,
-    /// Maps tool name to owning server, including servers in Removing state.
-    tool_to_server: HashMap<String, String>,
-    /// Visible tool cache from Active servers only.
-    cached_tools: Vec<Arc<ToolDef>>,
-    staged_ops: Vec<StagedRouterOp>,
+    projection: Arc<RouterProjectionSnapshot>,
+    staged_payloads: HashMap<String, McpServerConfig>,
 
     // --- Async pending infrastructure ---
     pending_tx: mpsc::Sender<PendingResult>,
     /// Poison-safe mutex wrapping the receiver.
     pending_rx: Mutex<mpsc::Receiver<PendingResult>>,
-    pending_servers: HashMap<String, PendingState>,
-    next_generation: u64,
-    next_boundary_turn: u64,
+    pending_obligations: HashMap<String, SurfaceCompletionObligation>,
+    pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
 }
@@ -190,14 +204,12 @@ impl McpRouter {
         Self {
             authority: Mutex::new(ExternalToolSurfaceAuthority::new()),
             servers: HashMap::new(),
-            tool_to_server: HashMap::new(),
-            cached_tools: Vec::new(),
-            staged_ops: Vec::new(),
+            projection: Arc::new(RouterProjectionSnapshot::default()),
+            staged_payloads: HashMap::new(),
             pending_tx: tx,
             pending_rx: Mutex::new(rx),
-            pending_servers: HashMap::new(),
-            next_generation: 0,
-            next_boundary_turn: 0,
+            pending_obligations: HashMap::new(),
+            pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
         }
     }
@@ -210,14 +222,12 @@ impl McpRouter {
                 removal_timeout,
             )),
             servers: HashMap::new(),
-            tool_to_server: HashMap::new(),
-            cached_tools: Vec::new(),
-            staged_ops: Vec::new(),
+            projection: Arc::new(RouterProjectionSnapshot::default()),
+            staged_payloads: HashMap::new(),
             pending_tx: tx,
             pending_rx: Mutex::new(rx),
-            pending_servers: HashMap::new(),
-            next_generation: 0,
-            next_boundary_turn: 0,
+            pending_obligations: HashMap::new(),
+            pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
         }
     }
@@ -237,15 +247,37 @@ impl McpRouter {
         self.authority.lock().expect("authority mutex poisoned")
     }
 
-    fn next_boundary_turn(&mut self) -> TurnNumber {
-        let turn = TurnNumber(self.next_boundary_turn);
-        self.next_boundary_turn += 1;
-        turn
+    fn turn_number_from_staged_sequence(&self, staged_sequence: u64) -> TurnNumber {
+        if staged_sequence > 0 {
+            TurnNumber(staged_sequence)
+        } else {
+            // Defensive fallback: staged intents should always have non-zero sequence.
+            TurnNumber(self.auth().snapshot_epoch())
+        }
+    }
+
+    fn turn_number_from_snapshot_epoch(&self) -> TurnNumber {
+        TurnNumber(self.auth().snapshot_epoch())
+    }
+
+    fn record_snapshot_alignment(
+        &mut self,
+        snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
+    ) {
+        if let Some(snapshot_alignment) = snapshot_alignment {
+            merge_snapshot_alignment(&mut self.pending_snapshot_alignment, snapshot_alignment);
+        }
     }
 
     /// Override remove-drain timeout.
     pub fn set_removal_timeout(&mut self, removal_timeout: Duration) {
-        self.auth_mut().set_removal_timeout(removal_timeout);
+        if let Err(error) = self.auth_mut().set_removal_timeout(removal_timeout) {
+            tracing::warn!(
+                timeout_ms = removal_timeout.as_millis(),
+                error = %error,
+                "Authority rejected set_removal_timeout"
+            );
+        }
     }
 
     /// Backward-compatible immediate add path.
@@ -254,26 +286,77 @@ impl McpRouter {
     /// for boundary semantics.
     pub async fn add_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
         self.install_active_server(config).await?;
-        self.rebuild_visible_cache();
+        let _ = self.publish_projection_snapshot();
         Ok(())
     }
 
     /// Stage a server add for the next boundary apply.
     pub fn stage_add(&mut self, config: McpServerConfig) {
-        self.staged_ops.push(StagedRouterOp::Add(config));
+        let server_name = config.name.clone();
+        let surface_id = SurfaceId::from(server_name.as_str());
+        match self
+            .auth_mut()
+            .apply(ExternalToolSurfaceInput::StageAdd { surface_id })
+        {
+            Ok(_) => {
+                self.staged_payloads.insert(server_name, config);
+            }
+            Err(error) => {
+                tracing::warn!(server = %server_name, error = %error, "Authority rejected StageAdd");
+            }
+        }
     }
 
     /// Stage a server remove intent for the next boundary apply.
     ///
     /// This only records intent. Removal lifecycle starts on `apply_staged`.
     pub fn stage_remove(&mut self, server_name: impl Into<String>) {
-        self.staged_ops
-            .push(StagedRouterOp::Remove(server_name.into()));
+        let server_name = server_name.into();
+        let surface_id = SurfaceId::from(server_name.as_str());
+        if let Err(error) = self
+            .auth_mut()
+            .apply(ExternalToolSurfaceInput::StageRemove { surface_id })
+        {
+            tracing::warn!(server = %server_name, error = %error, "Authority rejected StageRemove");
+            return;
+        }
+        self.staged_payloads.remove(&server_name);
     }
 
     /// Stage a server reload by server name (reuse existing config) or full config.
     pub fn stage_reload<T: Into<McpReloadTarget>>(&mut self, target: T) {
-        self.staged_ops.push(StagedRouterOp::Reload(target.into()));
+        let (server_name, requested_payload) = match target.into() {
+            McpReloadTarget::ServerName(server_name) => (server_name, None),
+            McpReloadTarget::Config(config) => (config.name.clone(), Some(config)),
+        };
+        let surface_id = SurfaceId::from(server_name.as_str());
+        match self
+            .auth_mut()
+            .apply(ExternalToolSurfaceInput::StageReload { surface_id })
+        {
+            Ok(_) => {
+                // Lifecycle legality is authority-owned. Shell payload lookup is
+                // execution context only and does not decide whether StageReload
+                // is legal.
+                let payload = requested_payload.or_else(|| {
+                    self.servers
+                        .get(&server_name)
+                        .map(|entry| entry.config.clone())
+                });
+                if let Some(payload) = payload {
+                    self.staged_payloads.insert(server_name, payload);
+                } else {
+                    tracing::warn!(
+                        server = %server_name,
+                        "Authority accepted StageReload but no execution payload is available; apply_staged will surface this as a protocol error"
+                    );
+                    self.staged_payloads.remove(&server_name);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(server = %server_name, error = %error, "Authority rejected StageReload");
+            }
+        }
     }
 
     /// Apply staged operations at a boundary (non-blocking for add/reload).
@@ -282,139 +365,73 @@ impl McpRouter {
     /// background tasks and executes effects.
     pub async fn apply_staged(&mut self) -> Result<McpApplyResult, McpError> {
         let mut delta = McpApplyDelta::default();
-        let staged_ops = std::mem::take(&mut self.staged_ops);
+        let staged_intents = self.auth_mut().staged_intents_in_order();
+        let mut snapshot_alignment = None;
 
         // 1. Drain pending results from background tasks.
         self.drain_pending();
 
-        for op in staged_ops {
-            match op {
-                StagedRouterOp::Add(config) => {
-                    let server_name = config.name.clone();
-                    let sid = SurfaceId::from(server_name.as_str());
-                    let applied_at_turn = self.next_boundary_turn();
-
-                    // Stage through authority.
-                    if let Err(e) = self.auth_mut().apply(ExternalToolSurfaceInput::StageAdd {
-                        surface_id: sid.clone(),
-                    }) {
-                        tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd");
-                        continue;
-                    }
-
-                    // Cancel any existing pending op for this server.
-                    self.pending_servers.remove(&server_name);
-
-                    // Apply boundary through authority to move to Pending.
-                    match self
-                        .auth_mut()
-                        .apply(ExternalToolSurfaceInput::ApplyBoundary {
-                            surface_id: sid,
-                            applied_at_turn,
-                        }) {
-                        Ok(transition) => {
-                            self.execute_effects(&transition.effects, &mut delta, Some(&config));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                server = %server_name,
-                                error = %e,
-                                "Authority rejected ApplyBoundary for Add"
-                            );
-                        }
-                    }
-                }
-                StagedRouterOp::Remove(server_name) => {
-                    let sid = SurfaceId::from(server_name.as_str());
-                    let applied_at_turn = self.next_boundary_turn();
-
-                    // Cancel pending for same server if any.
-                    self.pending_servers.remove(&server_name);
-
-                    // Stage through authority.
-                    if let Err(e) = self
-                        .auth_mut()
-                        .apply(ExternalToolSurfaceInput::StageRemove {
-                            surface_id: sid.clone(),
-                        })
-                    {
-                        tracing::warn!(server = %server_name, error = %e, "Authority rejected StageRemove");
-                        continue;
-                    }
-
-                    // Apply boundary through authority.
-                    match self
-                        .auth_mut()
-                        .apply(ExternalToolSurfaceInput::ApplyBoundary {
-                            surface_id: sid,
-                            applied_at_turn,
-                        }) {
-                        Ok(transition) => {
-                            self.execute_effects(&transition.effects, &mut delta, None);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                server = %server_name,
-                                error = %e,
-                                "Authority rejected ApplyBoundary for Remove"
-                            );
-                        }
+        for (surface_id, staged_op, staged_sequence) in staged_intents {
+            let server_name = surface_id.0.clone();
+            let config = match staged_op {
+                StagedSurfaceOp::Add => Some(
+                    self.staged_payloads
+                        .get(&server_name)
+                        .cloned()
+                        .ok_or_else(|| McpError::ProtocolError {
+                            message: format!(
+                                "staged add for '{server_name}' is missing its staged payload"
+                            ),
+                        })?,
+                ),
+                StagedSurfaceOp::Reload => Some(
+                    self.staged_payloads
+                        .get(&server_name)
+                        .cloned()
+                        .ok_or_else(|| McpError::ProtocolError {
+                            message: format!(
+                                "staged reload for '{server_name}' is missing its staged payload"
+                            ),
+                        })?,
+                ),
+                StagedSurfaceOp::Remove | StagedSurfaceOp::None => None,
+            };
+            let applied_at_turn = self.turn_number_from_staged_sequence(staged_sequence);
+            match self
+                .auth_mut()
+                .apply(ExternalToolSurfaceInput::ApplyBoundary {
+                    surface_id,
+                    applied_at_turn,
+                }) {
+                Ok(transition) => {
+                    self.execute_effects(
+                        &transition.effects,
+                        &mut delta,
+                        config.as_ref(),
+                        &mut snapshot_alignment,
+                    );
+                    if matches!(staged_op, StagedSurfaceOp::Add | StagedSurfaceOp::Reload) {
+                        self.staged_payloads.remove(&server_name);
                     }
                 }
-                StagedRouterOp::Reload(target) => {
-                    let config = match target {
-                        McpReloadTarget::ServerName(server_name) => {
-                            let entry = self
-                                .servers
-                                .get(&server_name)
-                                .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
-                            entry.config.clone()
-                        }
-                        McpReloadTarget::Config(config) => config,
-                    };
-
-                    let server_name = config.name.clone();
-                    let sid = SurfaceId::from(server_name.as_str());
-                    let applied_at_turn = self.next_boundary_turn();
-
-                    // Cancel any existing pending op for this server.
-                    self.pending_servers.remove(&server_name);
-
-                    // Stage through authority.
-                    if let Err(e) = self
-                        .auth_mut()
-                        .apply(ExternalToolSurfaceInput::StageReload {
-                            surface_id: sid.clone(),
-                        })
-                    {
-                        tracing::warn!(server = %server_name, error = %e, "Authority rejected StageReload");
-                        continue;
-                    }
-
-                    // Apply boundary through authority.
-                    match self
-                        .auth_mut()
-                        .apply(ExternalToolSurfaceInput::ApplyBoundary {
-                            surface_id: sid,
-                            applied_at_turn,
-                        }) {
-                        Ok(transition) => {
-                            self.execute_effects(&transition.effects, &mut delta, Some(&config));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                server = %server_name,
-                                error = %e,
-                                "Authority rejected ApplyBoundary for Reload"
-                            );
-                        }
-                    }
+                Err(error) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %error,
+                        "Authority rejected ApplyBoundary for staged intent"
+                    );
                 }
             }
         }
 
-        self.process_removals(&mut delta).await;
-        self.rebuild_visible_cache();
+        self.process_removals(&mut delta, &mut snapshot_alignment)
+            .await;
+        self.record_snapshot_alignment(snapshot_alignment);
+        let published = self.publish_projection_snapshot();
+        if published {
+            let obligation = self.pending_snapshot_alignment.take();
+            self.align_snapshot_if_requested(obligation);
+        }
 
         let pending_count = self.auth_mut().pending_count();
         Ok(McpApplyResult {
@@ -429,33 +446,37 @@ impl McpRouter {
         effects: &[ExternalToolSurfaceEffect],
         delta: &mut McpApplyDelta,
         config: Option<&McpServerConfig>,
+        snapshot_alignment: &mut Option<SurfaceSnapshotAlignmentObligation>,
     ) {
         // Extract obligation tokens from ScheduleSurfaceCompletion effects
         // before iterating — these are consumed by spawn_pending.
         let mut obligations = protocol_surface_completion::extract_obligations(effects)
             .into_iter()
             .collect::<VecDeque<_>>();
+        let mut snapshot_obligations =
+            protocol_surface_snapshot_alignment::extract_obligations(effects)
+                .into_iter()
+                .collect::<VecDeque<_>>();
 
         for effect in effects {
             match effect {
-                ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
-                    surface_id: _,
-                    operation,
-                    ..
-                } => {
+                ExternalToolSurfaceEffect::ScheduleSurfaceCompletion { operation, .. } => {
                     if let Some(config) = config {
-                        let op = match operation {
-                            SurfaceDeltaOperation::Add => PendingOp::Add,
-                            SurfaceDeltaOperation::Reload => PendingOp::Reload,
-                            _ => continue,
-                        };
+                        if !matches!(
+                            operation,
+                            SurfaceDeltaOperation::Add | SurfaceDeltaOperation::Reload
+                        ) {
+                            continue;
+                        }
                         if let Some(obligation) = obligations.pop_front() {
-                            self.spawn_pending(config.clone(), op, obligation);
+                            self.spawn_pending(config.clone(), obligation);
                         }
                     }
                 }
-                ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet => {
-                    // Deferred: rebuild_visible_cache is called after all effects.
+                ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet { .. } => {
+                    if let Some(obligation) = snapshot_obligations.pop_front() {
+                        merge_snapshot_alignment(snapshot_alignment, obligation);
+                    }
                 }
                 ExternalToolSurfaceEffect::EmitExternalToolDelta {
                     surface_id,
@@ -492,7 +513,6 @@ impl McpRouter {
                         });
                         entry.tools.clear();
                     }
-                    self.remove_tool_mappings_for_server(&surface_id.0);
                     delta.removed_servers.push(surface_id.0.clone());
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
@@ -503,35 +523,18 @@ impl McpRouter {
     }
 
     /// Spawn a background task to connect and enumerate tools for a server.
-    fn spawn_pending(
-        &mut self,
-        config: McpServerConfig,
-        op: PendingOp,
-        obligation: SurfaceCompletionObligation,
-    ) {
-        let generation = self.next_generation;
-        self.next_generation += 1;
-
+    fn spawn_pending(&mut self, config: McpServerConfig, obligation: SurfaceCompletionObligation) {
         let server_name = config.name.clone();
-        self.pending_servers.insert(
-            server_name.clone(),
-            PendingState {
-                generation,
-                obligation,
-            },
-        );
+        self.pending_obligations
+            .insert(server_name.clone(), obligation.clone());
 
         let tx = self.pending_tx.clone();
         tokio::spawn(async move {
             let result = McpConnection::connect_and_enumerate(&config).await;
-            let _ = tx
-                .send(PendingResult {
-                    server_name,
-                    generation,
-                    op,
-                    result,
-                })
-                .await;
+            if let Err(error) = tx.send(PendingResult { obligation, result }).await {
+                let server_name = error.0.obligation.surface_id.0.clone();
+                McpRouter::close_result_connection_if_present(server_name, error.0.result);
+            }
         });
     }
 
@@ -554,46 +557,88 @@ impl McpRouter {
             }
             buf
         };
+        let mut snapshot_alignment = None;
         for result in results {
-            self.process_pending_result(result);
+            if let Some(obligation) = self.process_pending_result(result) {
+                merge_snapshot_alignment(&mut snapshot_alignment, obligation);
+            }
+        }
+        self.record_snapshot_alignment(snapshot_alignment);
+        if self.pending_snapshot_alignment.is_some() {
+            let published = self.publish_projection_snapshot();
+            if published {
+                let obligation = self.pending_snapshot_alignment.take();
+                self.align_snapshot_if_requested(obligation);
+            }
         }
     }
 
-    fn process_pending_result(&mut self, result: PendingResult) {
-        // Check generation matches — discard stale results.
-        let current = self.pending_servers.get(&result.server_name);
-        let is_current = current
-            .map(|ps| ps.generation == result.generation)
-            .unwrap_or(false);
-
-        if !is_current {
+    fn process_pending_result(
+        &mut self,
+        result: PendingResult,
+    ) -> Option<SurfaceSnapshotAlignmentObligation> {
+        let PendingResult { obligation, result } = result;
+        let server_name = obligation.surface_id.0.clone();
+        let Some(state) = self.pending_obligations.get(&server_name) else {
             tracing::debug!(
-                server = %result.server_name,
-                generation = result.generation,
-                "Discarding stale pending MCP result"
+                server = %server_name,
+                "Discarding stale pending MCP result with no outstanding pending state"
             );
-            if let Ok((conn, _)) = result.result {
-                let server_name = result.server_name;
-                tokio::spawn(async move {
-                    if let Err(e) = conn.close().await {
-                        tracing::debug!(
-                            "Error closing stale MCP connection '{}': {}",
-                            server_name,
-                            e
-                        );
-                    }
-                });
+            Self::close_result_connection_if_present(server_name, result);
+            return None;
+        };
+
+        let expected_pending_op = match obligation.operation {
+            SurfaceDeltaOperation::Add => PendingSurfaceOp::Add,
+            SurfaceDeltaOperation::Reload => PendingSurfaceOp::Reload,
+            SurfaceDeltaOperation::Remove | SurfaceDeltaOperation::None => {
+                Self::close_result_connection_if_present(server_name, result);
+                return None;
             }
-            return;
+        };
+
+        let obligation_matches = state.surface_id == obligation.surface_id
+            && state.operation == obligation.operation
+            && state.pending_task_sequence == obligation.pending_task_sequence
+            && state.staged_intent_sequence == obligation.staged_intent_sequence
+            && state.applied_at_turn == obligation.applied_at_turn;
+        let sid = SurfaceId::from(server_name.as_str());
+        let auth = self.auth();
+        let authority_pending_matches = auth.pending_op(&sid) == expected_pending_op;
+        let authority_task_matches =
+            auth.pending_task_sequence(&sid) == obligation.pending_task_sequence;
+        let authority_lineage_matches =
+            auth.pending_lineage_sequence(&sid) == obligation.staged_intent_sequence;
+        drop(auth);
+
+        if !(obligation_matches
+            && authority_pending_matches
+            && authority_task_matches
+            && authority_lineage_matches)
+        {
+            tracing::warn!(
+                server = %server_name,
+                operation = ?obligation.operation,
+                obligation_matches,
+                authority_pending_matches,
+                authority_task_matches,
+                authority_lineage_matches,
+                "Discarding stale/inconsistent pending MCP result"
+            );
+            Self::close_result_connection_if_present(server_name.clone(), result);
+            return None;
         }
 
-        let pending_state = self.pending_servers.remove(&result.server_name);
-        let obligation = pending_state
-            .expect("pending_servers entry must exist for current-generation result")
-            .obligation;
-        let server_name = result.server_name.clone();
+        let Some(pending_state) = self.pending_obligations.remove(&server_name) else {
+            tracing::warn!(
+                server = %server_name,
+                "Pending state disappeared while processing current pending MCP result"
+            );
+            Self::close_result_connection_if_present(server_name, result);
+            return None;
+        };
 
-        match result.result {
+        match result {
             Ok((conn, tools)) => {
                 let tool_count = tools.len();
 
@@ -601,16 +646,20 @@ impl McpRouter {
                 // consuming the obligation token from ScheduleSurfaceCompletion.
                 match protocol_surface_completion::submit_pending_succeeded(
                     self.auth_mut(),
-                    obligation,
+                    pending_state.clone(),
                 ) {
-                    Ok(_transition) => {
-                        let operation = match result.op {
-                            PendingOp::Add => ToolConfigChangeOperation::Add,
-                            PendingOp::Reload => ToolConfigChangeOperation::Reload,
+                    Ok(transition) => {
+                        let operation = match pending_state.operation {
+                            SurfaceDeltaOperation::Add => ToolConfigChangeOperation::Add,
+                            SurfaceDeltaOperation::Reload => ToolConfigChangeOperation::Reload,
+                            SurfaceDeltaOperation::Remove | SurfaceDeltaOperation::None => {
+                                unreachable!()
+                            }
                         };
+                        let snapshot_alignment = latest_snapshot_alignment(&transition.effects);
 
                         // For reload: close old connection.
-                        if result.op == PendingOp::Reload
+                        if pending_state.operation == SurfaceDeltaOperation::Reload
                             && let Some(old_entry) = self.servers.get_mut(&server_name)
                         {
                             let old_conn = old_entry.connection.take();
@@ -630,22 +679,13 @@ impl McpRouter {
                         };
 
                         if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry)
-                            && result.op == PendingOp::Add
+                            && pending_state.operation == SurfaceDeltaOperation::Add
                         {
                             let old_name = old_entry.config.name.clone();
                             let old_conn = old_entry.connection;
                             tokio::spawn(async move {
                                 Self::close_entry_connection(old_name, old_conn).await;
                             });
-                        }
-
-                        // Update tool mappings.
-                        self.remove_tool_mappings_for_server(&server_name);
-                        if let Some(entry) = self.servers.get(&server_name) {
-                            for tool in &entry.tools {
-                                self.tool_to_server
-                                    .insert(tool.name.clone(), server_name.clone());
-                            }
                         }
 
                         self.completed_updates.push_back(CompletedLifecycleUpdate {
@@ -656,6 +696,7 @@ impl McpRouter {
                             )
                             .with_tool_count(Some(tool_count)),
                         });
+                        return snapshot_alignment;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -673,31 +714,38 @@ impl McpRouter {
                                 );
                             }
                         });
+                        return None;
                     }
                 }
             }
             Err(err) => {
-                let operation = match result.op {
-                    PendingOp::Add => ToolConfigChangeOperation::Add,
-                    PendingOp::Reload => ToolConfigChangeOperation::Reload,
+                let operation = match pending_state.operation {
+                    SurfaceDeltaOperation::Add => ToolConfigChangeOperation::Add,
+                    SurfaceDeltaOperation::Reload => ToolConfigChangeOperation::Reload,
+                    SurfaceDeltaOperation::Remove | SurfaceDeltaOperation::None => unreachable!(),
                 };
 
                 // Submit failure feedback through the generated protocol helper,
                 // consuming the obligation token from ScheduleSurfaceCompletion.
-                if let Err(e) =
-                    protocol_surface_completion::submit_pending_failed(self.auth_mut(), obligation)
-                {
-                    tracing::warn!(
-                        server = %server_name,
-                        error = %e,
-                        "Authority rejected PendingFailed"
-                    );
-                }
+                let snapshot_alignment = match protocol_surface_completion::submit_pending_failed(
+                    self.auth_mut(),
+                    pending_state.clone(),
+                ) {
+                    Ok(transition) => latest_snapshot_alignment(&transition.effects),
+                    Err(e) => {
+                        tracing::warn!(
+                            server = %server_name,
+                            error = %e,
+                            "Authority rejected PendingFailed"
+                        );
+                        None
+                    }
+                };
 
                 tracing::warn!(
                     server = %server_name,
                     error = %err,
-                    op = ?result.op,
+                    op = ?pending_state.operation,
                     "MCP server background connection failed"
                 );
 
@@ -709,6 +757,7 @@ impl McpRouter {
                     )
                     .with_detail(Some(err.to_string())),
                 });
+                return snapshot_alignment;
             }
         }
     }
@@ -716,7 +765,6 @@ impl McpRouter {
     /// Drain pending results and return queued canonical lifecycle actions.
     pub fn take_lifecycle_actions(&mut self) -> Vec<McpLifecycleAction> {
         self.drain_pending();
-        self.rebuild_visible_cache();
         self.completed_updates
             .drain(..)
             .map(|update| update.action)
@@ -726,7 +774,11 @@ impl McpRouter {
     /// Drain pending results and return queued external update notices.
     pub fn take_external_updates(&mut self) -> ExternalToolUpdate {
         self.drain_pending();
-        self.rebuild_visible_cache();
+        let pending = self
+            .auth()
+            .pending_surfaces()
+            .map(|surface_id| surface_id.0.clone())
+            .collect();
 
         ExternalToolUpdate {
             notices: self
@@ -734,13 +786,13 @@ impl McpRouter {
                 .drain(..)
                 .map(|update| update.action)
                 .collect(),
-            pending: self.pending_servers.keys().cloned().collect(),
+            pending,
         }
     }
 
     /// Returns true if there are pending background operations or undelivered notices.
     pub fn has_pending_or_notices(&self) -> bool {
-        !self.pending_servers.is_empty() || !self.completed_updates.is_empty()
+        self.auth().pending_count() > 0 || !self.completed_updates.is_empty()
     }
 
     /// Backward-compatible immediate install path. Bypasses staged/boundary
@@ -750,6 +802,7 @@ impl McpRouter {
 
         let server_name = config.name.clone();
         let sid = SurfaceId::from(server_name.as_str());
+        let mut snapshot_alignment = None;
 
         // Drive authority: StageAdd -> ApplyBoundary -> PendingSucceeded.
         // Uses the generated protocol helper for the completion feedback.
@@ -758,7 +811,8 @@ impl McpRouter {
         }) {
             tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd in install path");
         }
-        let applied_at_turn = self.next_boundary_turn();
+        let staged_sequence = self.auth().staged_intent_sequence(&sid);
+        let applied_at_turn = self.turn_number_from_staged_sequence(staged_sequence);
         let boundary_effects = match self.auth_mut().apply(
             ExternalToolSurfaceInput::ApplyBoundary {
                 surface_id: sid.clone(),
@@ -774,10 +828,16 @@ impl McpRouter {
         // Extract and immediately consume the obligation for the synchronous install path.
         let obligations = protocol_surface_completion::extract_obligations(&boundary_effects);
         for obligation in obligations {
-            if let Err(e) =
-                protocol_surface_completion::submit_pending_succeeded(self.auth_mut(), obligation)
+            match protocol_surface_completion::submit_pending_succeeded(self.auth_mut(), obligation)
             {
-                tracing::warn!(server = %server_name, error = %e, "Authority rejected PendingSucceeded in install path");
+                Ok(transition) => {
+                    if let Some(obligation) = latest_snapshot_alignment(&transition.effects) {
+                        merge_snapshot_alignment(&mut snapshot_alignment, obligation);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(server = %server_name, error = %e, "Authority rejected PendingSucceeded in install path");
+                }
             }
         }
 
@@ -787,24 +847,37 @@ impl McpRouter {
             tools,
             active_calls: AtomicUsize::new(0),
         };
+        let tool_count = new_entry.tools.len();
 
         if let Some(old_entry) = self.servers.insert(server_name.clone(), new_entry) {
             Self::close_entry_connection(old_entry.config.name.clone(), old_entry.connection).await;
         }
 
-        self.remove_tool_mappings_for_server(&server_name);
-        if let Some(entry) = self.servers.get(&server_name) {
-            for tool in &entry.tools {
-                self.tool_to_server
-                    .insert(tool.name.clone(), server_name.clone());
-            }
+        self.completed_updates.push_back(CompletedLifecycleUpdate {
+            action: McpLifecycleAction::new(
+                server_name.clone(),
+                ToolConfigChangeOperation::Add,
+                McpLifecyclePhase::Applied,
+            )
+            .with_tool_count(Some(tool_count)),
+        });
+
+        self.record_snapshot_alignment(snapshot_alignment);
+        let published = self.publish_projection_snapshot();
+        if published {
+            let obligation = self.pending_snapshot_alignment.take();
+            self.align_snapshot_if_requested(obligation);
         }
 
         Ok(())
     }
 
     /// Process removal finalization based on authority-owned timeout tracking.
-    async fn process_removals(&mut self, delta: &mut McpApplyDelta) {
+    async fn process_removals(
+        &mut self,
+        delta: &mut McpApplyDelta,
+        snapshot_alignment: &mut Option<SurfaceSnapshotAlignmentObligation>,
+    ) {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
 
@@ -824,7 +897,16 @@ impl McpRouter {
 
         for (server_name, degraded) in finalized {
             let sid = SurfaceId::from(server_name.as_str());
-            let applied_at_turn = self.next_boundary_turn();
+            let applied_at_turn = match self.auth_mut().removal_timing(&sid) {
+                Some(timing) => timing.applied_at_turn,
+                None => {
+                    tracing::warn!(
+                        server = %server_name,
+                        "removal finalization missing authority timing; falling back to snapshot epoch"
+                    );
+                    self.turn_number_from_snapshot_epoch()
+                }
+            };
             let input = if degraded {
                 ExternalToolSurfaceInput::FinalizeRemovalForced {
                     surface_id: sid,
@@ -839,7 +921,7 @@ impl McpRouter {
 
             match self.auth_mut().apply(input) {
                 Ok(transition) => {
-                    self.execute_effects(&transition.effects, delta, None);
+                    self.execute_effects(&transition.effects, delta, None, snapshot_alignment);
                     if degraded {
                         delta.degraded_removals.push(server_name);
                     }
@@ -855,6 +937,25 @@ impl McpRouter {
         }
     }
 
+    fn align_snapshot_if_requested(
+        &mut self,
+        snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
+    ) {
+        let Some(obligation) = snapshot_alignment else {
+            return;
+        };
+        if let Err(error) = protocol_surface_snapshot_alignment::submit_snapshot_aligned(
+            self.auth_mut(),
+            obligation.clone(),
+        ) {
+            tracing::warn!(
+                snapshot_epoch = obligation.snapshot_epoch,
+                error = %error,
+                "Authority rejected SnapshotAligned"
+            );
+        }
+    }
+
     async fn close_entry_connection(server_name: String, conn: Option<McpConnection>) {
         if let Some(conn) = conn
             && let Err(e) = conn.close().await
@@ -863,21 +964,70 @@ impl McpRouter {
         }
     }
 
-    fn remove_tool_mappings_for_server(&mut self, server_name: &str) {
-        self.tool_to_server
-            .retain(|_, owner| owner.as_str() != server_name);
+    fn close_result_connection_if_present(
+        server_name: String,
+        result: Result<(McpConnection, Vec<Arc<ToolDef>>), McpError>,
+    ) {
+        if let Ok((conn, _)) = result {
+            tokio::spawn(async move {
+                if let Err(error) = conn.close().await {
+                    tracing::debug!(
+                        "Error closing stale MCP connection '{}': {}",
+                        server_name,
+                        error
+                    );
+                }
+            });
+        }
     }
 
-    fn rebuild_visible_cache(&mut self) {
-        let visible: Vec<SurfaceId> = self.auth_mut().visible_surfaces().cloned().collect();
-        let mut tools: Vec<Arc<ToolDef>> = Vec::new();
-        for sid in &visible {
-            if let Some(entry) = self.servers.get(&sid.0) {
-                tools.extend(entry.tools.iter().cloned());
+    fn publish_projection_snapshot(&mut self) -> bool {
+        let auth = self.auth();
+        let epoch = auth.snapshot_epoch();
+        let server_names: BTreeSet<String> =
+            auth.visible_surfaces().map(|sid| sid.0.clone()).collect();
+        drop(auth);
+
+        let mut tool_to_server = HashMap::new();
+        let mut visible_tools: Vec<Arc<ToolDef>> = Vec::new();
+        let mut complete = true;
+
+        for server_name in server_names {
+            let Some(entry) = self.servers.get(&server_name) else {
+                tracing::warn!(
+                    server = %server_name,
+                    "Visible server has no shell entry during projection publish; publishing conservative snapshot without this server"
+                );
+                complete = false;
+                continue;
+            };
+            for tool in &entry.tools {
+                if let Some(previous_owner) =
+                    tool_to_server.insert(tool.name.clone(), server_name.clone())
+                    && previous_owner != server_name
+                {
+                    tracing::warn!(
+                        tool = %tool.name,
+                        previous_owner = %previous_owner,
+                        current_owner = %server_name,
+                        "MCP projection remapped duplicate tool name to newer owner"
+                    );
+                }
+                visible_tools.push(Arc::clone(tool));
             }
         }
-        tools.sort_by(|a, b| a.name.cmp(&b.name));
-        self.cached_tools = tools;
+        visible_tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+        self.projection = Arc::new(RouterProjectionSnapshot {
+            epoch,
+            tool_to_server,
+            visible_tools: visible_tools.into(),
+        });
+        complete
+    }
+
+    fn projection_tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.projection.visible_tools)
     }
 
     /// Get current lifecycle state for a server.
@@ -927,27 +1077,37 @@ impl McpRouter {
 
     /// List all visible tools from active servers.
     pub fn list_tools(&self) -> &[Arc<ToolDef>] {
-        &self.cached_tools
+        self.projection.visible_tools.as_ref()
     }
 
     /// Progress only server removals (drain/timeout finalization) without applying staged ops.
     pub async fn progress_removals(&mut self) -> McpApplyDelta {
         let mut delta = McpApplyDelta::default();
-        self.process_removals(&mut delta).await;
-        self.rebuild_visible_cache();
+        let mut snapshot_alignment = None;
+        self.process_removals(&mut delta, &mut snapshot_alignment)
+            .await;
+        self.record_snapshot_alignment(snapshot_alignment);
+        let published = self.publish_projection_snapshot();
+        if published {
+            let obligation = self.pending_snapshot_alignment.take();
+            self.align_snapshot_if_requested(obligation);
+        }
         delta
     }
 
     /// Call a tool by name, returning multimodal content blocks.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let server_name = self
+        let snapshot = Arc::clone(&self.projection);
+        let _projection_epoch = snapshot.epoch;
+        let server_name = snapshot
             .tool_to_server
             .get(name)
+            .cloned()
             .ok_or_else(|| McpError::ToolNotFound(name.to_string()))?;
 
         let entry = self
             .servers
-            .get(server_name)
+            .get(&server_name)
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
         // Route through authority — CallStarted validates lifecycle state.
@@ -987,20 +1147,52 @@ impl McpRouter {
         let result = conn.call_tool(name, args).await;
 
         // Notify authority that the call finished.
-        let _ = self
-            .auth()
-            .apply(ExternalToolSurfaceInput::CallFinished { surface_id: sid });
+        let mut auth = self.auth();
+        let _ = auth.apply(ExternalToolSurfaceInput::CallFinished { surface_id: sid });
 
         result
     }
 
     /// Gracefully shutdown all connections.
     pub async fn shutdown(mut self) {
+        // First consume any finished pending tasks through normal processing so
+        // stale completion payloads close their transports via existing paths.
+        self.drain_pending();
         let _ = self.auth_mut().apply(ExternalToolSurfaceInput::Shutdown);
-        drop(self.pending_tx);
-        for (_, entry) in self.servers {
+        self.pending_obligations.clear();
+        self.pending_snapshot_alignment = None;
+        self.completed_updates.clear();
+        self.staged_payloads.clear();
+        let (replacement_tx, _replacement_rx) = mpsc::channel(PENDING_CHANNEL_CAPACITY);
+        let old_pending_tx = std::mem::replace(&mut self.pending_tx, replacement_tx);
+        drop(old_pending_tx);
+        // Drain any completion payloads that arrived after pending_tx drop.
+        let drained_results: Vec<PendingResult> = {
+            let mut rx = match self.pending_rx.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "MCP pending_rx mutex was poisoned during shutdown; recovering receiver"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            let mut drained = Vec::new();
+            while let Ok(result) = rx.try_recv() {
+                drained.push(result);
+            }
+            drained
+        };
+        for pending in drained_results {
+            if let Ok((conn, _)) = pending.result {
+                Self::close_entry_connection(pending.obligation.surface_id.0, Some(conn)).await;
+            }
+        }
+        let servers = std::mem::take(&mut self.servers);
+        for (_, entry) in servers {
             Self::close_entry_connection(entry.config.name, entry.connection).await;
         }
+        let _ = self.publish_projection_snapshot();
     }
 
     pub fn set_inflight_calls_for_testing(&mut self, server_name: &str, count: usize) {
@@ -1033,7 +1225,7 @@ impl McpRouter {
 #[async_trait]
 impl AgentToolDispatcher for McpRouter {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        self.cached_tools.clone().into()
+        self.projection_tools()
     }
 
     async fn dispatch(
@@ -1202,7 +1394,10 @@ mod tests {
             .call_tool("echo", &serde_json::json!({"message": "blocked"}))
             .await
             .expect_err("new calls should be rejected while removing");
-        assert!(matches!(err, McpError::ServerUnavailable { .. }));
+        assert!(
+            matches!(err, McpError::ToolNotFound(_)),
+            "removing surfaces should be absent from the published routing snapshot, got {err:?}"
+        );
 
         router.set_inflight_calls_for_testing("test-server", 0);
         let result = router

@@ -305,6 +305,30 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::SurfaceResultAlignment,
             "External notice — surface must represent mob lifecycle accurately",
         ),
+        (
+            "MobMemberLifecycleAnchorMachine",
+            "MemberLifecycleSnapshotUpdated",
+            SeamClassification::NoOwnerRealization,
+            "Local projection anchor — publishes derived member lifecycle snapshot only",
+        ),
+        (
+            "MobRuntimeBridgeAnchorMachine",
+            "RuntimeBridgeSnapshotUpdated",
+            SeamClassification::NoOwnerRealization,
+            "Local projection anchor — publishes derived runtime bridge snapshot only",
+        ),
+        (
+            "MobWiringAnchorMachine",
+            "WiringSnapshotUpdated",
+            SeamClassification::NoOwnerRealization,
+            "Local projection anchor — publishes derived wiring snapshot only",
+        ),
+        (
+            "MobHelperResultAnchorMachine",
+            "HelperResultSnapshotUpdated",
+            SeamClassification::NoOwnerRealization,
+            "Local projection anchor — publishes derived helper result snapshot only",
+        ),
         // (RequestCleanup is Routed — not classified here)
         // === MobOrchestratorMachine ===
         (

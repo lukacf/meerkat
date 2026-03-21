@@ -10,9 +10,9 @@ use chrono::Utc;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
-    Input, InputDurability, InputHeader, InputOrigin, InputState, InputVisibility, PromptInput,
-    RuntimeDriverError, RuntimeSessionAdapter, RuntimeState, RuntimeStore, RuntimeStoreError,
-    SessionDelta, SessionServiceRuntimeExt,
+    Input, InputDurability, InputHeader, InputOrigin, InputState, InputVisibility,
+    LogicalRuntimeId, PromptInput, RuntimeDriverError, RuntimeSessionAdapter, RuntimeState,
+    RuntimeStore, RuntimeStoreError, SessionDelta, SessionServiceRuntimeExt,
 };
 
 fn make_prompt(text: &str) -> Input {
@@ -270,6 +270,296 @@ async fn unregister_removes_driver() {
 
     let result = adapter.runtime_state(&sid).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn recycle_preserves_ephemeral_queued_work() {
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let first = make_prompt("first");
+    let first_id = first.id().clone();
+    let second = make_prompt("second");
+    let second_id = second.id().clone();
+    adapter.accept_input(&sid, first).await.unwrap();
+    adapter.accept_input(&sid, second).await.unwrap();
+
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_transferred, 2);
+
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle
+    );
+    let active_ids = adapter.list_active_inputs(&sid).await.unwrap();
+    assert_eq!(active_ids, vec![first_id.clone(), second_id.clone()]);
+
+    let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
+    let second_state = adapter
+        .input_state(&sid, &second_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_state.current_state(),
+        meerkat_runtime::InputLifecycleState::Queued
+    );
+    assert_eq!(
+        second_state.current_state(),
+        meerkat_runtime::InputLifecycleState::Queued
+    );
+}
+
+#[tokio::test]
+async fn recycle_preserves_persistent_queued_work() {
+    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let adapter = RuntimeSessionAdapter::persistent(store);
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let first = make_prompt("first");
+    let first_id = first.id().clone();
+    let second = make_prompt("second");
+    let second_id = second.id().clone();
+    adapter.accept_input(&sid, first).await.unwrap();
+    adapter.accept_input(&sid, second).await.unwrap();
+
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_transferred, 2);
+
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle
+    );
+    let active_ids = adapter.list_active_inputs(&sid).await.unwrap();
+    assert_eq!(active_ids, vec![first_id.clone(), second_id.clone()]);
+
+    let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
+    let second_state = adapter
+        .input_state(&sid, &second_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_state.current_state(),
+        meerkat_runtime::InputLifecycleState::Queued
+    );
+    assert_eq!(
+        second_state.current_state(),
+        meerkat_runtime::InputLifecycleState::Queued
+    );
+}
+
+#[tokio::test]
+async fn recycle_keeps_waiters_for_preserved_pending_input() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+
+    struct NoResultExecutor;
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoResultExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
+        }
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, make_prompt("survive recycle"))
+        .await
+        .unwrap();
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should produce a completion handle");
+
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_transferred, 1);
+
+    adapter
+        .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
+        .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
+        .await
+        .expect("completion should resolve after recycle + executor attach");
+    assert!(
+        matches!(
+            result,
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        ),
+        "recycle should preserve pending waiter linkage for active input, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn recycle_attached_runtime_wakes_preserved_queued_work() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_runtime::{PeerConvention, PeerInput, ResponseProgressPhase};
+
+    struct CountingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    fn make_progress_input(label: &str) -> Input {
+        Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Ephemeral,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::ResponseProgress {
+                request_id: format!("req-{label}"),
+                phase: ResponseProgressPhase::InProgress,
+            }),
+            body: format!("progress-{label}"),
+            blocks: None,
+        })
+    }
+
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(CountingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+            }),
+        )
+        .await;
+
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, make_progress_input("recycle-attached"))
+        .await
+        .unwrap();
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("queued progress input should expose a completion handle");
+
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+        .await
+        .unwrap();
+    assert_eq!(report.inputs_transferred, 1);
+
+    let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
+        .await
+        .expect("attached runtime should wake and drain recycled queued work");
+    assert!(
+        matches!(
+            result,
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+        ),
+        "attached recycle should preserve and drain queued work, got {result:?}"
+    );
+    assert_eq!(
+        apply_calls.load(Ordering::SeqCst),
+        1,
+        "recycle should wake the existing loop exactly once for preserved queued work"
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Attached
+    );
+}
+
+#[tokio::test]
+async fn unregister_session_terminates_pending_completion_waiters() {
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, make_prompt("pending on unregister"))
+        .await
+        .unwrap();
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should produce a completion handle");
+
+    adapter.unregister_session(&sid).await;
+
+    let result = handle.wait().await;
+    assert!(
+        matches!(
+            result,
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(ref reason)
+            if reason == "runtime session unregistered"
+        ),
+        "unregister should explicitly terminate pending waiters, got {result:?}"
+    );
 }
 
 /// Test that accept_input with a RuntimeLoop triggers input processing.
@@ -661,6 +951,246 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+}
+
+#[tokio::test]
+async fn ensure_session_with_executor_repairs_stale_attached_driver() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    struct PanicOnCancelExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for PanicOnCancelExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(cmd, RunControlCommand::CancelCurrentRun { .. }) {
+                panic!("synthetic cancel panic to kill the loop and leave driver attached");
+            }
+            Ok(())
+        }
+    }
+
+    struct RecordingExecutor {
+        called: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    adapter
+        .register_session_with_executor(sid.clone(), Box::new(PanicOnCancelExecutor))
+        .await;
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Attached
+    );
+
+    adapter
+        .interrupt_current_run(&sid)
+        .await
+        .expect("attached runtime should accept the first interrupt command");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match adapter.interrupt_current_run(&sid).await {
+                Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Attached,
+                }) => break,
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("runtime loop should die and leave a stale attached driver state behind");
+
+    let apply_called = Arc::new(AtomicBool::new(false));
+    adapter
+        .ensure_session_with_executor(
+            sid.clone(),
+            Box::new(RecordingExecutor {
+                called: Arc::clone(&apply_called),
+            }),
+        )
+        .await;
+
+    let input = make_prompt("repair stale attachment");
+    let input_id = input.id().clone();
+    adapter.accept_input(&sid, input).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if apply_called.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("ensuring with executor should repair the stale attached driver");
+
+    let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Attached
+    );
+}
+
+#[tokio::test]
+async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use tokio::sync::Notify;
+
+    struct BlockingStopExecutor {
+        stop_entered: Arc<Notify>,
+        release_stop: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingStopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(cmd, RunControlCommand::StopRuntimeExecutor { .. }) {
+                self.stop_entered.notify_one();
+                self.release_stop.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let sid = SessionId::new();
+    let stop_entered = Arc::new(Notify::new());
+    let release_stop = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(BlockingStopExecutor {
+                stop_entered: Arc::clone(&stop_entered),
+                release_stop: Arc::clone(&release_stop),
+            }),
+        )
+        .await;
+
+    let stop_adapter = Arc::clone(&adapter);
+    let stop_sid = sid.clone();
+    let stop_task = tokio::spawn(async move {
+        stop_adapter
+            .stop_runtime_executor(
+                &stop_sid,
+                RunControlCommand::StopRuntimeExecutor {
+                    reason: "ownership-stop".into(),
+                },
+            )
+            .await
+            .expect("stop command should send successfully");
+    });
+
+    stop_entered.notified().await;
+    stop_task.await.unwrap();
+
+    adapter
+        .interrupt_current_run(&sid)
+        .await
+        .expect("attachment should remain published while stop is still in progress");
+
+    release_stop.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if adapter.runtime_state(&sid).await.unwrap() == RuntimeState::Stopped {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("runtime should reach Stopped after the blocking stop control is released");
+
+    let err = adapter
+        .interrupt_current_run(&sid)
+        .await
+        .expect_err("stopped runtime should no longer expose a live attachment");
+    assert!(matches!(
+        err,
+        RuntimeDriverError::NotReady {
+            state: RuntimeState::Stopped
+        }
+    ));
 }
 
 #[tokio::test]
@@ -1131,6 +1661,47 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
     );
 }
 
+#[tokio::test]
+async fn accept_input_and_run_rejects_deduplicated_admission() {
+    use meerkat_runtime::identifiers::IdempotencyKey;
+
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let key = IdempotencyKey::new("sync-dedup");
+    let mut first = make_prompt("first");
+    if let Input::Prompt(ref mut prompt) = first {
+        prompt.header.idempotency_key = Some(key.clone());
+    }
+    let first_id = first.id().clone();
+    let outcome = adapter.accept_input(&sid, first).await.unwrap();
+    assert!(outcome.is_accepted());
+
+    let mut duplicate = make_prompt("duplicate");
+    if let Input::Prompt(ref mut prompt) = duplicate {
+        prompt.header.idempotency_key = Some(key);
+    }
+
+    let err = adapter
+        .accept_input_and_run::<(), _, _>(&sid, duplicate, |_run_id, _primitive| async move {
+            unreachable!("deduplicated admission must be rejected before sync execution starts")
+        })
+        .await
+        .expect_err("deduplicated sync admission should be rejected");
+    assert!(matches!(
+        err,
+        RuntimeDriverError::ValidationFailed { ref reason }
+        if reason.contains("does not support deduplicated admission")
+    ));
+
+    let state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
+    assert_eq!(
+        state.current_state(),
+        meerkat_runtime::InputLifecycleState::Queued
+    );
+}
+
 /// Gate A4 (part 1): resolve_without_result sends CompletedWithoutResult
 /// when executor returns run_result: None.
 #[tokio::test]
@@ -1249,6 +1820,81 @@ async fn retire_without_loop_resolves_waiters() {
         ),
         "retire without loop should resolve pending waiters as terminated, got {result:?}"
     );
+}
+
+#[tokio::test]
+async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
+    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+    use tokio::sync::Notify;
+
+    struct IdleDrainRuntime {
+        notify: Arc<Notify>,
+    }
+
+    impl IdleDrainRuntime {
+        fn new() -> Self {
+            Self {
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for IdleDrainRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
+        }
+
+        fn dismiss_received(&self) -> bool {
+            false
+        }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
+    let spawned = adapter
+        .maybe_spawn_comms_drain(&sid, true, Some(comms))
+        .await;
+    assert!(spawned, "registered host-mode session should spawn a drain");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if adapter.comms_drain_suppresses_turn_boundary(&sid).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("spawned host drain should publish suppression before unregister");
+
+    adapter.unregister_session(&sid).await;
+
+    assert!(
+        !adapter.comms_drain_suppresses_turn_boundary(&sid).await,
+        "unregister should clear published turn-boundary suppression"
+    );
+    adapter.wait_comms_drain(&sid).await;
+    assert!(matches!(
+        adapter.runtime_state(&sid).await,
+        Err(RuntimeDriverError::NotReady {
+            state: RuntimeState::Destroyed
+        })
+    ));
 }
 
 /// Test that BoundaryApplied fires with correct receipt on success.

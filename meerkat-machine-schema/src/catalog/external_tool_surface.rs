@@ -9,7 +9,7 @@ use crate::{
 pub fn external_tool_surface_machine() -> MachineSchema {
     MachineSchema {
         machine: "ExternalToolSurfaceMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mcp".into(),
             module: "generated::external_tool_surface".into(),
@@ -47,6 +47,20 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     ),
                 ),
                 field(
+                    "staged_intent_sequence",
+                    TypeRef::Map(Box::new(named("SurfaceId")), Box::new(TypeRef::U64)),
+                ),
+                field("next_staged_intent_sequence", TypeRef::U64),
+                field(
+                    "pending_task_sequence",
+                    TypeRef::Map(Box::new(named("SurfaceId")), Box::new(TypeRef::U64)),
+                ),
+                field(
+                    "pending_lineage_sequence",
+                    TypeRef::Map(Box::new(named("SurfaceId")), Box::new(TypeRef::U64)),
+                ),
+                field("next_pending_task_sequence", TypeRef::U64),
+                field(
                     "inflight_calls",
                     TypeRef::Map(Box::new(named("SurfaceId")), Box::new(TypeRef::U64)),
                 ),
@@ -64,6 +78,8 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         Box::new(named("SurfaceDeltaPhase")),
                     ),
                 ),
+                field("snapshot_epoch", TypeRef::U64),
+                field("snapshot_aligned_epoch", TypeRef::U64),
             ],
             init: InitSchema {
                 phase: "Operating".into(),
@@ -73,9 +89,16 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     init("base_state", Expr::EmptyMap),
                     init("pending_op", Expr::EmptyMap),
                     init("staged_op", Expr::EmptyMap),
+                    init("staged_intent_sequence", Expr::EmptyMap),
+                    init("next_staged_intent_sequence", Expr::U64(1)),
+                    init("pending_task_sequence", Expr::EmptyMap),
+                    init("pending_lineage_sequence", Expr::EmptyMap),
+                    init("next_pending_task_sequence", Expr::U64(1)),
                     init("inflight_calls", Expr::EmptyMap),
                     init("last_delta_operation", Expr::EmptyMap),
                     init("last_delta_phase", Expr::EmptyMap),
+                    init("snapshot_epoch", Expr::U64(0)),
+                    init("snapshot_aligned_epoch", Expr::U64(0)),
                 ],
             },
             terminal_phases: vec!["Shutdown".into()],
@@ -106,6 +129,9 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     name: "PendingSucceeded".into(),
                     fields: vec![
                         field("surface_id", named("SurfaceId")),
+                        field("operation", named("SurfaceDeltaOperation")),
+                        field("pending_task_sequence", TypeRef::U64),
+                        field("staged_intent_sequence", TypeRef::U64),
                         field("applied_at_turn", named("TurnNumber")),
                     ],
                 },
@@ -113,6 +139,9 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     name: "PendingFailed".into(),
                     fields: vec![
                         field("surface_id", named("SurfaceId")),
+                        field("operation", named("SurfaceDeltaOperation")),
+                        field("pending_task_sequence", TypeRef::U64),
+                        field("staged_intent_sequence", TypeRef::U64),
                         field("applied_at_turn", named("TurnNumber")),
                     ],
                 },
@@ -138,6 +167,10 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         field("applied_at_turn", named("TurnNumber")),
                     ],
                 },
+                VariantSchema {
+                    name: "SnapshotAligned".into(),
+                    fields: vec![field("snapshot_epoch", TypeRef::U64)],
+                },
                 variant("Shutdown"),
             ],
         },
@@ -149,10 +182,15 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     fields: vec![
                         field("surface_id", named("SurfaceId")),
                         field("operation", named("SurfaceDeltaOperation")),
+                        field("pending_task_sequence", TypeRef::U64),
+                        field("staged_intent_sequence", TypeRef::U64),
                         field("applied_at_turn", named("TurnNumber")),
                     ],
                 },
-                variant("RefreshVisibleSurfaceSet"),
+                VariantSchema {
+                    name: "RefreshVisibleSurfaceSet".into(),
+                    fields: vec![field("snapshot_epoch", TypeRef::U64)],
+                },
                 VariantSchema {
                     name: "EmitExternalToolDelta".into(),
                     fields: vec![
@@ -180,6 +218,9 @@ pub fn external_tool_surface_machine() -> MachineSchema {
             lookup_string_helper("SurfaceBase", "base_state", "Absent", "SurfaceBaseState"),
             lookup_string_helper("PendingOp", "pending_op", "None", "PendingSurfaceOp"),
             lookup_string_helper("StagedOp", "staged_op", "None", "StagedSurfaceOp"),
+            lookup_u64_helper("StagedIntentSequence", "staged_intent_sequence"),
+            lookup_u64_helper("PendingTaskSequence", "pending_task_sequence"),
+            lookup_u64_helper("PendingLineageSequence", "pending_lineage_sequence"),
             lookup_u64_helper("InflightCallCount", "inflight_calls"),
             lookup_string_helper(
                 "LastDeltaOperation",
@@ -205,6 +246,43 @@ pub fn external_tool_surface_machine() -> MachineSchema {
         ],
         derived: vec![],
         invariants: vec![
+            set_subset_known_invariant(
+                "visible_surfaces_subset_of_known_surfaces",
+                "visible_surfaces",
+            ),
+            map_keys_subset_known_invariant(
+                "base_state_keys_subset_of_known_surfaces",
+                "base_state",
+            ),
+            map_keys_subset_known_invariant(
+                "pending_op_keys_subset_of_known_surfaces",
+                "pending_op",
+            ),
+            map_keys_subset_known_invariant("staged_op_keys_subset_of_known_surfaces", "staged_op"),
+            map_keys_subset_known_invariant(
+                "staged_intent_sequence_keys_subset_of_known_surfaces",
+                "staged_intent_sequence",
+            ),
+            map_keys_subset_known_invariant(
+                "pending_task_sequence_keys_subset_of_known_surfaces",
+                "pending_task_sequence",
+            ),
+            map_keys_subset_known_invariant(
+                "pending_lineage_sequence_keys_subset_of_known_surfaces",
+                "pending_lineage_sequence",
+            ),
+            map_keys_subset_known_invariant(
+                "inflight_calls_keys_subset_of_known_surfaces",
+                "inflight_calls",
+            ),
+            map_keys_subset_known_invariant(
+                "last_delta_operation_keys_subset_of_known_surfaces",
+                "last_delta_operation",
+            ),
+            map_keys_subset_known_invariant(
+                "last_delta_phase_keys_subset_of_known_surfaces",
+                "last_delta_phase",
+            ),
             quantified_surface_invariant(
                 "removing_or_removed_surfaces_are_not_visible",
                 Expr::Or(vec![
@@ -334,6 +412,71 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     ),
                 ]),
             ),
+            quantified_surface_invariant(
+                "staged_sequence_matches_staged_presence",
+                Expr::Or(vec![
+                    Expr::And(vec![
+                        eq(
+                            call("StagedOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                        eq(
+                            call("StagedIntentSequence", vec![binding("surface_id")]),
+                            Expr::U64(0),
+                        ),
+                    ]),
+                    Expr::And(vec![
+                        neq(
+                            call("StagedOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                        Expr::Gt(
+                            Box::new(call("StagedIntentSequence", vec![binding("surface_id")])),
+                            Box::new(Expr::U64(0)),
+                        ),
+                    ]),
+                ]),
+            ),
+            quantified_surface_invariant(
+                "pending_lineage_matches_pending_presence",
+                Expr::Or(vec![
+                    Expr::And(vec![
+                        eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                        eq(
+                            call("PendingTaskSequence", vec![binding("surface_id")]),
+                            Expr::U64(0),
+                        ),
+                        eq(
+                            call("PendingLineageSequence", vec![binding("surface_id")]),
+                            Expr::U64(0),
+                        ),
+                    ]),
+                    Expr::And(vec![
+                        neq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                        Expr::Gt(
+                            Box::new(call("PendingTaskSequence", vec![binding("surface_id")])),
+                            Box::new(Expr::U64(0)),
+                        ),
+                        Expr::Gt(
+                            Box::new(call("PendingLineageSequence", vec![binding("surface_id")])),
+                            Box::new(Expr::U64(0)),
+                        ),
+                    ]),
+                ]),
+            ),
+            InvariantSchema {
+                name: "snapshot_alignment_epoch_not_ahead".into(),
+                expr: Expr::Lte(
+                    Box::new(Expr::Field("snapshot_aligned_epoch".into())),
+                    Box::new(Expr::Field("snapshot_epoch".into())),
+                ),
+            },
         ],
         transitions: vec![
             stage_transition("StageAdd", "Add"),
@@ -359,6 +502,18 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         key: binding("surface_id"),
                         value: string("Reload"),
                     },
+                    set_map(
+                        "staged_intent_sequence",
+                        "surface_id",
+                        Expr::Field("next_staged_intent_sequence".into()),
+                    ),
+                    Update::Assign {
+                        field: "next_staged_intent_sequence".into(),
+                        expr: Expr::Add(
+                            Box::new(Expr::Field("next_staged_intent_sequence".into())),
+                            Box::new(Expr::U64(1)),
+                        ),
+                    },
                 ],
                 to: "Operating".into(),
                 emit: vec![],
@@ -374,6 +529,13 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     Guard {
                         name: "staged_add_present".into(),
                         expr: eq(call("StagedOp", vec![binding("surface_id")]), string("Add")),
+                    },
+                    Guard {
+                        name: "no_pending_operation".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
                     },
                     Guard {
                         name: "base_state_accepts_add".into(),
@@ -396,9 +558,27 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("pending_op", "surface_id", string("Add")),
+                    set_map(
+                        "pending_task_sequence",
+                        "surface_id",
+                        Expr::Field("next_pending_task_sequence".into()),
+                    ),
+                    set_map(
+                        "pending_lineage_sequence",
+                        "surface_id",
+                        call("StagedIntentSequence", vec![binding("surface_id")]),
+                    ),
                     set_map("staged_op", "surface_id", string("None")),
+                    set_map("staged_intent_sequence", "surface_id", Expr::U64(0)),
                     set_map("last_delta_operation", "surface_id", string("Add")),
                     set_map("last_delta_phase", "surface_id", string("Pending")),
+                    Update::Assign {
+                        field: "next_pending_task_sequence".into(),
+                        expr: Expr::Add(
+                            Box::new(Expr::Field("next_pending_task_sequence".into())),
+                            Box::new(Expr::U64(1)),
+                        ),
+                    },
                 ],
                 to: "Operating".into(),
                 emit: vec![
@@ -422,6 +602,13 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         ),
                     },
                     Guard {
+                        name: "no_pending_operation".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                    },
+                    Guard {
                         name: "reload_requires_active_base".into(),
                         expr: eq(
                             call("SurfaceBase", vec![binding("surface_id")]),
@@ -432,9 +619,27 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("pending_op", "surface_id", string("Reload")),
+                    set_map(
+                        "pending_task_sequence",
+                        "surface_id",
+                        Expr::Field("next_pending_task_sequence".into()),
+                    ),
+                    set_map(
+                        "pending_lineage_sequence",
+                        "surface_id",
+                        call("StagedIntentSequence", vec![binding("surface_id")]),
+                    ),
                     set_map("staged_op", "surface_id", string("None")),
+                    set_map("staged_intent_sequence", "surface_id", Expr::U64(0)),
                     set_map("last_delta_operation", "surface_id", string("Reload")),
                     set_map("last_delta_phase", "surface_id", string("Pending")),
+                    Update::Assign {
+                        field: "next_pending_task_sequence".into(),
+                        expr: Expr::Add(
+                            Box::new(Expr::Field("next_pending_task_sequence".into())),
+                            Box::new(Expr::U64(1)),
+                        ),
+                    },
                 ],
                 to: "Operating".into(),
                 emit: vec![
@@ -458,6 +663,13 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         ),
                     },
                     Guard {
+                        name: "no_pending_operation".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                    },
+                    Guard {
                         name: "remove_begins_from_active".into(),
                         expr: eq(
                             call("SurfaceBase", vec![binding("surface_id")]),
@@ -468,10 +680,14 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("staged_op", "surface_id", string("None")),
+                    set_map("staged_intent_sequence", "surface_id", Expr::U64(0)),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("base_state", "surface_id", string("Removing")),
                     set_map("last_delta_operation", "surface_id", string("Remove")),
                     set_map("last_delta_phase", "surface_id", string("Draining")),
+                    advance_snapshot_epoch(),
                     Update::SetRemove {
                         field: "visible_surfaces".into(),
                         value: binding("surface_id"),
@@ -479,10 +695,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 ],
                 to: "Operating".into(),
                 emit: vec![
-                    EffectEmit {
-                        variant: "RefreshVisibleSurfaceSet".into(),
-                        fields: IndexMap::new(),
-                    },
+                    emit_snapshot_refresh(),
                     emit_delta("surface_id", "Remove", "Draining", false),
                 ],
             },
@@ -502,6 +715,13 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         ),
                     },
                     Guard {
+                        name: "no_pending_operation".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            string("None"),
+                        ),
+                    },
+                    Guard {
                         name: "remove_not_starting_from_active".into(),
                         expr: neq(
                             call("SurfaceBase", vec![binding("surface_id")]),
@@ -512,7 +732,10 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("staged_op", "surface_id", string("None")),
+                    set_map("staged_intent_sequence", "surface_id", Expr::U64(0)),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                 ],
                 to: "Operating".into(),
                 emit: vec![],
@@ -522,21 +745,50 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 from: vec!["Operating".into()],
                 on: InputMatch {
                     variant: "PendingSucceeded".into(),
-                    bindings: vec!["surface_id".into(), "applied_at_turn".into()],
+                    bindings: vec![
+                        "surface_id".into(),
+                        "operation".into(),
+                        "pending_task_sequence".into(),
+                        "staged_intent_sequence".into(),
+                        "applied_at_turn".into(),
+                    ],
                 },
-                guards: vec![Guard {
-                    name: "add_is_pending".into(),
-                    expr: eq(
-                        call("PendingOp", vec![binding("surface_id")]),
-                        string("Add"),
-                    ),
-                }],
+                guards: vec![
+                    Guard {
+                        name: "operation_is_add".into(),
+                        expr: eq(binding("operation"), string("Add")),
+                    },
+                    Guard {
+                        name: "pending_operation_matches".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            binding("operation"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_task_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingTaskSequence", vec![binding("surface_id")]),
+                            binding("pending_task_sequence"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_lineage_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingLineageSequence", vec![binding("surface_id")]),
+                            binding("staged_intent_sequence"),
+                        ),
+                    },
+                ],
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("base_state", "surface_id", string("Active")),
                     set_map("last_delta_operation", "surface_id", string("Add")),
                     set_map("last_delta_phase", "surface_id", string("Applied")),
+                    advance_snapshot_epoch(),
                     Update::SetInsert {
                         field: "visible_surfaces".into(),
                         value: binding("surface_id"),
@@ -544,10 +796,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 ],
                 to: "Operating".into(),
                 emit: vec![
-                    EffectEmit {
-                        variant: "RefreshVisibleSurfaceSet".into(),
-                        fields: IndexMap::new(),
-                    },
+                    emit_snapshot_refresh(),
                     emit_delta("surface_id", "Add", "Applied", true),
                 ],
             },
@@ -556,21 +805,50 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 from: vec!["Operating".into()],
                 on: InputMatch {
                     variant: "PendingSucceeded".into(),
-                    bindings: vec!["surface_id".into(), "applied_at_turn".into()],
+                    bindings: vec![
+                        "surface_id".into(),
+                        "operation".into(),
+                        "pending_task_sequence".into(),
+                        "staged_intent_sequence".into(),
+                        "applied_at_turn".into(),
+                    ],
                 },
-                guards: vec![Guard {
-                    name: "reload_is_pending".into(),
-                    expr: eq(
-                        call("PendingOp", vec![binding("surface_id")]),
-                        string("Reload"),
-                    ),
-                }],
+                guards: vec![
+                    Guard {
+                        name: "operation_is_reload".into(),
+                        expr: eq(binding("operation"), string("Reload")),
+                    },
+                    Guard {
+                        name: "pending_operation_matches".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            binding("operation"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_task_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingTaskSequence", vec![binding("surface_id")]),
+                            binding("pending_task_sequence"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_lineage_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingLineageSequence", vec![binding("surface_id")]),
+                            binding("staged_intent_sequence"),
+                        ),
+                    },
+                ],
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("base_state", "surface_id", string("Active")),
                     set_map("last_delta_operation", "surface_id", string("Reload")),
                     set_map("last_delta_phase", "surface_id", string("Applied")),
+                    advance_snapshot_epoch(),
                     Update::SetInsert {
                         field: "visible_surfaces".into(),
                         value: binding("surface_id"),
@@ -578,10 +856,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 ],
                 to: "Operating".into(),
                 emit: vec![
-                    EffectEmit {
-                        variant: "RefreshVisibleSurfaceSet".into(),
-                        fields: IndexMap::new(),
-                    },
+                    emit_snapshot_refresh(),
                     emit_delta("surface_id", "Reload", "Applied", true),
                 ],
             },
@@ -590,18 +865,46 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 from: vec!["Operating".into()],
                 on: InputMatch {
                     variant: "PendingFailed".into(),
-                    bindings: vec!["surface_id".into(), "applied_at_turn".into()],
+                    bindings: vec![
+                        "surface_id".into(),
+                        "operation".into(),
+                        "pending_task_sequence".into(),
+                        "staged_intent_sequence".into(),
+                        "applied_at_turn".into(),
+                    ],
                 },
-                guards: vec![Guard {
-                    name: "add_is_pending".into(),
-                    expr: eq(
-                        call("PendingOp", vec![binding("surface_id")]),
-                        string("Add"),
-                    ),
-                }],
+                guards: vec![
+                    Guard {
+                        name: "operation_is_add".into(),
+                        expr: eq(binding("operation"), string("Add")),
+                    },
+                    Guard {
+                        name: "pending_operation_matches".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            binding("operation"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_task_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingTaskSequence", vec![binding("surface_id")]),
+                            binding("pending_task_sequence"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_lineage_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingLineageSequence", vec![binding("surface_id")]),
+                            binding("staged_intent_sequence"),
+                        ),
+                    },
+                ],
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("last_delta_operation", "surface_id", string("Add")),
                     set_map("last_delta_phase", "surface_id", string("Failed")),
                 ],
@@ -613,18 +916,46 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 from: vec!["Operating".into()],
                 on: InputMatch {
                     variant: "PendingFailed".into(),
-                    bindings: vec!["surface_id".into(), "applied_at_turn".into()],
+                    bindings: vec![
+                        "surface_id".into(),
+                        "operation".into(),
+                        "pending_task_sequence".into(),
+                        "staged_intent_sequence".into(),
+                        "applied_at_turn".into(),
+                    ],
                 },
-                guards: vec![Guard {
-                    name: "reload_is_pending".into(),
-                    expr: eq(
-                        call("PendingOp", vec![binding("surface_id")]),
-                        string("Reload"),
-                    ),
-                }],
+                guards: vec![
+                    Guard {
+                        name: "operation_is_reload".into(),
+                        expr: eq(binding("operation"), string("Reload")),
+                    },
+                    Guard {
+                        name: "pending_operation_matches".into(),
+                        expr: eq(
+                            call("PendingOp", vec![binding("surface_id")]),
+                            binding("operation"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_task_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingTaskSequence", vec![binding("surface_id")]),
+                            binding("pending_task_sequence"),
+                        ),
+                    },
+                    Guard {
+                        name: "pending_lineage_sequence_matches".into(),
+                        expr: eq(
+                            call("PendingLineageSequence", vec![binding("surface_id")]),
+                            binding("staged_intent_sequence"),
+                        ),
+                    },
+                ],
                 updates: vec![
                     track_surface("surface_id"),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("last_delta_operation", "surface_id", string("Reload")),
                     set_map("last_delta_phase", "surface_id", string("Failed")),
                 ],
@@ -802,8 +1133,11 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     track_surface("surface_id"),
                     set_map("base_state", "surface_id", string("Removed")),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("last_delta_operation", "surface_id", string("Remove")),
                     set_map("last_delta_phase", "surface_id", string("Applied")),
+                    advance_snapshot_epoch(),
                     Update::SetRemove {
                         field: "visible_surfaces".into(),
                         value: binding("surface_id"),
@@ -812,10 +1146,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 to: "Operating".into(),
                 emit: vec![
                     close_surface("surface_id"),
-                    EffectEmit {
-                        variant: "RefreshVisibleSurfaceSet".into(),
-                        fields: IndexMap::new(),
-                    },
+                    emit_snapshot_refresh(),
                     emit_delta("surface_id", "Remove", "Applied", true),
                 ],
             },
@@ -837,9 +1168,12 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     track_surface("surface_id"),
                     set_map("base_state", "surface_id", string("Removed")),
                     set_map("pending_op", "surface_id", string("None")),
+                    set_map("pending_task_sequence", "surface_id", Expr::U64(0)),
+                    set_map("pending_lineage_sequence", "surface_id", Expr::U64(0)),
                     set_map("inflight_calls", "surface_id", Expr::U64(0)),
                     set_map("last_delta_operation", "surface_id", string("Remove")),
                     set_map("last_delta_phase", "surface_id", string("Forced")),
+                    advance_snapshot_epoch(),
                     Update::SetRemove {
                         field: "visible_surfaces".into(),
                         value: binding("surface_id"),
@@ -848,12 +1182,39 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 to: "Operating".into(),
                 emit: vec![
                     close_surface("surface_id"),
-                    EffectEmit {
-                        variant: "RefreshVisibleSurfaceSet".into(),
-                        fields: IndexMap::new(),
-                    },
+                    emit_snapshot_refresh(),
                     emit_delta("surface_id", "Remove", "Forced", true),
                 ],
+            },
+            TransitionSchema {
+                name: "SnapshotAligned".into(),
+                from: vec!["Operating".into()],
+                on: InputMatch {
+                    variant: "SnapshotAligned".into(),
+                    bindings: vec!["snapshot_epoch".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "snapshot_epoch_matches_current".into(),
+                        expr: eq(
+                            binding("snapshot_epoch"),
+                            Expr::Field("snapshot_epoch".into()),
+                        ),
+                    },
+                    Guard {
+                        name: "snapshot_alignment_was_pending".into(),
+                        expr: Expr::Gt(
+                            Box::new(Expr::Field("snapshot_epoch".into())),
+                            Box::new(Expr::Field("snapshot_aligned_epoch".into())),
+                        ),
+                    },
+                ],
+                updates: vec![Update::Assign {
+                    field: "snapshot_aligned_epoch".into(),
+                    expr: binding("snapshot_epoch"),
+                }],
+                to: "Operating".into(),
+                emit: vec![],
             },
             TransitionSchema {
                 name: "Shutdown".into(),
@@ -885,6 +1246,26 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                         expr: Expr::EmptyMap,
                     },
                     Update::Assign {
+                        field: "staged_intent_sequence".into(),
+                        expr: Expr::EmptyMap,
+                    },
+                    Update::Assign {
+                        field: "next_staged_intent_sequence".into(),
+                        expr: Expr::U64(1),
+                    },
+                    Update::Assign {
+                        field: "pending_task_sequence".into(),
+                        expr: Expr::EmptyMap,
+                    },
+                    Update::Assign {
+                        field: "pending_lineage_sequence".into(),
+                        expr: Expr::EmptyMap,
+                    },
+                    Update::Assign {
+                        field: "next_pending_task_sequence".into(),
+                        expr: Expr::U64(1),
+                    },
+                    Update::Assign {
                         field: "inflight_calls".into(),
                         expr: Expr::EmptyMap,
                     },
@@ -895,6 +1276,14 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     Update::Assign {
                         field: "last_delta_phase".into(),
                         expr: Expr::EmptyMap,
+                    },
+                    Update::Assign {
+                        field: "snapshot_epoch".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "snapshot_aligned_epoch".into(),
+                        expr: Expr::U64(0),
                     },
                 ],
                 to: "Shutdown".into(),
@@ -907,7 +1296,11 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 disposition: EffectDisposition::Local,
                 handoff_protocol: Some("surface_completion".into()),
             },
-            disposition("RefreshVisibleSurfaceSet", EffectDisposition::Local),
+            EffectDispositionRule {
+                effect_variant: "RefreshVisibleSurfaceSet".into(),
+                disposition: EffectDisposition::Local,
+                handoff_protocol: Some("surface_snapshot_alignment".into()),
+            },
             disposition("EmitExternalToolDelta", EffectDisposition::External),
             disposition("CloseSurfaceConnection", EffectDisposition::External),
             disposition("RejectSurfaceCall", EffectDisposition::External),
@@ -935,6 +1328,18 @@ fn stage_transition(name: &str, op: &str) -> TransitionSchema {
         updates: vec![
             track_surface("surface_id"),
             set_map("staged_op", "surface_id", string(op)),
+            set_map(
+                "staged_intent_sequence",
+                "surface_id",
+                Expr::Field("next_staged_intent_sequence".into()),
+            ),
+            Update::Assign {
+                field: "next_staged_intent_sequence".into(),
+                expr: Expr::Add(
+                    Box::new(Expr::Field("next_staged_intent_sequence".into())),
+                    Box::new(Expr::U64(1)),
+                ),
+            },
         ],
         to: "Operating".into(),
         emit: vec![],
@@ -949,6 +1354,36 @@ fn quantified_surface_invariant(name: &str, body: Expr) -> InvariantSchema {
             binding: "surface_id".into(),
             over: Box::new(Expr::Field("known_surfaces".into())),
             body: Box::new(body),
+        },
+    }
+}
+
+fn set_subset_known_invariant(name: &str, set_field: &str) -> InvariantSchema {
+    InvariantSchema {
+        name: name.into(),
+        expr: Expr::Quantified {
+            quantifier: Quantifier::All,
+            binding: "surface_id".into(),
+            over: Box::new(Expr::Field(set_field.into())),
+            body: Box::new(Expr::Contains {
+                collection: Box::new(Expr::Field("known_surfaces".into())),
+                value: Box::new(binding("surface_id")),
+            }),
+        },
+    }
+}
+
+fn map_keys_subset_known_invariant(name: &str, map_field: &str) -> InvariantSchema {
+    InvariantSchema {
+        name: name.into(),
+        expr: Expr::Quantified {
+            quantifier: Quantifier::All,
+            binding: "surface_id".into(),
+            over: Box::new(Expr::MapKeys(Box::new(Expr::Field(map_field.into())))),
+            body: Box::new(Expr::Contains {
+                collection: Box::new(Expr::Field("known_surfaces".into())),
+                value: Box::new(binding("surface_id")),
+            }),
         },
     }
 }
@@ -1008,7 +1443,43 @@ fn schedule_completion(surface_binding: &str, operation: &str) -> EffectEmit {
         fields: IndexMap::from([
             ("surface_id".into(), binding(surface_binding)),
             ("operation".into(), string(operation)),
+            (
+                "pending_task_sequence".into(),
+                call("PendingTaskSequence", vec![binding(surface_binding)]),
+            ),
+            (
+                "staged_intent_sequence".into(),
+                call("PendingLineageSequence", vec![binding(surface_binding)]),
+            ),
+            ("applied_at_turn".into(), binding("applied_at_turn")),
         ]),
+    }
+}
+
+fn advance_snapshot_epoch() -> Update {
+    Update::Assign {
+        field: "snapshot_epoch".into(),
+        expr: Expr::IfElse {
+            condition: Box::new(eq(
+                Expr::Field("snapshot_epoch".into()),
+                Expr::Field("snapshot_aligned_epoch".into()),
+            )),
+            then_expr: Box::new(Expr::Add(
+                Box::new(Expr::Field("snapshot_epoch".into())),
+                Box::new(Expr::U64(1)),
+            )),
+            else_expr: Box::new(Expr::Field("snapshot_epoch".into())),
+        },
+    }
+}
+
+fn emit_snapshot_refresh() -> EffectEmit {
+    EffectEmit {
+        variant: "RefreshVisibleSurfaceSet".into(),
+        fields: IndexMap::from([(
+            "snapshot_epoch".into(),
+            Expr::Field("snapshot_epoch".into()),
+        )]),
     }
 }
 

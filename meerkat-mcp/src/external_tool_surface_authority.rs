@@ -9,14 +9,12 @@
 //! the machine schema in `meerkat-machine-schema/src/catalog/external_tool_surface.rs`:
 //!
 //! - 2 global phases: Operating, Shutdown
-//! - 11 inputs: StageAdd, StageRemove, StageReload, ApplyBoundary,
+//! - 12 inputs: StageAdd, StageRemove, StageReload, ApplyBoundary,
 //!   PendingSucceeded, PendingFailed, CallStarted, CallFinished,
-//!   FinalizeRemovalClean, FinalizeRemovalForced, Shutdown
-//! - 8 per-surface state maps: known_surfaces, visible_surfaces, base_state,
-//!   pending_op, staged_op, inflight_calls, last_delta_operation, last_delta_phase
-//! - 8 invariants (checked in debug builds after each transition)
-//! - 20 transitions with guards
-//! - 5 effects: ScheduleSurfaceCompletion, RefreshVisibleSurfaceSet,
+//!   FinalizeRemovalClean, FinalizeRemovalForced, SnapshotAligned, Shutdown
+//! - canonical per-surface lifecycle state plus staged ordering, pending
+//!   lineage, and snapshot publication epochs
+//! - 6 effects: ScheduleSurfaceCompletion, RefreshVisibleSurfaceSet,
 //!   EmitExternalToolDelta, CloseSurfaceConnection, RejectSurfaceCall
 
 use std::collections::{BTreeSet, HashMap};
@@ -179,10 +177,16 @@ pub enum ExternalToolSurfaceInput {
     },
     PendingSucceeded {
         surface_id: SurfaceId,
+        operation: SurfaceDeltaOperation,
+        pending_task_sequence: u64,
+        staged_intent_sequence: u64,
         applied_at_turn: TurnNumber,
     },
     PendingFailed {
         surface_id: SurfaceId,
+        operation: SurfaceDeltaOperation,
+        pending_task_sequence: u64,
+        staged_intent_sequence: u64,
         applied_at_turn: TurnNumber,
     },
     CallStarted {
@@ -198,6 +202,9 @@ pub enum ExternalToolSurfaceInput {
     FinalizeRemovalForced {
         surface_id: SurfaceId,
         applied_at_turn: TurnNumber,
+    },
+    SnapshotAligned {
+        snapshot_epoch: u64,
     },
     Shutdown,
 }
@@ -217,10 +224,12 @@ pub enum ExternalToolSurfaceEffect {
     ScheduleSurfaceCompletion {
         surface_id: SurfaceId,
         operation: SurfaceDeltaOperation,
+        pending_task_sequence: u64,
+        staged_intent_sequence: u64,
         applied_at_turn: TurnNumber,
     },
     /// Shell should rebuild its visible tool cache from authority state.
-    RefreshVisibleSurfaceSet,
+    RefreshVisibleSurfaceSet { snapshot_epoch: u64 },
     /// Shell should emit a lifecycle delta notification.
     EmitExternalToolDelta {
         surface_id: SurfaceId,
@@ -287,6 +296,7 @@ pub struct ExternalToolSurfaceTransition {
 pub struct RemovalTimingInfo {
     pub draining_since: Instant,
     pub timeout_at: Instant,
+    pub applied_at_turn: TurnNumber,
 }
 
 /// Canonical machine-owned state for ExternalToolSurface.
@@ -301,9 +311,16 @@ struct ExternalToolSurfaceFields {
     base_state: HashMap<SurfaceId, SurfaceBaseState>,
     pending_op: HashMap<SurfaceId, PendingSurfaceOp>,
     staged_op: HashMap<SurfaceId, StagedSurfaceOp>,
+    staged_intent_sequence: HashMap<SurfaceId, u64>,
+    next_staged_intent_sequence: u64,
+    pending_task_sequence: HashMap<SurfaceId, u64>,
+    pending_lineage_sequence: HashMap<SurfaceId, u64>,
+    next_pending_task_sequence: u64,
     inflight_calls: HashMap<SurfaceId, u64>,
     last_delta_operation: HashMap<SurfaceId, SurfaceDeltaOperation>,
     last_delta_phase: HashMap<SurfaceId, SurfaceDeltaPhase>,
+    snapshot_epoch: u64,
+    snapshot_aligned_epoch: u64,
     /// Removal timing per surface (set when entering Removing, cleared on finalization).
     removal_timing: HashMap<SurfaceId, RemovalTimingInfo>,
 }
@@ -316,9 +333,16 @@ impl ExternalToolSurfaceFields {
             base_state: HashMap::new(),
             pending_op: HashMap::new(),
             staged_op: HashMap::new(),
+            staged_intent_sequence: HashMap::new(),
+            next_staged_intent_sequence: 1,
+            pending_task_sequence: HashMap::new(),
+            pending_lineage_sequence: HashMap::new(),
+            next_pending_task_sequence: 1,
             inflight_calls: HashMap::new(),
             last_delta_operation: HashMap::new(),
             last_delta_phase: HashMap::new(),
+            snapshot_epoch: 0,
+            snapshot_aligned_epoch: 0,
             removal_timing: HashMap::new(),
         }
     }
@@ -348,6 +372,18 @@ impl ExternalToolSurfaceFields {
 
     fn inflight_call_count(&self, id: &SurfaceId) -> u64 {
         self.inflight_calls.get(id).copied().unwrap_or(0)
+    }
+
+    fn staged_intent_sequence(&self, id: &SurfaceId) -> u64 {
+        self.staged_intent_sequence.get(id).copied().unwrap_or(0)
+    }
+
+    fn pending_task_sequence(&self, id: &SurfaceId) -> u64 {
+        self.pending_task_sequence.get(id).copied().unwrap_or(0)
+    }
+
+    fn pending_lineage_sequence(&self, id: &SurfaceId) -> u64 {
+        self.pending_lineage_sequence.get(id).copied().unwrap_or(0)
     }
 
     fn is_visible(&self, id: &SurfaceId) -> bool {
@@ -417,9 +453,14 @@ impl ExternalToolSurfaceAuthority {
         }
     }
 
-    /// Set the removal timeout duration.
-    pub fn set_removal_timeout(&mut self, removal_timeout: Duration) {
+    /// Set the removal timeout duration while the machine is operating.
+    pub fn set_removal_timeout(
+        &mut self,
+        removal_timeout: Duration,
+    ) -> Result<(), ExternalToolSurfaceError> {
+        self.require_operating("set_removal_timeout")?;
         self.removal_timeout = removal_timeout;
+        Ok(())
     }
 
     /// Current global phase.
@@ -435,6 +476,21 @@ impl ExternalToolSurfaceAuthority {
     /// Read the pending operation for a surface.
     pub fn pending_op(&self, id: &SurfaceId) -> PendingSurfaceOp {
         self.fields.pending_op(id)
+    }
+
+    /// Read the staged intent sequence for a surface.
+    pub fn staged_intent_sequence(&self, id: &SurfaceId) -> u64 {
+        self.fields.staged_intent_sequence(id)
+    }
+
+    /// Read the current pending task sequence for a surface.
+    pub fn pending_task_sequence(&self, id: &SurfaceId) -> u64 {
+        self.fields.pending_task_sequence(id)
+    }
+
+    /// Read the lineage sequence attached to the current pending task.
+    pub fn pending_lineage_sequence(&self, id: &SurfaceId) -> u64 {
+        self.fields.pending_lineage_sequence(id)
     }
 
     /// Read the staged operation for a surface.
@@ -460,6 +516,28 @@ impl ExternalToolSurfaceAuthority {
     /// Iterate over all visible surface IDs.
     pub fn visible_surfaces(&self) -> impl Iterator<Item = &SurfaceId> {
         self.fields.visible_surfaces.iter()
+    }
+
+    /// Iterate over staged intents in canonical sequence order.
+    pub fn staged_intents_in_order(&self) -> Vec<(SurfaceId, StagedSurfaceOp, u64)> {
+        let mut staged = self
+            .fields
+            .known_surfaces
+            .iter()
+            .filter_map(|surface_id| {
+                let staged_op = self.fields.staged_op(surface_id);
+                if staged_op == StagedSurfaceOp::None {
+                    return None;
+                }
+                Some((
+                    surface_id.clone(),
+                    staged_op,
+                    self.fields.staged_intent_sequence(surface_id),
+                ))
+            })
+            .collect::<Vec<_>>();
+        staged.sort_by_key(|(_, _, sequence)| *sequence);
+        staged
     }
 
     /// Get removal timing info for a surface (only set while in Removing state).
@@ -500,6 +578,29 @@ impl ExternalToolSurfaceAuthority {
             .count()
     }
 
+    /// Return all surface IDs that are currently waiting on async completion.
+    pub fn pending_surfaces(&self) -> impl Iterator<Item = &SurfaceId> {
+        self.fields.pending_op.iter().filter_map(|(id, op)| {
+            if *op != PendingSurfaceOp::None {
+                Some(id)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Current published snapshot epoch requested by the authority.
+    pub fn snapshot_epoch(&self) -> u64 {
+        self.fields.snapshot_epoch
+    }
+
+    fn advance_snapshot_epoch(fields: &mut ExternalToolSurfaceFields) -> u64 {
+        if fields.snapshot_epoch == fields.snapshot_aligned_epoch {
+            fields.snapshot_epoch = fields.snapshot_epoch.saturating_add(1);
+        }
+        fields.snapshot_epoch
+    }
+
     /// Evaluate a transition without committing it.
     fn evaluate(
         &self,
@@ -526,6 +627,11 @@ impl ExternalToolSurfaceAuthority {
                 fields
                     .staged_op
                     .insert(surface_id.clone(), StagedSurfaceOp::Add);
+                fields
+                    .staged_intent_sequence
+                    .insert(surface_id.clone(), fields.next_staged_intent_sequence);
+                fields.next_staged_intent_sequence =
+                    fields.next_staged_intent_sequence.saturating_add(1);
                 Ok((
                     ExternalToolSurfacePhase::Operating,
                     fields,
@@ -543,6 +649,11 @@ impl ExternalToolSurfaceAuthority {
                 fields
                     .staged_op
                     .insert(surface_id.clone(), StagedSurfaceOp::Remove);
+                fields
+                    .staged_intent_sequence
+                    .insert(surface_id.clone(), fields.next_staged_intent_sequence);
+                fields.next_staged_intent_sequence =
+                    fields.next_staged_intent_sequence.saturating_add(1);
                 Ok((
                     ExternalToolSurfacePhase::Operating,
                     fields,
@@ -571,6 +682,11 @@ impl ExternalToolSurfaceAuthority {
                 fields
                     .staged_op
                     .insert(surface_id.clone(), StagedSurfaceOp::Reload);
+                fields
+                    .staged_intent_sequence
+                    .insert(surface_id.clone(), fields.next_staged_intent_sequence);
+                fields.next_staged_intent_sequence =
+                    fields.next_staged_intent_sequence.saturating_add(1);
                 Ok((
                     ExternalToolSurfacePhase::Operating,
                     fields,
@@ -590,6 +706,16 @@ impl ExternalToolSurfaceAuthority {
                 self.require_operating("ApplyBoundary")?;
                 let staged = self.fields.staged_op(surface_id);
                 let base = self.fields.surface_base(surface_id);
+                let pending = self.fields.pending_op(surface_id);
+
+                if pending != PendingSurfaceOp::None {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "ApplyBoundary".into(),
+                        reason: format!(
+                            "cannot apply staged boundary for surface '{surface_id}' while pending operation {pending:?} is unresolved"
+                        ),
+                    });
+                }
 
                 match staged {
                     StagedSurfaceOp::Add => {
@@ -608,12 +734,23 @@ impl ExternalToolSurfaceAuthority {
                             });
                         }
                         fields.known_surfaces.insert(surface_id.clone());
+                        let staged_intent_sequence = self.fields.staged_intent_sequence(surface_id);
+                        let pending_task_sequence = fields.next_pending_task_sequence;
+                        fields.next_pending_task_sequence =
+                            fields.next_pending_task_sequence.saturating_add(1);
                         fields
                             .pending_op
                             .insert(surface_id.clone(), PendingSurfaceOp::Add);
                         fields
+                            .pending_task_sequence
+                            .insert(surface_id.clone(), pending_task_sequence);
+                        fields
+                            .pending_lineage_sequence
+                            .insert(surface_id.clone(), staged_intent_sequence);
+                        fields
                             .staged_op
                             .insert(surface_id.clone(), StagedSurfaceOp::None);
+                        fields.staged_intent_sequence.remove(surface_id);
                         fields
                             .last_delta_operation
                             .insert(surface_id.clone(), SurfaceDeltaOperation::Add);
@@ -623,6 +760,8 @@ impl ExternalToolSurfaceAuthority {
                         effects.push(ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Add,
+                            pending_task_sequence,
+                            staged_intent_sequence,
                             applied_at_turn: *applied_at_turn,
                         });
                         effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
@@ -651,12 +790,23 @@ impl ExternalToolSurfaceAuthority {
                             });
                         }
                         fields.known_surfaces.insert(surface_id.clone());
+                        let staged_intent_sequence = self.fields.staged_intent_sequence(surface_id);
+                        let pending_task_sequence = fields.next_pending_task_sequence;
+                        fields.next_pending_task_sequence =
+                            fields.next_pending_task_sequence.saturating_add(1);
                         fields
                             .pending_op
                             .insert(surface_id.clone(), PendingSurfaceOp::Reload);
                         fields
+                            .pending_task_sequence
+                            .insert(surface_id.clone(), pending_task_sequence);
+                        fields
+                            .pending_lineage_sequence
+                            .insert(surface_id.clone(), staged_intent_sequence);
+                        fields
                             .staged_op
                             .insert(surface_id.clone(), StagedSurfaceOp::None);
+                        fields.staged_intent_sequence.remove(surface_id);
                         fields
                             .last_delta_operation
                             .insert(surface_id.clone(), SurfaceDeltaOperation::Reload);
@@ -666,6 +816,8 @@ impl ExternalToolSurfaceAuthority {
                         effects.push(ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Reload,
+                            pending_task_sequence,
+                            staged_intent_sequence,
                             applied_at_turn: *applied_at_turn,
                         });
                         effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
@@ -691,9 +843,14 @@ impl ExternalToolSurfaceAuthority {
                             fields
                                 .staged_op
                                 .insert(surface_id.clone(), StagedSurfaceOp::None);
+                            fields.staged_intent_sequence.remove(surface_id);
                             fields
                                 .pending_op
                                 .insert(surface_id.clone(), PendingSurfaceOp::None);
+                            fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                            fields
+                                .pending_lineage_sequence
+                                .insert(surface_id.clone(), 0);
                             fields
                                 .base_state
                                 .insert(surface_id.clone(), SurfaceBaseState::Removing);
@@ -702,6 +859,7 @@ impl ExternalToolSurfaceAuthority {
                                 RemovalTimingInfo {
                                     draining_since,
                                     timeout_at: draining_since + self.removal_timeout,
+                                    applied_at_turn: *applied_at_turn,
                                 },
                             );
                             fields
@@ -711,7 +869,10 @@ impl ExternalToolSurfaceAuthority {
                                 .last_delta_phase
                                 .insert(surface_id.clone(), SurfaceDeltaPhase::Draining);
                             fields.visible_surfaces.remove(surface_id);
-                            effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet);
+                            let snapshot_epoch = Self::advance_snapshot_epoch(&mut fields);
+                            effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet {
+                                snapshot_epoch,
+                            });
                             effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                                 surface_id: surface_id.clone(),
                                 operation: SurfaceDeltaOperation::Remove,
@@ -731,9 +892,14 @@ impl ExternalToolSurfaceAuthority {
                             fields
                                 .staged_op
                                 .insert(surface_id.clone(), StagedSurfaceOp::None);
+                            fields.staged_intent_sequence.remove(surface_id);
                             fields
                                 .pending_op
                                 .insert(surface_id.clone(), PendingSurfaceOp::None);
+                            fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                            fields
+                                .pending_lineage_sequence
+                                .insert(surface_id.clone(), 0);
                             Ok((
                                 ExternalToolSurfacePhase::Operating,
                                 fields,
@@ -755,10 +921,47 @@ impl ExternalToolSurfaceAuthority {
             // ----------------------------------------------------------
             ExternalToolSurfaceInput::PendingSucceeded {
                 surface_id,
+                operation,
+                pending_task_sequence,
+                staged_intent_sequence,
                 applied_at_turn,
             } => {
                 self.require_operating("PendingSucceeded")?;
                 let pending = self.fields.pending_op(surface_id);
+                let expected_operation = match pending {
+                    PendingSurfaceOp::Add => SurfaceDeltaOperation::Add,
+                    PendingSurfaceOp::Reload => SurfaceDeltaOperation::Reload,
+                    PendingSurfaceOp::None => SurfaceDeltaOperation::None,
+                };
+
+                if *operation != expected_operation {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "PendingSucceeded".into(),
+                        reason: format!(
+                            "pending operation for surface '{surface_id}' does not match completion operation {operation}"
+                        ),
+                    });
+                }
+                if self.fields.pending_task_sequence(surface_id) != *pending_task_sequence {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "PendingSucceeded".into(),
+                        reason: format!(
+                            "pending task sequence mismatch for surface '{surface_id}': expected {}, got {}",
+                            self.fields.pending_task_sequence(surface_id),
+                            pending_task_sequence
+                        ),
+                    });
+                }
+                if self.fields.pending_lineage_sequence(surface_id) != *staged_intent_sequence {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "PendingSucceeded".into(),
+                        reason: format!(
+                            "pending lineage mismatch for surface '{surface_id}': expected {}, got {}",
+                            self.fields.pending_lineage_sequence(surface_id),
+                            staged_intent_sequence
+                        ),
+                    });
+                }
 
                 match pending {
                     PendingSurfaceOp::Add => {
@@ -766,6 +969,10 @@ impl ExternalToolSurfaceAuthority {
                         fields
                             .pending_op
                             .insert(surface_id.clone(), PendingSurfaceOp::None);
+                        fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                        fields
+                            .pending_lineage_sequence
+                            .insert(surface_id.clone(), 0);
                         fields
                             .base_state
                             .insert(surface_id.clone(), SurfaceBaseState::Active);
@@ -776,7 +983,10 @@ impl ExternalToolSurfaceAuthority {
                             .last_delta_phase
                             .insert(surface_id.clone(), SurfaceDeltaPhase::Applied);
                         fields.visible_surfaces.insert(surface_id.clone());
-                        effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet);
+                        let snapshot_epoch = Self::advance_snapshot_epoch(&mut fields);
+                        effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet {
+                            snapshot_epoch,
+                        });
                         effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Add,
@@ -796,6 +1006,10 @@ impl ExternalToolSurfaceAuthority {
                         fields
                             .pending_op
                             .insert(surface_id.clone(), PendingSurfaceOp::None);
+                        fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                        fields
+                            .pending_lineage_sequence
+                            .insert(surface_id.clone(), 0);
                         fields
                             .base_state
                             .insert(surface_id.clone(), SurfaceBaseState::Active);
@@ -806,7 +1020,10 @@ impl ExternalToolSurfaceAuthority {
                             .last_delta_phase
                             .insert(surface_id.clone(), SurfaceDeltaPhase::Applied);
                         fields.visible_surfaces.insert(surface_id.clone());
-                        effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet);
+                        let snapshot_epoch = Self::advance_snapshot_epoch(&mut fields);
+                        effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet {
+                            snapshot_epoch,
+                        });
                         effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Reload,
@@ -833,10 +1050,47 @@ impl ExternalToolSurfaceAuthority {
             // ----------------------------------------------------------
             ExternalToolSurfaceInput::PendingFailed {
                 surface_id,
+                operation,
+                pending_task_sequence,
+                staged_intent_sequence,
                 applied_at_turn,
             } => {
                 self.require_operating("PendingFailed")?;
                 let pending = self.fields.pending_op(surface_id);
+                let expected_operation = match pending {
+                    PendingSurfaceOp::Add => SurfaceDeltaOperation::Add,
+                    PendingSurfaceOp::Reload => SurfaceDeltaOperation::Reload,
+                    PendingSurfaceOp::None => SurfaceDeltaOperation::None,
+                };
+
+                if *operation != expected_operation {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "PendingFailed".into(),
+                        reason: format!(
+                            "pending operation for surface '{surface_id}' does not match failed operation {operation}"
+                        ),
+                    });
+                }
+                if self.fields.pending_task_sequence(surface_id) != *pending_task_sequence {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "PendingFailed".into(),
+                        reason: format!(
+                            "pending task sequence mismatch for surface '{surface_id}': expected {}, got {}",
+                            self.fields.pending_task_sequence(surface_id),
+                            pending_task_sequence
+                        ),
+                    });
+                }
+                if self.fields.pending_lineage_sequence(surface_id) != *staged_intent_sequence {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "PendingFailed".into(),
+                        reason: format!(
+                            "pending lineage mismatch for surface '{surface_id}': expected {}, got {}",
+                            self.fields.pending_lineage_sequence(surface_id),
+                            staged_intent_sequence
+                        ),
+                    });
+                }
 
                 match pending {
                     PendingSurfaceOp::Add => {
@@ -844,6 +1098,10 @@ impl ExternalToolSurfaceAuthority {
                         fields
                             .pending_op
                             .insert(surface_id.clone(), PendingSurfaceOp::None);
+                        fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                        fields
+                            .pending_lineage_sequence
+                            .insert(surface_id.clone(), 0);
                         fields
                             .last_delta_operation
                             .insert(surface_id.clone(), SurfaceDeltaOperation::Add);
@@ -869,6 +1127,10 @@ impl ExternalToolSurfaceAuthority {
                         fields
                             .pending_op
                             .insert(surface_id.clone(), PendingSurfaceOp::None);
+                        fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                        fields
+                            .pending_lineage_sequence
+                            .insert(surface_id.clone(), 0);
                         fields
                             .last_delta_operation
                             .insert(surface_id.clone(), SurfaceDeltaOperation::Reload);
@@ -1013,6 +1275,10 @@ impl ExternalToolSurfaceAuthority {
                 fields
                     .pending_op
                     .insert(surface_id.clone(), PendingSurfaceOp::None);
+                fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                fields
+                    .pending_lineage_sequence
+                    .insert(surface_id.clone(), 0);
                 fields
                     .last_delta_operation
                     .insert(surface_id.clone(), SurfaceDeltaOperation::Remove);
@@ -1025,7 +1291,9 @@ impl ExternalToolSurfaceAuthority {
                 effects.push(ExternalToolSurfaceEffect::CloseSurfaceConnection {
                     surface_id: surface_id.clone(),
                 });
-                effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet);
+                let snapshot_epoch = Self::advance_snapshot_epoch(&mut fields);
+                effects
+                    .push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet { snapshot_epoch });
                 effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                     surface_id: surface_id.clone(),
                     operation: SurfaceDeltaOperation::Remove,
@@ -1066,6 +1334,10 @@ impl ExternalToolSurfaceAuthority {
                 fields
                     .pending_op
                     .insert(surface_id.clone(), PendingSurfaceOp::None);
+                fields.pending_task_sequence.insert(surface_id.clone(), 0);
+                fields
+                    .pending_lineage_sequence
+                    .insert(surface_id.clone(), 0);
                 fields.inflight_calls.insert(surface_id.clone(), 0);
                 fields
                     .last_delta_operation
@@ -1079,7 +1351,9 @@ impl ExternalToolSurfaceAuthority {
                 effects.push(ExternalToolSurfaceEffect::CloseSurfaceConnection {
                     surface_id: surface_id.clone(),
                 });
-                effects.push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet);
+                let snapshot_epoch = Self::advance_snapshot_epoch(&mut fields);
+                effects
+                    .push(ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet { snapshot_epoch });
                 effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                     surface_id: surface_id.clone(),
                     operation: SurfaceDeltaOperation::Remove,
@@ -1097,6 +1371,38 @@ impl ExternalToolSurfaceAuthority {
             }
 
             // ----------------------------------------------------------
+            // SnapshotAligned: acknowledge an atomically published projection snapshot.
+            // ----------------------------------------------------------
+            ExternalToolSurfaceInput::SnapshotAligned { snapshot_epoch } => {
+                self.require_operating("SnapshotAligned")?;
+                if *snapshot_epoch != self.fields.snapshot_epoch {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "SnapshotAligned".into(),
+                        reason: format!(
+                            "snapshot epoch mismatch: expected {}, got {}",
+                            self.fields.snapshot_epoch, snapshot_epoch
+                        ),
+                    });
+                }
+                if self.fields.snapshot_epoch <= self.fields.snapshot_aligned_epoch {
+                    return Err(ExternalToolSurfaceError {
+                        input_name: "SnapshotAligned".into(),
+                        reason: format!(
+                            "snapshot epoch {} is already aligned at {}",
+                            self.fields.snapshot_epoch, self.fields.snapshot_aligned_epoch
+                        ),
+                    });
+                }
+                fields.snapshot_aligned_epoch = *snapshot_epoch;
+                Ok((
+                    ExternalToolSurfacePhase::Operating,
+                    fields,
+                    effects,
+                    "SnapshotAligned".into(),
+                ))
+            }
+
+            // ----------------------------------------------------------
             // Shutdown: Operating|Shutdown -> Shutdown (clear all)
             // ----------------------------------------------------------
             ExternalToolSurfaceInput::Shutdown => {
@@ -1106,9 +1412,16 @@ impl ExternalToolSurfaceAuthority {
                 fields.base_state.clear();
                 fields.pending_op.clear();
                 fields.staged_op.clear();
+                fields.staged_intent_sequence.clear();
+                fields.next_staged_intent_sequence = 1;
+                fields.pending_task_sequence.clear();
+                fields.pending_lineage_sequence.clear();
+                fields.next_pending_task_sequence = 1;
                 fields.inflight_calls.clear();
                 fields.last_delta_operation.clear();
                 fields.last_delta_phase.clear();
+                fields.snapshot_epoch = 0;
+                fields.snapshot_aligned_epoch = 0;
                 fields.removal_timing.clear();
                 Ok((
                     ExternalToolSurfacePhase::Shutdown,
@@ -1131,14 +1444,108 @@ impl ExternalToolSurfaceAuthority {
         Ok(())
     }
 
-    /// Check all 8 invariants from the schema (debug builds only).
+    /// Check schema and keyspace invariants (debug builds only).
     #[cfg(debug_assertions)]
     fn check_invariants(&self) {
+        debug_assert!(
+            self.fields.snapshot_aligned_epoch <= self.fields.snapshot_epoch,
+            "invariant: snapshot_aligned_epoch must not exceed snapshot_epoch"
+        );
+
+        for surface_id in &self.fields.visible_surfaces {
+            debug_assert!(
+                self.fields.known_surfaces.contains(surface_id),
+                "invariant: visible surface '{surface_id}' must be in known_surfaces"
+            );
+        }
+
+        for (label, keys) in [
+            (
+                "base_state",
+                self.fields.base_state.keys().cloned().collect::<Vec<_>>(),
+            ),
+            (
+                "pending_op",
+                self.fields.pending_op.keys().cloned().collect::<Vec<_>>(),
+            ),
+            (
+                "staged_op",
+                self.fields.staged_op.keys().cloned().collect::<Vec<_>>(),
+            ),
+            (
+                "staged_intent_sequence",
+                self.fields
+                    .staged_intent_sequence
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "pending_task_sequence",
+                self.fields
+                    .pending_task_sequence
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "pending_lineage_sequence",
+                self.fields
+                    .pending_lineage_sequence
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "inflight_calls",
+                self.fields
+                    .inflight_calls
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "last_delta_operation",
+                self.fields
+                    .last_delta_operation
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "last_delta_phase",
+                self.fields
+                    .last_delta_phase
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "removal_timing",
+                self.fields
+                    .removal_timing
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            for surface_id in keys {
+                debug_assert!(
+                    self.fields.known_surfaces.contains(&surface_id),
+                    "invariant: key '{surface_id}' in map {label} must be in known_surfaces"
+                );
+            }
+        }
+
         for surface_id in &self.fields.known_surfaces {
             let base = self.fields.surface_base(surface_id);
             let pending = self.fields.pending_op(surface_id);
+            let staged = self.fields.staged_op(surface_id);
             let inflight = self.fields.inflight_call_count(surface_id);
             let visible = self.fields.is_visible(surface_id);
+            let staged_intent_sequence = self.fields.staged_intent_sequence(surface_id);
+            let pending_task_sequence = self.fields.pending_task_sequence(surface_id);
+            let pending_lineage_sequence = self.fields.pending_lineage_sequence(surface_id);
             let last_phase = self
                 .fields
                 .last_delta_phase
@@ -1217,6 +1624,54 @@ impl ExternalToolSurfaceAuthority {
                     "invariant: surface '{surface_id}' has Forced phase but last op is {last_op:?}"
                 );
             }
+
+            // 9. staged_intent_sequence exists iff staged op is not None.
+            if staged == StagedSurfaceOp::None {
+                debug_assert_eq!(
+                    staged_intent_sequence, 0,
+                    "invariant: staged sequence for '{surface_id}' must be zero when staged op is None (is {staged_intent_sequence})"
+                );
+            } else {
+                debug_assert!(
+                    staged_intent_sequence > 0,
+                    "invariant: staged sequence for '{surface_id}' must be non-zero when staged op is {staged:?}"
+                );
+            }
+
+            // 10. pending task/lineage sequences exist iff pending op is not None.
+            if pending == PendingSurfaceOp::None {
+                debug_assert_eq!(
+                    pending_task_sequence, 0,
+                    "invariant: pending task sequence for '{surface_id}' must be zero when pending op is None (is {pending_task_sequence})"
+                );
+                debug_assert_eq!(
+                    pending_lineage_sequence, 0,
+                    "invariant: pending lineage sequence for '{surface_id}' must be zero when pending op is None (is {pending_lineage_sequence})"
+                );
+            } else {
+                debug_assert!(
+                    pending_task_sequence > 0,
+                    "invariant: pending task sequence for '{surface_id}' must be non-zero when pending op is {pending:?}"
+                );
+                debug_assert!(
+                    pending_lineage_sequence > 0,
+                    "invariant: pending lineage sequence for '{surface_id}' must be non-zero when pending op is {pending:?}"
+                );
+            }
+
+            // 11. removal timing exists iff base state is Removing.
+            let has_removal_timing = self.fields.removal_timing.contains_key(surface_id);
+            if base == SurfaceBaseState::Removing {
+                debug_assert!(
+                    has_removal_timing,
+                    "invariant: removing surface '{surface_id}' must have removal timing"
+                );
+            } else {
+                debug_assert!(
+                    !has_removal_timing,
+                    "invariant: non-removing surface '{surface_id}' must not have removal timing"
+                );
+            }
         }
     }
 }
@@ -1267,6 +1722,58 @@ mod tests {
         TurnNumber(n)
     }
 
+    fn pending_feedback(
+        auth: &ExternalToolSurfaceAuthority,
+        id: &str,
+        applied_at_turn: u64,
+    ) -> (SurfaceId, SurfaceDeltaOperation, u64, u64, TurnNumber) {
+        let sid = SurfaceId::from(id);
+        let operation = match auth.pending_op(&sid) {
+            PendingSurfaceOp::Add => SurfaceDeltaOperation::Add,
+            PendingSurfaceOp::Reload => SurfaceDeltaOperation::Reload,
+            PendingSurfaceOp::None => SurfaceDeltaOperation::None,
+        };
+        (
+            sid.clone(),
+            operation,
+            auth.pending_task_sequence(&sid),
+            auth.pending_lineage_sequence(&sid),
+            turn(applied_at_turn),
+        )
+    }
+
+    fn pending_succeeded_input(
+        auth: &ExternalToolSurfaceAuthority,
+        id: &str,
+        applied_at_turn: u64,
+    ) -> ExternalToolSurfaceInput {
+        let (surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn) =
+            pending_feedback(auth, id, applied_at_turn);
+        ExternalToolSurfaceInput::PendingSucceeded {
+            surface_id,
+            operation,
+            pending_task_sequence,
+            staged_intent_sequence,
+            applied_at_turn,
+        }
+    }
+
+    fn pending_failed_input(
+        auth: &ExternalToolSurfaceAuthority,
+        id: &str,
+        applied_at_turn: u64,
+    ) -> ExternalToolSurfaceInput {
+        let (surface_id, operation, pending_task_sequence, staged_intent_sequence, applied_at_turn) =
+            pending_feedback(auth, id, applied_at_turn);
+        ExternalToolSurfaceInput::PendingFailed {
+            surface_id,
+            operation,
+            pending_task_sequence,
+            staged_intent_sequence,
+            applied_at_turn,
+        }
+    }
+
     /// Helper: stage add + apply boundary + pending succeeded -> Active.
     fn add_surface_active(auth: &mut ExternalToolSurfaceAuthority, id: &str, t: u64) {
         let sid = SurfaceId::from(id);
@@ -1279,11 +1786,8 @@ mod tests {
             applied_at_turn: turn(t),
         })
         .expect("apply boundary add");
-        auth.apply(ExternalToolSurfaceInput::PendingSucceeded {
-            surface_id: sid,
-            applied_at_turn: turn(t),
-        })
-        .expect("pending succeeded");
+        auth.apply(pending_succeeded_input(auth, id, t))
+            .expect("pending succeeded");
     }
 
     // ---- StageAdd / StageRemove / StageReload ----
@@ -1385,11 +1889,10 @@ mod tests {
         assert_eq!(t.transition_name, "ApplyBoundaryRemoveDraining");
         assert!(!auth.is_visible(&sid));
         assert_eq!(auth.surface_base(&sid), SurfaceBaseState::Removing);
-        assert!(
-            t.effects
-                .iter()
-                .any(|e| matches!(e, ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet))
-        );
+        assert!(t.effects.iter().any(|e| matches!(
+            e,
+            ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet { .. }
+        )));
     }
 
     #[test]
@@ -1457,12 +1960,8 @@ mod tests {
         .expect("apply add");
         assert!(!auth.is_visible(&sid));
 
-        let t = auth
-            .apply(ExternalToolSurfaceInput::PendingSucceeded {
-                surface_id: sid.clone(),
-                applied_at_turn: turn(5),
-            })
-            .expect("pending succeeded");
+        let input = pending_succeeded_input(&auth, "alpha", 5);
+        let t = auth.apply(input).expect("pending succeeded");
         assert_eq!(t.transition_name, "PendingSucceededAdd");
         assert!(auth.is_visible(&sid));
         assert_eq!(auth.surface_base(&sid), SurfaceBaseState::Active);
@@ -1487,12 +1986,8 @@ mod tests {
             applied_at_turn: turn(2),
         })
         .expect("apply reload");
-        let t = auth
-            .apply(ExternalToolSurfaceInput::PendingSucceeded {
-                surface_id: sid.clone(),
-                applied_at_turn: turn(2),
-            })
-            .expect("reload succeeded");
+        let input = pending_succeeded_input(&auth, "alpha", 2);
+        let t = auth.apply(input).expect("reload succeeded");
         assert_eq!(t.transition_name, "PendingSucceededReload");
         assert!(auth.is_visible(&sid));
     }
@@ -1510,12 +2005,8 @@ mod tests {
             applied_at_turn: turn(5),
         })
         .expect("apply add");
-        let t = auth
-            .apply(ExternalToolSurfaceInput::PendingFailed {
-                surface_id: sid.clone(),
-                applied_at_turn: turn(5),
-            })
-            .expect("pending failed");
+        let input = pending_failed_input(&auth, "alpha", 5);
+        let t = auth.apply(input).expect("pending failed");
         assert_eq!(t.transition_name, "PendingFailedAdd");
         assert!(!auth.is_visible(&sid));
         assert!(t.effects.iter().any(|e| matches!(
@@ -1539,12 +2030,8 @@ mod tests {
             applied_at_turn: turn(2),
         })
         .expect("apply reload");
-        let t = auth
-            .apply(ExternalToolSurfaceInput::PendingFailed {
-                surface_id: sid.clone(),
-                applied_at_turn: turn(2),
-            })
-            .expect("reload failed");
+        let input = pending_failed_input(&auth, "alpha", 2);
+        let t = auth.apply(input).expect("reload failed");
         assert_eq!(t.transition_name, "PendingFailedReload");
         // Surface stays active (reload failure keeps old connection).
         assert!(auth.is_visible(&sid));
@@ -1557,9 +2044,40 @@ mod tests {
         let sid = SurfaceId::from("ghost");
         let result = auth.apply(ExternalToolSurfaceInput::PendingSucceeded {
             surface_id: sid,
+            operation: SurfaceDeltaOperation::None,
+            pending_task_sequence: 0,
+            staged_intent_sequence: 0,
             applied_at_turn: turn(1),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_boundary_rejects_while_pending_operation_is_unresolved() {
+        let mut auth = make_authority();
+        let sid = SurfaceId::from("alpha");
+        auth.apply(ExternalToolSurfaceInput::StageAdd {
+            surface_id: sid.clone(),
+        })
+        .expect("stage add");
+        auth.apply(ExternalToolSurfaceInput::ApplyBoundary {
+            surface_id: sid.clone(),
+            applied_at_turn: turn(1),
+        })
+        .expect("apply add");
+        auth.apply(ExternalToolSurfaceInput::StageRemove {
+            surface_id: sid.clone(),
+        })
+        .expect("stage remove");
+
+        let result = auth.apply(ExternalToolSurfaceInput::ApplyBoundary {
+            surface_id: sid,
+            applied_at_turn: turn(2),
+        });
+        assert!(
+            result.is_err(),
+            "should reject boundary while add is pending"
+        );
     }
 
     // ---- CallStarted / CallFinished ----
@@ -1856,11 +2374,8 @@ mod tests {
         assert_eq!(t.transition_name, "ApplyBoundaryAdd");
 
         // 3. Pending succeeds -> active
-        auth.apply(ExternalToolSurfaceInput::PendingSucceeded {
-            surface_id: sid.clone(),
-            applied_at_turn: turn(1),
-        })
-        .expect("pending succeeded");
+        let input = pending_succeeded_input(&auth, "server-a", 1);
+        auth.apply(input).expect("pending succeeded");
         assert!(auth.is_visible(&sid));
         assert_eq!(auth.surface_base(&sid), SurfaceBaseState::Active);
 
@@ -1961,11 +2476,8 @@ mod tests {
             applied_at_turn: turn(3),
         })
         .expect("re-apply add");
-        auth.apply(ExternalToolSurfaceInput::PendingSucceeded {
-            surface_id: sid.clone(),
-            applied_at_turn: turn(3),
-        })
-        .expect("re-pending succeeded");
+        let input = pending_succeeded_input(&auth, "alpha", 3);
+        auth.apply(input).expect("re-pending succeeded");
         assert!(auth.is_visible(&sid));
         assert_eq!(auth.surface_base(&sid), SurfaceBaseState::Active);
     }
@@ -1987,11 +2499,8 @@ mod tests {
         .expect("apply add");
         assert_eq!(auth.pending_count(), 1);
 
-        auth.apply(ExternalToolSurfaceInput::PendingSucceeded {
-            surface_id: sid,
-            applied_at_turn: turn(1),
-        })
-        .expect("pending succeeded");
+        let input = pending_succeeded_input(&auth, "alpha", 1);
+        auth.apply(input).expect("pending succeeded");
         assert_eq!(auth.pending_count(), 0);
     }
 }

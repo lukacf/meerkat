@@ -141,11 +141,6 @@ impl PersistentRuntimeDriver {
         self.inner.has_queued_input_outside(excluded)
     }
 
-    /// Requeue an input at the front of the queue (delegates to inner).
-    pub fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {
-        self.inner.enqueue_front_input(input_id, input);
-    }
-
     /// Stage input (delegates to inner).
     pub fn stage_input(
         &mut self,
@@ -182,7 +177,7 @@ impl PersistentRuntimeDriver {
     }
 
     /// Remove a previously accepted input from the ledger/queue.
-    pub fn forget_input(&mut self, input_id: &InputId) {
+    pub(crate) fn forget_input(&mut self, input_id: &InputId) {
         self.inner.forget_input(input_id);
     }
 
@@ -215,6 +210,18 @@ impl PersistentRuntimeDriver {
             )));
         }
         Ok(abandoned)
+    }
+
+    /// Recycle the in-memory driver shell while preserving canonical pending
+    /// work from durable runtime truth.
+    ///
+    /// Unlike `reset()`, this must not abandon queued/staged work.
+    pub async fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
+        let silent_intents = self.inner.silent_comms_intents();
+        self.inner = EphemeralRuntimeDriver::new(self.runtime_id.clone());
+        self.inner.set_silent_comms_intents(silent_intents);
+        let _ = RuntimeDriver::recover(self).await?;
+        Ok(self.inner.active_input_ids().len())
     }
 }
 
@@ -419,13 +426,36 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                     *state.authority_mut() = auth;
                 }
             }
-
-            if let Some(input) = state.persisted_input.clone() {
-                recovered_payloads.push((state.input_id.clone(), input));
+            if matches!(
+                state.current_state(),
+                InputLifecycleState::Accepted | InputLifecycleState::Staged
+            ) {
+                // Accepted/Staged are pre-run in-flight states. On recovery they
+                // must re-enter the queue explicitly so ingress/ledger/queue
+                // truth stays aligned before Recover effects are evaluated.
+                let now = Utc::now();
+                let from = state.current_state();
+                let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                    InputLifecycleState::Queued,
+                    None,
+                    state.last_run_id().cloned(),
+                    state.last_boundary_sequence(),
+                    {
+                        let mut h = state.history().to_vec();
+                        h.push(InputStateHistoryEntry {
+                            timestamp: now,
+                            from,
+                            to: InputLifecycleState::Queued,
+                            reason: Some("recovery: pre-run state normalized to queued".into()),
+                        });
+                        h
+                    },
+                    now,
+                );
+                *state.authority_mut() = auth;
             }
 
             // Admit to ingress authority so Recover can see this input.
-            let lifecycle_state = state.current_state();
             if self.inner.input_state(&state.input_id).is_none() {
                 let handling_mode = state
                     .policy
@@ -454,6 +484,20 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                 let request_id = None;
                 let reservation_key = None;
 
+                let inserted = self.inner.ledger_mut().recover(state.clone());
+                if !inserted {
+                    // Filtered by ledger recover (e.g. ephemeral durability): do not
+                    // admit to ingress, otherwise ingress queue truth can outlive
+                    // canonical ledger truth.
+                    continue;
+                }
+
+                if let Some(input) = state.persisted_input.clone() {
+                    recovered_payloads.push((state.input_id.clone(), input));
+                }
+
+                let lifecycle_state = state.current_state();
+
                 if let Err(err) = self.inner.admit_recovered_to_ingress(
                     state.input_id.clone(),
                     content_shape,
@@ -463,25 +507,28 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                     request_id,
                     reservation_key,
                 ) {
-                    tracing::warn!(
-                        input_id = %state.input_id,
-                        error = %err,
-                        "failed to admit recovered input to ingress — continuing with ledger only"
-                    );
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to admit recovered input '{}' to ingress authority: {err}",
+                        state.input_id
+                    )));
                 }
-                self.inner.ledger_mut().recover(state);
             }
         }
 
-        // Then run ephemeral recovery logic (requeue Accepted/Staged)
+        // Then run ephemeral recovery logic to finalize ingress recovery,
+        // execute any remaining per-input recovery effects, and rebuild the
+        // physical queue projections from canonical ingress truth.
         let report = self.inner.recover().await?;
 
-        for (input_id, input) in recovered_payloads {
+        for (input_id, _input) in recovered_payloads {
             let should_requeue = self.inner.input_state(&input_id).is_some_and(|state| {
                 state.current_state() == crate::input_state::InputLifecycleState::Queued
             });
             if should_requeue && !self.inner.has_queued_input(&input_id) {
-                self.inner.enqueue_recovered_input(input_id, input);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "persistent recover left queued input '{}' out of the runtime queue projection",
+                    input_id
+                )));
             }
         }
 
@@ -513,26 +560,16 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             }
 
             // Terminal states must not have active inputs. If persisted state
-            // is terminal but active inputs exist, treat as store corruption:
-            // terminalize those inputs instead of resurrecting work.
+            // is terminal but active inputs exist, fail closed as store
+            // corruption instead of mutating queue projections in shell code.
             if runtime_state.is_terminal() {
                 let active = self.inner.active_input_ids();
                 if !active.is_empty() {
-                    tracing::warn!(
-                        runtime_id = %self.runtime_id,
-                        active_count = active.len(),
-                        persisted_state = %runtime_state,
-                        "terminal runtime has active inputs — terminalizing as corrupted"
-                    );
-                    let abandoned = self
-                        .inner
-                        .abandon_all_non_terminal(InputAbandonReason::Destroyed);
-                    self.inner.queue_mut().drain();
-                    tracing::warn!(
-                        runtime_id = %self.runtime_id,
-                        abandoned,
-                        "force-abandoned active inputs from terminal runtime"
-                    );
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "store corruption: terminal runtime '{}' has {} active inputs",
+                        runtime_state,
+                        active.len()
+                    )));
                 }
             }
         }

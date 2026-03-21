@@ -81,6 +81,14 @@ fn make_continuation() -> Input {
     ))
 }
 
+fn assert_queue_projection_alignment(driver: &EphemeralRuntimeDriver) {
+    assert_eq!(driver.queue().input_ids(), driver.ingress().queue());
+    assert_eq!(
+        driver.steer_queue().input_ids(),
+        driver.ingress().steer_queue()
+    );
+}
+
 #[tokio::test]
 async fn accept_prompt_idle_queues_and_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -90,6 +98,7 @@ async fn accept_prompt_idle_queues_and_wakes() {
     assert!(result.is_accepted());
     assert!(driver.take_wake_requested());
     assert_eq!(driver.queue().len(), 1);
+    assert_queue_projection_alignment(&driver);
 }
 
 #[tokio::test]
@@ -149,6 +158,7 @@ async fn accept_continuation_idle_wakes_and_requests_processing() {
     assert!(driver.take_process_requested());
     // Continuations route to steer queue (RoutingDisposition::Steer)
     assert_eq!(driver.steer_queue().len(), 1);
+    assert_queue_projection_alignment(&driver);
 }
 
 #[tokio::test]
@@ -286,6 +296,7 @@ async fn on_run_failed_rollbacks() {
     let state = driver.input_state(&input_id).unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Queued);
     assert!(driver.control().is_idle());
+    assert_queue_projection_alignment(&driver);
 }
 
 #[tokio::test]
@@ -354,13 +365,15 @@ async fn recovery_counts_queued_as_recovered() {
     assert_eq!(state.current_state(), InputLifecycleState::Queued);
 
     // Drain the queue (simulating crash losing queue state)
-    driver.queue_mut().drain();
+    driver.clear_queue_projections();
 
     // Recover
     let report = driver.recover_ephemeral();
     // Queued inputs are counted as recovered (already in correct state)
     assert_eq!(report.inputs_recovered, 1);
     assert_eq!(report.inputs_requeued, 0); // Already Queued, no transition needed
+    assert_eq!(driver.queue().input_ids(), vec![input_id]);
+    assert_queue_projection_alignment(&driver);
 }
 
 #[tokio::test]
@@ -392,6 +405,53 @@ async fn recovery_applied_stays_applied() {
         state.current_state(),
         InputLifecycleState::AppliedPendingConsumption
     );
+    assert_queue_projection_alignment(&driver);
+}
+
+#[tokio::test]
+async fn stage_input_keeps_queue_projection_aligned() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let input = make_prompt_input("stage me");
+    let input_id = input.id().clone();
+    driver.accept_input(input).await.unwrap();
+
+    let run_id = RunId::new();
+    driver.start_run(run_id.clone()).unwrap();
+    driver.stage_input(&input_id, &run_id).unwrap();
+
+    assert!(driver.queue().is_empty());
+    assert_queue_projection_alignment(&driver);
+}
+
+#[tokio::test]
+async fn rollback_restores_queue_projection_order() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+
+    let first = make_prompt_input("first");
+    let first_id = first.id().clone();
+    let second = make_prompt_input("second");
+    let second_id = second.id().clone();
+    driver.accept_input(first).await.unwrap();
+    driver.accept_input(second).await.unwrap();
+    let _ = driver.take_wake_requested();
+
+    let run_id = RunId::new();
+    let (dequeued_id, _) = driver.dequeue_next().unwrap();
+    assert_eq!(dequeued_id, first_id);
+    driver.start_run(run_id.clone()).unwrap();
+    driver.stage_input(&first_id, &run_id).unwrap();
+
+    driver
+        .on_run_event(RunEvent::RunFailed {
+            run_id,
+            error: "rollback".into(),
+            recoverable: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(driver.queue().input_ids(), vec![first_id, second_id]);
+    assert_queue_projection_alignment(&driver);
 }
 
 #[tokio::test]

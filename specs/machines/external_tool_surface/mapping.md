@@ -136,6 +136,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinalizeRemovalForced`
   - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
   - scenarios: `runtime-scoped-browser-tools`
+- `SnapshotAligned`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
 - `Shutdown`
   - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
   - scenarios: `runtime-scoped-browser-tools`
@@ -158,6 +161,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `runtime-scoped-browser-tools`
 
 ### Invariants
+- `visible_surfaces_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `base_state_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `pending_op_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `staged_op_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `staged_intent_sequence_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `pending_task_sequence_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `pending_lineage_sequence_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `inflight_calls_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `last_delta_operation_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `last_delta_phase_keys_subset_of_known_surfaces`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
 - `removing_or_removed_surfaces_are_not_visible`
   - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
   - scenarios: `add-reload-remove`, `runtime-scoped-browser-tools`
@@ -182,6 +215,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `forced_delta_phase_is_always_a_remove_delta`
   - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
   - scenarios: `add-reload-remove`, `runtime-scoped-browser-tools`
+- `staged_sequence_matches_staged_presence`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `pending_lineage_matches_pending_presence`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
+- `snapshot_alignment_epoch_not_ahead`
+  - anchors: `mcp_router`, `mcp_adapter`, `agent_tool_state`
+  - scenarios: `runtime-scoped-browser-tools`
 
 
 <!-- GENERATED_COVERAGE_END -->

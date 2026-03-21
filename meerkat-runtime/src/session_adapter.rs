@@ -10,7 +10,7 @@
 //! applies via CoreExecutor (which calls SessionService::start_turn()), and
 //! marks inputs as consumed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -215,12 +215,70 @@ struct RuntimeSessionEntry {
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
-    /// Wake signal sender (if a RuntimeLoop is attached).
-    wake_tx: Option<mpsc::Sender<()>>,
-    /// Run-control sender for cancelling the current run.
-    control_tx: Option<mpsc::Sender<RunControlCommand>>,
-    /// Loop task handle (dropped on unregister, which closes the channel).
-    _loop_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Runtime-loop capabilities. Presence means a loop is attached.
+    attachment: Option<RuntimeLoopAttachment>,
+}
+
+/// Capability bundle for an attached runtime loop.
+///
+/// Keep all loop-related handles together so "attached vs detached" cannot
+/// drift into partially-populated shell state.
+struct RuntimeLoopAttachment {
+    wake_tx: mpsc::Sender<()>,
+    control_tx: mpsc::Sender<RunControlCommand>,
+    _loop_handle: tokio::task::JoinHandle<()>,
+}
+
+impl RuntimeSessionEntry {
+    fn attachment_is_live(&self) -> bool {
+        self.attachment
+            .as_ref()
+            .map(|attachment| !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed())
+            .unwrap_or(false)
+    }
+
+    fn has_attachment(&self) -> bool {
+        self.attachment_is_live()
+    }
+
+    fn attach_runtime_loop(
+        &mut self,
+        wake_tx: mpsc::Sender<()>,
+        control_tx: mpsc::Sender<RunControlCommand>,
+        loop_handle: tokio::task::JoinHandle<()>,
+    ) {
+        self.attachment = Some(RuntimeLoopAttachment {
+            wake_tx,
+            control_tx,
+            _loop_handle: loop_handle,
+        });
+    }
+
+    fn clear_dead_attachment(&mut self) -> bool {
+        if self.attachment.is_some() && !self.attachment_is_live() {
+            self.attachment = None;
+            return true;
+        }
+        false
+    }
+
+    fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
+        if !self.attachment_is_live() {
+            return None;
+        }
+        self.attachment
+            .as_ref()
+            .map(|attachment| attachment.wake_tx.clone())
+    }
+
+    fn control_sender(&self) -> Option<mpsc::Sender<RunControlCommand>> {
+        if !self.attachment_is_live() {
+            return None;
+        }
+        self.attachment
+            .as_ref()
+            .map(|attachment| attachment.control_tx.clone())
+    }
 }
 
 /// Per-session comms drain slot, driven by `CommsDrainLifecycleAuthority`.
@@ -316,6 +374,16 @@ impl RuntimeSessionAdapter {
         session_id: &SessionId,
         control: Option<Arc<AtomicBool>>,
     ) {
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(session_id) {
+            tracing::warn!(
+                %session_id,
+                "ignoring comms drain control update for unregistered session"
+            );
+            return;
+        }
+        // Keep the session read guard while mutating drain slots so unregister
+        // cannot remove the session between registration check and slot update.
         let mut slots = self.comms_drain_slots.write().await;
         let slot = slots
             .entry(session_id.clone())
@@ -357,9 +425,14 @@ impl RuntimeSessionAdapter {
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
     pub async fn register_session(&self, session_id: SessionId) {
-        if self.contains_session(&session_id).await {
-            return;
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                existing.clear_dead_attachment();
+                return;
+            }
         }
+
         let mut entry = self.make_driver(&session_id);
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
@@ -369,12 +442,14 @@ impl RuntimeSessionAdapter {
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
-            wake_tx: None,
-            control_tx: None,
-            _loop_handle: None,
+            attachment: None,
         };
         let mut sessions = self.sessions.write().await;
-        sessions.entry(session_id).or_insert(session_entry);
+        if let Some(existing) = sessions.get_mut(&session_id) {
+            existing.clear_dead_attachment();
+        } else {
+            sessions.insert(session_id, session_entry);
+        }
     }
 
     /// Set the silent comms intents for a session's runtime driver.
@@ -412,66 +487,45 @@ impl RuntimeSessionAdapter {
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
-        let mut executor = Some(executor);
-        let upgrade = {
+        let existing = {
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(&session_id) {
-                if entry.wake_tx.is_some() && entry.control_tx.is_some() {
-                    return;
-                }
-
-                let driver = Arc::clone(&entry.driver);
-                let (wake_tx, wake_rx) = mpsc::channel(16);
-                let (control_tx, control_rx) = mpsc::channel(16);
-                let Some(executor) = executor.take() else {
-                    tracing::error!(%session_id, "executor missing while upgrading existing runtime session");
-                    return;
-                };
-                let handle = crate::runtime_loop::spawn_runtime_loop_with_completions(
-                    driver.clone(),
-                    executor,
-                    wake_rx,
-                    control_rx,
-                    Some(entry.completions.clone()),
-                );
-
-                entry.wake_tx = Some(wake_tx.clone());
-                entry.control_tx = Some(control_tx);
-                entry._loop_handle = Some(handle);
-                Some((driver, wake_tx))
-            } else {
-                None
-            }
+            sessions.get_mut(&session_id).map(|entry| {
+                entry.clear_dead_attachment();
+                (
+                    entry.has_attachment(),
+                    entry.driver.clone(),
+                    entry.completions.clone(),
+                )
+            })
         };
 
-        if let Some((driver, wake_tx)) = upgrade {
-            let should_wake = {
-                let mut driver = driver.lock().await;
-                // Transition Idle → Attached now that an executor is wired up
-                let _ = driver.attach();
-                !driver.as_driver().active_input_ids().is_empty()
-            };
-            if should_wake {
-                let _ = wake_tx.try_send(());
+        let (driver, completions) = if let Some((has_attachment, driver, completions)) = existing {
+            if has_attachment {
+                return;
             }
-            return;
-        }
+            (driver, completions)
+        } else {
+            let mut recovered_entry = self.make_driver(&session_id);
+            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+                tracing::error!(
+                    %session_id,
+                    error = %err,
+                    "failed to recover runtime driver during registration"
+                );
+                return;
+            }
 
-        let mut recovered_entry = self.make_driver(&session_id);
-        if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
-            return;
-        }
-
-        let driver = {
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get(&session_id) {
-                if entry.wake_tx.is_some() && entry.control_tx.is_some() {
+            if let Some(entry) = sessions.get_mut(&session_id) {
+                entry.clear_dead_attachment();
+                if entry.has_attachment() {
                     return;
                 }
-                entry.driver.clone()
+                (entry.driver.clone(), entry.completions.clone())
             } else {
                 let driver = Arc::new(Mutex::new(recovered_entry));
+                let completions =
+                    Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
                 sessions.insert(
                     session_id.clone(),
                     RuntimeSessionEntry {
@@ -479,57 +533,118 @@ impl RuntimeSessionAdapter {
                         ops_lifecycle: Arc::new(
                             crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new(),
                         ),
-                        completions: Arc::new(Mutex::new(
-                            crate::completion::CompletionRegistry::new(),
-                        )),
-                        wake_tx: None,
-                        control_tx: None,
-                        _loop_handle: None,
+                        completions: completions.clone(),
+                        attachment: None,
                     },
                 );
-                driver
+                (driver, completions)
             }
+        };
+
+        let should_wake = {
+            let mut driver_guard = driver.lock().await;
+            if let Err(error) = driver_guard.attach() {
+                let repaired = if error.from == RuntimeState::Attached
+                    && error.to == RuntimeState::Attached
+                {
+                    tracing::warn!(
+                        %session_id,
+                        error = %error,
+                        "runtime driver remained attached without a live published loop; detaching and retrying attachment"
+                    );
+                    match driver_guard.detach() {
+                        Ok(_) => match driver_guard.attach() {
+                            Ok(()) => true,
+                            Err(retry_error) => {
+                                tracing::warn!(
+                                    %session_id,
+                                    error = %retry_error,
+                                    "failed to re-attach runtime driver after repairing stale attachment state"
+                                );
+                                false
+                            }
+                        },
+                        Err(detach_error) => {
+                            tracing::warn!(
+                                %session_id,
+                                error = %detach_error,
+                                "failed to detach stale attached runtime driver before retrying attachment"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                if !repaired {
+                    tracing::warn!(
+                        %session_id,
+                        error = %error,
+                        "failed to attach runtime driver before publishing loop attachment"
+                    );
+                    return;
+                }
+            }
+            !driver_guard.as_driver().active_input_ids().is_empty()
         };
 
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
-        let Some(executor) = executor.take() else {
-            tracing::error!(%session_id, "executor missing while registering runtime session");
-            return;
+        let mut pending_loop_handle =
+            Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
+                driver.clone(),
+                executor,
+                wake_rx,
+                control_rx,
+                Some(completions.clone()),
+            ));
+
+        let (published, detach_after_abort) = {
+            let mut sessions = self.sessions.write().await;
+            match sessions.get_mut(&session_id) {
+                None => (false, true),
+                Some(entry) => {
+                    entry.clear_dead_attachment();
+                    if entry.has_attachment() {
+                        (false, false)
+                    } else if !Arc::ptr_eq(&entry.driver, &driver)
+                        || !Arc::ptr_eq(&entry.completions, &completions)
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            "runtime session entry changed while wiring executor; aborting stale loop attachment"
+                        );
+                        (false, true)
+                    } else {
+                        match pending_loop_handle.take() {
+                            Some(loop_handle) => {
+                                entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
+                                (true, false)
+                            }
+                            None => {
+                                tracing::error!(
+                                    %session_id,
+                                    "runtime loop handle missing during attachment publish"
+                                );
+                                (false, true)
+                            }
+                        }
+                    }
+                }
+            }
         };
 
-        // Get or create completions for this session
-        let completions = {
-            let sessions = self.sessions.read().await;
-            sessions.get(&session_id).map(|e| e.completions.clone())
-        };
-
-        let handle = crate::runtime_loop::spawn_runtime_loop_with_completions(
-            driver.clone(),
-            executor,
-            wake_rx,
-            control_rx,
-            completions,
-        );
-
-        let mut sessions = self.sessions.write().await;
-        let Some(entry) = sessions.get_mut(&session_id) else {
-            return;
-        };
-        if entry.wake_tx.is_some() && entry.control_tx.is_some() {
+        if !published {
+            if let Some(loop_handle) = pending_loop_handle.take() {
+                loop_handle.abort();
+            }
+            if detach_after_abort {
+                let mut driver_guard = driver.lock().await;
+                let _ = driver_guard.detach();
+            }
             return;
         }
-        entry.wake_tx = Some(wake_tx.clone());
-        entry.control_tx = Some(control_tx);
-        entry._loop_handle = Some(handle);
-        drop(sessions);
 
-        let should_wake = {
-            let mut driver = driver.lock().await;
-            // Transition Idle → Attached now that an executor is wired up
-            let _ = driver.attach();
-            !driver.as_driver().active_input_ids().is_empty()
-        };
         if should_wake {
             let _ = wake_tx.try_send(());
         }
@@ -540,13 +655,25 @@ impl RuntimeSessionAdapter {
     /// Detaches the executor (Attached → Idle) before removal, then drops
     /// the wake channel sender, which causes the RuntimeLoop to exit.
     pub async fn unregister_session(&self, session_id: &SessionId) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get(session_id) {
+        let entry = {
+            let mut sessions = self.sessions.write().await;
+            let mut slots = self.comms_drain_slots.write().await;
+            // Remove + abort drain slot before dropping session binding so
+            // slot keys remain a subset of registered-session keys.
+            if let Some(mut slot) = slots.remove(session_id) {
+                abort_slot(&mut slot);
+            }
+            sessions.remove(session_id)
+        };
+
+        if let Some(entry) = entry {
             let mut driver = entry.driver.lock().await;
             let _ = driver.detach(); // Attached → Idle (no-op if not Attached)
             drop(driver);
+
+            let mut completions = entry.completions.lock().await;
+            completions.resolve_all_terminated("runtime session unregistered");
         }
-        sessions.remove(session_id);
     }
 
     /// Check whether a runtime driver is already registered for a session.
@@ -559,16 +686,22 @@ impl RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let Some(control_tx) = &entry.control_tx else {
-            return Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            });
+        let (driver, control_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.control_sender())
+        };
+
+        let Some(control_tx) = control_tx else {
+            let state = {
+                let driver = driver.lock().await;
+                driver.as_driver().runtime_state()
+            };
+            return Err(RuntimeDriverError::NotReady { state });
         };
         control_tx
             .send(RunControlCommand::CancelCurrentRun {
@@ -586,28 +719,43 @@ impl RuntimeSessionAdapter {
         session_id: &SessionId,
         command: RunControlCommand,
     ) -> Result<(), RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+        let (driver, completions, control_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.completions.clone(),
+                entry.control_sender(),
+            )
+        };
 
-        if let Some(control_tx) = &entry.control_tx
+        if let Some(control_tx) = control_tx
             && control_tx.send(command.clone()).await.is_ok()
         {
             return Ok(());
         }
 
         if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-            let mut driver = entry.driver.lock().await;
+            let mut driver = driver.lock().await;
             driver
                 .as_driver_mut()
                 .on_runtime_control(crate::traits::RuntimeControlCommand::Stop)
                 .await?;
             drop(driver);
-            let mut completions = entry.completions.lock().await;
+            let mut completions = completions.lock().await;
             completions.resolve_all_terminated("runtime stopped");
+            drop(completions);
+
+            // No live control sender was available for this stop path. Scrub any
+            // dead attachment capabilities that may still be published.
+            let mut sessions = self.sessions.write().await;
+            if let Some(entry) = sessions.get_mut(session_id) {
+                entry.clear_dead_attachment();
+            }
             Ok(())
         } else {
             Err(RuntimeDriverError::Internal(
@@ -643,15 +791,46 @@ impl RuntimeSessionAdapter {
 
         let (input_id, run_id, primitive) = {
             let mut driver = driver.lock().await;
-            if !driver.is_idle_or_attached() || !driver.as_driver().active_input_ids().is_empty() {
+            if !driver.is_idle_or_attached() {
                 return Err(RuntimeDriverError::NotReady {
                     state: driver.as_driver().runtime_state(),
                 });
             }
+
+            let active_input_ids = driver.as_driver().active_input_ids();
+            if !active_input_ids.is_empty() {
+                let duplicate_active_input =
+                    input.header().idempotency_key.as_ref().and_then(|key| {
+                        active_input_ids.iter().find(|active_id| {
+                            driver
+                                .as_driver()
+                                .input_state(active_id)
+                                .and_then(|state| state.idempotency_key.as_ref())
+                                == Some(key)
+                        })
+                    });
+                if let Some(existing_id) = duplicate_active_input {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                        ),
+                    });
+                }
+                return Err(RuntimeDriverError::NotReady {
+                    state: driver.as_driver().runtime_state(),
+                });
+            }
+
             let outcome = driver.as_driver_mut().accept_input(input).await?;
             let input_id = match outcome {
                 AcceptOutcome::Accepted { input_id, .. } => input_id,
-                AcceptOutcome::Deduplicated { existing_id, .. } => existing_id,
+                AcceptOutcome::Deduplicated { existing_id, .. } => {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                        ),
+                    });
+                }
                 AcceptOutcome::Rejected { reason } => {
                     return Err(RuntimeDriverError::ValidationFailed { reason });
                 }
@@ -764,15 +943,22 @@ impl RuntimeSessionAdapter {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+        let (driver, completions, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.completions.clone(),
+                entry.wake_sender(),
+            )
+        };
 
         let (outcome, should_wake, should_process, handle) = {
-            let mut driver = entry.driver.lock().await;
+            let mut driver = driver.lock().await;
             let result = driver.as_driver_mut().accept_input(input).await?;
 
             match &result {
@@ -786,7 +972,7 @@ impl RuntimeSessionAdapter {
                         None
                     } else {
                         Some({
-                            let mut completions = entry.completions.lock().await;
+                            let mut completions = completions.lock().await;
                             completions.register(input_id.clone())
                         })
                     };
@@ -807,7 +993,7 @@ impl RuntimeSessionAdapter {
                     } else {
                         // In-flight — join existing waiters via multi-waiter Vec
                         let handle = {
-                            let mut completions = entry.completions.lock().await;
+                            let mut completions = completions.lock().await;
                             completions.register(existing_id.clone())
                         };
                         (result, false, false, Some(handle))
@@ -822,7 +1008,7 @@ impl RuntimeSessionAdapter {
         };
 
         if (should_wake || should_process)
-            && let Some(ref wake_tx) = entry.wake_tx
+            && let Some(ref wake_tx) = wake_tx
         {
             let _ = wake_tx.try_send(());
         }
@@ -863,6 +1049,16 @@ impl RuntimeSessionAdapter {
             None => return false,
         };
 
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(session_id) {
+            tracing::warn!(
+                %session_id,
+                "refusing to spawn comms drain for unregistered session"
+            );
+            return false;
+        }
+        // Keep the session read guard while mutating drain slots so unregister
+        // cannot race between registration check and slot publication.
         let mut slots = self.comms_drain_slots.write().await;
         let slot = slots
             .entry(session_id.clone())
@@ -1027,16 +1223,19 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+        let (driver, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.wake_sender())
+        };
 
         // Accept input and check wake under the driver lock
         let (outcome, should_wake, should_process) = {
-            let mut driver = entry.driver.lock().await;
+            let mut driver = driver.lock().await;
             let result = driver.as_driver_mut().accept_input(input).await?;
             let wake = driver.take_wake_requested();
             let process_now = driver.take_process_requested();
@@ -1045,7 +1244,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
 
         // Signal the RuntimeLoop if wake or immediate processing was requested.
         if (should_wake || should_process)
-            && let Some(ref wake_tx) = entry.wake_tx
+            && let Some(ref wake_tx) = wake_tx
         {
             // Non-blocking: if the channel is full, the loop is already processing
             let _ = wake_tx.try_send(());
@@ -1067,13 +1266,16 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<RuntimeState, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let driver = entry.driver.lock().await;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+        let driver = driver.lock().await;
         Ok(driver.as_driver().runtime_state())
     }
 
@@ -1081,20 +1283,27 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<RetireReport, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let mut driver = entry.driver.lock().await;
+        let (driver_handle, completions, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.completions.clone(),
+                entry.wake_sender(),
+            )
+        };
+        let mut driver = driver_handle.lock().await;
         let mut report = driver.as_driver_mut().retire().await?;
         drop(driver); // Release driver lock before waking
 
         if report.inputs_pending_drain > 0 {
             // Wake the runtime loop so it drains already-queued inputs.
             // Retired state allows processing but rejects new accepts.
-            if let Some(ref wake_tx) = entry.wake_tx
+            if let Some(ref wake_tx) = wake_tx
                 && wake_tx.send(()).await.is_ok()
             {
                 return Ok(report);
@@ -1103,12 +1312,12 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
             // No live loop can drain this retired queue. Abandon the queued work
             // now so later recovery/upgrade paths do not execute inputs whose
             // waiters were already terminated.
-            let mut driver = entry.driver.lock().await;
+            let mut driver = driver_handle.lock().await;
             let abandoned = driver
                 .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
                 .await?;
             drop(driver);
-            let mut completions = entry.completions.lock().await;
+            let mut completions = completions.lock().await;
             completions.resolve_all_terminated("retired without runtime loop");
             report.inputs_abandoned += abandoned;
             report.inputs_pending_drain = 0;
@@ -1121,22 +1330,26 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<ResetReport, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let mut driver = entry.driver.lock().await;
+        let (driver, completions) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.completions.clone())
+        };
+        let mut driver = driver.lock().await;
         if matches!(driver.as_driver().runtime_state(), RuntimeState::Running) {
             return Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Running,
             });
         }
         let report = driver.as_driver_mut().reset().await?;
+        drop(driver);
 
         // Resolve all pending completion waiters — reset discards all queued work
-        let mut completions = entry.completions.lock().await;
+        let mut completions = completions.lock().await;
         completions.resolve_all_terminated("runtime reset");
 
         Ok(report)
@@ -1147,13 +1360,16 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input_id: &InputId,
     ) -> Result<Option<InputState>, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let driver = entry.driver.lock().await;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+        let driver = driver.lock().await;
         Ok(driver.as_driver().input_state(input_id).cloned())
     }
 
@@ -1161,13 +1377,16 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<InputId>, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let driver = entry.driver.lock().await;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+        let driver = driver.lock().await;
         Ok(driver.as_driver().active_input_ids())
     }
 }
@@ -1215,7 +1434,7 @@ impl RuntimeSessionAdapter {
             session_id,
             entry.driver.clone(),
             entry.completions.clone(),
-            entry.wake_tx.clone(),
+            entry.wake_sender(),
         ))
     }
 }
@@ -1310,41 +1529,44 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
     ) -> Result<RecycleReport, RuntimeControlPlaneError> {
         let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
 
-        // Recycle = reset the driver to Idle and re-queue any recoverable inputs.
-        // For persistent drivers, the store already has the input states; recovery
-        // will replay them. For ephemeral drivers, inputs that survived are re-queued.
-        let transferred = {
+        let (transferred, active_after_recycle) = {
             let mut drv = driver.lock().await;
             let state = drv.as_driver().runtime_state();
             if matches!(state, RuntimeState::Running) {
                 return Err(RuntimeControlPlaneError::InvalidState { state });
             }
+            let should_restore_attached = matches!(state, RuntimeState::Attached);
 
-            // Count non-terminal inputs before reset — these are transferred.
-            let active = drv.as_driver().active_input_ids().len();
+            let transferred = match &mut *drv {
+                DriverEntry::Ephemeral(driver) => driver
+                    .recycle_preserving_work()
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
+                DriverEntry::Persistent(driver) => driver
+                    .recycle_preserving_work()
+                    .await
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
+            };
 
-            // Reset to Idle, which re-queues Staged inputs and abandons nothing
-            // that can be recovered.
-            let _report = drv
-                .as_driver_mut()
-                .reset()
-                .await
-                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            if should_restore_attached
+                && matches!(drv.as_driver().runtime_state(), RuntimeState::Idle)
+            {
+                drv.attach()
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            }
 
-            // Run recovery to rebuild queue from persisted state
-            let _recovery = drv
-                .as_driver_mut()
-                .recover()
-                .await
-                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-
-            active
+            let active_after_recycle = drv.as_driver().active_input_ids();
+            (transferred, active_after_recycle)
         };
 
-        // Resolve existing completion waiters since inputs were recycled
+        // Reconcile existing waiters: keep waiting only for inputs that remain
+        // active after recycle; terminate stale waiters so they cannot hang.
         {
+            let pending_after: HashSet<InputId> = active_after_recycle.into_iter().collect();
             let mut comp = completions.lock().await;
-            comp.resolve_all_terminated("recycled");
+            comp.resolve_not_pending(
+                |input_id| pending_after.contains(input_id),
+                "recycled input no longer pending",
+            );
         }
 
         // Wake the runtime loop to process re-queued inputs
@@ -1513,6 +1735,7 @@ mod tests {
         comms_runtime: Arc<dyn CommsRuntime>,
         idle_timeout: Duration,
     ) {
+        adapter.register_session(session_id.clone()).await;
         let mut slots = adapter.comms_drain_slots.write().await;
         let slot = slots
             .entry(session_id.clone())
@@ -1634,6 +1857,37 @@ mod tests {
         assert_eq!(
             current_phase(&adapter, &session_id).await,
             Some(CommsDrainPhase::Stopped)
+        );
+    }
+
+    #[tokio::test]
+    async fn unregister_session_aborts_and_removes_drain_slot() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+
+        adapter.register_session(session_id.clone()).await;
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::PersistentHost,
+            comms_runtime,
+            Duration::from_secs(60),
+        )
+        .await;
+
+        assert_eq!(
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Running)
+        );
+        assert!(handle_present(&adapter, &session_id).await);
+
+        adapter.unregister_session(&session_id).await;
+
+        let slots = adapter.comms_drain_slots.read().await;
+        assert!(
+            !slots.contains_key(&session_id),
+            "unregister must remove the comms drain slot entirely"
         );
     }
 }

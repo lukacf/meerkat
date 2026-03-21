@@ -11,8 +11,12 @@ use super::{
     external_tool_surface::external_tool_surface_machine,
     flow_run::flow_run_machine,
     input_lifecycle::input_lifecycle_machine,
+    mob_helper_result_anchor::mob_helper_result_anchor_machine,
     mob_lifecycle::mob_lifecycle_machine,
+    mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine,
     mob_orchestrator::mob_orchestrator_machine,
+    mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine,
+    mob_wiring_anchor::mob_wiring_anchor_machine,
     ops_lifecycle::ops_lifecycle_machine,
     peer_comms::peer_comms_machine,
     runtime_control::runtime_control_machine,
@@ -373,6 +377,238 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "completed/destroyed lifecycle phases stay terminal",
                 ),
             ],
+        ),
+        machine_manifest_from_schema(
+            &mob_member_lifecycle_anchor_machine(),
+            &[
+                anchor(
+                    "mob_runtime_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "mob actor observes child operation peer exposure and terminalization routes",
+                ),
+                anchor(
+                    "mob_ops_adapter",
+                    "meerkat-mob/src/runtime/ops_adapter.rs",
+                    "runtime/ops bridge that carries operation lifecycle signals",
+                ),
+                anchor(
+                    "mob_provisioner",
+                    "meerkat-mob/src/runtime/provisioner.rs",
+                    "member provisioning/retirement bridge where child operation lineage is surfaced",
+                ),
+            ],
+            &[
+                scenario(
+                    "member-peer-exposure-observed",
+                    "operation peer-ready exposure is mirrored into member lifecycle observation state",
+                ),
+                scenario(
+                    "member-terminalization-observed",
+                    "operation terminalization is mirrored into member lifecycle observation state",
+                ),
+                scenario(
+                    "member-lifecycle-observation-lineage",
+                    "member lifecycle anchor tracks observation lineage counters and sets without owning canonical lifecycle truth",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &mob_runtime_bridge_anchor_machine(),
+            &[
+                anchor(
+                    "mob_runtime_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "mob actor emits runtime run submission/terminalization and stop-request boundary events",
+                ),
+                anchor(
+                    "mob_provisioner",
+                    "meerkat-mob/src/runtime/provisioner.rs",
+                    "runtime session bridge and queue handling precursor for runtime bridge boundaries",
+                ),
+                anchor(
+                    "mob_ops_adapter",
+                    "meerkat-mob/src/runtime/ops_adapter.rs",
+                    "ops/runtime linkage precursor for run-level bridge observations",
+                ),
+            ],
+            &[
+                scenario(
+                    "runtime-run-submission-observed",
+                    "runtime run submissions are mirrored into runtime-bridge observation state",
+                ),
+                scenario(
+                    "runtime-run-terminal-observed",
+                    "runtime run completion/failure/cancellation is mirrored into runtime-bridge observation state",
+                ),
+                scenario(
+                    "runtime-stop-request-observed",
+                    "runtime stop requests are mirrored into runtime-bridge observation state",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &mob_wiring_anchor_machine(),
+            &[
+                anchor(
+                    "mob_runtime_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "peer wiring and admission routes mirrored into wiring observation state",
+                ),
+                anchor(
+                    "mob_roster_authority",
+                    "meerkat-mob/src/runtime/roster_authority.rs",
+                    "roster/peer graph mutation precursor for wiring boundary observations",
+                ),
+                anchor(
+                    "mob_edge_locks",
+                    "meerkat-mob/src/runtime/edge_locks.rs",
+                    "wire/unwire lock discipline precursor tied to observed wiring boundaries",
+                ),
+            ],
+            &[
+                scenario(
+                    "operation-peer-trust-observed",
+                    "operation peer-trust events are mirrored into wiring observation state",
+                ),
+                scenario(
+                    "peer-input-admission-observed",
+                    "peer input candidate admission is mirrored into wiring observation state",
+                ),
+                scenario(
+                    "runtime-work-admission-observed",
+                    "runtime work admission is mirrored into wiring observation state",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &mob_helper_result_anchor_machine(),
+            &[
+                anchor(
+                    "mob_runtime_handle",
+                    "meerkat-mob/src/runtime/handle.rs",
+                    "helper-facing surfaces that return run/member result classes",
+                ),
+                anchor(
+                    "mob_runtime_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "runtime command handling path that mirrors terminal classes for helper surfaces",
+                ),
+                anchor(
+                    "mob_terminalization",
+                    "meerkat-mob/src/runtime/terminalization.rs",
+                    "run terminalization precursor for helper-result class observations",
+                ),
+            ],
+            &[
+                scenario(
+                    "helper-completed-class-observed",
+                    "completed run classes are mirrored into helper-result observation state",
+                ),
+                scenario(
+                    "helper-failed-class-observed",
+                    "failed and cancelled run classes are mirrored into helper-result observation state",
+                ),
+                scenario(
+                    "helper-force-cancel-observed",
+                    "force-cancel helper classification signals are mirrored into helper-result observation state",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &mob_member_lifecycle_anchor_machine(),
+            &[
+                anchor(
+                    "mob_member_lifecycle_anchor_schema",
+                    "meerkat-machine-schema/src/catalog/mob_member_lifecycle_anchor.rs",
+                    "formal observation anchor for member lifecycle boundary routes",
+                ),
+                anchor(
+                    "mob_ops_adapter",
+                    "meerkat-mob/src/runtime/ops_adapter.rs",
+                    "member operation lifecycle observation and peer-ready reporting precursor",
+                ),
+                anchor(
+                    "mob_handle",
+                    "meerkat-mob/src/runtime/handle.rs",
+                    "helper/member-facing lifecycle observation precursor",
+                ),
+            ],
+            &[scenario(
+                "member-peer-exposure-terminalization",
+                "member lifecycle anchor observes peer exposure and terminalization routes",
+            )],
+        ),
+        machine_manifest_from_schema(
+            &mob_runtime_bridge_anchor_machine(),
+            &[
+                anchor(
+                    "mob_runtime_bridge_anchor_schema",
+                    "meerkat-machine-schema/src/catalog/mob_runtime_bridge_anchor.rs",
+                    "formal observation anchor for runtime bridge routes",
+                ),
+                anchor(
+                    "mob_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "runtime-bridge command handling precursor",
+                ),
+                anchor(
+                    "mob_provisioner",
+                    "meerkat-mob/src/runtime/provisioner.rs",
+                    "runtime-backed member provisioning precursor",
+                ),
+            ],
+            &[scenario(
+                "runtime-run-bridge-observation",
+                "runtime bridge anchor observes submitted, terminal, and stop-request run routes",
+            )],
+        ),
+        machine_manifest_from_schema(
+            &mob_wiring_anchor_machine(),
+            &[
+                anchor(
+                    "mob_wiring_anchor_schema",
+                    "meerkat-machine-schema/src/catalog/mob_wiring_anchor.rs",
+                    "formal observation anchor for mob wiring routes",
+                ),
+                anchor(
+                    "mob_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "peer admission and wiring mutation precursor",
+                ),
+                anchor(
+                    "mob_ops_adapter",
+                    "meerkat-mob/src/runtime/ops_adapter.rs",
+                    "runtime work and trusted-peer observation precursor",
+                ),
+            ],
+            &[scenario(
+                "peer-input-runtime-work-observation",
+                "wiring anchor observes peer-input admission, runtime-work admission, and trusted operation peers",
+            )],
+        ),
+        machine_manifest_from_schema(
+            &mob_helper_result_anchor_machine(),
+            &[
+                anchor(
+                    "mob_helper_result_anchor_schema",
+                    "meerkat-machine-schema/src/catalog/mob_helper_result_anchor.rs",
+                    "formal observation anchor for helper-facing terminal result classes",
+                ),
+                anchor(
+                    "mob_handle",
+                    "meerkat-mob/src/runtime/handle.rs",
+                    "helper result classification precursor",
+                ),
+                anchor(
+                    "mob_actor",
+                    "meerkat-mob/src/runtime/actor.rs",
+                    "runtime terminal outcome observation precursor",
+                ),
+            ],
+            &[scenario(
+                "helper-result-observation",
+                "helper result anchor observes completed, failed, cancelled, and force-cancelled helper outcomes",
+            )],
         ),
         machine_manifest_from_schema(
             &flow_run_machine(),

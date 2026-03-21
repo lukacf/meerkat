@@ -6,3 +6,4 @@
 // corresponding feedback submitter.
 
 pub mod protocol_surface_completion;
+pub mod protocol_surface_snapshot_alignment;

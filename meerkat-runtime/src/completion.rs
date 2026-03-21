@@ -4,6 +4,10 @@
 //! `CompletionHandle` that resolves when the input reaches a terminal state
 //! (Consumed or Abandoned). This bridges the async accept/await pattern needed
 //! for surfaces that want synchronous-feeling turn execution through the runtime.
+//!
+//! `CompletionRegistry` is waiter plumbing only. Production code must never
+//! treat waiter presence, waiter counts, or sender membership as semantic
+//! runtime truth.
 
 use std::collections::HashMap;
 
@@ -58,71 +62,63 @@ impl CompletionHandle {
 /// Uses `Vec<Sender>` per InputId to support multiple waiters for the same input
 /// (e.g. dedup of in-flight input registers a second waiter for the same InputId).
 #[derive(Default)]
-pub struct CompletionRegistry {
+pub(crate) struct CompletionRegistry {
     waiters: HashMap<InputId, Vec<oneshot::Sender<CompletionOutcome>>>,
 }
 
 impl CompletionRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    fn take_waiters(
+        &mut self,
+        input_id: &InputId,
+    ) -> Option<Vec<oneshot::Sender<CompletionOutcome>>> {
+        self.waiters.remove(input_id)
     }
 
     /// Register a waiter for an input. Returns the handle the caller will await.
     ///
     /// Multiple waiters can be registered for the same InputId — all will be
     /// resolved when the input reaches a terminal state.
-    pub fn register(&mut self, input_id: InputId) -> CompletionHandle {
+    pub(crate) fn register(&mut self, input_id: InputId) -> CompletionHandle {
         let (tx, rx) = oneshot::channel();
         self.waiters.entry(input_id).or_default().push(tx);
         CompletionHandle { rx }
     }
 
     /// Resolve all waiters for a completed input.
-    ///
-    /// Returns true if any waiters were found and resolved.
-    pub fn resolve_completed(&mut self, input_id: &InputId, result: RunResult) -> bool {
-        if let Some(senders) = self.waiters.remove(input_id) {
+    pub(crate) fn resolve_completed(&mut self, input_id: &InputId, result: RunResult) {
+        if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::Completed(result.clone()));
             }
-            true
-        } else {
-            false
         }
     }
 
     /// Resolve all waiters for an input that completed without producing a RunResult.
-    ///
-    /// Returns true if any waiters were found and resolved.
-    pub fn resolve_without_result(&mut self, input_id: &InputId) -> bool {
-        if let Some(senders) = self.waiters.remove(input_id) {
+    pub(crate) fn resolve_without_result(&mut self, input_id: &InputId) {
+        if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::CompletedWithoutResult);
             }
-            true
-        } else {
-            false
         }
     }
 
     /// Resolve all waiters for an abandoned input.
-    ///
-    /// Returns true if any waiters were found and resolved.
-    pub fn resolve_abandoned(&mut self, input_id: &InputId, reason: String) -> bool {
-        if let Some(senders) = self.waiters.remove(input_id) {
+    pub(crate) fn resolve_abandoned(&mut self, input_id: &InputId, reason: String) {
+        if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::Abandoned(reason.clone()));
             }
-            true
-        } else {
-            false
         }
     }
 
     /// Resolve all pending waiters with a termination error.
     ///
     /// Used when the runtime is stopped or destroyed.
-    pub fn resolve_all_terminated(&mut self, reason: &str) {
+    pub(crate) fn resolve_all_terminated(&mut self, reason: &str) {
         for (_, senders) in self.waiters.drain() {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::RuntimeTerminated(reason.into()));
@@ -130,13 +126,39 @@ impl CompletionRegistry {
         }
     }
 
+    /// Resolve waiters whose input IDs are no longer pending after a
+    /// lifecycle reconciliation (for example runtime recycle/recovery).
+    pub(crate) fn resolve_not_pending<F>(&mut self, mut is_still_pending: F, reason: &str)
+    where
+        F: FnMut(&InputId) -> bool,
+    {
+        self.waiters.retain(|input_id, senders| {
+            if is_still_pending(input_id) {
+                return true;
+            }
+
+            for tx in senders.drain(..) {
+                let _ = tx.send(CompletionOutcome::RuntimeTerminated(reason.into()));
+            }
+            false
+        });
+    }
+
     /// Check if there are any pending waiters.
-    pub fn has_pending(&self) -> bool {
+    ///
+    /// Test-only introspection. Production code must treat the registry as
+    /// waiter plumbing rather than semantic runtime truth.
+    #[cfg(test)]
+    pub fn debug_has_waiters(&self) -> bool {
         !self.waiters.is_empty()
     }
 
     /// Number of pending waiters (total across all InputIds).
-    pub fn pending_count(&self) -> usize {
+    ///
+    /// Test-only introspection. Production code must treat the registry as
+    /// waiter plumbing rather than semantic runtime truth.
+    #[cfg(test)]
+    pub fn debug_waiter_count(&self) -> usize {
         self.waiters.values().map(Vec::len).sum()
     }
 }
@@ -166,11 +188,11 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        assert!(registry.has_pending());
-        assert_eq!(registry.pending_count(), 1);
+        assert!(registry.debug_has_waiters());
+        assert_eq!(registry.debug_waiter_count(), 1);
 
         let result = make_run_result();
-        assert!(registry.resolve_completed(&input_id, result));
+        registry.resolve_completed(&input_id, result);
 
         match handle.wait().await {
             CompletionOutcome::Completed(r) => assert_eq!(r.text, "hello"),
@@ -184,7 +206,7 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        assert!(registry.resolve_abandoned(&input_id, "retired".into()));
+        registry.resolve_abandoned(&input_id, "retired".into());
 
         match handle.wait().await {
             CompletionOutcome::Abandoned(reason) => assert_eq!(reason, "retired"),
@@ -200,7 +222,7 @@ mod tests {
 
         registry.resolve_all_terminated("runtime stopped");
 
-        assert!(!registry.has_pending());
+        assert!(!registry.debug_has_waiters());
 
         match h1.wait().await {
             CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
@@ -213,10 +235,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_nonexistent_returns_false() {
+    async fn resolve_nonexistent_is_a_noop() {
         let mut registry = CompletionRegistry::new();
-        assert!(!registry.resolve_completed(&InputId::new(), make_run_result()));
-        assert!(!registry.resolve_abandoned(&InputId::new(), "gone".into()));
+        registry.resolve_completed(&InputId::new(), make_run_result());
+        registry.resolve_abandoned(&InputId::new(), "gone".into());
+        assert!(!registry.debug_has_waiters());
     }
 
     #[tokio::test]
@@ -243,12 +266,12 @@ mod tests {
         let h2 = registry.register(input_id.clone());
         let h3 = registry.register(input_id.clone());
 
-        assert_eq!(registry.pending_count(), 3);
+        assert_eq!(registry.debug_waiter_count(), 3);
 
         let result = make_run_result();
-        assert!(registry.resolve_completed(&input_id, result));
+        registry.resolve_completed(&input_id, result);
 
-        assert!(!registry.has_pending());
+        assert!(!registry.debug_has_waiters());
 
         for handle in [h1, h2, h3] {
             match handle.wait().await {
@@ -264,7 +287,7 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        assert!(registry.resolve_without_result(&input_id));
+        registry.resolve_without_result(&input_id);
 
         match handle.wait().await {
             CompletionOutcome::CompletedWithoutResult => {}
@@ -279,7 +302,7 @@ mod tests {
         let h1 = registry.register(input_id.clone());
         let h2 = registry.register(input_id.clone());
 
-        assert!(registry.resolve_without_result(&input_id));
+        registry.resolve_without_result(&input_id);
 
         for handle in [h1, h2] {
             match handle.wait().await {
@@ -316,8 +339,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_without_result_nonexistent_returns_false() {
+    async fn resolve_not_pending_keeps_pending_waiters() {
         let mut registry = CompletionRegistry::new();
-        assert!(!registry.resolve_without_result(&InputId::new()));
+        let keep_id = InputId::new();
+        let drop_id = InputId::new();
+
+        let keep_handle = registry.register(keep_id.clone());
+        let drop_handle = registry.register(drop_id.clone());
+        registry.resolve_not_pending(|input_id| input_id == &keep_id, "runtime recycled");
+        assert_eq!(registry.debug_waiter_count(), 1);
+
+        match drop_handle.wait().await {
+            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime recycled"),
+            other => panic!("Expected RuntimeTerminated, got {other:?}"),
+        }
+
+        registry.resolve_without_result(&keep_id);
+        match keep_handle.wait().await {
+            CompletionOutcome::CompletedWithoutResult => {}
+            other => panic!("Expected CompletedWithoutResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_without_result_nonexistent_is_a_noop() {
+        let mut registry = CompletionRegistry::new();
+        registry.resolve_without_result(&InputId::new());
+        assert!(!registry.debug_has_waiters());
     }
 }

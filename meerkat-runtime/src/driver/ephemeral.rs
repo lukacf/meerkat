@@ -7,6 +7,8 @@
 //! - S24 ephemeral recovery
 //! - S25 retire/reset/destroy lifecycle operations
 
+use std::collections::BTreeSet;
+
 use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
 use meerkat_core::types::HandlingMode;
 
@@ -81,7 +83,31 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        self.silent_comms_intents = intents;
+        let overrides = intents.into_iter().collect::<BTreeSet<_>>();
+        match self
+            .ingress
+            .apply(RuntimeIngressInput::SetSilentIntentOverrides { intents: overrides })
+        {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+                self.silent_comms_intents = self
+                    .ingress
+                    .silent_intent_overrides()
+                    .iter()
+                    .cloned()
+                    .collect();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected SetSilentIntentOverrides"
+                );
+            }
+        }
+    }
+
+    pub fn silent_comms_intents(&self) -> Vec<String> {
+        self.silent_comms_intents.clone()
     }
 
     /// Get a reference to the ingress authority.
@@ -89,9 +115,59 @@ impl EphemeralRuntimeDriver {
         &self.ingress
     }
 
+    fn build_projection_queue(&self, ids: &[InputId], lane: &str) -> InputQueue {
+        let mut queue = InputQueue::new();
+        for input_id in ids {
+            match self
+                .ledger
+                .get(input_id)
+                .and_then(|state| state.persisted_input.clone())
+            {
+                Some(input) => queue.enqueue(input_id.clone(), input),
+                None => {
+                    tracing::error!(
+                        input_id = ?input_id,
+                        lane,
+                        "ingress queue references input without persisted payload"
+                    );
+                    debug_assert!(
+                        false,
+                        "ingress queue projection missing persisted payload for {:?} in {}",
+                        input_id, lane
+                    );
+                }
+            }
+        }
+        queue
+    }
+
+    fn rebuild_queue_projections(&mut self) {
+        self.queue = self.build_projection_queue(self.ingress.queue(), "queue");
+        self.steer_queue = self.build_projection_queue(self.ingress.steer_queue(), "steer_queue");
+    }
+
+    fn debug_assert_queue_projection_alignment(&self) {
+        debug_assert_eq!(
+            self.queue.input_ids(),
+            self.ingress.queue(),
+            "physical queue must match canonical ingress queue lane"
+        );
+        debug_assert_eq!(
+            self.steer_queue.input_ids(),
+            self.ingress.steer_queue(),
+            "physical steer queue must match canonical ingress steer lane"
+        );
+    }
+
     /// Admit a store-recovered input into the ingress authority's tracking.
     /// Called by the persistent driver during crash recovery to ensure the
     /// authority knows about inputs loaded from the store before `Recover` fires.
+    ///
+    /// Important: this only seeds canonical ingress truth. The caller restores
+    /// the recovered `InputState` into the ledger before this call, so we must
+    /// not rebuild the physical queue projections here. Rebuilding before the
+    /// full recovery batch is loaded would make queue projection checks observe
+    /// transient partial state.
     #[allow(clippy::too_many_arguments)]
     pub fn admit_recovered_to_ingress(
         &mut self,
@@ -293,6 +369,8 @@ impl EphemeralRuntimeDriver {
                 }
             }
         }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
     }
 
     pub fn is_idle(&self) -> bool {
@@ -359,21 +437,20 @@ impl EphemeralRuntimeDriver {
     pub fn queue(&self) -> &InputQueue {
         &self.queue
     }
-    pub fn queue_mut(&mut self) -> &mut InputQueue {
-        &mut self.queue
-    }
     pub fn steer_queue(&self) -> &InputQueue {
         &self.steer_queue
     }
+
+    #[cfg(test)]
+    pub fn queue_mut(&mut self) -> &mut InputQueue {
+        &mut self.queue
+    }
+
+    #[cfg(test)]
     pub fn steer_queue_mut(&mut self) -> &mut InputQueue {
         &mut self.steer_queue
     }
-    pub fn enqueue_recovered_input(&mut self, input_id: InputId, input: Input) {
-        self.queue.enqueue(input_id, input);
-    }
-    pub fn enqueue_front_input(&mut self, input_id: InputId, input: Input) {
-        self.queue.enqueue_front(input_id, input);
-    }
+
     /// Route an input to the correct queue based on handling mode.
     fn enqueue_to(&mut self, mode: HandlingMode, input_id: InputId, input: Input) {
         match mode {
@@ -389,58 +466,53 @@ impl EphemeralRuntimeDriver {
         }
     }
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
-        self.queue
-            .input_ids()
+        self.ingress
+            .queue()
             .iter()
             .any(|queued_id| queued_id == input_id)
             || self
-                .steer_queue
-                .input_ids()
+                .ingress
+                .steer_queue()
                 .iter()
                 .any(|queued_id| queued_id == input_id)
     }
     pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
-        self.queue
-            .input_ids()
+        self.ingress
+            .queue()
             .iter()
-            .chain(self.steer_queue.input_ids().iter())
+            .chain(self.ingress.steer_queue().iter())
             .any(|queued_id| !excluded.iter().any(|excluded_id| excluded_id == queued_id))
     }
     fn existing_superseded_input(
         &self,
         input: &Input,
     ) -> Option<(InputId, crate::coalescing::CoalescingResult)> {
-        self.queue
-            .input_ids()
+        self.ingress
+            .queue()
             .into_iter()
-            .chain(self.steer_queue.input_ids())
+            .chain(self.ingress.steer_queue().iter())
             .find_map(|queued_id| {
-                let existing = self.ledger.get(&queued_id)?.persisted_input.as_ref()?;
+                let existing = self.ledger.get(queued_id)?.persisted_input.as_ref()?;
                 let result =
                     crate::coalescing::check_supersession(input, existing, &self.runtime_id);
                 match result {
                     crate::coalescing::CoalescingResult::Supersedes { .. } => {
-                        Some((queued_id, result))
+                        Some((queued_id.clone(), result))
                     }
                     crate::coalescing::CoalescingResult::Standalone => None,
                 }
             })
     }
-    pub fn remove_input(&mut self, input_id: &InputId) {
-        let _ = self.queue.remove(input_id);
-        let _ = self.steer_queue.remove(input_id);
-        let _ = self.ledger.remove(input_id);
-    }
     pub fn ledger(&self) -> &InputLedger {
         &self.ledger
     }
-    pub fn ledger_mut(&mut self) -> &mut InputLedger {
+    pub(crate) fn ledger_mut(&mut self) -> &mut InputLedger {
         &mut self.ledger
     }
     pub fn input_states_snapshot(&self) -> Vec<InputState> {
         self.ledger.iter().map(|(_, state)| state.clone()).collect()
     }
-    pub fn forget_input(&mut self, input_id: &InputId) {
+    pub(crate) fn forget_input(&mut self, input_id: &InputId) {
         let _ = self.queue.remove(input_id);
         let _ = self.steer_queue.remove(input_id);
         let _ = self.ledger.remove(input_id);
@@ -452,8 +524,17 @@ impl EphemeralRuntimeDriver {
         &self.control
     }
     /// Get a mutable reference to the runtime control authority.
+    ///
+    /// This is primarily a contract-test hook for driving explicit runtime
+    /// control transitions in recovery scenarios.
     pub fn control_mut(&mut self) -> &mut RuntimeControlAuthority {
         &mut self.control
+    }
+    /// Clear the physical queue projections without touching canonical ingress
+    /// truth. Used by recovery contract tests to simulate projection loss.
+    pub fn clear_queue_projections(&mut self) {
+        self.queue = InputQueue::new();
+        self.steer_queue = InputQueue::new();
     }
     pub fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
         let queued = self
@@ -493,6 +574,8 @@ impl EphemeralRuntimeDriver {
         }) {
             Ok(transition) => {
                 self.process_ingress_effects(&transition.effects);
+                self.rebuild_queue_projections();
+                self.debug_assert_queue_projection_alignment();
             }
             Err(err) => {
                 tracing::warn!(
@@ -590,6 +673,8 @@ impl EphemeralRuntimeDriver {
                 }
             }
         }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(())
     }
 
@@ -653,6 +738,8 @@ impl EphemeralRuntimeDriver {
                 return Err(RuntimeDriverError::Internal(err.to_string()));
             }
         }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(ResetReport {
             inputs_abandoned: abandoned,
         })
@@ -681,6 +768,8 @@ impl EphemeralRuntimeDriver {
             to: transition.next_phase,
         }));
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(abandoned)
     }
 
@@ -738,12 +827,54 @@ impl EphemeralRuntimeDriver {
             }
         }
 
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+
         RecoveryReport {
             inputs_recovered: recovered,
             inputs_abandoned: abandoned,
             inputs_requeued: requeued,
             details: Vec::new(),
         }
+    }
+
+    pub fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
+        let transition = self
+            .control
+            .apply(RuntimeControlInput::RecycleRequested)
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+            from: transition.from_phase,
+            to: transition.next_phase,
+        }));
+
+        let transferred = self.ledger.active_input_ids().len();
+        let runtime_id = self.runtime_id.clone();
+        let silent_comms_intents = self.silent_comms_intents.clone();
+        let ledger = self.ledger.clone();
+        let ingress = self.ingress.clone();
+        let control = self.control.clone();
+
+        *self = Self::new(runtime_id);
+        self.silent_comms_intents = silent_comms_intents;
+        self.ledger = ledger;
+        self.ingress = ingress;
+        self.control = control;
+
+        let _ = self.recover_ephemeral();
+
+        let transition = self
+            .control
+            .apply(RuntimeControlInput::RecycleSucceeded)
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+            from: transition.from_phase,
+            to: transition.next_phase,
+        }));
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+
+        Ok(transferred)
     }
 
     fn emit_event(&mut self, event: RuntimeEvent) {
@@ -795,6 +926,8 @@ impl EphemeralRuntimeDriver {
         self.steer_queue.drain();
         self.wake_requested = false;
         self.process_requested = false;
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         abandoned
     }
 }

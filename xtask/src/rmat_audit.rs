@@ -14,6 +14,8 @@ use syn::{
     Type,
 };
 
+use crate::ownership_ledger;
+use crate::ownership_ledger::{OwnershipFinding, OwnershipFindingKey, format_ownership_finding};
 use crate::public_contracts::repo_root;
 use crate::rmat_policy::AuditPolicy;
 
@@ -52,17 +54,58 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
     let root = repo_root()?;
     let policy = AuditPolicy::load();
     let findings = collect_findings(&root, &policy)?;
+    let ownership_findings = ownership_ledger::collect_current_findings(&root)?;
+    let ownership_doc_in_sync = ownership_ledger::ownership_doc_is_in_sync(&root)?;
+    let ownership_rmat_findings = ownership_findings
+        .iter()
+        .map(|finding| Finding {
+            key: FindingKey {
+                rule: finding.key.rule.clone(),
+                path: finding.key.path.clone(),
+                symbol: finding.key.symbol.clone(),
+            },
+            severity: finding.severity.clone(),
+            message: finding.message.clone(),
+            suppressed: false,
+        })
+        .collect::<Vec<_>>();
+    let mut combined_findings = findings.clone();
+    combined_findings.extend(ownership_rmat_findings);
+    if !ownership_doc_in_sync {
+        combined_findings.push(Finding {
+            key: FindingKey {
+                rule: "OwnershipLedgerDocDrift".into(),
+                path: "docs/architecture/finite-ownership-ledger.md".into(),
+                symbol: "finite-ownership-ledger".into(),
+            },
+            severity: "error".into(),
+            message: "generated ownership ledger doc is stale relative to typed ownership registry"
+                .into(),
+            suppressed: false,
+        });
+    }
+    combined_findings.sort_by(|a, b| a.key.cmp(&b.key));
+    combined_findings.dedup_by(|a, b| a.key == b.key);
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&findings)?);
+        println!("{}", serde_json::to_string_pretty(&combined_findings)?);
     } else {
-        print_findings(&findings);
+        print_findings(&combined_findings);
+    }
+
+    if !ownership_doc_in_sync {
+        bail!(
+            "ownership ledger doc drift:\n- docs/architecture/finite-ownership-ledger.md is stale relative to typed ownership registry"
+        );
     }
 
     let baseline_path = root.join("xtask/rmat-baseline.toml");
+    let ownership_baseline_path = root.join("xtask/ownership-baseline.toml");
     if args.update_baseline {
         write_baseline(&baseline_path, &findings)?;
+        ownership_ledger::write_baseline(&ownership_baseline_path, &ownership_findings)?;
         println!("updated {}", baseline_path.display());
+        println!("updated {}", ownership_baseline_path.display());
         return Ok(());
     }
 
@@ -82,6 +125,17 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
         .iter()
         .filter(|key| !findings.iter().any(|f| &f.key == *key))
         .collect();
+    let (new_ownership_findings, stale_ownership_baseline) =
+        ownership_ledger::diff_against_baseline(&ownership_baseline_path, &ownership_findings)?;
+
+    if let Some(details) =
+        format_ownership_diff_messages(&new_ownership_findings, &stale_ownership_baseline)
+    {
+        bail!(
+            "ownership audit diff detected (run `xtask ownership-ledger` and update the baseline):\n{}",
+            details
+        );
+    }
 
     if args.strict && (!new_findings.is_empty() || !stale_baseline.is_empty()) {
         let mut messages = Vec::new();
@@ -202,6 +256,33 @@ fn format_finding(finding: &Finding) -> String {
         "- [{}] {} {} :: {}{}",
         finding.severity, finding.key.rule, finding.key.path, finding.message, suppression
     )
+}
+
+fn format_ownership_diff_messages(
+    new_findings: &[OwnershipFinding],
+    stale_baseline: &[OwnershipFindingKey],
+) -> Option<String> {
+    let mut sections = Vec::new();
+
+    if !new_findings.is_empty() {
+        let body = new_findings
+            .iter()
+            .map(|finding| format_ownership_finding(finding))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("new ownership findings:\n{}", body));
+    }
+
+    if !stale_baseline.is_empty() {
+        let body = stale_baseline
+            .iter()
+            .map(|key| format!("- {} {} {}", key.rule, key.path, key.symbol))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("stale ownership baseline entries:\n{}", body));
+    }
+
+    (!sections.is_empty()).then_some(sections.join("\n\n"))
 }
 
 fn collect_repo_rs_files(root: &Path) -> Result<Vec<PathBuf>> {

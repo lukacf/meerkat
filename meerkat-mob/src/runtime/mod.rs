@@ -62,8 +62,10 @@ mod mob_orchestrator_authority;
 mod ops_adapter;
 mod orchestrator_kernel;
 mod path;
+mod pending_spawn_lineage;
 mod provision_guard;
 mod provisioner;
+mod roster_authority;
 mod session_service;
 mod spawn_policy;
 mod state;
@@ -94,6 +96,8 @@ pub use handle::{
     MobRespawnError, SpawnMemberSpec,
 };
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
+use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
+use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 pub use state::MobState;

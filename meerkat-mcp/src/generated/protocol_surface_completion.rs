@@ -13,6 +13,8 @@ use crate::external_tool_surface_authority::{
 pub struct SurfaceCompletionObligation {
     pub surface_id: SurfaceId,
     pub operation: SurfaceDeltaOperation,
+    pub pending_task_sequence: u64,
+    pub staged_intent_sequence: u64,
     pub applied_at_turn: TurnNumber,
 }
 
@@ -25,10 +27,14 @@ pub fn extract_obligations(
             ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                 surface_id,
                 operation,
+                pending_task_sequence,
+                staged_intent_sequence,
                 applied_at_turn,
             } => Some(SurfaceCompletionObligation {
                 surface_id: surface_id.clone(),
                 operation: operation.clone(),
+                pending_task_sequence: pending_task_sequence.clone(),
+                staged_intent_sequence: staged_intent_sequence.clone(),
                 applied_at_turn: applied_at_turn.clone(),
             }),
             _ => None,
@@ -42,6 +48,9 @@ pub fn submit_pending_succeeded(
 ) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
     let transition = authority.apply(ExternalToolSurfaceInput::PendingSucceeded {
         surface_id: obligation.surface_id,
+        operation: obligation.operation,
+        pending_task_sequence: obligation.pending_task_sequence,
+        staged_intent_sequence: obligation.staged_intent_sequence,
         applied_at_turn: obligation.applied_at_turn,
     })?;
     Ok(transition)
@@ -53,6 +62,9 @@ pub fn submit_pending_failed(
 ) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
     let transition = authority.apply(ExternalToolSurfaceInput::PendingFailed {
         surface_id: obligation.surface_id,
+        operation: obligation.operation,
+        pending_task_sequence: obligation.pending_task_sequence,
+        staged_intent_sequence: obligation.staged_intent_sequence,
         applied_at_turn: obligation.applied_at_turn,
     })?;
     Ok(transition)

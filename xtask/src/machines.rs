@@ -1501,7 +1501,7 @@ pub fn parse_tlc_coverage_line(line: &str) -> Option<(String, TlcCoverageCounts)
 }
 
 fn run_generated_kernel_tests(root: &Path) -> Result<()> {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = repo_cargo_command(root);
     cmd.arg("test")
         .arg("-p")
         .arg("meerkat-machine-kernels")
@@ -1593,7 +1593,7 @@ fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
             "owner-test: {} -> {}::{}/{}",
             machine.schema.machine, spec.package, spec.target, spec.filter
         );
-        let mut cmd = Command::new("cargo");
+        let mut cmd = repo_cargo_command(root);
         cmd.arg("test")
             .arg("-p")
             .arg(spec.package)
@@ -1623,6 +1623,10 @@ fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn repo_cargo_command(root: &Path) -> Command {
+    Command::new(root.join("scripts/repo-cargo"))
 }
 
 fn verification_metadir(slug: &str, profile: VerifyProfile) -> Result<PathBuf> {

@@ -98,15 +98,23 @@ pub(super) struct McpServerEntry {
 }
 
 pub(super) struct PendingSpawn {
+    pub(super) profile_name: ProfileName,
+    pub(super) meerkat_id: MeerkatId,
+    pub(super) prompt: String,
+    pub(super) runtime_mode: crate::MobRuntimeMode,
+    pub(super) labels: std::collections::BTreeMap<String, String>,
+    pub(super) auto_wire_parent: bool,
+    /// Peer wiring to restore after respawn completes.
+    pub(super) restore_wiring: Option<Vec<MeerkatId>>,
+    pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
+}
+
+struct RespawnSnapshot {
     profile_name: ProfileName,
-    meerkat_id: MeerkatId,
-    prompt: String,
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
-    auto_wire_parent: bool,
-    /// Peer wiring to restore after respawn completes.
-    restore_wiring: Option<Vec<MeerkatId>>,
-    reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
+    old_session_id: meerkat_core::types::SessionId,
+    wired_peers: Vec<MeerkatId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +127,7 @@ pub(super) struct PendingSpawn {
 /// All mutations go through here; reads bypass via shared `Arc` state.
 pub(super) struct MobActor {
     pub(super) definition: Arc<MobDefinition>,
-    pub(super) roster: Arc<RwLock<Roster>>,
+    pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) task_board: Arc<RwLock<TaskBoard>>,
     pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
@@ -140,8 +148,7 @@ pub(super) struct MobActor {
     pub(super) autonomous_host_loops:
         Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopHandle>>>,
     pub(super) next_spawn_ticket: u64,
-    pub(super) pending_spawns: BTreeMap<u64, PendingSpawn>,
-    pub(super) pending_spawn_tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
+    pub(super) pending_spawns: PendingSpawnLineage,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
@@ -275,6 +282,172 @@ impl MobActor {
         let member =
             serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
         format!("{meerkat_id}|{member}")
+    }
+
+    fn pending_spawn_maps_aligned(&self) -> bool {
+        self.pending_spawn_alignment_violation().is_none()
+    }
+
+    fn pending_spawn_alignment_violation(&self) -> Option<String> {
+        let expected = self
+            .orchestrator
+            .as_ref()
+            .map(|orchestrator| orchestrator.snapshot().pending_spawn_count as usize);
+        self.pending_spawns.alignment_violation(expected)
+    }
+
+    fn ensure_pending_spawn_alignment(&self, context: &str) -> Result<(), MobError> {
+        if let Some(message) = self.pending_spawn_alignment_violation() {
+            return Err(MobError::Internal(format!(
+                "{context}: pending spawn alignment violation: {message}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn debug_assert_pending_spawn_alignment(&self) {
+        debug_assert!(
+            self.pending_spawn_maps_aligned(),
+            "pending spawn alignment must hold across pending maps and orchestrator count"
+        );
+    }
+
+    fn insert_pending_spawn(
+        &mut self,
+        spawn_ticket: u64,
+        pending: PendingSpawn,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        let impact = self.pending_spawns.insert(spawn_ticket, pending, task);
+        if matches!(impact, PendingSpawnInsertImpact::Collided) {
+            // StageSpawn has already been accepted for the new slot in enqueue paths.
+            // If we replaced a prior slot at the same ticket, close that prior
+            // staged snapshot now so authority counters cannot drift silently.
+            self.complete_orchestrator_spawn(
+                Some(spawn_ticket),
+                "pending spawn slot collision replaced existing entry",
+            );
+            tracing::warn!(
+                spawn_ticket,
+                "pending spawn slot collision replaced existing entry"
+            );
+        }
+        self.debug_assert_pending_spawn_alignment();
+        if let Some(message) = self.pending_spawn_alignment_violation() {
+            tracing::error!(
+                spawn_ticket,
+                message = %message,
+                "pending spawn alignment violated after insert"
+            );
+        }
+    }
+
+    fn pending_spawn_tickets(&self) -> std::collections::BTreeSet<u64> {
+        self.pending_spawns.tickets()
+    }
+
+    fn take_pending_spawn_slot(
+        &mut self,
+        spawn_ticket: u64,
+    ) -> (Option<PendingSpawn>, Option<tokio::task::JoinHandle<()>>) {
+        self.pending_spawns
+            .take_slot(spawn_ticket)
+            .map_or((None, None), |slot| (Some(slot.spawn), slot.task))
+    }
+
+    fn complete_pending_spawn_slot(
+        &mut self,
+        spawn_ticket: u64,
+        context: &'static str,
+    ) -> (Option<PendingSpawn>, Option<tokio::task::JoinHandle<()>>) {
+        let (pending, task) = self.take_pending_spawn_slot(spawn_ticket);
+        if pending.is_some() || task.is_some() {
+            self.complete_orchestrator_spawn(Some(spawn_ticket), context);
+        }
+        if let Some(message) = self.pending_spawn_alignment_violation() {
+            tracing::error!(
+                spawn_ticket,
+                context,
+                message = %message,
+                "pending spawn alignment violated after completion"
+            );
+        }
+        (pending, task)
+    }
+
+    fn stage_orchestrator_spawn(&mut self) -> Result<(), MobError> {
+        if let Some(ref mut orch) = self.orchestrator {
+            orch.apply(MobOrchestratorInput::StageSpawn)?;
+        }
+        Ok(())
+    }
+
+    fn complete_orchestrator_spawn(&mut self, spawn_ticket: Option<u64>, context: &'static str) {
+        if let Some(ref mut orch) = self.orchestrator
+            && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
+        {
+            if let Some(spawn_ticket) = spawn_ticket {
+                tracing::warn!(
+                    spawn_ticket,
+                    error = %error,
+                    context,
+                    "failed to reconcile orchestrator pending-spawn snapshot"
+                );
+            } else {
+                tracing::warn!(
+                    error = %error,
+                    context,
+                    "failed to reconcile orchestrator pending-spawn snapshot"
+                );
+            }
+        }
+    }
+
+    async fn flow_tracker_alignment_violation(&self) -> Option<String> {
+        let run_task_ids = self
+            .run_tasks
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let run_token_ids = self
+            .run_cancel_tokens
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if run_task_ids != run_token_ids {
+            return Some(format!(
+                "run task/token tracker mismatch: tasks={run_task_ids:?}, tokens={run_token_ids:?}"
+            ));
+        }
+
+        let stream_ids = self
+            .flow_streams
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let unknown_streams = stream_ids
+            .iter()
+            .filter(|run_id| !run_task_ids.contains(*run_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown_streams.is_empty() {
+            return Some(format!(
+                "flow stream tracker contains unknown runs: {unknown_streams:?}"
+            ));
+        }
+
+        None
+    }
+
+    async fn ensure_flow_tracker_alignment(&self, context: &str) -> Result<(), MobError> {
+        if let Some(message) = self.flow_tracker_alignment_violation().await {
+            return Err(MobError::Internal(format!(
+                "{context}: flow tracker alignment violation: {message}"
+            )));
+        }
+        Ok(())
     }
 
     async fn stop_mcp_servers(&self) -> Result<(), MobError> {
@@ -800,7 +973,20 @@ impl MobActor {
                         MobState::Creating,
                         MobState::Stopped,
                     ]) {
-                        Ok(()) => self.handle_retire(meerkat_id).await,
+                        Ok(()) => {
+                            let canceled = self.cancel_pending_spawns_for_member(
+                                &meerkat_id,
+                                "retire command received",
+                            );
+                            if canceled > 0 {
+                                tracing::info!(
+                                    meerkat_id = %meerkat_id,
+                                    canceled,
+                                    "retire canceled pending spawn lineage before roster retirement"
+                                );
+                            }
+                            self.handle_retire(meerkat_id).await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -905,34 +1091,19 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::FlowFinished { run_id } => {
-                    self.run_tasks.remove(&run_id);
-                    self.run_cancel_tokens.remove(&run_id);
-                    self.flow_streams.lock().await.remove(&run_id);
-                    if let Some(ref mut orch) = self.orchestrator
-                        && let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+                    if let Err(error) = self
+                        .handle_flow_cleanup(run_id, "flow finished cleanup")
+                        .await
                     {
-                        tracing::warn!(error = %error, "orchestrator CompleteFlow failed");
-                    }
-                    if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::FinishRun)
-                    {
-                        tracing::warn!(error = %error, "lifecycle FinishRun failed");
+                        tracing::error!(error = %error, "flow finished cleanup failed");
                     }
                 }
                 MobCommand::FlowCanceledCleanup { run_id } => {
-                    self.run_tasks.remove(&run_id);
-                    self.run_cancel_tokens.remove(&run_id);
-                    self.flow_streams.lock().await.remove(&run_id);
-                    if let Some(ref mut orch) = self.orchestrator
-                        && let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+                    if let Err(error) = self
+                        .handle_flow_cleanup(run_id, "flow canceled cleanup")
+                        .await
                     {
-                        tracing::warn!(
-                            error = %error,
-                            "orchestrator CompleteFlow failed during canceled flow cleanup"
-                        );
-                    }
-                    if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::FinishRun)
-                    {
-                        tracing::warn!(error = %error, "lifecycle FinishRun failed during canceled flow cleanup");
+                        tracing::error!(error = %error, "flow canceled cleanup failed");
                     }
                 }
                 #[cfg(test)]
@@ -990,18 +1161,25 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                if let Some(ref mut orch) = self.orchestrator
-                                    && let Err(error) =
+                                if let Some(ref mut orch) = self.orchestrator {
+                                    if let Err(error) =
                                         orch.apply(MobOrchestratorInput::StopOrchestrator)
-                                {
-                                    tracing::warn!(error = %error, "orchestrator StopOrchestrator failed");
+                                    {
+                                        stop_result = Err(MobError::Internal(format!(
+                                            "orchestrator StopOrchestrator transition failed during stop: {error}"
+                                        )));
+                                    }
                                 }
-                                if let Err(e) =
-                                    self.lifecycle_authority.apply(MobLifecycleInput::Stop)
+                                if stop_result.is_ok()
+                                    && let Err(error) =
+                                        self.lifecycle_authority.apply(MobLifecycleInput::Stop)
                                 {
-                                    tracing::warn!(error = %e, "authority rejected Stop");
+                                    stop_result = Err(MobError::Internal(format!(
+                                        "lifecycle Stop transition failed during stop: {error}"
+                                    )));
                                 }
-                            } else {
+                            }
+                            if stop_result.is_err() {
                                 // Restore checkpointer state — mob stays Running.
                                 self.provisioner.rearm_all_checkpointers().await;
                             }
@@ -1045,18 +1223,46 @@ impl MobActor {
                                 }
                                 Err(error)
                             } else {
-                                if let Some(ref mut orch) = self.orchestrator
-                                    && let Err(error) =
+                                let mut resume_result: Result<(), MobError> = Ok(());
+                                if let Some(ref mut orch) = self.orchestrator {
+                                    if let Err(error) =
                                         orch.apply(MobOrchestratorInput::ResumeOrchestrator)
-                                {
-                                    tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed");
+                                    {
+                                        resume_result = Err(MobError::Internal(format!(
+                                            "orchestrator ResumeOrchestrator transition failed during resume: {error}"
+                                        )));
+                                    }
                                 }
-                                if let Err(e) =
-                                    self.lifecycle_authority.apply(MobLifecycleInput::Resume)
+                                if resume_result.is_ok()
+                                    && let Err(error) =
+                                        self.lifecycle_authority.apply(MobLifecycleInput::Resume)
                                 {
-                                    tracing::warn!(error = %e, "authority rejected Resume");
+                                    resume_result = Err(MobError::Internal(format!(
+                                        "lifecycle Resume transition failed during resume: {error}"
+                                    )));
                                 }
-                                Ok(())
+                                if let Err(error) = resume_result {
+                                    if let Err(stop_error) =
+                                        self.stop_all_autonomous_host_loops().await
+                                    {
+                                        tracing::warn!(
+                                            mob_id = %self.definition.id,
+                                            error = %stop_error,
+                                            "resume transition rollback failed while stopping autonomous loops"
+                                        );
+                                    }
+                                    if let Err(stop_error) = self.stop_mcp_servers().await {
+                                        tracing::warn!(
+                                            mob_id = %self.definition.id,
+                                            error = %stop_error,
+                                            "resume transition rollback failed while stopping mcp servers"
+                                        );
+                                    }
+                                    self.provisioner.cancel_all_checkpointers().await;
+                                    Err(error)
+                                } else {
+                                    Ok(())
+                                }
                             }
                         }
                         Err(error) => Err(error),
@@ -1133,8 +1339,13 @@ impl MobActor {
                 MobCommand::Shutdown { reply_tx } => {
                     self.fail_all_pending_spawns("mob runtime is shutting down")
                         .await;
-                    self.cancel_all_flow_tasks().await;
                     let mut result: Result<(), MobError> = Ok(());
+                    if let Err(error) = self.cancel_all_flow_tasks().await {
+                        tracing::warn!(error = %error, "shutdown flow cancellation encountered errors");
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
+                    }
                     if let Err(error) = self.stop_all_autonomous_host_loops().await {
                         tracing::warn!(error = %error, "shutdown loop stop encountered errors");
                         if result.is_ok() {
@@ -1151,8 +1362,16 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
-                        tracing::warn!(error = %e, "authority rejected Stop");
+                    if self.state() == MobState::Running {
+                        if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::Stop)
+                        {
+                            tracing::warn!(error = %error, "authority rejected Stop");
+                            if result.is_ok() {
+                                result = Err(MobError::Internal(format!(
+                                    "lifecycle Stop transition failed during shutdown: {error}"
+                                )));
+                            }
+                        }
                     }
                     let _ = reply_tx.send(result);
                     break;
@@ -1163,29 +1382,83 @@ impl MobActor {
 
     async fn fail_all_pending_spawns(&mut self, reason: &str) {
         if self.pending_spawns.is_empty() {
+            if let Some(message) = self.pending_spawn_alignment_violation() {
+                tracing::error!(
+                    reason,
+                    message = %message,
+                    "pending spawn alignment violated with no local pending slots to drain"
+                );
+            }
             return;
         }
 
-        for (spawn_ticket, pending) in std::mem::take(&mut self.pending_spawns) {
-            if let Some(ref mut orch) = self.orchestrator
-                && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
-            {
-                tracing::warn!(
-                    spawn_ticket,
-                    error = %error,
-                    "failed to clear orchestrator pending-spawn snapshot during lifecycle transition"
-                );
-            }
-            let _ = pending.reply_tx.send(Err(MobError::Internal(format!(
-                "spawn canceled for '{}': {}",
-                pending.meerkat_id, reason
-            ))));
+        for slot in self.pending_spawns.drain_all() {
+            let spawn_ticket = slot.ticket;
+            let meerkat_id = slot.spawn.meerkat_id.clone();
+            self.complete_orchestrator_spawn(
+                Some(spawn_ticket),
+                "lifecycle transition cleared pending spawn",
+            );
+            slot.fail(&format!("spawn canceled for '{meerkat_id}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
-                meerkat_id = %pending.meerkat_id,
+                meerkat_id = %meerkat_id,
                 "failed pending spawn due to lifecycle transition"
             );
         }
+        debug_assert!(
+            self.pending_spawns.is_empty(),
+            "all pending spawn slots should be drained during lifecycle transition"
+        );
+        if let Some(message) = self.pending_spawn_alignment_violation() {
+            tracing::error!(
+                message = %message,
+                "pending spawn alignment still violated after lifecycle drain"
+            );
+        }
+    }
+
+    fn cancel_pending_spawns_for_member(&mut self, meerkat_id: &MeerkatId, reason: &str) -> usize {
+        let slots = self.pending_spawns.take_for_member(meerkat_id);
+        if slots.is_empty() {
+            if let Some(message) = self.pending_spawn_alignment_violation() {
+                tracing::error!(
+                    meerkat_id = %meerkat_id,
+                    reason,
+                    message = %message,
+                    "pending spawn alignment violated while canceling member-specific pending spawns"
+                );
+            }
+            return 0;
+        }
+        let canceled = slots.len();
+
+        for slot in &slots {
+            self.complete_orchestrator_spawn(
+                Some(slot.ticket),
+                "member lifecycle command canceled pending spawn",
+            );
+        }
+
+        for slot in slots {
+            let spawn_ticket = slot.ticket;
+            slot.fail(&format!("spawn canceled for '{}': {}", meerkat_id, reason));
+            tracing::debug!(
+                spawn_ticket,
+                meerkat_id = %meerkat_id,
+                "canceled pending spawn for member lifecycle command"
+            );
+        }
+
+        self.debug_assert_pending_spawn_alignment();
+        if let Some(message) = self.pending_spawn_alignment_violation() {
+            tracing::error!(
+                meerkat_id = %meerkat_id,
+                message = %message,
+                "pending spawn alignment violated after member-specific cancellation"
+            );
+        }
+        canceled
     }
 
     /// P1-T04: spawn() creates a real session.
@@ -1236,7 +1509,7 @@ impl MobActor {
                 "MobActor::enqueue_spawn start"
             );
 
-            if self.pending_spawns.values().any(|p| p.meerkat_id == meerkat_id) {
+            if self.pending_spawns.contains_member(&meerkat_id) {
                 return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
             }
 
@@ -1452,7 +1725,7 @@ impl MobActor {
         if let Some(member_ref) = resume_member_ref {
             let operation_id = self
                 .provisioner
-                .operation_id_for_member(&member_ref)
+                .active_operation_id_for_member(&member_ref)
                 .await
                 .ok_or_else(|| {
                     MobError::Internal(format!(
@@ -1497,14 +1770,14 @@ impl MobActor {
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
         let spawn_meerkat_id = meerkat_id.clone();
+        let spawn_meerkat_id_for_log = spawn_meerkat_id.clone();
         let spawn_runtime_mode = selected_runtime_mode;
 
-        if let Some(ref mut orch) = self.orchestrator
-            && let Err(error) = orch.apply(MobOrchestratorInput::StageSpawn)
-        {
+        if let Err(error) = self.stage_orchestrator_spawn() {
             let _ = reply_tx.send(Err(error));
             return;
         }
+
         let pending = PendingSpawn {
             profile_name,
             meerkat_id,
@@ -1515,15 +1788,8 @@ impl MobActor {
             restore_wiring: None,
             reply_tx,
         };
-        self.pending_spawns.insert(spawn_ticket, pending);
-
-        tracing::debug!(
-            spawn_ticket,
-            meerkat_id = %spawn_meerkat_id,
-            runtime_mode = ?spawn_runtime_mode,
-            "MobActor::enqueue_spawn queued provisioning task"
-        );
-
+        // Treat pending spawn lifecycle as a single keyed table: pending intent
+        // and async task handle must be inserted/removed together.
         let provisioner = self.provisioner.clone();
         let command_tx = self.command_tx.clone();
         let task = tokio::spawn(async move {
@@ -1581,18 +1847,53 @@ impl MobActor {
                 );
             }
         });
-        self.pending_spawn_tasks.insert(spawn_ticket, task);
+        self.insert_pending_spawn(spawn_ticket, pending, task);
+        if let Err(error) = self.ensure_pending_spawn_alignment("enqueue_spawn post-insert") {
+            tracing::error!(
+                spawn_ticket,
+                error = %error,
+                "pending spawn alignment check failed after enqueue; canceling all pending spawns"
+            );
+            self.fail_all_pending_spawns("pending spawn alignment violated after enqueue")
+                .await;
+            return;
+        }
+
+        tracing::debug!(
+            spawn_ticket,
+            meerkat_id = %spawn_meerkat_id_for_log,
+            runtime_mode = ?spawn_runtime_mode,
+            "MobActor::enqueue_spawn queued provisioning task"
+        );
     }
 
     async fn handle_spawn_provisioned_batch(
         &mut self,
         completions: Vec<(u64, Result<super::handle::MemberSpawnReceipt, MobError>)>,
     ) {
+        if let Err(error) = self.ensure_pending_spawn_alignment("spawn batch preflight") {
+            tracing::error!(
+                error = %error,
+                "pending spawn alignment check failed before spawn completion batch"
+            );
+            self.fail_all_pending_spawns("pending spawn alignment violated before spawn batch")
+                .await;
+            return;
+        }
+
         let mut pending_items = Vec::with_capacity(completions.len());
         for (spawn_ticket, result) in completions {
-            self.pending_spawn_tasks.remove(&spawn_ticket);
-            let Some(pending) = self.pending_spawns.remove(&spawn_ticket) else {
+            let (pending, task_handle) =
+                self.complete_pending_spawn_slot(spawn_ticket, "spawn provisioned batch");
+            let Some(pending) = pending else {
                 tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
+                if let Some(handle) = task_handle {
+                    handle.abort();
+                    tracing::warn!(
+                        spawn_ticket,
+                        "received spawn completion for unknown pending metadata but found task handle"
+                    );
+                }
                 if let Ok(spawn_receipt) = result {
                     let orphan = PendingProvision::new(
                         spawn_receipt.member_ref,
@@ -1609,15 +1910,6 @@ impl MobActor {
                 }
                 continue;
             };
-            if let Some(ref mut orch) = self.orchestrator
-                && let Err(error) = orch.apply(MobOrchestratorInput::CompleteSpawn)
-            {
-                tracing::warn!(
-                    spawn_ticket,
-                    error = %error,
-                    "failed to reconcile orchestrator pending-spawn snapshot"
-                );
-            }
             pending_items.push((pending, result));
         }
 
@@ -1676,6 +1968,183 @@ impl MobActor {
         while let Some((reply_tx, reply)) = in_flight.next().await {
             let _ = reply_tx.send(reply);
         }
+        drop(in_flight);
+
+        if let Err(error) = self.ensure_pending_spawn_alignment("spawn batch completion") {
+            tracing::error!(
+                error = %error,
+                "pending spawn alignment check failed after spawn completion batch"
+            );
+            self.fail_all_pending_spawns("pending spawn alignment violated after spawn batch")
+                .await;
+        }
+    }
+
+    async fn spawn_from_policy_inline(
+        &mut self,
+        meerkat_id: &MeerkatId,
+        spawn_spec: super::spawn_policy::SpawnSpec,
+    ) -> Result<super::handle::MemberSpawnReceipt, MobError> {
+        self.ensure_pending_spawn_alignment("spawn_from_policy_inline preflight")?;
+
+        if meerkat_id
+            .as_str()
+            .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
+        {
+            return Err(MobError::WiringError(format!(
+                "meerkat id '{meerkat_id}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+            )));
+        }
+        if self.pending_spawns.contains_member(meerkat_id) {
+            return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+        }
+        {
+            let roster = self.roster.read().await;
+            if roster.get(meerkat_id).is_some() {
+                return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+            }
+        }
+
+        let profile_name = spawn_spec.profile;
+        let profile = self
+            .definition
+            .profiles
+            .get(&profile_name)
+            .ok_or_else(|| MobError::ProfileNotFound(profile_name.clone()))?;
+        let runtime_mode = spawn_spec.runtime_mode.unwrap_or(profile.runtime_mode);
+        let external_tools = self.external_tools_for_profile(profile)?;
+        let labels = std::collections::BTreeMap::new();
+        let mut config = build::build_agent_config(build::BuildAgentConfigParams {
+            mob_id: &self.definition.id,
+            profile_name: &profile_name,
+            meerkat_id,
+            profile,
+            definition: &self.definition,
+            external_tools,
+            context: None,
+            labels: Some(labels.clone()),
+            additional_instructions: None,
+            shell_env: None,
+        })
+        .await?;
+        if let Some(ref client) = self.default_llm_client {
+            config.llm_client_override = Some(client.clone());
+        }
+
+        let prompt = self.fallback_spawn_prompt(&profile_name, meerkat_id);
+        let req = build::to_create_session_request(&config, prompt.clone());
+        let selected_backend = profile.backend.unwrap_or(self.definition.backend.default);
+        let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
+        let provision_request = ProvisionMemberRequest {
+            create_session: req,
+            backend: selected_backend,
+            peer_name,
+        };
+
+        let spawn_ticket = self.next_spawn_ticket;
+        self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
+        self.stage_orchestrator_spawn()?;
+        let (pending_reply_tx, _pending_reply_rx) = oneshot::channel();
+        let pending = PendingSpawn {
+            profile_name: profile_name.clone(),
+            meerkat_id: meerkat_id.clone(),
+            prompt: prompt.clone(),
+            runtime_mode,
+            labels: labels.clone(),
+            auto_wire_parent: false,
+            restore_wiring: None,
+            reply_tx: pending_reply_tx,
+        };
+        let pending_task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        self.insert_pending_spawn(spawn_ticket, pending, pending_task);
+        if let Err(error) =
+            self.ensure_pending_spawn_alignment("spawn_from_policy_inline staged pending")
+        {
+            tracing::error!(
+                meerkat_id = %meerkat_id,
+                error = %error,
+                "pending spawn alignment violated while staging inline policy spawn"
+            );
+            self.fail_all_pending_spawns(
+                "pending spawn alignment violated while staging inline policy spawn",
+            )
+            .await;
+            return Err(error);
+        }
+
+        let spawn_result = async {
+            let spawn_receipt = self.provisioner.provision_member(provision_request).await?;
+            if runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                && let Err(capability_error) =
+                    Self::ensure_autonomous_dispatch_capability_for_provisioner(
+                        &self.provisioner,
+                        meerkat_id,
+                        &spawn_receipt.member_ref,
+                    )
+                    .await
+            {
+                if let Err(retire_error) = self
+                    .provisioner
+                    .retire_member(&spawn_receipt.member_ref)
+                    .await
+                {
+                    return Err(MobError::Internal(format!(
+                        "autonomous capability check failed for '{meerkat_id}': {capability_error}; cleanup retire failed: {retire_error}"
+                    )));
+                }
+                return Err(capability_error);
+            }
+            let provision = PendingProvision::new(
+                spawn_receipt.member_ref.clone(),
+                meerkat_id.clone(),
+                self.provisioner.clone(),
+            );
+            if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+                if let Err(retire_error) = provision.rollback().await {
+                    return Err(MobError::Internal(format!(
+                        "policy spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
+                    )));
+                }
+                return Err(error);
+            }
+            self.finalize_spawn_from_pending(
+                &profile_name,
+                meerkat_id,
+                runtime_mode,
+                prompt,
+                labels,
+                provision,
+                spawn_receipt.operation_id,
+                false,
+                None,
+            )
+            .await
+        }
+        .await;
+
+        let (_pending, task_handle) =
+            self.complete_pending_spawn_slot(spawn_ticket, "policy inline spawn completion");
+        if let Some(handle) = task_handle {
+            handle.abort();
+        }
+        if let Err(error) =
+            self.ensure_pending_spawn_alignment("spawn_from_policy_inline completion")
+        {
+            tracing::error!(
+                meerkat_id = %meerkat_id,
+                error = %error,
+                "pending spawn alignment violated after inline policy spawn completion"
+            );
+            self.fail_all_pending_spawns(
+                "pending spawn alignment violated after inline policy spawn completion",
+            )
+            .await;
+            return Err(error);
+        }
+
+        spawn_result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1721,7 +2190,7 @@ impl MobActor {
 
         {
             let mut roster = self.roster.write().await;
-            let inserted = roster.add(crate::roster::RosterAddEntry {
+            let inserted = roster.add_member(crate::roster::RosterAddEntry {
                 meerkat_id: meerkat_id.clone(),
                 profile: profile_name.clone(),
                 runtime_mode,
@@ -1740,15 +2209,16 @@ impl MobActor {
 
         let planned_wiring_targets = self.spawn_wiring_targets(profile_name, meerkat_id).await;
 
-        if let Err(wiring_error) = self
+        let (wired_spawn_targets, wiring_error) = self
             .apply_spawn_wiring(meerkat_id, &planned_wiring_targets)
-            .await
-        {
+            .await;
+        if let Some(wiring_error) = wiring_error {
             if let Err(rollback_error) = self
                 .rollback_failed_spawn(
                     meerkat_id,
                     profile_name,
                     &member_ref,
+                    &wired_spawn_targets,
                     &planned_wiring_targets,
                 )
                 .await
@@ -1770,6 +2240,7 @@ impl MobActor {
                     meerkat_id,
                     profile_name,
                     &member_ref,
+                    &wired_spawn_targets,
                     &planned_wiring_targets,
                 )
                 .await
@@ -1787,7 +2258,10 @@ impl MobActor {
                 let roster = self.roster.read().await;
                 roster
                     .by_profile(&orchestrator.profile)
-                    .filter(|entry| entry.meerkat_id != *meerkat_id)
+                    .filter(|entry| {
+                        entry.state == crate::roster::MemberState::Active
+                            && entry.meerkat_id != *meerkat_id
+                    })
                     .map(|entry| entry.meerkat_id.clone())
                     .collect::<Vec<_>>()
             };
@@ -1803,9 +2277,11 @@ impl MobActor {
         }
 
         // Restore peer wiring from a prior respawn.
-        if let Some(peers) = restore_wiring {
-            for peer_id in &peers {
-                if let Err(e) = self.do_wire(meerkat_id, peer_id).await {
+        if let Some(mut peers) = restore_wiring {
+            peers.sort();
+            peers.dedup();
+            for peer_id in peers.into_iter().filter(|peer_id| peer_id != meerkat_id) {
+                if let Err(e) = self.do_wire(meerkat_id, &peer_id).await {
                     tracing::warn!(
                         error = %e,
                         peer = %peer_id,
@@ -1840,6 +2316,7 @@ impl MobActor {
                 let roster = self.roster.read().await;
                 roster
                     .by_profile(&orchestrator.profile)
+                    .filter(|entry| entry.state == crate::roster::MemberState::Active)
                     .map(|entry| entry.meerkat_id.clone())
                     .collect::<Vec<_>>()
             };
@@ -1863,7 +2340,10 @@ impl MobActor {
                     let roster = self.roster.read().await;
                     roster
                         .by_profile(target_profile)
-                        .filter(|entry| entry.meerkat_id != *meerkat_id)
+                        .filter(|entry| {
+                            entry.state == crate::roster::MemberState::Active
+                                && entry.meerkat_id != *meerkat_id
+                        })
                         .map(|entry| entry.meerkat_id.clone())
                         .collect::<Vec<_>>()
                 };
@@ -1898,7 +2378,9 @@ impl MobActor {
     /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
     /// pipeline (policy-driven), then unconditional roster removal.
     async fn handle_retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
-        self.handle_retire_inner(&meerkat_id, false).await
+        self.ensure_pending_spawn_alignment("handle_retire preflight")?;
+        self.handle_retire_inner(&meerkat_id, false).await?;
+        self.ensure_pending_spawn_alignment("handle_retire completion")
     }
 
     async fn handle_retire_inner(
@@ -1961,46 +2443,64 @@ impl MobActor {
     ) -> Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError> {
         use super::handle::{MemberRespawnReceipt, MobRespawnError};
 
-        // 1. Snapshot the current member state before retiring.
-        let entry = {
-            let roster = self.roster.read().await;
-            roster
-                .get(&meerkat_id)
-                .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
-        };
+        self.ensure_pending_spawn_alignment("handle_respawn preflight")
+            .map_err(MobRespawnError::from)?;
 
-        // 2. Capture old session ID (required for receipt).
-        let old_session_id = entry.member_ref.session_id().cloned();
-        if old_session_id.is_none() {
-            return Err(MobRespawnError::NoSessionBridge {
-                member_id: meerkat_id,
-            });
+        let canceled = self.cancel_pending_spawns_for_member(
+            &meerkat_id,
+            "respawn command superseded pending spawn",
+        );
+        if canceled > 0 {
+            tracing::info!(
+                meerkat_id = %meerkat_id,
+                canceled,
+                "respawn canceled pending spawn lineage before replacement workflow"
+            );
         }
 
-        let wired_peers: Vec<MeerkatId> = entry.wired_to.iter().cloned().collect();
+        // 1. Snapshot all replacement inputs before retiring.
+        let snapshot = {
+            let roster = self.roster.read().await;
+            let entry = roster
+                .get(&meerkat_id)
+                .cloned()
+                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+            let old_session_id = entry.member_ref.session_id().cloned().ok_or_else(|| {
+                MobRespawnError::NoSessionBridge {
+                    member_id: meerkat_id.clone(),
+                }
+            })?;
+            let snapshot = RespawnSnapshot {
+                profile_name: entry.profile.clone(),
+                runtime_mode: entry.runtime_mode,
+                labels: entry.labels.clone(),
+                old_session_id,
+                wired_peers: entry.wired_to.iter().cloned().collect(),
+            };
+            snapshot
+        };
 
-        // 3. Retire the existing member (archives the session, removes from roster).
+        // 2. Retire the existing member (archives the session, removes from roster).
         self.handle_retire(meerkat_id.clone()).await?;
 
-        // 4. Rebuild the replacement spawn preserving identity, profile, labels, and mode.
+        // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
         let prompt = initial_message
-            .unwrap_or_else(|| self.fallback_spawn_prompt(&entry.profile, &meerkat_id));
+            .unwrap_or_else(|| self.fallback_spawn_prompt(&snapshot.profile_name, &meerkat_id));
         let profile = self
             .definition
             .profiles
-            .get(&entry.profile)
-            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+            .get(&snapshot.profile_name)
+            .ok_or_else(|| MobError::ProfileNotFound(snapshot.profile_name.clone()))?;
         let external_tools = self.external_tools_for_profile(profile)?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
-            profile_name: &entry.profile,
+            profile_name: &snapshot.profile_name,
             meerkat_id: &meerkat_id,
             profile,
             definition: &self.definition,
             external_tools,
             context: None,
-            labels: Some(entry.labels.clone()),
+            labels: Some(snapshot.labels.clone()),
             additional_instructions: None,
             shell_env: None,
         })
@@ -2010,100 +2510,157 @@ impl MobActor {
         }
         let req = build::to_create_session_request(&config, prompt.clone());
         let selected_backend = profile.backend.unwrap_or(self.definition.backend.default);
-        let peer_name = format!("{}/{}/{}", self.definition.id, entry.profile, meerkat_id);
+        let peer_name = format!(
+            "{}/{}/{}",
+            self.definition.id, snapshot.profile_name, meerkat_id
+        );
         let provision_request = ProvisionMemberRequest {
             create_session: req,
             backend: selected_backend,
             peer_name,
         };
 
-        // 5. Provision and finalize the replacement member inline so the receipt reflects
-        //    the committed canonical member/session state before we return.
-        let spawn_receipt = self
-            .provisioner
-            .provision_member(provision_request)
-            .await
+        let respawn_spawn_ticket = self.next_spawn_ticket;
+        self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
+        self.stage_orchestrator_spawn()
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 member_id: meerkat_id.clone(),
-                reason: error.to_string(),
+                reason: format!("failed to stage respawn replacement spawn: {error}"),
             })?;
-        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
-            && let Err(capability_error) =
-                Self::ensure_autonomous_dispatch_capability_for_provisioner(
-                    &self.provisioner,
-                    &meerkat_id,
-                    &spawn_receipt.member_ref,
-                )
-                .await
+        let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
+        let respawn_pending = PendingSpawn {
+            profile_name: snapshot.profile_name.clone(),
+            meerkat_id: meerkat_id.clone(),
+            prompt: prompt.clone(),
+            runtime_mode: snapshot.runtime_mode,
+            labels: snapshot.labels.clone(),
+            auto_wire_parent: false,
+            restore_wiring: (!snapshot.wired_peers.is_empty())
+                .then_some(snapshot.wired_peers.clone()),
+            reply_tx: respawn_inline_reply_tx,
+        };
+        let respawn_inline_task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        self.insert_pending_spawn(respawn_spawn_ticket, respawn_pending, respawn_inline_task);
+        if let Err(error) = self.ensure_pending_spawn_alignment("handle_respawn staged replacement")
         {
-            if let Err(retire_error) = self
-                .provisioner
-                .retire_member(&spawn_receipt.member_ref)
-                .await
-            {
-                return Err(MobRespawnError::SpawnAfterRetire {
-                    member_id: meerkat_id.clone(),
-                    reason: format!(
-                        "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
-                    ),
-                });
-            }
-            return Err(MobRespawnError::SpawnAfterRetire {
-                member_id: meerkat_id.clone(),
-                reason: capability_error.to_string(),
-            });
-        }
-
-        let provision = PendingProvision::new(
-            spawn_receipt.member_ref.clone(),
-            meerkat_id.clone(),
-            self.provisioner.clone(),
-        );
-        if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
-            if let Err(retire_error) = provision.rollback().await {
-                return Err(MobRespawnError::SpawnAfterRetire {
-                    member_id: meerkat_id.clone(),
-                    reason: format!(
-                        "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
-                    ),
-                });
-            }
+            tracing::error!(
+                meerkat_id = %meerkat_id,
+                error = %error,
+                "pending spawn alignment violated while staging respawn replacement"
+            );
+            self.fail_all_pending_spawns(
+                "pending spawn alignment violated while staging respawn replacement",
+            )
+            .await;
             return Err(MobRespawnError::SpawnAfterRetire {
                 member_id: meerkat_id.clone(),
                 reason: error.to_string(),
             });
         }
 
-        if !wired_peers.is_empty() {
-            tracing::info!(
-                meerkat_id = %meerkat_id,
-                peers = ?wired_peers,
-                "respawn: restoring peer wiring during replacement finalization"
-            );
-        }
+        // 4. Provision and finalize the replacement member inline so the receipt reflects
+        //    the committed canonical member/session state before we return.
+        let replacement_result: Result<super::handle::MemberSpawnReceipt, MobRespawnError> = async {
+            let spawn_receipt = self
+                .provisioner
+                .provision_member(provision_request)
+                .await
+                .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                    member_id: meerkat_id.clone(),
+                    reason: error.to_string(),
+                })?;
+            if snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                && let Err(capability_error) =
+                    Self::ensure_autonomous_dispatch_capability_for_provisioner(
+                        &self.provisioner,
+                        &meerkat_id,
+                        &spawn_receipt.member_ref,
+                    )
+                    .await
+            {
+                if let Err(retire_error) = self
+                    .provisioner
+                    .retire_member(&spawn_receipt.member_ref)
+                    .await
+                {
+                    return Err(MobRespawnError::SpawnAfterRetire {
+                        member_id: meerkat_id.clone(),
+                        reason: format!(
+                            "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
+                        ),
+                    });
+                }
+                return Err(MobRespawnError::SpawnAfterRetire {
+                    member_id: meerkat_id.clone(),
+                    reason: capability_error.to_string(),
+                });
+            }
 
-        let replacement = self
-            .finalize_spawn_from_pending(
-                &entry.profile,
+            let provision = PendingProvision::new(
+                spawn_receipt.member_ref.clone(),
+                meerkat_id.clone(),
+                self.provisioner.clone(),
+            );
+            if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+                if let Err(retire_error) = provision.rollback().await {
+                    return Err(MobRespawnError::SpawnAfterRetire {
+                        member_id: meerkat_id.clone(),
+                        reason: format!(
+                            "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
+                        ),
+                    });
+                }
+                return Err(MobRespawnError::SpawnAfterRetire {
+                    member_id: meerkat_id.clone(),
+                    reason: error.to_string(),
+                });
+            }
+
+            if !snapshot.wired_peers.is_empty() {
+                tracing::info!(
+                    meerkat_id = %meerkat_id,
+                    peers = ?snapshot.wired_peers,
+                    "respawn: restoring peer wiring during replacement finalization"
+                );
+            }
+
+            self.finalize_spawn_from_pending(
+                &snapshot.profile_name,
                 &meerkat_id,
-                entry.runtime_mode,
+                snapshot.runtime_mode,
                 prompt,
-                entry.labels.clone(),
+                snapshot.labels.clone(),
                 provision,
                 spawn_receipt.operation_id,
                 false,
-                (!wired_peers.is_empty()).then_some(wired_peers),
+                (!snapshot.wired_peers.is_empty()).then_some(snapshot.wired_peers.clone()),
             )
             .await
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 member_id: meerkat_id.clone(),
                 reason: error.to_string(),
-            })?;
+            })
+        }
+        .await;
 
-        // 6. Build the receipt from the committed replacement member reference.
+        let (_respawn_pending, respawn_task) =
+            self.complete_pending_spawn_slot(respawn_spawn_ticket, "respawn replacement spawn");
+        if let Some(handle) = respawn_task {
+            handle.abort();
+        }
+        self.ensure_pending_spawn_alignment("handle_respawn completion")
+            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                member_id: meerkat_id.clone(),
+                reason: error.to_string(),
+            })?;
+        let replacement = replacement_result?;
+
+        // 5. Build the receipt from the committed replacement member reference.
         Ok(MemberRespawnReceipt {
             member_id: meerkat_id,
-            old_session_id,
+            old_session_id: Some(snapshot.old_session_id),
             new_session_id: replacement.member_ref.session_id().cloned(),
         })
     }
@@ -2287,11 +2844,17 @@ impl MobActor {
     /// Remove the member from the roster. Infallible.
     pub(super) async fn dispose_remove_from_roster(&self, ctx: &DisposalContext) {
         let mut roster = self.roster.write().await;
-        roster.remove(&ctx.meerkat_id);
+        roster.remove_member(&ctx.meerkat_id);
     }
 
     /// P1-T06: wire() establishes bidirectional trust.
     async fn handle_wire(&self, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
+        self.ensure_pending_spawn_alignment("handle_wire preflight")?;
+        if a == b {
+            return Err(MobError::WiringError(format!(
+                "wire requires distinct members (got '{a}')"
+            )));
+        }
         // Verify both exist
         {
             let roster = self.roster.read().await;
@@ -2303,13 +2866,23 @@ impl MobActor {
             }
         }
 
-        self.do_wire(&a, &b).await
+        self.do_wire(&a, &b).await?;
+        self.ensure_pending_spawn_alignment("handle_wire completion")
     }
 
     /// P1-T07: unwire() removes bidirectional trust.
     async fn handle_unwire(&self, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
-        // Look up both entries
-        let (entry_a, entry_b) = {
+        self.ensure_pending_spawn_alignment("handle_unwire preflight")?;
+        if a == b {
+            return Err(MobError::WiringError(format!(
+                "unwire requires distinct members (got '{a}')"
+            )));
+        }
+
+        let _edge_guard = self.edge_locks.acquire(a.as_str(), b.as_str()).await;
+
+        // Look up both entries + current wiring relation under the edge lock.
+        let (entry_a, entry_b, a_has_b_edge, b_has_a_edge) = {
             let roster = self.roster.read().await;
             let ea = roster
                 .get(&a)
@@ -2319,8 +2892,27 @@ impl MobActor {
                 .get(&b)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
-            (ea, eb)
+            let a_has_b_edge = ea.wired_to.contains(&b);
+            let b_has_a_edge = eb.wired_to.contains(&a);
+            (ea, eb, a_has_b_edge, b_has_a_edge)
         };
+
+        // Idempotent no-op only when both directed projections are already absent.
+        if !a_has_b_edge && !b_has_a_edge {
+            self.edge_locks.remove(a.as_str(), b.as_str()).await;
+            self.debug_assert_roster_edge_symmetric(&a, &b, "handle_unwire/noop")
+                .await;
+            return Ok(());
+        }
+        if a_has_b_edge != b_has_a_edge {
+            tracing::warn!(
+                a = %a,
+                b = %b,
+                a_has_b_edge,
+                b_has_a_edge,
+                "unwire found non-canonical roster projection; applying full unwire path"
+            );
+        }
 
         // Get comms and keys for both sides (required for unwire).
         let comms_a = self
@@ -2427,15 +3019,36 @@ impl MobActor {
         // Update roster
         {
             let mut roster = self.roster.write().await;
-            roster.unwire(&a, &b);
+            roster.unwire_members(&a, &b);
         }
         self.edge_locks.remove(a.as_str(), b.as_str()).await;
+        self.debug_assert_roster_edge_symmetric(&a, &b, "handle_unwire/post")
+            .await;
 
-        Ok(())
+        self.ensure_pending_spawn_alignment("handle_unwire completion")
     }
 
     async fn handle_complete(&mut self) -> Result<(), MobError> {
-        self.cancel_all_flow_tasks().await;
+        self.ensure_pending_spawn_alignment("handle_complete preflight")?;
+        self.ensure_flow_tracker_alignment("handle_complete preflight")
+            .await?;
+        self.cancel_all_flow_tasks().await?;
+        if !self
+            .lifecycle_authority
+            .can_accept(MobLifecycleInput::MarkCompleted)
+        {
+            return Err(MobError::Internal(
+                "lifecycle authority rejected MarkCompleted after flow cancellation".into(),
+            ));
+        }
+        if let Some(ref orch) = self.orchestrator
+            && !orch.can_accept(MobOrchestratorInput::MarkCompleted)
+        {
+            return Err(MobError::Internal(
+                "orchestrator authority rejected MarkCompleted after flow cancellation".into(),
+            ));
+        }
+
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
         self.retire_all_members("complete").await?;
@@ -2448,21 +3061,31 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        if let Some(ref mut orch) = self.orchestrator
-            && let Err(error) = orch.apply(MobOrchestratorInput::MarkCompleted)
-        {
-            tracing::warn!(error = %error, "orchestrator MarkCompleted failed");
+        if let Some(ref mut orch) = self.orchestrator {
+            orch.apply(MobOrchestratorInput::MarkCompleted)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "orchestrator MarkCompleted transition failed during complete: {error}"
+                    ))
+                })?;
         }
-        if let Err(e) = self
-            .lifecycle_authority
+        self.lifecycle_authority
             .apply(MobLifecycleInput::MarkCompleted)
-        {
-            tracing::warn!(error = %e, "authority rejected MarkCompleted");
-        }
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "lifecycle MarkCompleted transition failed during complete: {error}"
+                ))
+            })?;
+        self.ensure_pending_spawn_alignment("handle_complete completion")?;
+        self.ensure_flow_tracker_alignment("handle_complete completion")
+            .await?;
         Ok(())
     }
 
     async fn handle_destroy(&mut self) -> Result<(), MobError> {
+        self.ensure_pending_spawn_alignment("handle_destroy preflight")?;
+        self.ensure_flow_tracker_alignment("handle_destroy preflight")
+            .await?;
         // Gate via lifecycle authority — reject if current phase doesn't support Destroy.
         if !self
             .lifecycle_authority
@@ -2473,7 +3096,7 @@ impl MobActor {
                 to: MobState::Destroyed,
             });
         }
-        self.cancel_all_flow_tasks().await;
+        self.cancel_all_flow_tasks().await?;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
         self.retire_all_members("destroy").await?;
@@ -2481,19 +3104,33 @@ impl MobActor {
         self.events.clear().await?;
         self.cleanup_namespace().await?;
         self.edge_locks.clear().await;
-        // Transition through StopOrchestrator then Destroy — authority decides legality.
+        // Transition through StopOrchestrator then Destroy.
         if let Some(ref mut orch) = self.orchestrator {
-            // Authority rejects StopOrchestrator if not Running — no shell pre-check.
-            if let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator) {
-                tracing::trace!(error = %error, "orchestrator StopOrchestrator skipped during destroy (expected if not Running)");
+            if orch.can_accept(MobOrchestratorInput::StopOrchestrator) {
+                orch.apply(MobOrchestratorInput::StopOrchestrator)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "orchestrator StopOrchestrator transition failed during destroy: {error}"
+                        ))
+                    })?;
             }
-            if let Err(error) = orch.apply(MobOrchestratorInput::DestroyOrchestrator) {
-                tracing::warn!(error = %error, "orchestrator DestroyOrchestrator failed");
-            }
+            orch.apply(MobOrchestratorInput::DestroyOrchestrator)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "orchestrator DestroyOrchestrator transition failed during destroy: {error}"
+                    ))
+                })?;
         }
-        if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Destroy) {
-            tracing::warn!(error = %e, "authority rejected Destroy");
-        }
+        self.lifecycle_authority
+            .apply(MobLifecycleInput::Destroy)
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "lifecycle Destroy transition failed during destroy: {error}"
+                ))
+            })?;
+        self.ensure_pending_spawn_alignment("handle_destroy completion")?;
+        self.ensure_flow_tracker_alignment("handle_destroy completion")
+            .await?;
         Ok(())
     }
 
@@ -2507,6 +3144,9 @@ impl MobActor {
     }
 
     async fn handle_reset(&mut self) -> Result<(), MobError> {
+        self.ensure_pending_spawn_alignment("handle_reset preflight")?;
+        self.ensure_flow_tracker_alignment("handle_reset preflight")
+            .await?;
         // Gate via lifecycle authority — Reset is a multi-step process
         // (Running→Stop→Resume, Stopped→Resume, Completed→BeginCleanup→FinishCleanup→Resume).
         // Use require_phase to validate the current phase supports reset.
@@ -2516,7 +3156,7 @@ impl MobActor {
         )?;
         let prior_state = self.state();
         let was_stopped = prior_state == MobState::Stopped;
-        self.cancel_all_flow_tasks().await;
+        self.cancel_all_flow_tasks().await?;
 
         // Rearm checkpointers temporarily so retire can checkpoint if needed.
         if was_stopped {
@@ -2536,6 +3176,16 @@ impl MobActor {
             // Members already retired -- fail-closed to Stopped.
             self.fail_reset_to_stopped().await;
             return Err(error);
+        }
+
+        if self.lifecycle_authority.can_accept(MobLifecycleInput::Stop) {
+            self.lifecycle_authority
+                .apply(MobLifecycleInput::Stop)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "lifecycle Stop transition failed during reset: {error}"
+                    ))
+                })?;
         }
 
         // --- Event rewrite phase: append new epoch markers. ---
@@ -2587,38 +3237,45 @@ impl MobActor {
         }
 
         if let Some(ref mut orch) = self.orchestrator {
-            // Authority rejects StopOrchestrator if not Running — no shell pre-check on prior_state.
-            if let Err(error) = orch.apply(MobOrchestratorInput::StopOrchestrator) {
-                tracing::trace!(
-                    error = %error,
-                    "orchestrator StopOrchestrator skipped during reset (expected if not Running)"
-                );
+            if orch.can_accept(MobOrchestratorInput::StopOrchestrator) {
+                orch.apply(MobOrchestratorInput::StopOrchestrator)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "orchestrator StopOrchestrator transition failed during reset: {error}"
+                        ))
+                    })?;
             }
-            if let Err(error) = orch.apply(MobOrchestratorInput::ResumeOrchestrator) {
-                tracing::warn!(error = %error, "orchestrator ResumeOrchestrator failed during reset");
-            }
+            orch.apply(MobOrchestratorInput::ResumeOrchestrator)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "orchestrator ResumeOrchestrator transition failed during reset: {error}"
+                    ))
+                })?;
         }
-        if let Err(error) = self
-            .lifecycle_authority
+        self.lifecycle_authority
             .apply(MobLifecycleInput::BeginCleanup)
-        {
-            tracing::trace!(
-                error = %error,
-                "authority rejected BeginCleanup during reset"
-            );
-        }
-        if let Err(error) = self
-            .lifecycle_authority
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "lifecycle BeginCleanup transition failed during reset: {error}"
+                ))
+            })?;
+        self.lifecycle_authority
             .apply(MobLifecycleInput::FinishCleanup)
-        {
-            tracing::trace!(
-                error = %error,
-                "authority rejected FinishCleanup during reset"
-            );
-        }
-        if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Resume) {
-            tracing::warn!(error = %e, "authority rejected Resume during reset");
-        }
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "lifecycle FinishCleanup transition failed during reset: {error}"
+                ))
+            })?;
+        self.lifecycle_authority
+            .apply(MobLifecycleInput::Resume)
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "lifecycle Resume transition failed during reset: {error}"
+                ))
+            })?;
+        self.ensure_pending_spawn_alignment("handle_reset completion")?;
+        self.ensure_flow_tracker_alignment("handle_reset completion")
+            .await?;
         Ok(())
     }
 
@@ -2627,7 +3284,12 @@ impl MobActor {
     /// event-append failures (pre-cleanup); cleanup errors are best-effort.
     /// If any member fails to retire the operation is aborted — the caller
     /// can retry since already-retired members are idempotent.
-    async fn retire_all_members(&self, context: &str) -> Result<(), MobError> {
+    async fn retire_all_members(&mut self, context: &str) -> Result<(), MobError> {
+        self.ensure_pending_spawn_alignment("retire_all_members preflight")?;
+        let pending_reason = format!("{context}: draining pending spawns before bulk retirement");
+        self.fail_all_pending_spawns(&pending_reason).await;
+        self.ensure_pending_spawn_alignment("retire_all_members after pending drain")?;
+
         let ids = {
             let roster = self.roster.read().await;
             roster
@@ -2672,6 +3334,7 @@ impl MobActor {
                 retire_failures.join("; ")
             )));
         }
+        self.ensure_pending_spawn_alignment("retire_all_members completion")?;
         Ok(())
     }
 
@@ -2716,6 +3379,7 @@ impl MobActor {
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ) -> Result<SessionId, MobError> {
+        self.ensure_pending_spawn_alignment("handle_external_turn preflight")?;
         // Look up the entry
         let entry = {
             let roster = self.roster.read().await;
@@ -2729,68 +3393,32 @@ impl MobActor {
                 e
             }
             None => {
-                // Consult spawn policy for auto-provisioning
                 if let Some(spec) = self.spawn_policy.resolve(&meerkat_id).await {
-                    let (spawn_reply_tx, spawn_reply_rx) = oneshot::channel();
-                    let mut spawn_spec =
-                        super::handle::SpawnMemberSpec::new(spec.profile, meerkat_id.clone());
-                    spawn_spec.runtime_mode = spec.runtime_mode;
-                    self.enqueue_spawn(spawn_spec, spawn_reply_tx).await;
-
-                    // Wait for spawn to complete, then deliver the message
-                    // via a deferred ExternalTurn command.
-                    let command_tx = self.command_tx.clone();
-                    let target_id = meerkat_id.clone();
-                    let spawn_receipt = spawn_reply_rx
+                    self.spawn_from_policy_inline(&meerkat_id, spec)
                         .await
-                        .map_err(|_| MobError::Internal("auto-spawn reply channel dropped".into()))?
-                        .map_err(|e| {
-                            MobError::Internal(format!("auto-spawn failed for '{target_id}': {e}"))
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "auto-spawn failed for '{meerkat_id}': {error}"
+                            ))
                         })?;
-
-                    let session_id =
-                        spawn_receipt
-                            .member_ref
-                            .session_id()
-                            .cloned()
-                            .ok_or_else(|| {
-                                MobError::Internal(format!(
-                                    "auto-spawned member '{target_id}' has no session"
-                                ))
-                            })?;
-
-                    // Deferred delivery — fire and forget after spawn completes.
-                    self.lifecycle_tasks.spawn(async move {
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        let _ = command_tx
-                            .send(MobCommand::ExternalTurn {
-                                meerkat_id: target_id.clone(),
-                                message,
-                                handling_mode,
-                                render_metadata: None,
-                                reply_tx,
-                            })
-                            .await;
-                        match reply_rx.await {
-                            Ok(Ok(_)) => {}
-                            Ok(Err(e)) => {
-                                tracing::error!(
-                                    meerkat_id = %target_id,
-                                    error = %e,
-                                    "deferred delivery after auto-spawn failed"
-                                );
-                            }
-                            Err(_) => {
-                                tracing::error!(
-                                    meerkat_id = %target_id,
-                                    "deferred delivery channel dropped before response"
-                                );
-                            }
-                        }
-                    });
-                    return Ok(session_id);
+                    let spawned_entry = {
+                        let roster = self.roster.read().await;
+                        roster.get(&meerkat_id).cloned()
+                    }
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "auto-spawned member '{meerkat_id}' missing from roster after completion"
+                        ))
+                    })?;
+                    if spawned_entry.state != crate::roster::MemberState::Active {
+                        return Err(MobError::Internal(format!(
+                            "auto-spawned member '{meerkat_id}' is not active"
+                        )));
+                    }
+                    spawned_entry
+                } else {
+                    return Err(MobError::MeerkatNotFound(meerkat_id));
                 }
-                return Err(MobError::MeerkatNotFound(meerkat_id));
             }
         };
 
@@ -2815,6 +3443,7 @@ impl MobActor {
         meerkat_id: MeerkatId,
         message: meerkat_core::types::ContentInput,
     ) -> Result<SessionId, MobError> {
+        self.ensure_pending_spawn_alignment("handle_internal_turn preflight")?;
         let entry = {
             let roster = self.roster.read().await;
             roster
@@ -2842,6 +3471,7 @@ impl MobActor {
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
     ) -> Result<SessionId, MobError> {
+        self.ensure_pending_spawn_alignment("dispatch_member_turn preflight")?;
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let session_id = entry.member_ref.session_id().ok_or_else(|| {
@@ -2906,6 +3536,9 @@ impl MobActor {
         activation_params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
     ) -> Result<RunId, MobError> {
+        self.ensure_pending_spawn_alignment("handle_run_flow preflight")?;
+        self.ensure_flow_tracker_alignment("handle_run_flow preflight")
+            .await?;
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_id = self
             .flow_kernel
@@ -2914,10 +3547,49 @@ impl MobActor {
         if let Some(ref mut orch) = self.orchestrator
             && let Err(error) = orch.apply(MobOrchestratorInput::StartFlow)
         {
-            tracing::warn!(error = %error, "orchestrator StartFlow failed");
+            let reason =
+                format!("orchestrator StartFlow transition failed during flow admission: {error}");
+            if let Err(terminalize_error) = self
+                .flow_kernel
+                .terminalize_failed(run_id.clone(), config.flow_id.clone(), reason.clone())
+                .await
+            {
+                return Err(MobError::Internal(format!(
+                    "{reason}; additionally failed to terminalize pending run: {terminalize_error}"
+                )));
+            }
+            return Err(MobError::Internal(reason));
         }
         if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::StartRun) {
-            tracing::warn!(error = %error, "lifecycle StartRun failed");
+            let mut details = Vec::new();
+            if let Some(ref mut orch) = self.orchestrator
+                && let Err(rollback_error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+            {
+                details.push(format!(
+                    "orchestrator CompleteFlow rollback failed: {rollback_error}"
+                ));
+            }
+            if let Err(terminalize_error) = self
+                .flow_kernel
+                .terminalize_failed(
+                    run_id.clone(),
+                    config.flow_id.clone(),
+                    format!("lifecycle StartRun transition failed during flow admission: {error}"),
+                )
+                .await
+            {
+                details.push(format!(
+                    "terminalizing pending run failed: {terminalize_error}"
+                ));
+            }
+            let detail_suffix = if details.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", details.join("; "))
+            };
+            return Err(MobError::Internal(format!(
+                "lifecycle StartRun transition failed during flow admission: {error}{detail_suffix}"
+            )));
         }
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -2975,18 +3647,119 @@ impl MobActor {
             }
         });
         self.run_tasks.insert(run_id.clone(), handle);
+        self.ensure_flow_tracker_alignment("handle_run_flow completion")
+            .await?;
 
         Ok(run_id)
     }
 
+    async fn handle_flow_cleanup(
+        &mut self,
+        run_id: RunId,
+        context: &'static str,
+    ) -> Result<(), MobError> {
+        self.ensure_pending_spawn_alignment("handle_flow_cleanup preflight")?;
+        self.ensure_flow_tracker_alignment("handle_flow_cleanup preflight")
+            .await?;
+        let has_task = self.run_tasks.contains_key(&run_id);
+        let has_token = self.run_cancel_tokens.contains_key(&run_id);
+        let has_stream = self.flow_streams.lock().await.contains_key(&run_id);
+
+        if !has_task && !has_token && !has_stream {
+            let run_terminal = self
+                .run_store
+                .get_run(&run_id)
+                .await?
+                .as_ref()
+                .is_some_and(|run| run.status.is_terminal());
+            let authorities_expect_completion = self
+                .orchestrator
+                .as_ref()
+                .is_some_and(|orch| orch.can_accept(MobOrchestratorInput::CompleteFlow))
+                || self
+                    .lifecycle_authority
+                    .can_accept(MobLifecycleInput::FinishRun);
+            if authorities_expect_completion && !run_terminal {
+                return Err(MobError::Internal(format!(
+                    "{context}: received cleanup for run {run_id} with no local trackers while flow authorities still accept completion"
+                )));
+            }
+            tracing::debug!(
+                run_id = %run_id,
+                context = context,
+                "flow cleanup command had no local run-tracker entries"
+            );
+            return Ok(());
+        }
+
+        if let Some(ref mut orch) = self.orchestrator {
+            orch.apply(MobOrchestratorInput::CompleteFlow)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "{context}: orchestrator CompleteFlow transition failed for run {run_id}: {error}"
+                    ))
+                })?;
+        }
+        self.lifecycle_authority
+            .apply(MobLifecycleInput::FinishRun)
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "{context}: lifecycle FinishRun transition failed for run {run_id}: {error}"
+                ))
+            })?;
+
+        let _ = self.run_tasks.remove(&run_id);
+        let _ = self.run_cancel_tokens.remove(&run_id);
+        let _ = self.flow_streams.lock().await.remove(&run_id);
+        self.ensure_flow_tracker_alignment("handle_flow_cleanup completion")
+            .await?;
+        Ok(())
+    }
+
     async fn handle_cancel_flow(&mut self, run_id: RunId) -> Result<(), MobError> {
-        let Some((cancel_token, flow_id)) = self.run_cancel_tokens.remove(&run_id) else {
+        self.ensure_pending_spawn_alignment("handle_cancel_flow preflight")?;
+        let Some((cancel_token, flow_id)) = self
+            .run_cancel_tokens
+            .get(&run_id)
+            .map(|(token, flow_id)| (token.clone(), flow_id.clone()))
+        else {
+            if self.run_tasks.contains_key(&run_id)
+                || self.flow_streams.lock().await.contains_key(&run_id)
+            {
+                return Err(MobError::Internal(format!(
+                    "handle_cancel_flow: run {run_id} missing cancel token despite live task/stream trackers"
+                )));
+            }
+            self.ensure_flow_tracker_alignment("handle_cancel_flow no-op completion")
+                .await?;
             return Ok(());
         };
         self.flow_streams.lock().await.remove(&run_id);
         cancel_token.cancel();
 
         let Some(mut handle) = self.run_tasks.remove(&run_id) else {
+            self.flow_kernel.cancel_dispatched_steps(&run_id).await?;
+            self.flow_kernel
+                .terminalize_canceled(run_id.clone(), flow_id)
+                .await?;
+            if let Some(ref mut orch) = self.orchestrator {
+                orch.apply(MobOrchestratorInput::CompleteFlow)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "flow canceled cleanup (no task handle): orchestrator CompleteFlow transition failed for run {run_id}: {error}"
+                        ))
+                    })?;
+            }
+            self.lifecycle_authority
+                .apply(MobLifecycleInput::FinishRun)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "flow canceled cleanup (no task handle): lifecycle FinishRun transition failed for run {run_id}: {error}"
+                    ))
+                })?;
+            let _ = self.run_cancel_tokens.remove(&run_id);
+            self.ensure_flow_tracker_alignment("handle_cancel_flow no-task cleanup")
+                .await?;
             return Ok(());
         };
 
@@ -3001,13 +3774,26 @@ impl MobActor {
                 || std::time::Duration::from_secs(5),
                 std::time::Duration::from_millis,
             );
-        tokio::spawn(async move {
+        let cleanup_run_tracker = run_id.clone();
+        let cleanup_run_id_for_error = run_id.clone();
+        let cleanup_handle = tokio::spawn(async move {
             let cleanup_run_id = run_id.clone();
             let completed = tokio::select! {
                 _ = &mut handle => true,
                 () = tokio::time::sleep(cancel_grace_timeout) => false,
             };
             if completed {
+                if cleanup_tx
+                    .send(MobCommand::FlowCanceledCleanup {
+                        run_id: cleanup_run_id,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "failed to send FlowCanceledCleanup command after task completion"
+                    );
+                }
                 return;
             }
 
@@ -3034,50 +3820,62 @@ impl MobActor {
                 tracing::warn!("failed to send FlowCanceledCleanup command");
             }
         });
+        if let Some(replaced) = self.run_tasks.insert(cleanup_run_tracker, cleanup_handle) {
+            replaced.abort();
+            return Err(MobError::Internal(format!(
+                "handle_cancel_flow: duplicate flow cleanup task registration for run {cleanup_run_id_for_error}"
+            )));
+        }
+        self.ensure_flow_tracker_alignment("handle_cancel_flow completion")
+            .await?;
 
         Ok(())
     }
 
-    async fn cancel_all_flow_tasks(&mut self) {
-        let cancel_tokens = std::mem::take(&mut self.run_cancel_tokens);
-        let tasks = std::mem::take(&mut self.run_tasks);
-        for (_, handle) in tasks {
-            handle.abort();
-        }
-        for (run_id, (token, flow_id)) in cancel_tokens {
+    async fn cancel_all_flow_tasks(&mut self) -> Result<(), MobError> {
+        self.ensure_pending_spawn_alignment("cancel_all_flow_tasks preflight")?;
+        let tracked_run_ids = self.run_cancel_tokens.keys().cloned().collect::<Vec<_>>();
+        for run_id in tracked_run_ids {
+            let Some((token, flow_id)) = self
+                .run_cancel_tokens
+                .get(&run_id)
+                .map(|(token, flow_id)| (token.clone(), flow_id.clone()))
+            else {
+                continue;
+            };
+
             token.cancel();
+            if let Some(handle) = self.run_tasks.remove(&run_id) {
+                handle.abort();
+            }
             self.flow_streams.lock().await.remove(&run_id);
-            if let Err(error) = self.flow_kernel.cancel_dispatched_steps(&run_id).await {
-                tracing::error!(
-                    run_id = %run_id,
-                    error = %error,
-                    "failed to settle dispatched steps during lifecycle shutdown cancellation"
-                );
-            }
-            if let Err(error) = self
-                .flow_kernel
+
+            self.flow_kernel.cancel_dispatched_steps(&run_id).await?;
+            self.flow_kernel
                 .terminalize_canceled(run_id.clone(), flow_id.clone())
-                .await
-            {
-                tracing::error!(
-                    run_id = %run_id,
-                    flow_id = %flow_id,
-                    error = %error,
-                    "failed to finalize run cancellation during lifecycle shutdown"
-                );
+                .await?;
+
+            if let Some(ref mut orch) = self.orchestrator {
+                orch.apply(MobOrchestratorInput::CompleteFlow)
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "orchestrator CompleteFlow failed during bulk flow cancellation for run {run_id}: {error}"
+                        ))
+                    })?;
             }
-            if let Some(ref mut orch) = self.orchestrator
-                && let Err(error) = orch.apply(MobOrchestratorInput::CompleteFlow)
-            {
-                tracing::warn!(
-                    error = %error,
-                    "orchestrator CompleteFlow failed during bulk flow cancellation"
-                );
-            }
-            if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::FinishRun) {
-                tracing::warn!(error = %error, "lifecycle FinishRun failed during bulk flow cancellation");
-            }
+            self.lifecycle_authority
+                .apply(MobLifecycleInput::FinishRun)
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "lifecycle FinishRun failed during bulk flow cancellation for run {run_id}: {error}"
+                    ))
+                })?;
+
+            let _ = self.run_cancel_tokens.remove(&run_id);
         }
+        self.ensure_flow_tracker_alignment("cancel_all_flow_tasks completion")
+            .await?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -3093,14 +3891,15 @@ impl MobActor {
         &self,
         meerkat_id: &MeerkatId,
         wiring_targets: &[MeerkatId],
-    ) -> Result<(), MobError> {
+    ) -> (Vec<MeerkatId>, Option<MobError>) {
         if wiring_targets.is_empty() {
-            return Ok(());
+            return (Vec::new(), None);
         }
 
         const MAX_PARALLEL_SPAWN_WIRES: usize = 8;
         let mut in_flight = FuturesUnordered::new();
         let mut remaining = wiring_targets.iter().cloned();
+        let mut successful_targets = Vec::new();
         let mut first_error: Option<MobError> = None;
 
         for _ in 0..MAX_PARALLEL_SPAWN_WIRES {
@@ -3111,32 +3910,62 @@ impl MobActor {
         }
 
         while let Some(result) = in_flight.next().await {
-            if let Err(error) = result
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+            match result {
+                Ok(target_id) => successful_targets.push(target_id),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
             if let Some(target_id) = remaining.next() {
                 in_flight.push(self.wire_spawn_target(meerkat_id, target_id));
             }
         }
 
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
+        (successful_targets, first_error)
     }
 
     async fn wire_spawn_target(
         &self,
         meerkat_id: &MeerkatId,
         target_id: MeerkatId,
-    ) -> Result<(), MobError> {
+    ) -> Result<MeerkatId, MobError> {
+        let target_entry = {
+            let roster = self.roster.read().await;
+            match roster.wiring_edge_state(meerkat_id, &target_id) {
+                crate::roster::WiringEdgeState::Absent => {}
+                edge_state => {
+                    return Err(MobError::WiringError(format!(
+                        "role_wiring fan-out requires absent projected edge for {meerkat_id} <-> {target_id}, found {edge_state:?}"
+                    )));
+                }
+            }
+            roster
+                .get(&target_id)
+                .cloned()
+                .ok_or_else(|| MobError::MeerkatNotFound(target_id.clone()))?
+        };
+        let target_comms = self
+            .provisioner_comms(&target_entry.member_ref)
+            .await
+            .ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "role_wiring fan-out requires comms runtime for target '{target_id}'"
+                ))
+            })?;
+        if target_comms.public_key().is_none() {
+            return Err(MobError::WiringError(format!(
+                "role_wiring fan-out requires public key for target '{target_id}'"
+            )));
+        }
+
         self.do_wire(meerkat_id, &target_id).await.map_err(|e| {
             MobError::WiringError(format!(
                 "role_wiring fan-out failed for {meerkat_id} <-> {target_id}: {e}"
             ))
-        })
+        })?;
+        Ok(target_id)
     }
 
     /// Compensate a failed spawn wiring path to avoid partial state.
@@ -3145,6 +3974,7 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         profile_name: &ProfileName,
         member_ref: &MemberRef,
+        successful_wiring_targets: &[MeerkatId],
         planned_wiring_targets: &[MeerkatId],
     ) -> Result<(), MobError> {
         let retire_event_already_present = self.retire_event_exists(meerkat_id, member_ref).await?;
@@ -3153,13 +3983,10 @@ impl MobActor {
                 .await?;
         }
 
-        let wired_peers = {
-            let roster = self.roster.read().await;
-            roster
-                .get(meerkat_id)
-                .map(|entry| entry.wired_to.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        };
+        let mut wired_peers = successful_wiring_targets.to_vec();
+        wired_peers.sort();
+        wired_peers.dedup();
+
         let mut cleanup_peers = wired_peers.clone();
         for peer_id in planned_wiring_targets {
             if peer_id != meerkat_id && !cleanup_peers.contains(peer_id) {
@@ -3354,18 +4181,15 @@ impl MobActor {
 
     /// Internal wire operation (used by handle_wire and auto_wire/role_wiring).
     async fn do_wire(&self, a: &MeerkatId, b: &MeerkatId) -> Result<(), MobError> {
-        let _edge_guard = self.edge_locks.acquire(a.as_str(), b.as_str()).await;
-
-        {
-            let roster = self.roster.read().await;
-            if let Some(entry_a) = roster.get(a)
-                && entry_a.wired_to.contains(b)
-            {
-                return Ok(());
-            }
+        if a == b {
+            return Err(MobError::WiringError(format!(
+                "wire requires distinct members (got '{a}')"
+            )));
         }
 
-        let (entry_a, entry_b) = {
+        let _edge_guard = self.edge_locks.acquire(a.as_str(), b.as_str()).await;
+
+        let (entry_a, entry_b, a_has_b_edge, b_has_a_edge) = {
             let roster = self.roster.read().await;
             let ea = roster
                 .get(a)
@@ -3375,8 +4199,41 @@ impl MobActor {
                 .get(b)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
-            (ea, eb)
+            let a_has_b_edge = ea.wired_to.contains(b);
+            let b_has_a_edge = eb.wired_to.contains(a);
+            (ea, eb, a_has_b_edge, b_has_a_edge)
         };
+        if entry_a.state != crate::roster::MemberState::Active {
+            return Err(MobError::WiringError(format!(
+                "wire requires active member '{a}', found state {:?}",
+                &entry_a.state
+            )));
+        }
+        if entry_b.state != crate::roster::MemberState::Active {
+            return Err(MobError::WiringError(format!(
+                "wire requires active member '{b}', found state {:?}",
+                &entry_b.state
+            )));
+        }
+
+        if a_has_b_edge && b_has_a_edge {
+            // Roster projection already says "wired". Reconcile trust edges so
+            // stale/missing comms trust cannot hide behind a roster-only fast path.
+            self.reconcile_wire_trust_edges(a, &entry_a, b, &entry_b)
+                .await?;
+            self.debug_assert_roster_edge_symmetric(a, b, "do_wire/reconcile")
+                .await;
+            return Ok(());
+        }
+        if a_has_b_edge != b_has_a_edge {
+            tracing::warn!(
+                a = %a,
+                b = %b,
+                a_has_b_edge,
+                b_has_a_edge,
+                "wire found non-canonical roster projection; reapplying full wire path"
+            );
+        }
 
         // Establish bidirectional trust via comms (required).
         let comms_a = self
@@ -3486,10 +4343,84 @@ impl MobActor {
         // Update roster
         {
             let mut roster = self.roster.write().await;
-            roster.wire(a, b);
+            roster.wire_members(a, b);
         }
+        self.debug_assert_roster_edge_symmetric(a, b, "do_wire/post")
+            .await;
 
         Ok(())
+    }
+
+    async fn reconcile_wire_trust_edges(
+        &self,
+        a: &MeerkatId,
+        entry_a: &RosterEntry,
+        b: &MeerkatId,
+        entry_b: &RosterEntry,
+    ) -> Result<(), MobError> {
+        let comms_a = self
+            .provisioner_comms(&entry_a.member_ref)
+            .await
+            .ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "wire trust reconciliation requires comms runtime for '{a}'"
+                ))
+            })?;
+        let comms_b = self
+            .provisioner_comms(&entry_b.member_ref)
+            .await
+            .ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "wire trust reconciliation requires comms runtime for '{b}'"
+                ))
+            })?;
+        let key_a = comms_a.public_key().ok_or_else(|| {
+            MobError::WiringError(format!(
+                "wire trust reconciliation requires public key for '{a}'"
+            ))
+        })?;
+        let key_b = comms_b.public_key().ok_or_else(|| {
+            MobError::WiringError(format!(
+                "wire trust reconciliation requires public key for '{b}'"
+            ))
+        })?;
+        let comms_name_a = self.comms_name_for(entry_a);
+        let comms_name_b = self.comms_name_for(entry_b);
+        let spec_b = self
+            .provisioner
+            .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
+            .await?;
+        let spec_a = self
+            .provisioner
+            .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
+            .await?;
+
+        comms_a.add_trusted_peer(spec_b).await?;
+        comms_b.add_trusted_peer(spec_a).await?;
+        Ok(())
+    }
+
+    async fn debug_assert_roster_edge_symmetric(
+        &self,
+        a: &MeerkatId,
+        b: &MeerkatId,
+        context: &'static str,
+    ) {
+        let _ = (a, b, context);
+        #[cfg(debug_assertions)]
+        {
+            let roster = self.roster.read().await;
+            let a_has_b = roster
+                .get(a)
+                .is_some_and(|entry| entry.wired_to.contains(b));
+            let b_has_a = roster
+                .get(b)
+                .is_some_and(|entry| entry.wired_to.contains(a));
+            debug_assert_eq!(
+                a_has_b, b_has_a,
+                "roster wiring symmetry violated ({context}) for '{a}' <-> '{b}'"
+            );
+        }
     }
 
     /// Get the comms runtime for a session, if available.

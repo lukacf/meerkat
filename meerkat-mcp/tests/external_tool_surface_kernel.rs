@@ -68,6 +68,7 @@ fn external_tool_surface_kernel_add_and_reload_emit_canonical_deltas() {
     )
     .expect("apply add");
     let pending_add = effect_with_variant(&apply_add, "EmitExternalToolDelta");
+    let scheduled_add = effect_with_variant(&apply_add, "ScheduleSurfaceCompletion");
     assert_eq!(apply_add.transition, "ApplyBoundaryAdd");
     assert_eq!(pending_add.fields.get("operation"), Some(&string("Add")));
     assert_eq!(pending_add.fields.get("phase"), Some(&string("Pending")));
@@ -86,6 +87,23 @@ fn external_tool_surface_kernel_add_and_reload_emit_canonical_deltas() {
             "PendingSucceeded",
             vec![
                 ("surface_id", string("alpha")),
+                ("operation", string("Add")),
+                (
+                    "pending_task_sequence",
+                    scheduled_add
+                        .fields
+                        .get("pending_task_sequence")
+                        .expect("pending add task sequence")
+                        .clone(),
+                ),
+                (
+                    "staged_intent_sequence",
+                    scheduled_add
+                        .fields
+                        .get("staged_intent_sequence")
+                        .expect("pending add intent sequence")
+                        .clone(),
+                ),
                 ("applied_at_turn", KernelValue::U64(7)),
             ],
         ),
@@ -116,6 +134,7 @@ fn external_tool_surface_kernel_add_and_reload_emit_canonical_deltas() {
     )
     .expect("apply reload");
     let pending_reload = effect_with_variant(&apply_reload, "EmitExternalToolDelta");
+    let scheduled_reload = effect_with_variant(&apply_reload, "ScheduleSurfaceCompletion");
     assert_eq!(
         pending_reload.fields.get("operation"),
         Some(&string("Reload"))
@@ -128,6 +147,23 @@ fn external_tool_surface_kernel_add_and_reload_emit_canonical_deltas() {
             "PendingFailed",
             vec![
                 ("surface_id", string("alpha")),
+                ("operation", string("Reload")),
+                (
+                    "pending_task_sequence",
+                    scheduled_reload
+                        .fields
+                        .get("pending_task_sequence")
+                        .expect("pending reload task sequence")
+                        .clone(),
+                ),
+                (
+                    "staged_intent_sequence",
+                    scheduled_reload
+                        .fields
+                        .get("staged_intent_sequence")
+                        .expect("pending reload intent sequence")
+                        .clone(),
+                ),
                 ("applied_at_turn", KernelValue::U64(8)),
             ],
         ),
@@ -164,12 +200,30 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
         ),
     )
     .expect("apply add");
+    let scheduled_active = effect_with_variant(&apply_add, "ScheduleSurfaceCompletion");
     let active = external_tool_surface::transition(
         &apply_add.next_state,
         &input(
             "PendingSucceeded",
             vec![
                 ("surface_id", string("beta")),
+                ("operation", string("Add")),
+                (
+                    "pending_task_sequence",
+                    scheduled_active
+                        .fields
+                        .get("pending_task_sequence")
+                        .expect("pending active task sequence")
+                        .clone(),
+                ),
+                (
+                    "staged_intent_sequence",
+                    scheduled_active
+                        .fields
+                        .get("staged_intent_sequence")
+                        .expect("pending active intent sequence")
+                        .clone(),
+                ),
                 ("applied_at_turn", KernelValue::U64(10)),
             ],
         ),
@@ -259,12 +313,30 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
         ),
     )
     .expect("apply add gamma");
+    let scheduled_forced = effect_with_variant(&forced_state, "ScheduleSurfaceCompletion");
     let forced_state = external_tool_surface::transition(
         &forced_state.next_state,
         &input(
             "PendingSucceeded",
             vec![
                 ("surface_id", string("gamma")),
+                ("operation", string("Add")),
+                (
+                    "pending_task_sequence",
+                    scheduled_forced
+                        .fields
+                        .get("pending_task_sequence")
+                        .expect("pending forced task sequence")
+                        .clone(),
+                ),
+                (
+                    "staged_intent_sequence",
+                    scheduled_forced
+                        .fields
+                        .get("staged_intent_sequence")
+                        .expect("pending forced intent sequence")
+                        .clone(),
+                ),
                 ("applied_at_turn", KernelValue::U64(12)),
             ],
         ),

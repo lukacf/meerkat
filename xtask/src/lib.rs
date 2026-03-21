@@ -3,6 +3,7 @@ pub mod machines;
 #[cfg(not(feature = "machine-authority"))]
 #[path = "machines_test_support.rs"]
 pub mod machines;
+pub mod ownership_ledger;
 pub mod protocol_codegen;
 pub mod public_contracts;
 pub mod rmat_audit;
@@ -13,6 +14,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::machines::{SelectionArgs, VerifyArgs};
+use crate::ownership_ledger::OwnershipLedgerArgs;
 use crate::rmat_audit::RmatAuditArgs;
 
 #[derive(Debug, Parser)]
@@ -37,6 +39,8 @@ enum Commands {
     ProtocolCodegen,
     #[command(name = "rmat-audit")]
     RmatAudit(RmatAuditArgs),
+    #[command(name = "ownership-ledger")]
+    OwnershipLedger(OwnershipLedgerArgs),
 }
 
 pub fn run() -> Result<()> {
@@ -47,5 +51,6 @@ pub fn run() -> Result<()> {
         Commands::SeamInventory => seam_inventory::run_seam_inventory(),
         Commands::ProtocolCodegen => protocol_codegen::run_protocol_codegen(),
         Commands::RmatAudit(args) => rmat_audit::rmat_audit(args),
+        Commands::OwnershipLedger(args) => ownership_ledger::run_ownership_ledger(args),
     }
 }

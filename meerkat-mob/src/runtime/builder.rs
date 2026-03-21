@@ -25,7 +25,7 @@ enum BuilderMode {
 }
 
 struct RuntimeWiring {
-    roster: Arc<RwLock<Roster>>,
+    roster: Arc<RwLock<RosterAuthority>>,
     task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
     mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
@@ -314,7 +314,7 @@ impl MobBuilder {
 
         // Prepare shared runtime components early so resume reconciliation can
         // wire tool dispatchers for recreated sessions to the final actor channel.
-        let roster_state = Arc::new(RwLock::new(Roster::new()));
+        let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
         let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
         let state = Arc::new(AtomicU8::new(resumed_state as u8));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
@@ -369,7 +369,7 @@ impl MobBuilder {
             .await?;
         }
 
-        *wiring.roster.write().await = roster;
+        *wiring.roster.write().await = RosterAuthority::from_roster(roster);
         *wiring.task_board.write().await = task_board;
 
         Ok(Self::start_runtime_with_components(
@@ -609,7 +609,7 @@ impl MobBuilder {
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
     ) -> MobHandle {
-        let roster = Arc::new(RwLock::new(initial_roster));
+        let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
         let state = Arc::new(AtomicU8::new(initial_state as u8));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
@@ -781,8 +781,7 @@ impl MobBuilder {
             retired_event_index: Arc::new(RwLock::new(HashSet::new())),
             autonomous_host_loops: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             next_spawn_ticket: 0,
-            pending_spawns: BTreeMap::new(),
-            pending_spawn_tasks: BTreeMap::new(),
+            pending_spawns: PendingSpawnLineage::new(),
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             session_service: handle_session_service,

@@ -204,9 +204,10 @@ machine-check-drift: xtask-build
 	$(XTASK_BIN) machine-check-drift --all
 
 # RMAT structural seam audit: protocol coverage, feedback constraints,
-# terminal mapping, and heuristic authority hygiene checks.
+# terminal mapping, ownership-ledger drift, and heuristic authority hygiene checks.
 rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
+	$(CARGO) run -p xtask -- ownership-ledger --check-drift
 	$(CARGO) run -p xtask -- rmat-audit --strict
 
 # Generate documentation
@@ -407,7 +408,7 @@ help:
 	@echo "  $(GREEN)ci-smoke$(NC)       - Run CI smoke pipeline (no full feature matrices)"
 	@echo "  $(GREEN)machine-verify$(NC)- Verify machine/composition authority artifacts"
 	@echo "  $(GREEN)machine-check-drift$(NC)- Check generated authority artifacts for drift"
-	@echo "  $(GREEN)rmat-audit$(NC)    - Run RMAT structural seam audit (strict mode)"
+	@echo "  $(GREEN)rmat-audit$(NC)    - Run RMAT + ownership-ledger audit gates (strict mode)"
 	@echo "  $(GREEN)verify-version$(NC)- Verify Cargo.toml version matches git tag"
 	@echo ""
 	@echo "Release targets:"

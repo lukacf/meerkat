@@ -2,6 +2,14 @@
 //!
 //! The `Roster` is a projection built from `MeerkatSpawned`, `MeerkatRetired`,
 //! `PeersWired`, and `PeersUnwired` events.
+//!
+//! Projection contract:
+//! - `Roster` is not canonical transport/comms trust truth.
+//! - Canonical wiring side effects (trust edges, notifications, lock discipline)
+//!   are performed by runtime orchestration.
+//! - `Roster` stores the event/projected peer graph used for read surfaces and
+//!   consistency checks.
+//! - `wire`/`unwire`/`remove` are projection mutations only.
 
 use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{MeerkatId, ProfileName};
@@ -41,6 +49,18 @@ pub struct RosterEntry {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+}
+
+/// Directed projection presence state for an undirected peer edge.
+///
+/// This reflects only roster-projected `wired_to` membership; it does not
+/// imply comms trust/runtime side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WiringEdgeState {
+    Absent,
+    AOnly,
+    BOnly,
+    Bidirectional,
 }
 
 /// Parameters for adding a new member to the roster.
@@ -129,7 +149,10 @@ impl Roster {
             .is_none()
     }
 
-    /// Remove a meerkat from the roster. Also removes it from all peer wiring sets.
+    /// Remove a meerkat from the roster projection.
+    ///
+    /// Projection-only behavior: this prunes `wired_to` references from peers
+    /// but does not perform runtime trust-edge teardown.
     pub fn remove(&mut self, meerkat_id: &MeerkatId) {
         if self.entries.remove(meerkat_id).is_some() {
             // Remove this meerkat from all other entries' wired_to sets
@@ -139,7 +162,10 @@ impl Roster {
         }
     }
 
-    /// Wire two meerkats together (bidirectional).
+    /// Wire two meerkats in the roster projection (bidirectional set update).
+    ///
+    /// Projection-only behavior: caller is responsible for canonical runtime
+    /// trust establishment and lifecycle/event ordering.
     pub fn wire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         if let Some(entry_a) = self.entries.get_mut(a) {
             entry_a.wired_to.insert(b.clone());
@@ -149,13 +175,84 @@ impl Roster {
         }
     }
 
-    /// Unwire two meerkats (bidirectional).
+    /// Unwire two meerkats in the roster projection (bidirectional set update).
+    ///
+    /// Projection-only behavior: caller is responsible for canonical runtime
+    /// trust removal and lifecycle/event ordering.
     pub fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         if let Some(entry_a) = self.entries.get_mut(a) {
             entry_a.wired_to.remove(b);
         }
         if let Some(entry_b) = self.entries.get_mut(b) {
             entry_b.wired_to.remove(a);
+        }
+    }
+
+    /// Returns true if both members currently have reciprocal projected edges.
+    pub fn has_bidirectional_edge(&self, a: &MeerkatId, b: &MeerkatId) -> bool {
+        matches!(self.wiring_edge_state(a, b), WiringEdgeState::Bidirectional)
+    }
+
+    /// Returns the directed projection presence state for edge `(a, b)`.
+    pub fn wiring_edge_state(&self, a: &MeerkatId, b: &MeerkatId) -> WiringEdgeState {
+        let a_has_b = self
+            .entries
+            .get(a)
+            .is_some_and(|entry| entry.wired_to.contains(b));
+        let b_has_a = self
+            .entries
+            .get(b)
+            .is_some_and(|entry| entry.wired_to.contains(a));
+        match (a_has_b, b_has_a) {
+            (false, false) => WiringEdgeState::Absent,
+            (true, false) => WiringEdgeState::AOnly,
+            (false, true) => WiringEdgeState::BOnly,
+            (true, true) => WiringEdgeState::Bidirectional,
+        }
+    }
+
+    /// Returns `true` when every projected edge is reciprocal and endpoint-present.
+    pub fn is_wiring_projection_consistent(&self) -> bool {
+        self.wiring_projection_inconsistencies().is_empty()
+    }
+
+    /// Returns canonicalized endpoint pairs with projection inconsistencies.
+    ///
+    /// An inconsistency means:
+    /// - an entry references a missing peer, or
+    /// - a directed edge is not reciprocated.
+    pub fn wiring_projection_inconsistencies(&self) -> Vec<(MeerkatId, MeerkatId)> {
+        let mut inconsistencies = BTreeSet::<(MeerkatId, MeerkatId)>::new();
+        for (a_id, a_entry) in &self.entries {
+            for b_id in &a_entry.wired_to {
+                let reciprocal = self
+                    .entries
+                    .get(b_id)
+                    .is_some_and(|b_entry| b_entry.wired_to.contains(a_id));
+                if !reciprocal {
+                    let pair = if a_id <= b_id {
+                        (a_id.clone(), b_id.clone())
+                    } else {
+                        (b_id.clone(), a_id.clone())
+                    };
+                    inconsistencies.insert(pair);
+                }
+            }
+        }
+        inconsistencies.into_iter().collect()
+    }
+
+    /// Debug-only assertion helper for projection consistency checks.
+    pub fn debug_assert_wiring_projection_consistent(&self) {
+        let _ = self;
+        #[cfg(debug_assertions)]
+        {
+            let inconsistencies = self.wiring_projection_inconsistencies();
+            debug_assert!(
+                inconsistencies.is_empty(),
+                "roster wiring projection is inconsistent: {:?}",
+                inconsistencies
+            );
         }
     }
 

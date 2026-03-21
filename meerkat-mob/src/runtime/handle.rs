@@ -2,6 +2,7 @@ use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::ops::OperationId;
+use meerkat_core::service::SessionError;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +137,103 @@ pub struct HelperResult {
     pub session_id: Option<meerkat_core::types::SessionId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalMemberStatus {
+    Unknown,
+    Active,
+    Retiring,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalSessionObservation {
+    Active,
+    Inactive,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobMemberTerminalClass {
+    Running,
+    TerminalUnknown,
+    TerminalCompleted,
+}
+
+struct MobMemberTerminalClassifier;
+
+impl MobMemberTerminalClassifier {
+    fn classify(material: &CanonicalMemberSnapshotMaterial) -> MobMemberTerminalClass {
+        if !material.member_present {
+            return MobMemberTerminalClass::TerminalUnknown;
+        }
+        match material.status {
+            // Retiring remains non-terminal while canonical roster membership
+            // still exists, even if the session read is already inactive/missing.
+            CanonicalMemberStatus::Retiring => MobMemberTerminalClass::Running,
+            CanonicalMemberStatus::Active => match material.session_observation {
+                CanonicalSessionObservation::Active | CanonicalSessionObservation::Unknown => {
+                    MobMemberTerminalClass::Running
+                }
+                CanonicalSessionObservation::Inactive | CanonicalSessionObservation::Missing => {
+                    MobMemberTerminalClass::TerminalCompleted
+                }
+            },
+            CanonicalMemberStatus::Completed => MobMemberTerminalClass::TerminalCompleted,
+            CanonicalMemberStatus::Unknown => MobMemberTerminalClass::TerminalUnknown,
+        }
+    }
+
+    fn is_terminal(material: &CanonicalMemberSnapshotMaterial) -> bool {
+        matches!(
+            Self::classify(material),
+            MobMemberTerminalClass::TerminalUnknown | MobMemberTerminalClass::TerminalCompleted
+        )
+    }
+
+    fn has_canonical_member(material: &CanonicalMemberSnapshotMaterial) -> bool {
+        material.member_present
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalMemberSnapshotMaterial {
+    member_present: bool,
+    status: CanonicalMemberStatus,
+    session_observation: CanonicalSessionObservation,
+    output_preview: Option<String>,
+    tokens_used: u64,
+    current_session_id: Option<SessionId>,
+}
+
+impl CanonicalMemberSnapshotMaterial {
+    fn to_snapshot(&self) -> MobMemberSnapshot {
+        let status = match self.status {
+            CanonicalMemberStatus::Unknown => MobMemberStatus::Unknown,
+            CanonicalMemberStatus::Active => MobMemberStatus::Active,
+            CanonicalMemberStatus::Retiring => MobMemberStatus::Retiring,
+            CanonicalMemberStatus::Completed => MobMemberStatus::Completed,
+        };
+        let is_final = MobMemberTerminalClassifier::is_terminal(self);
+        MobMemberSnapshot {
+            status,
+            output_preview: self.output_preview.clone(),
+            error: None,
+            tokens_used: self.tokens_used,
+            is_final,
+            current_session_id: self.current_session_id.clone(),
+        }
+    }
+
+    fn to_helper_result(&self) -> HelperResult {
+        HelperResult {
+            output: self.output_preview.clone(),
+            tokens_used: self.tokens_used,
+            session_id: self.current_session_id.clone(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MobHandle
 // ---------------------------------------------------------------------------
@@ -148,7 +246,7 @@ pub struct HelperResult {
 #[derive(Clone)]
 pub struct MobHandle {
     pub(super) command_tx: mpsc::Sender<MobCommand>,
-    pub(super) roster: Arc<RwLock<Roster>>,
+    pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) task_board: Arc<RwLock<TaskBoard>>,
     pub(super) definition: Arc<MobDefinition>,
     pub(super) state: Arc<AtomicU8>,
@@ -349,7 +447,7 @@ impl MobHandle {
 
     /// Snapshot of the current roster.
     pub async fn roster(&self) -> Roster {
-        self.roster.read().await.clone()
+        self.roster.read().await.snapshot()
     }
 
     /// List active (operational) members in the roster.
@@ -690,6 +788,10 @@ impl MobHandle {
         meerkat_id: MeerkatId,
         initial_message: Option<String>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
+        let old_session_id_before = self
+            .canonical_member_snapshot_material(&meerkat_id)
+            .await
+            .current_session_id;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Respawn {
@@ -699,9 +801,41 @@ impl MobHandle {
             })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
-        reply_rx
+        let reply = reply_rx
             .await
-            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?;
+        let mut receipt = match reply {
+            Ok(receipt) => receipt,
+            Err(MobRespawnError::TopologyRestoreFailed {
+                mut receipt,
+                failed_peer_ids,
+            }) => {
+                if receipt.old_session_id.is_none() {
+                    receipt.old_session_id = old_session_id_before;
+                }
+                let post_material = self
+                    .canonical_member_snapshot_material(&receipt.member_id)
+                    .await;
+                if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
+                    receipt.new_session_id = post_material.current_session_id;
+                }
+                return Err(MobRespawnError::TopologyRestoreFailed {
+                    receipt,
+                    failed_peer_ids,
+                });
+            }
+            Err(err) => return Err(err),
+        };
+        if receipt.old_session_id.is_none() {
+            receipt.old_session_id = old_session_id_before;
+        }
+        let post_material = self
+            .canonical_member_snapshot_material(&receipt.member_id)
+            .await;
+        if MobMemberTerminalClassifier::has_canonical_member(&post_material) {
+            receipt.new_session_id = post_material.current_session_id;
+        }
+        Ok(receipt)
     }
 
     /// Retire all roster members concurrently in a single actor command.
@@ -749,7 +883,14 @@ impl MobHandle {
         meerkat_id: MeerkatId,
         message: impl Into<meerkat_core::types::ContentInput>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        self.member(&meerkat_id).await?.internal_turn(message).await
+        let session_id = self
+            .internal_turn_for_member(meerkat_id.clone(), message.into())
+            .await?;
+        Ok(MemberDeliveryReceipt {
+            member_id: meerkat_id,
+            session_id,
+            handling_mode: HandlingMode::Queue,
+        })
     }
 
     pub(super) async fn external_turn_for_member(
@@ -987,94 +1128,118 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
+    async fn canonical_member_snapshot_material(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> CanonicalMemberSnapshotMaterial {
+        // Canonical helper-surface classification is derived only from roster
+        // membership/state plus session-service activity, never side tables.
+        let (roster_state, current_session_id) = {
+            let roster = self.roster.read().await;
+            match roster.get(meerkat_id) {
+                Some(entry) => (Some(entry.state), entry.member_ref.session_id().cloned()),
+                None => (None, None),
+            }
+        };
+
+        match (roster_state, current_session_id) {
+            (None, _) => CanonicalMemberSnapshotMaterial {
+                member_present: false,
+                status: CanonicalMemberStatus::Unknown,
+                session_observation: CanonicalSessionObservation::Missing,
+                output_preview: None,
+                tokens_used: 0,
+                current_session_id: None,
+            },
+            (Some(crate::roster::MemberState::Retiring), None) => CanonicalMemberSnapshotMaterial {
+                member_present: true,
+                status: CanonicalMemberStatus::Retiring,
+                session_observation: CanonicalSessionObservation::Missing,
+                output_preview: None,
+                tokens_used: 0,
+                current_session_id: None,
+            },
+            (Some(crate::roster::MemberState::Active), None) => CanonicalMemberSnapshotMaterial {
+                member_present: true,
+                status: CanonicalMemberStatus::Completed,
+                session_observation: CanonicalSessionObservation::Missing,
+                output_preview: None,
+                tokens_used: 0,
+                current_session_id: None,
+            },
+            (Some(roster_state), Some(session_id)) => {
+                let (output_preview, tokens_used, observation) =
+                    match self.session_service.read(&session_id).await {
+                        Ok(view) => (
+                            view.state.last_assistant_text.clone(),
+                            view.billing.total_tokens,
+                            if view.state.is_active {
+                                CanonicalSessionObservation::Active
+                            } else {
+                                CanonicalSessionObservation::Inactive
+                            },
+                        ),
+                        Err(SessionError::NotFound { .. }) => {
+                            (None, 0, CanonicalSessionObservation::Missing)
+                        }
+                        Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
+                    };
+                let status = match observation {
+                    CanonicalSessionObservation::Active => match roster_state {
+                        crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
+                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
+                    },
+                    CanonicalSessionObservation::Inactive
+                    | CanonicalSessionObservation::Missing => match roster_state {
+                        crate::roster::MemberState::Active => CanonicalMemberStatus::Completed,
+                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
+                    },
+                    // Transport/read faults are not terminal truth.
+                    CanonicalSessionObservation::Unknown => match roster_state {
+                        crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
+                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
+                    },
+                };
+                CanonicalMemberSnapshotMaterial {
+                    member_present: true,
+                    status,
+                    session_observation: observation,
+                    output_preview,
+                    tokens_used,
+                    current_session_id: Some(session_id),
+                }
+            }
+        }
+    }
+
+    async fn wait_one_material(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Result<CanonicalMemberSnapshotMaterial, MobError> {
+        loop {
+            let material = self.canonical_member_snapshot_material(meerkat_id).await;
+            if MobMemberTerminalClassifier::is_terminal(&material) {
+                return Ok(material);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     /// Get a point-in-time execution snapshot for a member.
     pub async fn member_status(
         &self,
         meerkat_id: &MeerkatId,
     ) -> Result<MobMemberSnapshot, MobError> {
-        let roster = self.roster.read().await;
-        let entry = roster.get(meerkat_id);
-        let Some(entry) = entry else {
-            return Ok(MobMemberSnapshot {
-                status: MobMemberStatus::Unknown,
-                output_preview: None,
-                error: None,
-                tokens_used: 0,
-                is_final: true,
-                current_session_id: None,
-            });
-        };
-        let status = match entry.state {
-            crate::roster::MemberState::Active => MobMemberStatus::Active,
-            crate::roster::MemberState::Retiring => MobMemberStatus::Retiring,
-        };
-        let session_id = entry.member_ref.session_id().cloned();
-        drop(roster);
-
-        let (output_preview, tokens_used, is_active) = if let Some(ref sid) = session_id {
-            match self.session_service.read(sid).await {
-                Ok(view) => {
-                    let output = view.state.last_assistant_text.clone();
-                    let tokens = view.billing.total_tokens;
-                    let active = view.state.is_active;
-                    (output, tokens, active)
-                }
-                Err(_) => (None, 0, false),
-            }
-        } else {
-            (None, 0, false)
-        };
-
-        // A member is final when its session is no longer active. The roster
-        // may still show Active (not yet retired), but the session completing
-        // is the authoritative signal.
-        let effective_status = if !is_active && status == MobMemberStatus::Active {
-            MobMemberStatus::Completed
-        } else {
-            status
-        };
-        let is_final = !is_active;
-        Ok(MobMemberSnapshot {
-            status: effective_status,
-            output_preview,
-            error: None,
-            tokens_used,
-            is_final,
-            current_session_id: session_id,
-        })
+        let material = self.canonical_member_snapshot_material(meerkat_id).await;
+        Ok(material.to_snapshot())
     }
 
     /// Wait for a specific member to reach a terminal state, then return its snapshot.
     ///
-    /// Polls the session state until the member is no longer active.
+    /// Polls canonical member classification until terminal.
     pub async fn wait_one(&self, meerkat_id: &MeerkatId) -> Result<MobMemberSnapshot, MobError> {
-        loop {
-            let snapshot = self.member_status(meerkat_id).await?;
-            if snapshot.is_final || snapshot.status == MobMemberStatus::Unknown {
-                return Ok(snapshot);
-            }
-            // Check if session is still active
-            let roster = self.roster.read().await;
-            let session_id = roster
-                .get(meerkat_id)
-                .and_then(|e| e.member_ref.session_id().cloned());
-            drop(roster);
-
-            if let Some(sid) = session_id {
-                match self.session_service.read(&sid).await {
-                    Ok(view) if !view.state.is_active => {
-                        return self.member_status(meerkat_id).await;
-                    }
-                    Err(_) => {
-                        return self.member_status(meerkat_id).await;
-                    }
-                    _ => {}
-                }
-            } else {
-                return self.member_status(meerkat_id).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        let material = self.wait_one_material(meerkat_id).await?;
+        Ok(material.to_snapshot())
     }
 
     /// Wait for all specified members to reach terminal states.
@@ -1084,10 +1249,13 @@ impl MobHandle {
     ) -> Result<Vec<MobMemberSnapshot>, MobError> {
         let futs = meerkat_ids
             .iter()
-            .map(|id| self.wait_one(id))
+            .map(|id| self.wait_one_material(id))
             .collect::<Vec<_>>();
         let results = futures::future::join_all(futs).await;
-        results.into_iter().collect()
+        results
+            .into_iter()
+            .map(|result| result.map(|material| material.to_snapshot()))
+            .collect()
     }
 
     /// Collect snapshots for all members that have reached terminal states.
@@ -1128,15 +1296,11 @@ impl MobHandle {
         spec.tool_access_policy = options.tool_access_policy;
         spec.auto_wire_parent = true;
 
-        let member_ref = self.spawn_spec(spec).await?;
-        let snapshot = self.wait_one(&meerkat_id).await?;
+        self.spawn_spec(spec).await?;
+        let terminal_material = self.wait_one_material(&meerkat_id).await?;
         let _ = self.retire(meerkat_id.clone()).await;
 
-        Ok(HelperResult {
-            output: snapshot.output_preview,
-            tokens_used: snapshot.tokens_used,
-            session_id: member_ref.session_id().cloned(),
-        })
+        Ok(terminal_material.to_helper_result())
     }
 
     /// Fork from an existing member's context, wait for completion, retire, and return.
@@ -1169,15 +1333,11 @@ impl MobHandle {
             fork_context,
         };
 
-        let member_ref = self.spawn_spec(spec).await?;
-        let snapshot = self.wait_one(&meerkat_id).await?;
+        self.spawn_spec(spec).await?;
+        let terminal_material = self.wait_one_material(&meerkat_id).await?;
         let _ = self.retire(meerkat_id.clone()).await;
 
-        Ok(HelperResult {
-            output: snapshot.output_preview,
-            tokens_used: snapshot.tokens_used,
-            session_id: member_ref.session_id().cloned(),
-        })
+        Ok(terminal_material.to_helper_result())
     }
 }
 

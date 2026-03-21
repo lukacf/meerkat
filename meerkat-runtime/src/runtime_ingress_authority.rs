@@ -1817,6 +1817,22 @@ impl RuntimeIngressAuthority {
             let lifecycle = fields.lifecycle.get(wid).copied();
             match lifecycle {
                 Some(InputLifecycleState::Accepted) => {
+                    fields
+                        .lifecycle
+                        .insert(wid.clone(), InputLifecycleState::Queued);
+                    let hm = fields.handling_mode.get(wid).copied();
+                    match hm {
+                        Some(HandlingMode::Steer) => {
+                            if !fields.steer_queue.contains(wid) {
+                                fields.steer_queue.insert(0, wid.clone());
+                            }
+                        }
+                        _ => {
+                            if !fields.queue.contains(wid) {
+                                fields.queue.insert(0, wid.clone());
+                            }
+                        }
+                    }
                     // Check if this is an Ignore+OnAccept input that should be consumed
                     let should_consume = fields
                         .policy_snapshot
@@ -1837,6 +1853,22 @@ impl RuntimeIngressAuthority {
                     }
                 }
                 Some(InputLifecycleState::Staged) => {
+                    fields
+                        .lifecycle
+                        .insert(wid.clone(), InputLifecycleState::Queued);
+                    let hm = fields.handling_mode.get(wid).copied();
+                    match hm {
+                        Some(HandlingMode::Steer) => {
+                            if !fields.steer_queue.contains(wid) {
+                                fields.steer_queue.insert(0, wid.clone());
+                            }
+                        }
+                        _ => {
+                            if !fields.queue.contains(wid) {
+                                fields.queue.insert(0, wid.clone());
+                            }
+                        }
+                    }
                     effects.push(RuntimeIngressEffect::RecoverRollback {
                         work_id: wid.clone(),
                     });
@@ -2491,6 +2523,63 @@ mod tests {
         assert!(auth.current_run().is_none());
         assert!(auth.queue().contains(&w1));
         assert!(auth.wake_requested());
+    }
+
+    #[test]
+    fn recover_requeues_admitted_recovered_accepted_input() {
+        let mut auth = RuntimeIngressAuthority::new();
+        let w1 = InputId::new();
+
+        auth.apply(RuntimeIngressInput::AdmitRecovered {
+            work_id: w1.clone(),
+            content_shape: ContentShape("text".into()),
+            handling_mode: HandlingMode::Queue,
+            lifecycle_state: InputLifecycleState::Accepted,
+            policy: test_policy(),
+            request_id: None,
+            reservation_key: None,
+        })
+        .expect("admit recovered accepted input should succeed");
+
+        let transition = auth
+            .apply(RuntimeIngressInput::Recover)
+            .expect("recover should succeed");
+
+        assert_eq!(auth.lifecycle_state(&w1), Some(InputLifecycleState::Queued));
+        assert!(auth.queue().contains(&w1));
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            RuntimeIngressEffect::RecoverRollback { work_id } if work_id == &w1
+        )));
+    }
+
+    #[test]
+    fn recover_requeues_admitted_recovered_staged_input_without_current_run() {
+        let mut auth = RuntimeIngressAuthority::new();
+        let w1 = InputId::new();
+
+        auth.apply(RuntimeIngressInput::AdmitRecovered {
+            work_id: w1.clone(),
+            content_shape: ContentShape("text".into()),
+            handling_mode: HandlingMode::Steer,
+            lifecycle_state: InputLifecycleState::Staged,
+            policy: test_policy(),
+            request_id: None,
+            reservation_key: None,
+        })
+        .expect("admit recovered staged input should succeed");
+
+        let transition = auth
+            .apply(RuntimeIngressInput::Recover)
+            .expect("recover should succeed");
+
+        assert_eq!(auth.lifecycle_state(&w1), Some(InputLifecycleState::Queued));
+        assert!(auth.steer_queue().contains(&w1));
+        assert!(!auth.queue().contains(&w1));
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            RuntimeIngressEffect::RecoverRollback { work_id } if work_id == &w1
+        )));
     }
 
     // ---- SetSilentIntentOverrides ----

@@ -89,16 +89,16 @@ fn strip_images_from_messages(messages: &[Message]) -> Vec<Message> {
 
 impl Compactor for DefaultCompactor {
     fn should_compact(&self, ctx: &CompactionContext) -> bool {
-        // Never compact on the first turn
-        if ctx.current_turn == 0 {
+        // Never compact on the first-ever session LLM boundary.
+        if ctx.session_boundary_index == 0 {
             return false;
         }
 
-        // Loop guard: enforce minimum turns between compactions.
-        // Use saturating_sub to prevent underflow when last_compaction_turn
-        // comes from an earlier run and current_turn has reset.
-        if let Some(last) = ctx.last_compaction_turn
-            && ctx.current_turn.saturating_sub(last) < self.config.min_turns_between_compactions
+        // Loop guard: enforce minimum session-scoped boundaries between
+        // compactions. Session boundary indices do not reset across runs.
+        if let Some(last) = ctx.last_compaction_boundary_index
+            && ctx.session_boundary_index.saturating_sub(last)
+                < u64::from(self.config.min_turns_between_compactions)
         {
             return false;
         }
@@ -201,8 +201,8 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
-            last_compaction_turn: None,
-            current_turn: 0,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 0,
         };
         assert!(!c.should_compact(&ctx));
     }
@@ -214,10 +214,23 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
-            last_compaction_turn: Some(5),
-            current_turn: 7, // Only 2 turns since last compaction, threshold is 3
+            last_compaction_boundary_index: Some(5),
+            session_boundary_index: 7, // Only 2 boundaries since last compaction, threshold is 3
         };
         assert!(!c.should_compact(&ctx));
+    }
+
+    #[test]
+    fn test_should_compact_follow_up_run_boundary_zero_no_longer_special() {
+        let c = DefaultCompactor::new(make_config());
+        let ctx = CompactionContext {
+            last_input_tokens: 200_000,
+            message_count: 100,
+            estimated_history_tokens: 200_000,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 1,
+        };
+        assert!(c.should_compact(&ctx));
     }
 
     #[test]
@@ -229,8 +242,8 @@ mod tests {
             last_input_tokens: 100_000,
             message_count: 50,
             estimated_history_tokens: 50_000,
-            last_compaction_turn: None,
-            current_turn: 5,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
         };
         assert!(c.should_compact(&ctx));
 
@@ -239,8 +252,8 @@ mod tests {
             last_input_tokens: 50_000,
             message_count: 50,
             estimated_history_tokens: 100_000,
-            last_compaction_turn: None,
-            current_turn: 5,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
         };
         assert!(c.should_compact(&ctx2));
     }

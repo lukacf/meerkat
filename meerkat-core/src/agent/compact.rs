@@ -3,7 +3,10 @@
 //! Called from the agent state machine when a compactor is configured and
 //! the threshold is met.
 
-use crate::compact::{CompactionContext, Compactor};
+use crate::Session;
+use crate::compact::{
+    CompactionContext, Compactor, SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
+};
 use crate::event::AgentEvent;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -44,8 +47,8 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
 pub fn build_compaction_context(
     messages: &[Message],
     last_input_tokens: u64,
-    last_compaction_turn: Option<u32>,
-    current_turn: u32,
+    last_compaction_boundary_index: Option<u64>,
+    session_boundary_index: u64,
 ) -> CompactionContext {
     let estimated_history_tokens = match estimate_tokens(messages) {
         Ok(tokens) => tokens,
@@ -59,9 +62,42 @@ pub fn build_compaction_context(
         last_input_tokens,
         message_count: messages.len(),
         estimated_history_tokens,
-        last_compaction_turn,
-        current_turn,
+        last_compaction_boundary_index,
+        session_boundary_index,
     }
+}
+
+/// Best-effort count of prior LLM boundaries for older sessions that do not
+/// yet carry explicit cadence metadata.
+fn infer_session_boundary_index(messages: &[Message]) -> u64 {
+    messages
+        .iter()
+        .filter(|message| matches!(message, Message::BlockAssistant(_)))
+        .count() as u64
+}
+
+/// Load persisted compaction cadence from session metadata, falling back to
+/// transcript-derived history for pre-migration sessions.
+pub fn load_compaction_cadence(session: &Session) -> SessionCompactionCadence {
+    session
+        .metadata()
+        .get(SESSION_COMPACTION_CADENCE_KEY)
+        .and_then(|value| serde_json::from_value::<SessionCompactionCadence>(value.clone()).ok())
+        .unwrap_or_else(|| SessionCompactionCadence {
+            session_boundary_index: infer_session_boundary_index(session.messages()),
+            last_compaction_boundary_index: None,
+        })
+}
+
+/// Persist compaction cadence so reused/resumed sessions preserve their
+/// session-scoped compaction behavior.
+pub fn persist_compaction_cadence(
+    session: &mut Session,
+    cadence: &SessionCompactionCadence,
+) -> Result<(), serde_json::Error> {
+    let value = serde_json::to_value(cadence)?;
+    session.set_metadata(SESSION_COMPACTION_CADENCE_KEY, value);
+    Ok(())
 }
 
 /// Run the compaction flow.
@@ -76,7 +112,7 @@ pub async fn run_compaction<C>(
     compactor: &Arc<dyn Compactor>,
     messages: &[Message],
     last_input_tokens: u64,
-    current_turn: u32,
+    session_boundary_index: u64,
     event_tx: &Option<mpsc::Sender<AgentEvent>>,
     event_tap: &crate::event_tap::EventTap,
 ) -> Result<CompactionOutcome, CompactionError>
@@ -187,7 +223,7 @@ where
         new_messages: result.messages,
         discarded: result.discarded,
         summary_usage,
-        current_turn,
+        session_boundary_index,
     })
 }
 
@@ -199,6 +235,51 @@ pub struct CompactionOutcome {
     pub discarded: Vec<Message>,
     /// Usage from the summary LLM call.
     pub summary_usage: Usage,
-    /// Turn at which compaction occurred.
-    pub current_turn: u32,
+    /// Session boundary index at which compaction occurred.
+    pub session_boundary_index: u64,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::types::{AssistantBlock, BlockAssistantMessage, StopReason, Usage, UserMessage};
+
+    #[test]
+    fn load_compaction_cadence_infers_boundary_count_from_existing_history() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("first")));
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "ok".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+        }));
+        session.push(Message::User(UserMessage::text("second")));
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "done".to_string(),
+                meta: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+        }));
+        session.record_usage(Usage::default());
+
+        let cadence = load_compaction_cadence(&session);
+        assert_eq!(cadence.session_boundary_index, 2);
+        assert_eq!(cadence.last_compaction_boundary_index, None);
+    }
+
+    #[test]
+    fn persisted_compaction_cadence_round_trips_through_session_metadata() {
+        let mut session = Session::new();
+        let cadence = SessionCompactionCadence {
+            session_boundary_index: 7,
+            last_compaction_boundary_index: Some(4),
+        };
+        persist_compaction_cadence(&mut session, &cadence).unwrap();
+
+        assert_eq!(load_compaction_cadence(&session), cadence);
+    }
 }

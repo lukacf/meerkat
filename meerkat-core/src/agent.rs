@@ -16,6 +16,7 @@ use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
     StreamError, StreamScope, TrustedPeerSpec,
 };
+use crate::compact::SessionCompactionCadence;
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
 use crate::event::ExternalToolDelta;
@@ -486,8 +487,8 @@ where
     pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     /// Input tokens from the last LLM response (for compaction trigger).
     pub(crate) last_input_tokens: u64,
-    /// Turn number when compaction last occurred.
-    pub(crate) last_compaction_turn: Option<u32>,
+    /// Session-scoped compaction cadence tracked across runs.
+    pub(crate) compaction_cadence: SessionCompactionCadence,
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     /// Optional skill engine for per-turn `/skill-ref` activation.
@@ -518,7 +519,7 @@ where
     /// Optional shared lifecycle registry for async operations.
     ///
     /// When set, the agent loop waits on the exact turn-local operation IDs
-    /// registered in `turn_authority.pending_op_ids()`.
+    /// registered in `turn_authority.pending_op_refs()`.
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Machine authority for turn-execution state transitions (RMAT).
     pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,

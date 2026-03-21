@@ -139,12 +139,13 @@ where
                     self.drain_comms_inbox().await;
                 }
                 TurnExecutionEffect::CheckCompaction => {
+                    let current_boundary_index = self.compaction_cadence.session_boundary_index;
                     if let Some(ref compactor) = self.compactor {
                         let ctx = crate::agent::compact::build_compaction_context(
                             self.session.messages(),
                             self.last_input_tokens,
-                            self.last_compaction_turn,
-                            turn_count,
+                            self.compaction_cadence.last_compaction_boundary_index,
+                            current_boundary_index,
                         );
                         if compactor.should_compact(&ctx) {
                             let outcome = crate::agent::compact::run_compaction(
@@ -152,7 +153,7 @@ where
                                 compactor,
                                 self.session.messages(),
                                 self.last_input_tokens,
-                                turn_count,
+                                current_boundary_index,
                                 event_tx,
                                 &self.event_tap,
                             )
@@ -163,7 +164,8 @@ where
                                 self.session.record_usage(outcome.summary_usage.clone());
                                 self.budget.record_usage(&outcome.summary_usage);
                                 self.last_input_tokens = 0;
-                                self.last_compaction_turn = Some(turn_count);
+                                self.compaction_cadence.last_compaction_boundary_index =
+                                    Some(outcome.session_boundary_index);
 
                                 if let Some(ref memory_store) = self.memory_store {
                                     let store = std::sync::Arc::clone(memory_store);
@@ -192,6 +194,20 @@ where
                                 }
                             }
                         }
+                    }
+                    self.compaction_cadence.session_boundary_index = self
+                        .compaction_cadence
+                        .session_boundary_index
+                        .saturating_add(1);
+                    let cadence = self.compaction_cadence.clone();
+                    if let Err(error) = crate::agent::compact::persist_compaction_cadence(
+                        self.session_mut(),
+                        &cadence,
+                    ) {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to persist session compaction cadence metadata"
+                        );
                     }
                 }
                 _ => {}
@@ -251,7 +267,7 @@ where
                 self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
                     run_id: run_id.clone(),
                 })?;
-                return Ok(self.build_result(turn_count, tool_call_count).await);
+                return self.build_result(turn_count, tool_call_count).await;
             }
 
             // Check budget
@@ -265,7 +281,7 @@ where
                 self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
                     run_id: run_id.clone(),
                 })?;
-                return Ok(self.build_result(turn_count, tool_call_count).await);
+                return self.build_result(turn_count, tool_call_count).await;
             }
 
             match self.state {
@@ -819,17 +835,22 @@ where
                             tool_call_count += 1;
                         }
 
-                        let pending_op_ids = tool_results.iter().fold(
-                            Vec::<crate::ops::OperationId>::new(),
+                        let pending_op_refs = tool_results.iter().fold(
+                            Vec::<crate::ops::AsyncOpRef>::new(),
                             |mut acc, result| {
                                 for op_id in &result.operation_ids {
-                                    if !acc.contains(op_id) {
-                                        acc.push(op_id.clone());
+                                    if !acc.iter().any(|r| r.operation_id == *op_id) {
+                                        // Normal tool-call ops are always barrier —
+                                        // they must resolve before the turn boundary.
+                                        acc.push(crate::ops::AsyncOpRef::barrier(op_id.clone()));
                                     }
                                 }
                                 acc
                             },
                         );
+                        let has_barrier_ops = pending_op_refs
+                            .iter()
+                            .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
 
                         // Add tool results to session
                         self.session.push(Message::ToolResults {
@@ -838,16 +859,13 @@ where
 
                         self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
                             run_id: run_id.clone(),
-                            operation_ids: pending_op_ids,
+                            op_refs: pending_op_refs,
+                            has_barrier_ops,
                         })?;
 
-                        if self
-                            .turn_authority
-                            .pending_op_ids()
-                            .is_some_and(|pending| !pending.is_empty())
-                        {
+                        if self.turn_authority.has_barrier_ops() {
                             // Stay in WaitingForOps — the outer match arm will
-                            // await completion via the machine-owned wait-set.
+                            // await completion of barrier ops via wait-set.
                             continue;
                         }
 
@@ -1069,30 +1087,41 @@ where
                     }
                 }
                 LoopState::WaitingForOps => {
-                    // Await completion of all pending async operations via the
-                    // machine-owned turn-local wait-set.
-                    match self.turn_authority.pending_op_ids() {
-                        Some(ids) if !ids.is_empty() => {
-                            if let Some(ref registry) = self.ops_lifecycle {
-                                let _results = registry.wait_all(ids).await.map_err(|e| {
-                                    AgentError::InternalError(format!(
-                                        "ops lifecycle wait_all failed: {e}"
-                                    ))
-                                })?;
-                            } else {
-                                return Err(AgentError::InternalError(
-                                    "pending_op_ids registered without ops_lifecycle registry"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                        Some(_) => {}
-                        None => {
+                    // Await completion of all pending barrier operations via
+                    // the machine-owned turn-local wait-set. Only barrier ops
+                    // block the turn; detached ops run independently.
+                    if self.turn_authority.pending_op_refs().is_none() {
+                        return Err(AgentError::InternalError(
+                            "WaitingForOps entered without registered pending_op_refs".to_string(),
+                        ));
+                    }
+                    let barrier_ids = self.turn_authority.barrier_op_ids();
+                    if !barrier_ids.is_empty() {
+                        let owned_ids: Vec<crate::ops::OperationId> =
+                            barrier_ids.iter().map(|id| (*id).clone()).collect();
+                        if let Some(ref registry) = self.ops_lifecycle {
+                            let _results = registry.wait_all(&owned_ids).await.map_err(|e| {
+                                AgentError::InternalError(format!(
+                                    "ops lifecycle wait_all failed: {e}"
+                                ))
+                            })?;
+                        } else {
                             return Err(AgentError::InternalError(
-                                "WaitingForOps entered without registered pending_op_ids"
-                                    .to_string(),
+                                "barrier ops registered without ops_lifecycle registry".to_string(),
                             ));
                         }
+                        // Feed OpsBarrierSatisfied through the generated protocol
+                        // helper so the obligation token enforces the handoff.
+                        use crate::generated::protocol_ops_barrier_satisfaction::{
+                            accept_wait_all_satisfied, submit_ops_barrier_satisfied,
+                        };
+                        let obligation = accept_wait_all_satisfied(owned_ids);
+                        let transition = submit_ops_barrier_satisfied(
+                            &mut self.turn_authority,
+                            obligation,
+                            run_id.clone(),
+                        )?;
+                        self.state = transition.next_phase.to_loop_state();
                     }
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
                         run_id: run_id.clone(),
@@ -1116,7 +1145,7 @@ where
                     self.apply_turn_input(TurnExecutionInput::CancellationObserved {
                         run_id: run_id.clone(),
                     })?;
-                    return Ok(self.build_result(turn_count, tool_call_count).await);
+                    return self.build_result(turn_count, tool_call_count).await;
                 }
                 LoopState::ErrorRecovery => {
                     // Attempt recovery
@@ -1126,23 +1155,37 @@ where
                     self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
                 LoopState::Completed => {
-                    return Ok(self.build_result(turn_count, tool_call_count).await);
+                    return self.build_result(turn_count, tool_call_count).await;
                 }
             }
         }
     }
 
-    /// Build a RunResult from current state
-    async fn build_result(&self, turns: u32, tool_calls: u32) -> RunResult {
-        RunResult {
-            text: self.session.last_assistant_text().unwrap_or_default(),
-            session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
-            turns,
-            tool_calls,
-            structured_output: None,
-            schema_warnings: None,
-            skill_diagnostics: self.collect_skill_diagnostics().await,
+    /// Build a RunResult from current state, using the generated terminal
+    /// classification to decide Ok vs Err.
+    async fn build_result(&self, turns: u32, tool_calls: u32) -> Result<RunResult, AgentError> {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+
+        let outcome = self.turn_authority.terminal_outcome();
+        let classification = classify_terminal(&outcome);
+
+        match classification {
+            Some(SurfaceResultClass::HardFailure) => Err(AgentError::TerminalFailure {
+                outcome: format!("{outcome:?}"),
+            }),
+            _ => {
+                // Success, Cancelled, or no terminal outcome yet (early exit)
+                Ok(RunResult {
+                    text: self.session.last_assistant_text().unwrap_or_default(),
+                    session_id: self.session.id().clone(),
+                    usage: self.session.total_usage(),
+                    turns,
+                    tool_calls,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: self.collect_skill_diagnostics().await,
+                })
+            }
         }
     }
 
@@ -1229,6 +1272,7 @@ mod tests {
     use super::rewrite_assistant_text;
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::budget::{Budget, BudgetLimits};
+    use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::skills::{
         ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillId,
@@ -1462,6 +1506,109 @@ mod tests {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+    }
+
+    struct CompactionAwareLlmClient {
+        last_user_messages: Mutex<Vec<String>>,
+    }
+
+    impl CompactionAwareLlmClient {
+        fn new() -> Self {
+            Self {
+                last_user_messages: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_last_user_messages(&self) -> Vec<String> {
+            self.last_user_messages.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CompactionAwareLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.last_user_messages
+                .lock()
+                .unwrap()
+                .push(last_user.clone());
+
+            let text = if last_user == "COMPACT NOW" {
+                "summary".to_string()
+            } else {
+                "ok".to_string()
+            };
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text { text, meta: None }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    struct TrackingCompactor {
+        compact_on_boundary: Option<u64>,
+        seen_contexts: Mutex<Vec<CompactionContext>>,
+    }
+
+    impl TrackingCompactor {
+        fn new(compact_on_boundary: Option<u64>) -> Self {
+            Self {
+                compact_on_boundary,
+                seen_contexts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_boundaries(&self) -> Vec<u64> {
+            self.seen_contexts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|ctx| ctx.session_boundary_index)
+                .collect()
+        }
+    }
+
+    impl Compactor for TrackingCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            self.seen_contexts.lock().unwrap().push(ctx.clone());
+            self.compact_on_boundary == Some(ctx.session_boundary_index)
+        }
+
+        fn compaction_prompt(&self) -> &str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], _summary: &str) -> CompactionResult {
+            CompactionResult {
+                messages: messages.to_vec(),
+                discarded: Vec::new(),
+            }
         }
     }
 
@@ -1723,6 +1870,29 @@ mod tests {
         AgentBuilder::new()
             .build(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await
+    }
+
+    #[tokio::test]
+    async fn reused_session_follow_up_run_can_compact_before_first_llm_call() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(TrackingCompactor::new(Some(1)));
+        let mut agent = AgentBuilder::new()
+            .compactor(compactor.clone())
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        assert_eq!(compactor.seen_boundaries(), vec![0, 1]);
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec![
+                "first".to_string(),
+                "COMPACT NOW".to_string(),
+                "second".to_string()
+            ]
+        );
     }
 
     #[tokio::test]

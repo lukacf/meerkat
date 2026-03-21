@@ -30,6 +30,7 @@ pub mod event;
 pub mod event_injector;
 pub mod event_tap;
 pub mod gateway;
+pub mod generated;
 pub mod hooks;
 pub mod interaction;
 pub mod lifecycle;
@@ -74,7 +75,10 @@ pub use comms_drain_lifecycle_authority::{
     CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainLifecycleTransition,
     CommsDrainMode, CommsDrainPhase, DrainExitReason,
 };
-pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
+pub use compact::{
+    CompactionConfig, CompactionContext, CompactionResult, Compactor,
+    SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
+};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;
 
@@ -122,9 +126,9 @@ pub use lifecycle::{
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use ops::{
-    ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,
-    OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec, ToolAccessPolicy,
-    WorkKind,
+    AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
+    OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec,
+    ToolAccessPolicy, WaitPolicy, WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,

@@ -961,7 +961,7 @@ pub struct CompactionRuntimeConfig {
     pub recent_turn_budget: usize,
     /// Maximum tokens for the compaction summary response.
     pub max_summary_tokens: u32,
-    /// Minimum turns between compactions.
+    /// Minimum session-scoped pre-LLM boundaries between compactions.
     pub min_turns_between_compactions: u32,
 }
 

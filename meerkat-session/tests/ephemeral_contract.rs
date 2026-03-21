@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::compact::{CompactionContext, CompactionResult, Compactor};
 use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
@@ -385,6 +386,8 @@ impl AgentLlmClient for RecordingLlmClient {
 }
 
 type RealInnerAgent = Agent<RecordingLlmClient, StaticToolDispatcher, NoopSessionStore>;
+type CompactionInnerAgent =
+    Agent<CompactionTrackingLlmClient, StaticToolDispatcher, NoopSessionStore>;
 
 struct RealSessionAgent {
     agent: RealInnerAgent,
@@ -453,11 +456,209 @@ impl SessionAgent for RealSessionAgent {
     }
 }
 
+struct CompactionSessionAgent {
+    agent: CompactionInnerAgent,
+}
+
+#[async_trait]
+impl SessionAgent for CompactionSessionAgent {
+    async fn run_with_events(
+        &mut self,
+        prompt: meerkat_core::types::ContentInput,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.agent.run_with_events(prompt, event_tx).await
+    }
+
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+        self.agent.pending_skill_references = refs;
+    }
+
+    fn set_flow_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .set_flow_tool_overlay(overlay)
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+    }
+
+    fn cancel(&mut self) {
+        self.agent.cancel();
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.agent.session().id().clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        let session = self.agent.session();
+        SessionSnapshot {
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            total_tokens: session.total_tokens(),
+            usage: session.total_usage(),
+            last_assistant_text: session.last_assistant_text(),
+        }
+    }
+
+    fn session_clone(&self) -> meerkat_core::Session {
+        self.agent.session_with_system_context_state()
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        self.agent
+            .session_mut()
+            .append_system_context_blocks(appends);
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        self.agent.system_context_state()
+    }
+}
+
 struct RealAgentBuilder {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     provider_visible_system_prompts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     llm_delay_ms: Option<u64>,
     hook_engine: Option<Arc<dyn HookEngine>>,
+}
+
+struct CompactionTrackingLlmClient {
+    seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl AgentLlmClient for CompactionTrackingLlmClient {
+    async fn stream_response(
+        &self,
+        messages: &[meerkat_core::types::Message],
+        _tools: &[Arc<ToolDef>],
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<&Value>,
+    ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
+        let last_user = messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                meerkat_core::types::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.seen_last_user_messages
+            .lock()
+            .expect("seen_last_user_messages lock poisoned")
+            .push(last_user.clone());
+
+        let text = if last_user == "COMPACT NOW" {
+            "summary".to_string()
+        } else {
+            "ok".to_string()
+        };
+
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text { text, meta: None }],
+            StopReason::EndTurn,
+            Usage::default(),
+        ))
+    }
+
+    fn provider(&self) -> &'static str {
+        "compaction-mock"
+    }
+}
+
+struct TrackingCompactor {
+    compact_on_boundary: Option<u64>,
+    seen_contexts: Arc<std::sync::Mutex<Vec<CompactionContext>>>,
+}
+
+impl TrackingCompactor {
+    fn new(compact_on_boundary: Option<u64>) -> Self {
+        Self {
+            compact_on_boundary,
+            seen_contexts: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn seen_boundaries(&self) -> Vec<u64> {
+        self.seen_contexts
+            .lock()
+            .expect("seen_contexts lock poisoned")
+            .iter()
+            .map(|ctx| ctx.session_boundary_index)
+            .collect()
+    }
+}
+
+impl Compactor for TrackingCompactor {
+    fn should_compact(&self, ctx: &CompactionContext) -> bool {
+        self.seen_contexts
+            .lock()
+            .expect("seen_contexts lock poisoned")
+            .push(ctx.clone());
+        self.compact_on_boundary == Some(ctx.session_boundary_index)
+    }
+
+    fn compaction_prompt(&self) -> &str {
+        "COMPACT NOW"
+    }
+
+    fn max_summary_tokens(&self) -> u32 {
+        32
+    }
+
+    fn rebuild_history(
+        &self,
+        messages: &[meerkat_core::types::Message],
+        _summary: &str,
+    ) -> CompactionResult {
+        CompactionResult {
+            messages: messages.to_vec(),
+            discarded: Vec::new(),
+        }
+    }
+}
+
+struct CompactionAgentBuilder {
+    seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
+    compactor: Arc<TrackingCompactor>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for CompactionAgentBuilder {
+    type Agent = CompactionSessionAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<CompactionSessionAgent, SessionError> {
+        let mut builder = AgentBuilder::new()
+            .model(req.model.clone())
+            .compactor(self.compactor.clone());
+        if let Some(max_tokens) = req.max_tokens {
+            builder = builder.max_tokens_per_turn(max_tokens);
+        }
+        if let Some(system_prompt) = &req.system_prompt {
+            builder = builder.system_prompt(system_prompt.clone());
+        }
+
+        let client = Arc::new(CompactionTrackingLlmClient {
+            seen_last_user_messages: Arc::clone(&self.seen_last_user_messages),
+        });
+        let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
+        let store = Arc::new(NoopSessionStore);
+        let agent = builder.build(client, tools, store).await;
+        Ok(CompactionSessionAgent { agent })
+    }
 }
 
 #[async_trait]
@@ -628,6 +829,42 @@ async fn test_start_turn_on_existing_session() {
         .await
         .unwrap();
     assert!(result2.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
+async fn test_follow_up_start_turn_can_compact_before_first_llm_call() {
+    let seen_last_user_messages = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let compactor = Arc::new(TrackingCompactor::new(Some(1)));
+    let service = Arc::new(EphemeralSessionService::new(
+        CompactionAgentBuilder {
+            seen_last_user_messages: Arc::clone(&seen_last_user_messages),
+            compactor: Arc::clone(&compactor),
+        },
+        10,
+    ));
+
+    let created = service
+        .create_session(create_req("first"))
+        .await
+        .expect("initial session run should succeed");
+
+    service
+        .start_turn(&created.session_id, turn_req("follow up"))
+        .await
+        .expect("follow-up start_turn should succeed");
+
+    assert_eq!(compactor.seen_boundaries(), vec![0, 1]);
+    assert_eq!(
+        seen_last_user_messages
+            .lock()
+            .expect("seen_last_user_messages lock poisoned")
+            .clone(),
+        vec![
+            "first".to_string(),
+            "COMPACT NOW".to_string(),
+            "follow up".to_string()
+        ]
+    );
 }
 
 #[tokio::test]

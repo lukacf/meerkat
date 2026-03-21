@@ -209,6 +209,7 @@ impl AgentBuilder {
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
         let tool_scope = ToolScope::new(tools.tools());
+        let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
         let mut agent = Agent {
             config: self.config,
@@ -226,7 +227,7 @@ impl AgentBuilder {
             hook_run_overrides: self.hook_run_overrides,
             compactor: self.compactor,
             last_input_tokens: 0,
-            last_compaction_turn: None,
+            compaction_cadence,
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,

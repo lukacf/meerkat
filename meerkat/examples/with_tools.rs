@@ -14,7 +14,7 @@ use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
     ToolResult,
 };
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use meerkat_store::JsonlStore;
 use meerkat_store::StoreAdapter;
 use schemars::JsonSchema;
@@ -52,7 +52,7 @@ impl AgentToolDispatcher for MathToolDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: BinaryMathArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -61,11 +61,7 @@ impl AgentToolDispatcher for MathToolDispatcher {
             "multiply" => json!(args.a * args.b),
             _ => return Err(ToolError::not_found(call.name)),
         };
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            value.to_string(),
-            false,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
     }
 }
 

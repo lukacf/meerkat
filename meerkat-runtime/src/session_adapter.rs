@@ -977,6 +977,9 @@ impl RuntimeSessionAdapter {
     /// Wait for a session's comms drain task to finish.
     ///
     /// Returns immediately if no drain is active for the session.
+    /// If the task already notified the authority (normal exit), this is a no-op
+    /// for authority state. If the task panicked without notifying, this submits
+    /// `TaskExited { Failed }` as a safety net.
     pub async fn wait_comms_drain(&self, session_id: &SessionId) {
         let handle = {
             let mut slots = self.comms_drain_slots.write().await;
@@ -986,6 +989,31 @@ impl RuntimeSessionAdapter {
         };
         if let Some(handle) = handle {
             let _ = handle.await;
+        }
+        // Safety net: if the authority is still Running after the task exited,
+        // the task panicked without notifying. Submit Failed to prevent the
+        // authority from being stuck in Running forever.
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id) {
+            if slot.authority.phase()
+                == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
+            {
+                tracing::warn!(
+                    "comms_drain: task exited without notifying authority (likely panicked), \
+                     submitting Failed safety net"
+                );
+                match protocol_comms_drain_spawn::notify_running_task_exited(
+                    &mut slot.authority,
+                    DrainExitReason::Failed,
+                ) {
+                    Ok(effects) => {
+                        apply_runtime_drain_effects(slot, &effects);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "comms drain authority rejected safety-net TaskExited");
+                    }
+                }
+            }
         }
     }
 }

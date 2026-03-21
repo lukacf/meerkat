@@ -9,7 +9,6 @@ use std::borrow::Cow;
 use std::fmt;
 use uuid::Uuid;
 
-use crate::ops::OperationId;
 use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning};
 
 // ===========================================================================
@@ -780,13 +779,6 @@ pub struct ToolResult {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
-    /// Async operations started by this tool call.
-    ///
-    /// This is canonical turn-local wait-set input. Shell code may use it to
-    /// register exactly which operations belong to the current `WaitingForOps`
-    /// phase instead of re-deriving membership from a global registry.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub operation_ids: Vec<OperationId>,
 }
 
 impl ToolResult {
@@ -796,7 +788,6 @@ impl ToolResult {
             tool_use_id,
             content: ContentBlock::text_vec(content),
             is_error,
-            operation_ids: Vec::new(),
         }
     }
 
@@ -806,7 +797,6 @@ impl ToolResult {
             tool_use_id: tool_call.id.clone(),
             content: ContentBlock::text_vec(content),
             is_error,
-            operation_ids: Vec::new(),
         }
     }
 
@@ -816,14 +806,7 @@ impl ToolResult {
             tool_use_id,
             content,
             is_error,
-            operation_ids: Vec::new(),
         }
-    }
-
-    /// Attach async operation IDs to this tool result.
-    pub fn with_operation_ids(mut self, operation_ids: Vec<OperationId>) -> Self {
-        self.operation_ids = operation_ids;
-        self
     }
 
     /// Get concatenated text content (text projection for all blocks).

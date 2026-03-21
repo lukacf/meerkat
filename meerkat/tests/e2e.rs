@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use schemars::JsonSchema;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -215,7 +215,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }
@@ -249,13 +249,13 @@ impl AgentToolDispatcher for MockToolDispatcher {
         self.tools.iter().map(Arc::clone).collect::<Vec<_>>().into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let content = self
             .results
             .get(call.name)
             .cloned()
             .ok_or_else(|| ToolError::not_found(call.name))?;
-        Ok(ToolResult::new(call.id.to_string(), content, false))
+        Ok(ToolResult::new(call.id.to_string(), content, false).into())
     }
 }
 
@@ -497,12 +497,14 @@ mod tool_invocation {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let args: Value = serde_json::from_str(call.args.get())
                 .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
             // Call the tool through the router
             match self.router.call_tool(call.name, &args).await {
-                Ok(blocks) => Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)),
+                Ok(blocks) => {
+                    Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
+                }
                 Err(e) => Err(ToolError::execution_failed(e.to_string())),
             }
         }
@@ -1028,7 +1030,7 @@ mod parallel_tools {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let start = std::time::Instant::now();
 
             // Simulate network/processing delay
@@ -1069,7 +1071,7 @@ mod parallel_tools {
                 Value::String(s) => s.clone(),
                 _ => serde_json::to_string(&value).unwrap_or_default(),
             };
-            Ok(ToolResult::new(call.id.to_string(), content, false))
+            Ok(ToolResult::new(call.id.to_string(), content, false).into())
         }
     }
 
@@ -1254,7 +1256,10 @@ mod parallel_tools {
                 .into()
             }
 
-            async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
                 // Simulate some processing time
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -1275,7 +1280,7 @@ mod parallel_tools {
                     Value::String(s) => s.clone(),
                     _ => serde_json::to_string(&value).unwrap_or_default(),
                 };
-                Ok(ToolResult::new(call.id.to_string(), content, false))
+                Ok(ToolResult::new(call.id.to_string(), content, false).into())
             }
         }
 

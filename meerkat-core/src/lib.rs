@@ -128,12 +128,12 @@ pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpSe
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
     OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec,
-    ToolAccessPolicy, WaitPolicy, WorkKind,
+    ToolAccessPolicy, ToolDispatchOutcome, WaitPolicy, WorkKind,
 };
 pub use ops_lifecycle::{
     OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
     OperationProgressUpdate, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
-    OpsLifecycleRegistry,
+    OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};

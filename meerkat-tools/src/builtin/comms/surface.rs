@@ -63,7 +63,10 @@ impl AgentToolDispatcher for CommsToolSurface {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let is_comms = self.tool_defs.iter().any(|t| t.name == call.name);
         if !is_comms {
             return Err(ToolError::NotFound {
@@ -76,11 +79,7 @@ impl AgentToolDispatcher for CommsToolSurface {
         let result = handle_tools_call(&self.tool_context, call.name, &args)
             .await
             .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            result.to_string(),
-            false,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
     }
 }
 

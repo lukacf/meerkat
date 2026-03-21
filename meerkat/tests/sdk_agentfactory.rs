@@ -12,6 +12,7 @@ use meerkat::{
 };
 use meerkat_client::LlmClient;
 use meerkat_core::ToolCallView;
+use meerkat_core::ToolDispatchOutcome;
 use meerkat_tools::schema_for;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -92,17 +93,13 @@ impl AgentToolDispatcher for RecordingDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         self.called.store(true, Ordering::SeqCst);
         let args: EchoInput = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let payload = json!({ "message": args.message, "tool": call.name });
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            payload.to_string(),
-            false,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), payload.to_string(), false).into())
     }
 }
 

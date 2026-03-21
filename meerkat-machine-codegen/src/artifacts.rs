@@ -3774,6 +3774,11 @@ impl<'a> CompositionTlaCompiler<'a> {
                     RouteBindingSource::Literal(expr) => {
                         compiler.render_expr_with_types(expr, next_env, binding_env, binding_types)
                     }
+                    RouteBindingSource::OwnerProvided => {
+                        // Owner-provided bindings are nondeterministic in the TLA model —
+                        // the owner actor chooses the value at runtime.
+                        format!("owner_provided_{}", tla_ident(&binding.to_field))
+                    }
                 };
                 (binding.to_field.clone(), expr)
             })

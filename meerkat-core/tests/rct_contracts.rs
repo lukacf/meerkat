@@ -422,13 +422,9 @@ impl AgentToolDispatcher for MockDispatcher {
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
-    ) -> Result<ToolResult, meerkat_core::ToolError> {
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         let value = json!({"dispatched": call.name});
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            value.to_string(),
-            false,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
     }
 }
 

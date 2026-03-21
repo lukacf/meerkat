@@ -23,7 +23,7 @@ use meerkat::{
     HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, ToolDef,
     ToolError, ToolResult,
 };
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use meerkat_hooks::{DefaultHookEngine, RuntimeHookResponse};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use schemars::JsonSchema;
@@ -54,7 +54,7 @@ impl AgentToolDispatcher for WeatherDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             "get_weather" => {
                 let args: WeatherArgs = call
@@ -67,11 +67,7 @@ impl AgentToolDispatcher for WeatherDispatcher {
                     "unit": "celsius",
                     "condition": "partly cloudy",
                 });
-                Ok(ToolResult::new(
-                    call.id.to_string(),
-                    result.to_string(),
-                    false,
-                ))
+                Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
             }
             _ => Err(ToolError::not_found(call.name)),
         }

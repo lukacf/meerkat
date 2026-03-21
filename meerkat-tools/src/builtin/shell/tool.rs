@@ -484,13 +484,16 @@ impl BuiltinTool for ShellTool {
         )?))
     }
 
-    fn operation_ids_for_output(&self, output: &ToolOutput) -> Vec<OperationId> {
+    fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {
         match output {
             ToolOutput::Json(value) => value
                 .get("operation_id")
                 .and_then(Value::as_str)
                 .and_then(|raw| serde_json::from_str::<OperationId>(&format!("\"{raw}\"")).ok())
                 .into_iter()
+                // Shell background jobs are detached — they run independently
+                // and do not block the turn boundary.
+                .map(meerkat_core::ops::AsyncOpRef::detached)
                 .collect(),
             ToolOutput::Blocks(_) => Vec::new(),
         }

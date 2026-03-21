@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 
@@ -54,7 +55,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         self.tools.clone()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let request_id = self.next_id();
         let arguments: serde_json::Value = serde_json::from_str(call.args.get()).map_err(|e| {
             ToolError::invalid_arguments(call.name, format!("malformed tool-call arguments: {e}"))
@@ -118,11 +119,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             ToolError::execution_failed(format!("Failed to parse callback result: {e}"))
         })?;
 
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            parsed.content,
-            parsed.is_error,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into())
     }
 }
 

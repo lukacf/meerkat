@@ -6344,7 +6344,7 @@ mod tests {
         SessionError, SessionInfo, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
     };
     use meerkat_core::types::{RunResult, Usage};
-    use meerkat_core::{ToolCallView, ToolDef, ToolResult};
+    use meerkat_core::{ToolCallView, ToolDef, ToolDispatchOutcome, ToolResult};
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::pin::Pin;
@@ -6397,7 +6397,7 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
         }
     }
@@ -6431,13 +6431,11 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|tool| tool.name == call.name) {
-                return Ok(ToolResult::new(
-                    call.id.to_string(),
-                    self.content.clone(),
-                    false,
-                ));
+                return Ok(
+                    ToolResult::new(call.id.to_string(), self.content.clone(), false).into(),
+                );
             }
             Err(ToolError::not_found(call.name))
         }
@@ -8556,7 +8554,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             })
             .await
             .expect("dispatch should succeed");
-        assert_eq!(result.text_content(), "primary");
+        assert_eq!(result.result.text_content(), "primary");
     }
 
     #[tokio::test]
@@ -8643,8 +8641,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             })
             .await
             .expect("tool dispatch should succeed");
-        assert!(!out.is_error, "tool returned error: {}", out.text_content());
-        serde_json::from_str(&out.text_content()).expect("tool content should be valid json")
+        assert!(
+            !out.result.is_error,
+            "tool returned error: {}",
+            out.result.text_content()
+        );
+        serde_json::from_str(&out.result.text_content()).expect("tool content should be valid json")
     }
 
     #[tokio::test]

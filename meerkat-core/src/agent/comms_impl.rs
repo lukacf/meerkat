@@ -335,7 +335,7 @@ mod tests {
     use crate::comms::{PeerDirectoryEntry, PeerDirectorySource, PeerName};
     use crate::error::{AgentError, LlmFailureReason};
     use crate::session::Session;
-    use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult};
+    use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef};
     use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::Arc;
@@ -459,7 +459,7 @@ mod tests {
         async fn dispatch(
             &self,
             call: ToolCallView<'_>,
-        ) -> Result<ToolResult, crate::error::ToolError> {
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
             Err(crate::error::ToolError::NotFound {
                 name: call.name.to_string(),
             })

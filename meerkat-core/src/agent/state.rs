@@ -710,9 +710,13 @@ where
                         let dispatch_results = futures::future::join_all(dispatch_futures).await;
 
                         // Process results and emit events
+                        let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
                         for (tc, dispatch_result, duration_ms) in dispatch_results {
                             let mut tool_result = match dispatch_result {
-                                Ok(result) => result,
+                                Ok(outcome) => {
+                                    all_async_ops.extend(outcome.async_ops);
+                                    outcome.result
+                                }
                                 Err(crate::error::ToolError::CallbackPending {
                                     tool_name: callback_tool,
                                     args: callback_args,
@@ -835,19 +839,7 @@ where
                             tool_call_count += 1;
                         }
 
-                        let pending_op_refs = tool_results.iter().fold(
-                            Vec::<crate::ops::AsyncOpRef>::new(),
-                            |mut acc, result| {
-                                for op_id in &result.operation_ids {
-                                    if !acc.iter().any(|r| r.operation_id == *op_id) {
-                                        // Normal tool-call ops are always barrier —
-                                        // they must resolve before the turn boundary.
-                                        acc.push(crate::ops::AsyncOpRef::barrier(op_id.clone()));
-                                    }
-                                }
-                                acc
-                            },
-                        );
+                        let pending_op_refs = all_async_ops;
                         let has_barrier_ops = pending_op_refs
                             .iter()
                             .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
@@ -1099,23 +1091,23 @@ where
                     if !barrier_ids.is_empty() {
                         let owned_ids: Vec<crate::ops::OperationId> =
                             barrier_ids.iter().map(|id| (*id).clone()).collect();
-                        if let Some(ref registry) = self.ops_lifecycle {
-                            let _results = registry.wait_all(&owned_ids).await.map_err(|e| {
+                        let wait_result = if let Some(ref registry) = self.ops_lifecycle {
+                            registry.wait_all(&owned_ids).await.map_err(|e| {
                                 AgentError::InternalError(format!(
                                     "ops lifecycle wait_all failed: {e}"
                                 ))
-                            })?;
+                            })?
                         } else {
                             return Err(AgentError::InternalError(
                                 "barrier ops registered without ops_lifecycle registry".to_string(),
                             ));
-                        }
+                        };
                         // Feed OpsBarrierSatisfied through the generated protocol
-                        // helper so the obligation token enforces the handoff.
+                        // helper using the authority-derived obligation token.
                         use crate::generated::protocol_ops_barrier_satisfaction::{
                             accept_wait_all_satisfied, submit_ops_barrier_satisfied,
                         };
-                        let obligation = accept_wait_all_satisfied(owned_ids);
+                        let obligation = accept_wait_all_satisfied(wait_result.satisfied);
                         let transition = submit_ops_barrier_satisfied(
                             &mut self.turn_authority,
                             obligation,
@@ -1621,7 +1613,10 @@ mod tests {
             Arc::new([])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             Err(ToolError::NotFound {
                 name: call.name.to_string(),
             })
@@ -1678,7 +1673,10 @@ mod tests {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             self.dispatched_names
                 .lock()
                 .unwrap()
@@ -1688,7 +1686,8 @@ mod tests {
                 call.id.to_string(),
                 format!("dispatched {}", call.name),
                 false,
-            ))
+            )
+            .into())
         }
     }
 

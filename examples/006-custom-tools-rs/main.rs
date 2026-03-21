@@ -20,6 +20,7 @@ use meerkat::{
     ToolResult,
 };
 use meerkat_core::ToolCallView;
+use meerkat_core::ToolDispatchOutcome;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -75,7 +76,7 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             "get_weather" => {
                 let args: WeatherArgs = call
@@ -103,11 +104,7 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "condition": "partly cloudy",
                     "humidity": 65,
                 });
-                Ok(ToolResult::new(
-                    call.id.to_string(),
-                    result.to_string(),
-                    false,
-                ))
+                Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
             }
 
             "convert_units" => {
@@ -127,7 +124,8 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                             call.id.to_string(),
                             format!("Cannot convert from '{}' to '{}'", args.from, args.to),
                             true, // is_error = true
-                        ));
+                        )
+                        .into());
                     }
                 };
 
@@ -137,11 +135,7 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "converted": result,
                     "to": args.to,
                 });
-                Ok(ToolResult::new(
-                    call.id.to_string(),
-                    output.to_string(),
-                    false,
-                ))
+                Ok(ToolResult::new(call.id.to_string(), output.to_string(), false).into())
             }
 
             _ => Err(ToolError::not_found(call.name)),

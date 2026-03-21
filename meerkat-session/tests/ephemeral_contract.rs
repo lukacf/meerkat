@@ -15,8 +15,7 @@ use meerkat_core::service::{
     SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef,
-    ToolResult, Usage,
+    AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
@@ -275,7 +274,10 @@ impl AgentToolDispatcher for StaticToolDispatcher {
         Arc::clone(&self.tools)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }

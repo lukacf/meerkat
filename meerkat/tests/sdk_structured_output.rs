@@ -13,10 +13,11 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, LlmDoneOutcome, LlmEvent, LlmRequest,
-    OutputSchema, ToolDef, ToolError, ToolResult,
+    OutputSchema, ToolDef, ToolError,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::ToolCallView;
+use meerkat_core::ToolDispatchOutcome;
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[path = "support/test_session_store.rs"]
@@ -202,7 +203,7 @@ impl AgentToolDispatcher for EmptyDispatcher {
         Arc::new([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })

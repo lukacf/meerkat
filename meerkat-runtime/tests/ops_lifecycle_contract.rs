@@ -445,27 +445,29 @@ async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
         .cancel_operation(&id_c, Some("c-reason".into()))
         .unwrap();
 
-    let results = registry
+    let wait_result = registry
         .wait_all(&[id_a.clone(), id_b.clone(), id_c.clone()])
         .await
         .unwrap();
 
-    assert_eq!(results.len(), 3);
-    assert_eq!(results[0].0, id_a);
+    assert_eq!(wait_result.outcomes.len(), 3);
+    assert_eq!(wait_result.outcomes[0].0, id_a);
     assert!(matches!(
-        results[0].1,
+        wait_result.outcomes[0].1,
         OperationTerminalOutcome::Completed(_)
     ));
-    assert_eq!(results[1].0, id_b);
+    assert_eq!(wait_result.outcomes[1].0, id_b);
     assert!(matches!(
-        results[1].1,
+        wait_result.outcomes[1].1,
         OperationTerminalOutcome::Failed { .. }
     ));
-    assert_eq!(results[2].0, id_c);
+    assert_eq!(wait_result.outcomes[2].0, id_c);
     assert!(matches!(
-        results[2].1,
+        wait_result.outcomes[2].1,
         OperationTerminalOutcome::Cancelled { .. }
     ));
+    // Authority-validated obligation carries all awaited IDs
+    assert_eq!(wait_result.satisfied.operation_ids.len(), 3);
 }
 
 #[tokio::test]

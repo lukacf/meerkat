@@ -60,6 +60,26 @@ pub struct EffectHandoffProtocol {
     pub closure_policy: ClosurePolicy,
     /// Optional fairness annotation for TLA+ liveness claims.
     pub liveness_annotation: Option<String>,
+    /// Code generation mode for the protocol helper.
+    pub generation_mode: ProtocolGenerationMode,
+    /// Target crate for the generated helper (relative path from repo root).
+    /// When `None`, defaults to `meerkat-core/src/generated/`.
+    pub target_crate: Option<String>,
+}
+
+/// Determines the shape of generated protocol helper code.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ProtocolGenerationMode {
+    /// Calls `authority.apply()` with the triggering input, returns effects + obligation.
+    /// Helper lives in the same crate as the authority.
+    #[default]
+    Executor,
+    /// Scans already-emitted effects for the handoff-annotated variant, extracts obligation.
+    /// Helper lives in the authority's crate.
+    EffectExtractor,
+    /// Wraps authority-derived data into an obligation token for cross-machine handoff.
+    /// Helper lives in the consuming machine's crate.
+    ShellBridge,
 }
 
 /// References a specific machine input that the owner may submit as feedback.
@@ -673,6 +693,11 @@ impl CompositionSchema {
                             });
                         }
                     }
+                    RouteBindingSource::OwnerProvided => {
+                        // Owner-provided bindings skip type checking — the
+                        // realizing owner actor supplies the value at runtime.
+                        // The handoff protocol enforces the contract instead.
+                    }
                 }
             }
         }
@@ -1044,6 +1069,11 @@ pub enum RouteBindingSource {
         allow_named_alias: bool,
     },
     Literal(Expr),
+    /// Value is supplied by the realizing owner actor at runtime, not by the
+    /// producing machine's effect. Used when the target input needs data that
+    /// the producer does not own (e.g., TurnExecution's `run_id` is not known
+    /// to OpsLifecycle).
+    OwnerProvided,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

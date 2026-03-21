@@ -65,6 +65,39 @@ impl AsyncOpRef {
     }
 }
 
+/// Outcome of a tool dispatch, separating transcript data from execution metadata.
+///
+/// `result` is what the model sees (conversation/transcript). `async_ops` is
+/// what the runtime scheduler sees (barrier/detached classification). This
+/// prevents hooks, persistence, and message serialization from accidentally
+/// owning barrier semantics.
+#[derive(Debug, Clone)]
+pub struct ToolDispatchOutcome {
+    /// The tool result for the conversation transcript.
+    pub result: crate::types::ToolResult,
+    /// Async operations started by this dispatch, with typed wait policies.
+    ///
+    /// Empty for synchronous tools. Barrier ops block the turn boundary;
+    /// detached ops run independently.
+    pub async_ops: Vec<AsyncOpRef>,
+}
+
+impl ToolDispatchOutcome {
+    /// Create an outcome with no async operations (synchronous tool).
+    pub fn sync_result(result: crate::types::ToolResult) -> Self {
+        Self {
+            result,
+            async_ops: Vec::new(),
+        }
+    }
+}
+
+impl From<crate::types::ToolResult> for ToolDispatchOutcome {
+    fn from(result: crate::types::ToolResult) -> Self {
+        Self::sync_result(result)
+    }
+}
+
 impl OperationId {
     /// Create a new operation ID
     pub fn new() -> Self {

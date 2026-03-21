@@ -220,7 +220,10 @@ impl AgentToolDispatcher for McpRouterAdapter {
         }
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let guard = self.router.read().await;
         match &*guard {
             Some(router) => {
@@ -230,7 +233,7 @@ impl AgentToolDispatcher for McpRouterAdapter {
                     .call_tool(call.name, &args)
                     .await
                     .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-                Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false))
+                Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }

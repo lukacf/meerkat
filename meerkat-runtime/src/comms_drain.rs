@@ -14,6 +14,8 @@ use meerkat_core::interaction::{ClassifiedInboxInteraction, PeerInputClass};
 use meerkat_core::lifecycle::RunControlCommand;
 use meerkat_core::types::SessionId;
 
+use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
+
 use crate::comms_bridge::interaction_to_runtime_input;
 use crate::completion::CompletionOutcome;
 use crate::identifiers::LogicalRuntimeId;
@@ -65,6 +67,9 @@ pub fn spawn_comms_drain(
                                 },
                             )
                             .await;
+                        adapter
+                            .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
+                            .await;
                         return;
                     }
                     if crate::tokio::time::timeout(timeout_dur, notified)
@@ -72,6 +77,9 @@ pub fn spawn_comms_drain(
                         .is_err()
                     {
                         tracing::info!("comms_drain: idle timeout expired, stopping");
+                        adapter
+                            .notify_comms_drain_exited(&session_id, DrainExitReason::IdleTimeout)
+                            .await;
                         return;
                     }
                     continue;
@@ -90,6 +98,9 @@ pub fn spawn_comms_drain(
                                     },
                                 )
                                 .await;
+                            adapter
+                                .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)
+                                .await;
                             return;
                         }
                         if crate::tokio::time::timeout(timeout_dur, notified)
@@ -97,6 +108,12 @@ pub fn spawn_comms_drain(
                             .is_err()
                         {
                             tracing::info!("comms_drain: idle timeout expired (legacy), stopping");
+                            adapter
+                                .notify_comms_drain_exited(
+                                    &session_id,
+                                    DrainExitReason::IdleTimeout,
+                                )
+                                .await;
                             return;
                         }
                         continue;

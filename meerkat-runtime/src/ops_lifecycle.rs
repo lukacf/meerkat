@@ -14,7 +14,8 @@ use crate::tokio;
 use meerkat_core::ops_lifecycle::{
     DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationLifecycleSnapshot,
     OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
-    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
+    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
+    WaitAllSatisfied,
 };
 
 use crate::ops_lifecycle_authority::{
@@ -532,15 +533,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         &self,
         ids: &[OperationId],
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<(OperationId, OperationTerminalOutcome)>,
-                        OpsLifecycleError,
-                    >,
-                > + Send
-                + '_,
-        >,
+        Box<dyn std::future::Future<Output = Result<WaitAllResult, OpsLifecycleError>> + Send + '_>,
     > {
         // Register watchers synchronously under the lock, then await them.
         // This avoids borrowing `ids` across the await point.
@@ -579,22 +572,39 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         Box::pin(async move {
             let watches = watches?;
-            let mut results = Vec::with_capacity(watches.len());
+            let mut outcomes = Vec::with_capacity(watches.len());
             for (id, watch) in watches {
                 let outcome = watch.wait().await;
-                results.push((id, outcome));
+                outcomes.push((id, outcome));
             }
 
-            // Feed WaitAll through the authority so it emits WaitAllSatisfied
-            // for cross-machine handoff (ops_barrier_satisfaction protocol).
-            {
+            // Feed WaitAll through the authority so it validates all ops are
+            // terminal and emits WaitAllSatisfied for cross-machine handoff.
+            // The authority rejects if any operation is non-terminal.
+            let satisfied_ids = {
                 let mut state = self.write_state()?;
-                let _transition = state.authority.apply(OpsLifecycleInput::WaitAll {
+                let transition = state.authority.apply(OpsLifecycleInput::WaitAll {
                     operation_ids: owned_ids,
                 })?;
-            }
+                // Extract the validated operation_ids from the WaitAllSatisfied effect.
+                transition
+                    .effects
+                    .into_iter()
+                    .find_map(|e| match e {
+                        OpsLifecycleEffect::WaitAllSatisfied { operation_ids } => {
+                            Some(operation_ids)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            };
 
-            Ok(results)
+            Ok(WaitAllResult {
+                outcomes,
+                satisfied: WaitAllSatisfied {
+                    operation_ids: satisfied_ids,
+                },
+            })
         })
     }
 }
@@ -727,21 +737,23 @@ mod tests {
             .unwrap();
         registry.fail_operation(&id_b, "b-error".into()).unwrap();
 
-        let results = registry
+        let wait_result = registry
             .wait_all(&[id_a.clone(), id_b.clone()])
             .await
             .unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, id_a);
+        assert_eq!(wait_result.outcomes.len(), 2);
+        assert_eq!(wait_result.outcomes[0].0, id_a);
         assert!(matches!(
-            results[0].1,
+            wait_result.outcomes[0].1,
             OperationTerminalOutcome::Completed(_)
         ));
-        assert_eq!(results[1].0, id_b);
+        assert_eq!(wait_result.outcomes[1].0, id_b);
         assert!(matches!(
-            results[1].1,
+            wait_result.outcomes[1].1,
             OperationTerminalOutcome::Failed { .. }
         ));
+        // Authority-derived obligation carries the awaited IDs
+        assert_eq!(wait_result.satisfied.operation_ids.len(), 2);
     }
 
     /// Exercises the trait `wait_all` path (via `dyn OpsLifecycleRegistry`)
@@ -768,12 +780,14 @@ mod tests {
 
         // Call through trait object to exercise the trait impl, not the inherent method.
         let trait_ref: &dyn OpsLifecycleRegistry = &registry;
-        let results = trait_ref.wait_all(&[op_id.clone()]).await.unwrap();
-        assert_eq!(results.len(), 1);
+        let wait_result = trait_ref.wait_all(&[op_id.clone()]).await.unwrap();
+        assert_eq!(wait_result.outcomes.len(), 1);
         assert!(matches!(
-            results[0].1,
+            wait_result.outcomes[0].1,
             OperationTerminalOutcome::Completed(_)
         ));
+        // Obligation carries the validated ID
+        assert_eq!(wait_result.satisfied.operation_ids, vec![op_id]);
     }
 
     #[test]

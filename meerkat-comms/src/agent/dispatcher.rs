@@ -5,6 +5,7 @@ use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use parking_lot::RwLock;
@@ -62,7 +63,7 @@ impl AgentToolDispatcher for NoOpDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::from([])
     }
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
@@ -98,18 +99,14 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if let Some((normalized_name, normalized_args)) = normalize_comms_call(call.name, args) {
             let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                result.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else if let Some(inner) = &self.inner {
             inner.dispatch(call).await
         } else {
@@ -154,18 +151,14 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if let Some((normalized_name, normalized_args)) = normalize_comms_call(call.name, args) {
             let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                result.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else {
             self.inner.dispatch(call).await
         }

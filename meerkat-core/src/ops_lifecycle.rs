@@ -181,6 +181,31 @@ pub enum OpsLifecycleError {
     Internal(String),
 }
 
+/// Authority-validated result of `wait_all()`.
+///
+/// Carries the per-operation outcomes alongside an authority-derived
+/// obligation token (`satisfied`). The obligation proves the authority
+/// validated every operation as terminal before emitting `WaitAllSatisfied`.
+#[derive(Debug)]
+pub struct WaitAllResult {
+    /// Per-operation terminal outcomes.
+    pub outcomes: Vec<(OperationId, OperationTerminalOutcome)>,
+    /// Authority-validated obligation token for the ops_barrier_satisfaction protocol.
+    pub satisfied: WaitAllSatisfied,
+}
+
+/// Authority-validated obligation token emitted by the `WaitAllSatisfied` effect.
+///
+/// Created only by the `OpsLifecycleRegistry::wait_all()` implementation after
+/// the authority validates all operations are terminal. Core-owned so it can be
+/// consumed by the `protocol_ops_barrier_satisfaction` helper without crossing
+/// crate boundaries.
+#[derive(Debug)]
+pub struct WaitAllSatisfied {
+    /// The operation IDs validated as terminal by the authority.
+    pub operation_ids: Vec<OperationId>,
+}
+
 /// Shared async-operation lifecycle registry.
 pub trait OpsLifecycleRegistry: Send + Sync {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError>;
@@ -227,22 +252,14 @@ pub trait OpsLifecycleRegistry: Send + Sync {
 
     /// Register a completion watcher for each ID and await all of them.
     ///
-    /// Returns when every listed operation has reached a terminal state.
-    /// Already-terminal operations resolve immediately.
-    #[allow(clippy::type_complexity)]
+    /// Returns a [`WaitAllResult`] containing per-operation outcomes and an
+    /// authority-validated obligation token. The authority validates that every
+    /// operation is terminal before emitting `WaitAllSatisfied`.
     fn wait_all(
         &self,
         _ids: &[OperationId],
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<(OperationId, OperationTerminalOutcome)>,
-                        OpsLifecycleError,
-                    >,
-                > + Send
-                + '_,
-        >,
+        Box<dyn std::future::Future<Output = Result<WaitAllResult, OpsLifecycleError>> + Send + '_>,
     > {
         Box::pin(std::future::ready(Err(OpsLifecycleError::Unsupported(
             "wait_all".into(),

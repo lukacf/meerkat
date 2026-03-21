@@ -769,10 +769,23 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
             }
 
             OpsLifecycleInput::WaitAll { operation_ids } => {
-                // The shell has already awaited the actual completions.
-                // This input exists so the authority emits the formal
-                // WaitAllSatisfied effect for cross-machine handoff
-                // (ops_barrier_satisfaction protocol).
+                // Validate: every operation must be in a terminal state.
+                // The shell awaited the actual completions, but the authority
+                // must validate the claim — reject if any op is non-terminal.
+                for id in &operation_ids {
+                    match self.state.operations.get(id) {
+                        Some(op) if op.status.is_terminal() => {}
+                        Some(op) => {
+                            return Err(OpsLifecycleError::Internal(format!(
+                                "WaitAll rejected: operation {} is {:?}, not terminal",
+                                id, op.status
+                            )));
+                        }
+                        None => {
+                            return Err(OpsLifecycleError::NotFound(id.clone()));
+                        }
+                    }
+                }
                 Ok(OpsLifecycleTransition {
                     effects: vec![OpsLifecycleEffect::WaitAllSatisfied { operation_ids }],
                 })

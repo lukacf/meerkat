@@ -2,6 +2,7 @@
 
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::types::{ToolCallView, ToolResult};
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
@@ -21,7 +22,10 @@ async fn dispatch_tool(
         name,
         args: &args_raw,
     };
-    dispatcher.dispatch(call).await
+    dispatcher
+        .dispatch(call)
+        .await
+        .map(|outcome| outcome.result)
 }
 
 #[tokio::test]
@@ -398,7 +402,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
             })])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let _ = call;
             // Hang forever
             std::future::pending().await
@@ -488,13 +492,9 @@ async fn test_regression_composite_deduplicates_external_tools()
             ])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let value = json!({"from": "external", "tool": call.name});
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                value.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
         }
     }
 
@@ -572,13 +572,9 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             ])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let value = json!({"called": call.name});
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                value.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
         }
     }
 
@@ -684,7 +680,10 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
             })])
         }
 
-        async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
             // This should NOT be called for blocked tools
             panic!("Dispatch should not be called for blocked tools!");
         }

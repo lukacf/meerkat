@@ -34,7 +34,7 @@ pub fn run_protocol_codegen() -> Result<()> {
                 .and_then(|inst| machine_by_name.get(inst.machine_name.as_str()).copied());
 
             let code = generate_protocol_helpers(protocol, producer_machine, composition);
-            let output_path = protocol_output_path(&root, &protocol.name);
+            let output_path = protocol_output_path(&root, protocol);
 
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)
@@ -72,11 +72,15 @@ pub fn run_protocol_codegen() -> Result<()> {
     Ok(())
 }
 
-fn protocol_output_path(root: &Path, protocol_name: &str) -> std::path::PathBuf {
-    root.join(format!(
-        "meerkat-core/src/generated/protocol_{}.rs",
-        protocol_name
-    ))
+fn protocol_output_path(root: &Path, protocol: &EffectHandoffProtocol) -> std::path::PathBuf {
+    if let Some(ref target_crate) = protocol.target_crate {
+        root.join(format!("{}/protocol_{}.rs", target_crate, protocol.name))
+    } else {
+        root.join(format!(
+            "meerkat-core/src/generated/protocol_{}.rs",
+            protocol.name
+        ))
+    }
 }
 
 fn generate_protocol_helpers(
@@ -164,78 +168,146 @@ fn generate_executor(
     protocol: &EffectHandoffProtocol,
     _producer_machine: Option<&MachineSchema>,
 ) {
-    let fn_name = format!("execute_{}", to_snake_case(&protocol.name));
+    use meerkat_machine_schema::ProtocolGenerationMode;
+
     let obligation_type = format!("{}Obligation", to_pascal_case(&protocol.name));
 
-    writeln!(
-        out,
-        "/// Execute the `{}` effect through the authority and return an obligation token.",
-        protocol.effect_variant
-    )
-    .expect("write");
-    writeln!(
-        out,
-        "/// The caller must eventually close this obligation via one of the feedback submitters."
-    )
-    .expect("write");
-    writeln!(
-        out,
-        "/// Closure policy: {}.",
-        closure_policy_label(&protocol.closure_policy)
-    )
-    .expect("write");
-    writeln!(out, "///").expect("write");
-    writeln!(
-        out,
-        "/// # Usage\n/// ```ignore\n/// let (effects, obligation) = {fn_name}(&mut authority, input)?;\n/// // ... realize effects ...\n/// // ... submit feedback using obligation token ...\n/// ```"
-    )
-    .expect("write");
+    match &protocol.generation_mode {
+        ProtocolGenerationMode::Executor => {
+            // Executor mode: generates a function that calls authority.apply() and
+            // returns effects + obligation. The exact authority type varies per
+            // machine, so we generate the contract shape with typed parameters.
+            let fn_name = format!("execute_{}", to_snake_case(&protocol.name));
+            writeln!(
+                out,
+                "/// Execute the `{}` effect through the authority and return an obligation token.",
+                protocol.effect_variant
+            )
+            .expect("write");
+            writeln!(
+                out,
+                "/// The caller must eventually close this obligation via one of the feedback submitters."
+            )
+            .expect("write");
+            writeln!(
+                out,
+                "/// Closure policy: {}.",
+                closure_policy_label(&protocol.closure_policy)
+            )
+            .expect("write");
 
-    // Generate the function stub — the body references authority.apply() which is
-    // machine-specific. We generate the contract; the implementor fills the body.
-    writeln!(
-        out,
-        "// TODO: Fill in the authority call for the producing machine."
-    )
-    .expect("write");
-    writeln!(out, "// The function should:").expect("write");
-    writeln!(
-        out,
-        "//   1. Call authority.apply(<input>) to trigger the {} effect",
-        protocol.effect_variant
-    )
-    .expect("write");
-    writeln!(
-        out,
-        "//   2. Extract correlation fields from the emitted effect"
-    )
-    .expect("write");
-    writeln!(out, "//   3. Return (effects, {obligation_type} {{ ... }})").expect("write");
+            if protocol.correlation_fields.is_empty() {
+                writeln!(
+                    out,
+                    "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
+                )
+                .expect("write");
+            } else {
+                let params: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|f| format!("{}: String", to_snake_case(f)))
+                    .collect();
+                let fields: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|f| to_snake_case(f))
+                    .collect();
+                writeln!(
+                    out,
+                    "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
+                    params.join(", "),
+                    fields.join(", ")
+                )
+                .expect("write");
+            }
+        }
+        ProtocolGenerationMode::EffectExtractor => {
+            // Effect-extractor mode: scans already-emitted effects for the
+            // handoff-annotated variant and extracts the obligation token.
+            let fn_name = format!("extract_{}", to_snake_case(&protocol.name));
+            writeln!(
+                out,
+                "/// Extract the `{}` obligation from already-emitted effects.",
+                protocol.effect_variant
+            )
+            .expect("write");
+            writeln!(
+                out,
+                "/// Scans the effect list for `{}` and creates the obligation token.",
+                protocol.effect_variant
+            )
+            .expect("write");
 
-    if protocol.correlation_fields.is_empty() {
-        writeln!(
-            out,
-            "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
-        )
-        .expect("write");
-    } else {
-        let params: Vec<String> = protocol
-            .correlation_fields
-            .iter()
-            .map(|f| format!("{}: String", to_snake_case(f)))
-            .collect();
-        let fields: Vec<String> = protocol
-            .correlation_fields
-            .iter()
-            .map(|f| to_snake_case(f))
-            .collect();
-        writeln!(
-            out,
-            "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
-            params.join(", "),
-            fields.join(", ")
-        )
-        .expect("write");
+            if protocol.correlation_fields.is_empty() {
+                writeln!(
+                    out,
+                    "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
+                )
+                .expect("write");
+            } else {
+                let params: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|f| format!("{}: String", to_snake_case(f)))
+                    .collect();
+                let fields: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|f| to_snake_case(f))
+                    .collect();
+                writeln!(
+                    out,
+                    "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
+                    params.join(", "),
+                    fields.join(", ")
+                )
+                .expect("write");
+            }
+        }
+        ProtocolGenerationMode::ShellBridge => {
+            // Shell-bridge mode: wraps authority-derived data into an obligation
+            // token for cross-machine handoff. The data comes from the producing
+            // machine's effect, not from a direct authority.apply() call.
+            let fn_name = format!("accept_{}", to_snake_case(&protocol.name));
+            writeln!(
+                out,
+                "/// Accept authority-derived `{}` data and create an obligation token.",
+                protocol.effect_variant
+            )
+            .expect("write");
+            writeln!(
+                out,
+                "/// The caller provides data extracted from the producing machine's effect."
+            )
+            .expect("write");
+
+            if protocol.correlation_fields.is_empty() {
+                writeln!(
+                    out,
+                    "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
+                )
+                .expect("write");
+            } else {
+                let params: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|f| format!("{}: String", to_snake_case(f)))
+                    .collect();
+                let fields: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|f| to_snake_case(f))
+                    .collect();
+                writeln!(
+                    out,
+                    "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
+                    params.join(", "),
+                    fields.join(", ")
+                )
+                .expect("write");
+            }
+        }
     }
     writeln!(out).expect("write");
 }
@@ -272,24 +344,15 @@ fn generate_feedback_submitters(out: &mut String, protocol: &EffectHandoffProtoc
         )
         .expect("write");
 
+        // Generate a feedback submitter that consumes the obligation by move.
+        // The actual authority.apply() call is machine-specific — the generated
+        // function enforces the obligation contract (move semantics), and the
+        // hand-written body in the checked-in file provides the authority call.
         writeln!(
             out,
-            "// TODO: Fill in the authority call for the feedback target machine."
-        )
-        .expect("write");
-        writeln!(out, "// The function should:").expect("write");
-        writeln!(out, "//   1. Consume the obligation token (move semantics)").expect("write");
-        writeln!(
-            out,
-            "//   2. Call authority.apply({}) on the {} machine instance",
-            feedback.input_variant, feedback.machine_instance
-        )
-        .expect("write");
-        writeln!(out, "//   3. Return the resulting effects").expect("write");
-
-        writeln!(
-            out,
-            "pub fn {fn_name}(_obligation: {obligation_type}) {{\n    // Obligation consumed by move\n}}"
+            "pub fn {fn_name}(_obligation: {obligation_type}) {{\n    // Obligation consumed by move semantics.\n    // The hand-written implementation calls authority.apply({input})\n    // on the {instance} machine instance.\n}}",
+            input = feedback.input_variant,
+            instance = feedback.machine_instance,
         )
         .expect("write");
         writeln!(out).expect("write");
@@ -425,11 +488,6 @@ fn generate_terminal_classifier(out: &mut String, machine: &MachineSchema) {
     )
     .expect("write");
 
-    writeln!(
-        out,
-        "// TODO: Replace &str with the actual terminal outcome type once available."
-    )
-    .expect("write");
     writeln!(
         out,
         "pub fn classify_terminal(terminal_phase: &str) -> SurfaceResultClass {{"

@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -216,7 +216,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }

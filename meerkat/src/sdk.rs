@@ -413,8 +413,8 @@ mod tests {
             name,
             args: &args_raw,
         };
-        let result = dispatcher.dispatch(call).await?;
-        let text = result.text_content();
+        let outcome = dispatcher.dispatch(call).await?;
+        let text = outcome.result.text_content();
         serde_json::from_str(&text).or(Ok(serde_json::Value::String(text)))
     }
 

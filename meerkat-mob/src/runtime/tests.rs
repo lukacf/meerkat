@@ -410,6 +410,7 @@ impl MockSessionService {
                 args: &raw,
             })
             .await
+            .map(|outcome| outcome.result)
     }
 
     async fn set_comms_behavior(&self, comms_name: &str, behavior: MockCommsBehavior) {
@@ -1959,7 +1960,7 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
     async fn dispatch(
         &self,
         call: meerkat_core::ToolCallView<'_>,
-    ) -> Result<meerkat_core::ToolResult, meerkat_core::ToolError> {
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         if call.name != "bundle_echo" {
             return Err(meerkat_core::ToolError::not_found(call.name));
         }
@@ -1974,7 +1975,8 @@ impl AgentToolDispatcher for EchoBundleDispatcher {
             call.id.to_string(),
             serde_json::json!({ "echo": echoed }).to_string(),
             false,
-        ))
+        )
+        .into())
     }
 }
 
@@ -2118,7 +2120,10 @@ impl AgentToolDispatcher for OverlayProbeDispatcher {
         Arc::clone(&self.tools)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }

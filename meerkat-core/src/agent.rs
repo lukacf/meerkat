@@ -30,7 +30,7 @@ use crate::tokio;
 use crate::tool_scope::ToolScope;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
-    ToolDef, ToolResult, Usage,
+    ToolDef, Usage,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -137,9 +137,15 @@ pub struct ExternalToolUpdate {
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
-    /// Execute a tool call
-    async fn dispatch(&self, call: ToolCallView<'_>)
-    -> Result<ToolResult, crate::error::ToolError>;
+    /// Execute a tool call, returning the transcript result and any async operations.
+    ///
+    /// The `ToolDispatchOutcome` separates transcript data (`result`) from
+    /// execution metadata (`async_ops`). Most tools return no async ops;
+    /// use `ToolDispatchOutcome::from(result)` for synchronous tools.
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError>;
 
     /// Poll for external tool updates from background operations (e.g. async MCP loading).
     ///
@@ -219,7 +225,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
-    ) -> Result<ToolResult, crate::error::ToolError> {
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         if !self.allowed_tools.contains(call.name) {
             return Err(crate::error::ToolError::access_denied(call.name));
         }
@@ -623,7 +629,8 @@ mod tests {
     fn test_filtered_dispatcher_bind_wait_interrupt_forwards() {
         use super::{AgentToolDispatcher, FilteredToolDispatcher};
         use crate::error::ToolError;
-        use crate::types::{ToolCallView, ToolDef, ToolResult};
+        use crate::ops::ToolDispatchOutcome;
+        use crate::types::{ToolCallView, ToolDef};
         use serde_json::json;
 
         struct MockTool;
@@ -639,7 +646,10 @@ mod tests {
                 })]
                 .into()
             }
-            async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
                 Err(ToolError::not_found("test"))
             }
         }
@@ -663,7 +673,8 @@ mod tests {
     fn test_filtered_dispatcher_bind_wait_interrupt_shared_ownership() {
         use super::{AgentToolDispatcher, FilteredToolDispatcher};
         use crate::error::ToolError;
-        use crate::types::{ToolCallView, ToolDef, ToolResult};
+        use crate::ops::ToolDispatchOutcome;
+        use crate::types::{ToolCallView, ToolDef};
         use serde_json::json;
 
         struct MockTool;
@@ -679,7 +690,10 @@ mod tests {
                 })]
                 .into()
             }
-            async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
                 Err(ToolError::not_found("test"))
             }
         }

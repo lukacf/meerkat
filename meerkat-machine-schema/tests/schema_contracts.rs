@@ -695,8 +695,8 @@ fn handoff_protocol_valid_round_trip() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
         EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FeedbackInputRef, FieldSchema,
-        InitSchema, MachineInstance, MachineSchema, RustBinding, StateSchema, TypeRef,
-        VariantSchema,
+        InitSchema, MachineInstance, MachineSchema, ProtocolGenerationMode, RustBinding,
+        StateSchema, TypeRef, VariantSchema,
     };
     use std::collections::BTreeMap;
 
@@ -794,6 +794,8 @@ fn handoff_protocol_valid_round_trip() {
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -817,7 +819,7 @@ fn handoff_protocol_valid_round_trip() {
 fn handoff_protocol_unknown_producer() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
-        MachineInstance,
+        MachineInstance, ProtocolGenerationMode,
     };
     use std::collections::BTreeMap;
 
@@ -847,6 +849,8 @@ fn handoff_protocol_unknown_producer() {
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -874,7 +878,7 @@ fn handoff_protocol_unknown_producer() {
 fn handoff_protocol_actor_not_owner() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
-        MachineInstance,
+        MachineInstance, ProtocolGenerationMode,
     };
     use std::collections::BTreeMap;
 
@@ -904,6 +908,8 @@ fn handoff_protocol_actor_not_owner() {
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -931,7 +937,7 @@ fn handoff_protocol_actor_not_owner() {
 fn handoff_protocol_unknown_feedback_machine() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
-        FeedbackInputRef, MachineInstance,
+        FeedbackInputRef, MachineInstance, ProtocolGenerationMode,
     };
     use std::collections::BTreeMap;
 
@@ -964,6 +970,8 @@ fn handoff_protocol_unknown_feedback_machine() {
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -992,7 +1000,7 @@ fn handoff_protocol_unknown_effect_cross_schema() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
         EffectDispositionRule, EffectHandoffProtocol, EnumSchema, InitSchema, MachineInstance,
-        MachineSchema, RustBinding, StateSchema, VariantSchema,
+        MachineSchema, ProtocolGenerationMode, RustBinding, StateSchema, VariantSchema,
     };
     use std::collections::BTreeMap;
 
@@ -1066,6 +1074,8 @@ fn handoff_protocol_unknown_effect_cross_schema() {
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -1094,7 +1104,8 @@ fn handoff_protocol_terminal_closure_requires_terminal_phases() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
         EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FieldSchema, InitSchema,
-        MachineInstance, MachineSchema, RustBinding, StateSchema, TypeRef, VariantSchema,
+        MachineInstance, MachineSchema, ProtocolGenerationMode, RustBinding, StateSchema, TypeRef,
+        VariantSchema,
     };
     use std::collections::BTreeMap;
 
@@ -1171,6 +1182,8 @@ fn handoff_protocol_terminal_closure_requires_terminal_phases() {
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::TerminalClosure,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -1289,7 +1302,8 @@ fn closed_world_accepts_handoff_protocol_present() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
         EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FieldSchema, InitSchema,
-        MachineInstance, MachineSchema, RustBinding, StateSchema, TypeRef, VariantSchema,
+        MachineInstance, MachineSchema, ProtocolGenerationMode, RustBinding, StateSchema, TypeRef,
+        VariantSchema,
     };
     use std::collections::BTreeMap;
 
@@ -1381,6 +1395,8 @@ fn closed_world_accepts_handoff_protocol_present() {
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
+            generation_mode: ProtocolGenerationMode::Executor,
+            target_crate: None,
         }],
         entry_inputs: vec![],
         routes: vec![],

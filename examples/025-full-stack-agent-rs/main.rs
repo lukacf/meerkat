@@ -23,6 +23,7 @@ use meerkat::{
     create_dispatcher_with_builtins, spawn_event_logger,
 };
 use meerkat_core::ToolCallView;
+use meerkat_core::ToolDispatchOutcome;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -75,7 +76,7 @@ impl AgentToolDispatcher for DomainTools {
         .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             "search_docs" => {
                 let args: SearchDocsArgs = call
@@ -91,11 +92,7 @@ impl AgentToolDispatcher for DomainTools {
                     ],
                     "total": 3
                 });
-                Ok(ToolResult::new(
-                    call.id.to_string(),
-                    results.to_string(),
-                    false,
-                ))
+                Ok(ToolResult::new(call.id.to_string(), results.to_string(), false).into())
             }
             "create_ticket" => {
                 let args: CreateTicketArgs = call
@@ -109,11 +106,7 @@ impl AgentToolDispatcher for DomainTools {
                     "status": "open",
                     "created_at": "2026-02-21T00:00:00Z"
                 });
-                Ok(ToolResult::new(
-                    call.id.to_string(),
-                    ticket.to_string(),
-                    false,
-                ))
+                Ok(ToolResult::new(call.id.to_string(), ticket.to_string(), false).into())
             }
             _ => Err(ToolError::not_found(call.name)),
         }

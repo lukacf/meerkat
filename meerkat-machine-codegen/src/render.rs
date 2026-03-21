@@ -812,6 +812,9 @@ fn render_route_bindings(route: &meerkat_machine_schema::Route) -> String {
             meerkat_machine_schema::RouteBindingSource::Literal(expr) => {
                 format!("{} := {}", binding.to_field, render_expr(expr))
             }
+            meerkat_machine_schema::RouteBindingSource::OwnerProvided => {
+                format!("{} := <owner-provided>", binding.to_field)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")

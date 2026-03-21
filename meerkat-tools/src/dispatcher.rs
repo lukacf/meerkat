@@ -5,7 +5,7 @@ use crate::error::DispatchError;
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::ops::ToolAccessPolicy;
+use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
@@ -70,13 +70,13 @@ impl ToolDispatcher {
         self.registry.validate(call.name, &args)?;
 
         // 2. Dispatch to router with timeout
-        let result = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
+        let outcome = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
             .await
             .map_err(|_| DispatchError::Timeout {
                 timeout_ms: self.default_timeout.as_millis() as u64,
             })??;
 
-        Ok(result)
+        Ok(outcome.result)
     }
 }
 
@@ -87,7 +87,7 @@ impl AgentToolDispatcher for ToolDispatcher {
         Arc::from(self.registry.list())
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.to_string(),
@@ -174,7 +174,7 @@ impl AgentToolDispatcher for FilteredDispatcher {
             .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         if !self.allowed_names.contains(call.name) {
             return Err(ToolError::NotFound {
                 name: call.name.to_string(),
@@ -225,13 +225,14 @@ mod tests {
                 .into()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tool_names.contains(&call.name) {
                 Ok(ToolResult::new(
                     call.id.to_string(),
                     json!({"called": call.name}).to_string(),
                     false,
-                ))
+                )
+                .into())
             } else {
                 Err(ToolError::NotFound {
                     name: call.name.to_string(),

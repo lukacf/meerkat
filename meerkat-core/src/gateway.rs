@@ -34,7 +34,9 @@ use crate::error::ToolError;
 use crate::event::ExternalToolDelta;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{ToolCallView, ToolDef, ToolResult};
+#[cfg(test)]
+use crate::types::ToolResult;
+use crate::types::{ToolCallView, ToolDef};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -352,7 +354,10 @@ impl AgentToolDispatcher for ToolGateway {
     /// - `ToolError::NotFound` if the tool doesn't exist
     /// - `ToolError::Unavailable` if the tool exists but is currently hidden
     /// - The tool result if execution succeeds
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
         let idx = self
             .route
             .get(call.name)
@@ -474,8 +479,8 @@ mod tests {
             name,
             args: &args_raw,
         };
-        let result = gateway.dispatch(call).await?;
-        serde_json::from_str(&result.text_content())
+        let outcome = gateway.dispatch(call).await?;
+        serde_json::from_str(&outcome.result.text_content())
             .map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 
@@ -523,13 +528,17 @@ mod tests {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|t| t.name == call.name) {
                 Ok(ToolResult::new(
                     call.id.to_string(),
                     json!({"source": self.prefix, "tool": call.name}).to_string(),
                     false,
-                ))
+                )
+                .into())
             } else {
                 Err(ToolError::not_found(call.name))
             }

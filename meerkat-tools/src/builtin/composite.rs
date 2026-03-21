@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -281,7 +282,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         tools.into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.to_string(),
@@ -313,21 +314,20 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     }
                     BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
                 })?;
-                let operation_ids = tool.operation_ids_for_output(&output);
-                match output {
+                let async_ops = tool.async_ops_for_output(&output);
+                let result = match output {
                     ToolOutput::Json(value) => {
                         let content = match &value {
                             Value::String(s) => s.clone(),
                             _ => serde_json::to_string(&value).unwrap_or_default(),
                         };
-                        return Ok(ToolResult::new(call.id.to_string(), content, false)
-                            .with_operation_ids(operation_ids));
+                        ToolResult::new(call.id.to_string(), content, false)
                     }
                     ToolOutput::Blocks(blocks) => {
-                        return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)
-                            .with_operation_ids(operation_ids));
+                        ToolResult::with_blocks(call.id.to_string(), blocks, false)
                     }
-                }
+                };
+                return Ok(ToolDispatchOutcome { result, async_ops });
             }
         }
 
@@ -348,21 +348,20 @@ impl AgentToolDispatcher for CompositeDispatcher {
                             ToolError::ExecutionFailed { message: te }
                         }
                     })?;
-                    let operation_ids = tool.operation_ids_for_output(&output);
-                    match output {
+                    let async_ops = tool.async_ops_for_output(&output);
+                    let result = match output {
                         ToolOutput::Json(value) => {
                             let content = match &value {
                                 Value::String(s) => s.clone(),
                                 _ => serde_json::to_string(&value).unwrap_or_default(),
                             };
-                            return Ok(ToolResult::new(call.id.to_string(), content, false)
-                                .with_operation_ids(operation_ids));
+                            ToolResult::new(call.id.to_string(), content, false)
                         }
                         ToolOutput::Blocks(blocks) => {
-                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)
-                                .with_operation_ids(operation_ids));
+                            ToolResult::with_blocks(call.id.to_string(), blocks, false)
                         }
-                    }
+                    };
+                    return Ok(ToolDispatchOutcome { result, async_ops });
                 }
             }
         }
@@ -436,13 +435,9 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|tool| tool.name == call.name) {
-                return Ok(ToolResult::new(
-                    call.id.to_string(),
-                    "{}".to_string(),
-                    false,
-                ));
+                return Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into());
             }
             Err(ToolError::not_found(call.name))
         }
@@ -524,7 +519,8 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "wait should be interrupted quickly, took {elapsed:?}"
         );
-        let content: serde_json::Value = serde_json::from_str(&result.text_content()).unwrap();
+        let content: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).unwrap();
         assert_eq!(content["status"], "interrupted");
     }
 
@@ -582,10 +578,10 @@ mod tests {
             .dispatch(call)
             .await
             .expect("dispatch should succeed");
-        assert!(!result.is_error);
+        assert!(!result.result.is_error);
         // wait returns {"waited_seconds": ..., "status": "complete"} which is an object
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result.text_content()).expect("content should be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
+            .expect("content should be valid JSON");
         assert_eq!(parsed["status"], "complete");
     }
 
@@ -614,9 +610,9 @@ mod tests {
             .dispatch(call)
             .await
             .expect("dispatch should succeed");
-        assert!(!result.is_error);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result.text_content()).expect("content should be valid JSON");
+        assert!(!result.result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
+            .expect("content should be valid JSON");
         assert!(
             parsed.get("iso8601").is_some(),
             "should contain iso8601 field"

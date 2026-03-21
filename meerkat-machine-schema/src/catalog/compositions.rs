@@ -3,8 +3,8 @@ use crate::{
     CompositionInvariantKind, CompositionSchema, CompositionStateLimits, CompositionWitness,
     CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
-    EntryInput, Expr, FeedbackInputRef, MachineInstance, Route, RouteBindingSource, RouteDelivery,
-    RouteFieldBinding, RouteTarget, SchedulerRule,
+    EntryInput, Expr, FeedbackInputRef, MachineInstance, ProtocolGenerationMode, Route,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
 };
 use std::collections::BTreeMap;
 
@@ -1881,6 +1881,8 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
             liveness_annotation: Some(
                 "eventual feedback under surface connection liveness".into(),
             ),
+            generation_mode: ProtocolGenerationMode::EffectExtractor,
+            target_crate: Some("meerkat-mcp/src/generated".into()),
         }],
         entry_inputs: vec![
             EntryInput {
@@ -3027,6 +3029,8 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
             liveness_annotation: Some(
                 "eventual feedback under task-scheduling fairness".into(),
             ),
+            generation_mode: ProtocolGenerationMode::ShellBridge,
+            target_crate: None,
         }],
         entry_inputs: vec![
             EntryInput {
@@ -3388,8 +3392,9 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
             // Barrier satisfaction: OpsLifecycle WaitAllSatisfied -> TurnExecution OpsBarrierSatisfied
-            // The run_id is provided by the owner actor (agent loop) since WaitAllSatisfied
-            // carries operation_ids but OpsBarrierSatisfied needs the active run_id.
+            // This is an owner-mediated handoff: the agent loop provides run_id at runtime
+            // because OpsLifecycle has no knowledge of TurnExecution's run concept.
+            // The protocol helper (ops_barrier_satisfaction) enforces the obligation.
             Route {
                 name: "ops_barrier_satisfied_enters_turn_execution".into(),
                 from_machine: "ops_lifecycle".into(),
@@ -3400,7 +3405,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 },
                 bindings: vec![RouteFieldBinding {
                     to_field: "run_id".into(),
-                    source: RouteBindingSource::Literal(Expr::String("owner_provided".into())),
+                    source: RouteBindingSource::OwnerProvided,
                 }],
                 delivery: RouteDelivery::Immediate,
             },
@@ -6358,6 +6363,8 @@ pub fn mob_bundle_composition() -> CompositionSchema {
             liveness_annotation: Some(
                 "eventual feedback under task-scheduling fairness".into(),
             ),
+            generation_mode: ProtocolGenerationMode::ShellBridge,
+            target_crate: None,
         }],
         entry_inputs: vec![
             EntryInput { name: "control_initialize".into(), machine: "runtime_control".into(), input_variant: "Initialize".into() },
@@ -8262,6 +8269,8 @@ pub fn ops_peer_bundle_composition() -> CompositionSchema {
                 "owner acknowledges barrier satisfaction; no turn-execution in this composition scope"
                     .into(),
             ),
+            generation_mode: ProtocolGenerationMode::ShellBridge,
+            target_crate: None,
         }],
         entry_inputs: vec![
             EntryInput {
@@ -8655,6 +8664,8 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
                 liveness_annotation: Some(
                     "eventual feedback under task-scheduling fairness".into(),
                 ),
+                generation_mode: ProtocolGenerationMode::Executor,
+                target_crate: None,
             },
             EffectHandoffProtocol {
                 name: "comms_drain_abort".into(),
@@ -8668,6 +8679,8 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
                 }],
                 closure_policy: ClosurePolicy::TerminalClosure,
                 liveness_annotation: None,
+                generation_mode: ProtocolGenerationMode::Executor,
+                target_crate: None,
             },
         ],
         entry_inputs: vec![

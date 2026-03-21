@@ -1299,7 +1299,10 @@ impl AgentToolDispatcher for MobMcpDispatcher {
         self.tools.clone()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let started = Instant::now();
         tracing::info!(
             target: "mob_tools",
@@ -1655,7 +1658,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 err
             ),
         }
-        result
+        result.map(Into::into)
     }
 }
 
@@ -1706,7 +1709,7 @@ pub async fn handle_tools_call(
             message: e.to_string(),
             data: None,
         })?;
-    let text = result.text_content();
+    let text = result.result.text_content();
     serde_json::from_str(&text).map_err(|e| McpToolError {
         code: -32603,
         message: format!("invalid tool result payload: {e}"),
@@ -2326,7 +2329,7 @@ mod tests {
     ) -> serde_json::Value {
         let raw = serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
         let out = d.dispatch(mk_call(name, &raw)).await.expect("tool call");
-        serde_json::from_str(&out.text_content()).expect("tool json")
+        serde_json::from_str(&out.result.text_content()).expect("tool json")
     }
 
     async fn call_tool_err(d: &MobMcpDispatcher, name: &str, args: serde_json::Value) -> ToolError {

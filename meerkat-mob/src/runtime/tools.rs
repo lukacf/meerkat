@@ -372,8 +372,11 @@ impl AgentToolDispatcher for MobToolDispatcher {
         Arc::clone(&self.tools)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
-        match call.name {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        (match call.name {
             TOOL_SPAWN_MEERKAT => {
                 let args: SpawnMeerkatArgs = call
                     .parse_args()
@@ -614,7 +617,8 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 Self::encode_result(call, json!(snapshot))
             }
             _ => Err(ToolError::not_found(call.name)),
-        }
+        })
+        .map(Into::into)
     }
 }
 

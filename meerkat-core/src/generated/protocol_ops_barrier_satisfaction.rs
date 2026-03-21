@@ -11,34 +11,32 @@
 
 use crate::lifecycle::identifiers::RunId;
 use crate::ops::OperationId;
+use crate::ops_lifecycle::WaitAllSatisfied;
 use crate::turn_execution_authority::{
     TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition,
 };
 
 /// Obligation token for the `ops_barrier_satisfaction` protocol.
 ///
-/// Created when the owner observes `WaitAllSatisfied` from OpsLifecycle;
-/// consumed when the owner submits `OpsBarrierSatisfied` to TurnExecution.
-/// Move semantics enforce that every barrier completion is acknowledged
-/// exactly once.
+/// Created from the authority-validated [`WaitAllSatisfied`] token returned
+/// by `OpsLifecycleRegistry::wait_all()`. Move semantics enforce that every
+/// barrier completion is acknowledged exactly once.
 #[derive(Debug)]
 pub struct OpsBarrierSatisfactionObligation {
-    /// The operation IDs that were awaited (carried from `WaitAllSatisfied`).
+    /// The operation IDs validated as terminal by the authority.
     pub operation_ids: Vec<OperationId>,
 }
 
-/// Create an obligation token from the data extracted from a
-/// `WaitAllSatisfied` effect.
+/// Create an obligation token from the authority-validated `WaitAllSatisfied`.
 ///
-/// The caller (shell) is responsible for extracting `operation_ids` from the
-/// `OpsLifecycleEffect::WaitAllSatisfied` variant and passing them here.
-/// This function lives in core (not runtime) so the obligation can be
-/// consumed by [`submit_ops_barrier_satisfied`] without crossing crate
-/// boundaries.
-pub fn accept_wait_all_satisfied(
-    operation_ids: Vec<OperationId>,
-) -> OpsBarrierSatisfactionObligation {
-    OpsBarrierSatisfactionObligation { operation_ids }
+/// The `satisfied` token is produced by `OpsLifecycleRegistry::wait_all()` after
+/// the authority validates all operations are terminal and emits the
+/// `WaitAllSatisfied` effect. This function converts it into the protocol
+/// obligation without re-inventing the operation IDs.
+pub fn accept_wait_all_satisfied(satisfied: WaitAllSatisfied) -> OpsBarrierSatisfactionObligation {
+    OpsBarrierSatisfactionObligation {
+        operation_ids: satisfied.operation_ids,
+    }
 }
 
 /// Submit `OpsBarrierSatisfied` feedback to TurnExecution, consuming the
@@ -61,6 +59,7 @@ mod tests {
     use super::*;
     use crate::lifecycle::identifiers::RunId;
     use crate::ops::{AsyncOpRef, OperationId};
+    use crate::ops_lifecycle::WaitAllSatisfied;
     use crate::turn_execution_authority::{
         ContentShape, TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnPhase,
     };
@@ -106,8 +105,11 @@ mod tests {
         })
         .expect("register pending ops");
 
-        // Create obligation from WaitAllSatisfied data
-        let obligation = accept_wait_all_satisfied(vec![op_id.clone()]);
+        // Create obligation from authority-derived WaitAllSatisfied
+        let satisfied = WaitAllSatisfied {
+            operation_ids: vec![op_id.clone()],
+        };
+        let obligation = accept_wait_all_satisfied(satisfied);
         assert_eq!(obligation.operation_ids, vec![op_id]);
 
         // Submit feedback through the protocol helper
@@ -127,7 +129,10 @@ mod tests {
     #[test]
     fn obligation_carries_operation_ids() {
         let ids = vec![OperationId::new(), OperationId::new()];
-        let obligation = accept_wait_all_satisfied(ids.clone());
+        let satisfied = WaitAllSatisfied {
+            operation_ids: ids.clone(),
+        };
+        let obligation = accept_wait_all_satisfied(satisfied);
         assert_eq!(obligation.operation_ids, ids);
     }
 
@@ -143,7 +148,10 @@ mod tests {
         })
         .expect("register pending ops");
 
-        let obligation = accept_wait_all_satisfied(vec![]);
+        let satisfied = WaitAllSatisfied {
+            operation_ids: vec![],
+        };
+        let obligation = accept_wait_all_satisfied(satisfied);
         // OpsBarrierSatisfied should fail when barrier_satisfied is already
         // trivially true (no barrier ops registered)
         let result = submit_ops_barrier_satisfied(&mut auth, obligation, rid);

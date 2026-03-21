@@ -1026,7 +1026,10 @@ impl AgentToolDispatcher for McpRouter {
         self.cached_tools.clone().into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         let blocks = self
@@ -1039,7 +1042,7 @@ impl AgentToolDispatcher for McpRouter {
                 },
             })?;
 
-        Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false))
+        Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
     }
 }
 

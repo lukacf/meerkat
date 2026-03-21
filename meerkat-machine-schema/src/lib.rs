@@ -5,7 +5,8 @@ mod machine;
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas, comms_drain_lifecycle_machine,
+    canonical_machine_coverage_manifests, canonical_machine_schemas,
+    comms_drain_lifecycle_composition, comms_drain_lifecycle_machine,
     external_tool_bundle_composition, external_tool_surface_machine, flow_run_machine,
     input_lifecycle_machine, mob_bundle_composition, mob_lifecycle_machine,
     mob_orchestrator_machine, ops_lifecycle_machine, ops_peer_bundle_composition,
@@ -14,14 +15,16 @@ pub use catalog::{
     turn_execution_machine,
 };
 pub use composition::{
-    ActorPriority, CompositionInvariant, CompositionInvariantKind, CompositionSchema,
-    CompositionSchemaError, CompositionStateLimits, CompositionWitness, CompositionWitnessField,
-    CompositionWitnessInput, CompositionWitnessState, CompositionWitnessTransition,
-    CompositionWitnessTransitionOrder, EntryInput, MachineInstance, Route, RouteBindingSource,
-    RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
+    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionInvariant,
+    CompositionInvariantKind, CompositionSchema, CompositionSchemaError, CompositionStateLimits,
+    CompositionWitness, CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
+    CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
+    EntryInput, FeedbackInputRef, MachineInstance, Route, RouteBindingSource, RouteDelivery,
+    RouteFieldBinding, RouteTarget, SchedulerRule,
 };
 pub use machine::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema,
     FieldType, Guard, HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema,
-    Quantifier, RustBinding, StateSchema, TransitionSchema, TypeRef, Update, VariantSchema,
+    MachineSchemaError, Quantifier, RustBinding, StateSchema, TransitionSchema, TypeRef, Update,
+    VariantSchema,
 };

@@ -443,9 +443,17 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
             },
         ],
         effect_dispositions: vec![
-            disposition("SpawnDrainTask", EffectDisposition::Local),
+            EffectDispositionRule {
+                effect_variant: "SpawnDrainTask".into(),
+                disposition: EffectDisposition::Local,
+                handoff_protocol: Some("comms_drain_spawn".into()),
+            },
             disposition("SetTurnBoundaryDrainSuppressed", EffectDisposition::Local),
-            disposition("AbortDrainTask", EffectDisposition::Local),
+            EffectDispositionRule {
+                effect_variant: "AbortDrainTask".into(),
+                disposition: EffectDisposition::Local,
+                handoff_protocol: Some("comms_drain_abort".into()),
+            },
         ],
     }
 }
@@ -454,6 +462,7 @@ fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
     EffectDispositionRule {
         effect_variant: name.into(),
         disposition: d,
+        handoff_protocol: None,
     }
 }
 

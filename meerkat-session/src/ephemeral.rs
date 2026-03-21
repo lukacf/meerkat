@@ -7,6 +7,8 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::generated::protocol_comms_drain_abort;
+use meerkat_core::generated::protocol_comms_drain_spawn;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest, HostModeOwner,
     SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
@@ -17,8 +19,7 @@ use meerkat_core::service::{
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_core::{
-    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleInput,
-    CommsDrainLifecycleMutator, CommsDrainMode, DrainExitReason, HostModePollOutcome,
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, HostModePollOutcome,
     PendingSystemContextAppend, SessionSystemContextState,
 };
 use std::collections::BTreeMap;
@@ -1125,20 +1126,29 @@ async fn session_task<A: SessionAgent>(
                     if requested_host_mode_owner == HostModeOwner::SessionService
                         && agent.comms_runtime().is_some()
                     {
-                        match host_mode_drain.apply(CommsDrainLifecycleInput::EnsureRunning {
-                            mode: CommsDrainMode::PersistentHost,
-                        }) {
-                            Ok(transition) => {
-                                apply_comms_drain_effects(&mut agent, &transition.effects);
-                                if transition.effects.iter().any(|effect| {
-                                    matches!(
-                                        effect,
-                                        CommsDrainLifecycleEffect::SpawnDrainTask { .. }
-                                    )
-                                }) && let Ok(spawned) =
-                                    host_mode_drain.apply(CommsDrainLifecycleInput::TaskSpawned)
-                                {
-                                    apply_comms_drain_effects(&mut agent, &spawned.effects);
+                        match protocol_comms_drain_spawn::execute_ensure_running(
+                            &mut host_mode_drain,
+                            CommsDrainMode::PersistentHost,
+                        ) {
+                            Ok(result) => {
+                                apply_comms_drain_effects(&mut agent, &result.effects);
+                                // The session-service host spawns the drain
+                                // task synchronously (as a poll loop inside
+                                // session_task), so we immediately submit
+                                // TaskSpawned feedback to close the obligation.
+                                match protocol_comms_drain_spawn::submit_task_spawned(
+                                    &mut host_mode_drain,
+                                    result.obligation,
+                                ) {
+                                    Ok(effects) => {
+                                        apply_comms_drain_effects(&mut agent, &effects);
+                                    }
+                                    Err(error) => {
+                                        tracing::trace!(
+                                            error = %error,
+                                            "host-mode drain authority rejected TaskSpawned"
+                                        );
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -1284,12 +1294,11 @@ async fn session_task<A: SessionAgent>(
                 match pump_result {
                     Ok(HostModePollOutcome::Idle | HostModePollOutcome::Ran(_)) => {}
                     Ok(HostModePollOutcome::Dismissed) => {
-                        if let Ok(transition) =
-                            host_mode_drain.apply(CommsDrainLifecycleInput::TaskExited {
-                                reason: DrainExitReason::Dismissed,
-                            })
-                        {
-                            apply_comms_drain_effects(&mut agent, &transition.effects);
+                        if let Ok(effects) = protocol_comms_drain_spawn::notify_running_task_exited(
+                            &mut host_mode_drain,
+                            meerkat_core::DrainExitReason::Dismissed,
+                        ) {
+                            apply_comms_drain_effects(&mut agent, &effects);
                         }
                         host_mode_owner = None;
                     }
@@ -1315,11 +1324,18 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(());
             }
             SessionCommand::Shutdown => {
-                if host_mode_owner == Some(HostModeOwner::SessionService)
-                    && let Ok(transition) =
-                        host_mode_drain.apply(CommsDrainLifecycleInput::StopRequested)
-                {
-                    apply_comms_drain_effects(&mut agent, &transition.effects);
+                if host_mode_owner == Some(HostModeOwner::SessionService) {
+                    if let Ok(result) =
+                        protocol_comms_drain_abort::execute_stop_requested(&mut host_mode_drain)
+                    {
+                        apply_comms_drain_effects(&mut agent, &result.effects);
+                        // The abort obligation is implicitly closed under
+                        // TerminalClosure policy when the machine reaches
+                        // Stopped phase (which StopRequested transitions to).
+                        // No explicit AbortObserved feedback is needed here
+                        // because the session is shutting down.
+                        drop(result.abort_obligation);
+                    }
                 }
                 control.state_tx.send_replace(SessionState::ShuttingDown);
                 break;

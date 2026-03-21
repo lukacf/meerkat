@@ -1,9 +1,10 @@
 use crate::{
-    ActorPriority, CompositionInvariant, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionWitness, CompositionWitnessField, CompositionWitnessInput,
-    CompositionWitnessState, CompositionWitnessTransition, CompositionWitnessTransitionOrder,
-    EntryInput, Expr, MachineInstance, Route, RouteBindingSource, RouteDelivery, RouteFieldBinding,
-    RouteTarget, SchedulerRule,
+    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionInvariant,
+    CompositionInvariantKind, CompositionSchema, CompositionStateLimits, CompositionWitness,
+    CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
+    CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
+    EntryInput, Expr, FeedbackInputRef, MachineInstance, Route, RouteBindingSource, RouteDelivery,
+    RouteFieldBinding, RouteTarget, SchedulerRule,
 };
 use std::collections::BTreeMap;
 
@@ -27,6 +28,12 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 actor: "turn_executor".into(),
             },
         ],
+        actors: vec![
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+        ],
+        handoff_protocols: vec![],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
@@ -1848,6 +1855,33 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                 actor: "turn_executor".into(),
             },
         ],
+        actors: vec![
+            machine_actor("surface_boundary"),
+            machine_actor("control_plane"),
+            machine_actor("turn_executor"),
+            owner_actor("surface_host"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "surface_completion".into(),
+            producer_instance: "external_tool_surface".into(),
+            effect_variant: "ScheduleSurfaceCompletion".into(),
+            realizing_actor: "surface_host".into(),
+            correlation_fields: vec!["surface_id".into()],
+            allowed_feedback_inputs: vec![
+                FeedbackInputRef {
+                    machine_instance: "external_tool_surface".into(),
+                    input_variant: "PendingSucceeded".into(),
+                },
+                FeedbackInputRef {
+                    machine_instance: "external_tool_surface".into(),
+                    input_variant: "PendingFailed".into(),
+                },
+            ],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback under surface connection liveness".into(),
+            ),
+        }],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
@@ -2002,6 +2036,19 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                 statement: "runtime control outranks surface-boundary work when both are ready".into(),
                 references_machines: vec!["runtime_control".into(), "external_tool_surface".into()],
                 references_actors: vec!["control_plane".into(), "surface_boundary".into()],
+            },
+            CompositionInvariant {
+                name: "surface_completion_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "external_tool_surface".into(),
+                    effect_variant: "ScheduleSurfaceCompletion".into(),
+                    protocol_name: "surface_completion".into(),
+                },
+                statement:
+                    "ScheduleSurfaceCompletion effect is covered by surface_completion handoff protocol"
+                        .into(),
+                references_machines: vec!["external_tool_surface".into()],
+                references_actors: vec!["surface_host".into()],
             },
         ],
         witnesses: vec![
@@ -2250,6 +2297,120 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     map_limit: 2,
                 },
             },
+            // Witness: surface completion handoff protocol feedback path
+            CompositionWitness {
+                name: "surface_completion_feedback".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "StageAdd".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "surface_id".into(),
+                            expr: Expr::String("default_surface".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "StartConversationRun".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // Owner feedback: PendingSucceeded closes the handoff obligation
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "PendingSucceeded".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "surface_id".into(),
+                                expr: Expr::String("default_surface".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "applied_at_turn".into(),
+                                expr: Expr::String("turn_1".into()),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![
+                    "turn_boundary_applies_surface_changes".into(),
+                    "surface_delta_notifies_runtime_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("external_tool_surface", Some("Operating"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("external_tool_surface", "StageAdd"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
+                    witness_transition("turn_execution", "LlmReturnedTerminal"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("external_tool_surface", "ApplyBoundaryAdd"),
+                    witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
+                    witness_transition("external_tool_surface", "PendingSucceededAdd"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "turn_execution",
+                        "LlmReturnedTerminal",
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                    ),
+                    // ApplyBoundaryAdd emits ScheduleSurfaceCompletion — owner realizes
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                        "external_tool_surface",
+                        "PendingSucceededAdd",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 8,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 3,
+                },
+            },
         ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: BTreeMap::new(),
@@ -2282,6 +2443,12 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                 actor: "ordinary_ingress".into(),
             },
         ],
+        actors: vec![
+            machine_actor("peer_plane"),
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+        ],
+        handoff_protocols: vec![],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
@@ -2839,11 +3006,43 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 actor: "turn_executor".into(),
             },
         ],
+        actors: vec![
+            machine_actor("ops_plane"),
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+            owner_actor("agent_loop"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "ops_barrier_satisfaction".into(),
+            producer_instance: "ops_lifecycle".into(),
+            effect_variant: "WaitAllSatisfied".into(),
+            realizing_actor: "agent_loop".into(),
+            correlation_fields: vec!["operation_ids".into()],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "turn_execution".into(),
+                input_variant: "OpsBarrierSatisfied".into(),
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback under task-scheduling fairness".into(),
+            ),
+        }],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
                 machine: "runtime_control".into(),
                 input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "ops_wait_all".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "WaitAll".into(),
+            },
+            EntryInput {
+                name: "turn_ops_barrier_satisfied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "OpsBarrierSatisfied".into(),
             },
             EntryInput {
                 name: "register_operation".into(),
@@ -2949,6 +3148,27 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 name: "turn_cancellation_observed".into(),
                 machine: "turn_execution".into(),
                 input_variant: "CancellationObserved".into(),
+            },
+            // Barrier-related turn_execution inputs
+            EntryInput {
+                name: "turn_llm_returned_tool_calls".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedToolCalls".into(),
+            },
+            EntryInput {
+                name: "turn_register_pending_ops".into(),
+                machine: "turn_execution".into(),
+                input_variant: "RegisterPendingOps".into(),
+            },
+            EntryInput {
+                name: "turn_tool_calls_resolved".into(),
+                machine: "turn_execution".into(),
+                input_variant: "ToolCallsResolved".into(),
+            },
+            EntryInput {
+                name: "turn_boundary_continue".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryContinue".into(),
             },
         ],
         routes: vec![
@@ -3167,6 +3387,23 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 }],
                 delivery: RouteDelivery::Immediate,
             },
+            // Barrier satisfaction: OpsLifecycle WaitAllSatisfied -> TurnExecution OpsBarrierSatisfied
+            // The run_id is provided by the owner actor (agent loop) since WaitAllSatisfied
+            // carries operation_ids but OpsBarrierSatisfied needs the active run_id.
+            Route {
+                name: "ops_barrier_satisfied_enters_turn_execution".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "WaitAllSatisfied".into(),
+                to: RouteTarget {
+                    machine: "turn_execution".into(),
+                    input_variant: "OpsBarrierSatisfied".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Literal(Expr::String("owner_provided".into())),
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
         ],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
@@ -3272,6 +3509,26 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     "turn_executor".into(),
                     "ordinary_ingress".into(),
                     "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "barrier_satisfaction_handoff_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "ops_lifecycle".into(),
+                    effect_variant: "WaitAllSatisfied".into(),
+                    protocol_name: "ops_barrier_satisfaction".into(),
+                },
+                statement:
+                    "OpsLifecycle WaitAllSatisfied effect is covered by the ops_barrier_satisfaction handoff protocol, routing barrier satisfaction to TurnExecution"
+                        .into(),
+                references_machines: vec![
+                    "ops_lifecycle".into(),
+                    "turn_execution".into(),
+                ],
+                references_actors: vec![
+                    "ops_plane".into(),
+                    "agent_loop".into(),
+                    "turn_executor".into(),
                 ],
             },
         ],
@@ -3739,6 +3996,242 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     map_limit: 2,
                 },
             },
+            // Barrier satisfaction: tool loop with barrier ops triggers
+            // OpsLifecycle WaitAllSatisfied -> TurnExecution OpsBarrierSatisfied
+            CompositionWitness {
+                name: "barrier_tool_loop_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("BackgroundToolOp".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    // LLM returns tool calls -> WaitingForOps
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedToolCalls".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "tool_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                        ],
+                    },
+                    // Register barrier ops
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "RegisterPendingOps".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "op_refs".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "has_barrier_ops".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    },
+                    // OpsLifecycle completes -> shell calls WaitAll
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "CompleteOperation".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "WaitAll".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_ids".into(),
+                            expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                        }],
+                    },
+                    // OpsBarrierSatisfied feeds into TurnExecution
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "OpsBarrierSatisfied".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // ToolCallsResolved -> DrainingBoundary
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "ToolCallsResolved".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // BoundaryContinue -> CallingLlm (next turn)
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryContinue".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // LLM returns terminal -> DrainingBoundary -> Completed
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "op_event_enters_runtime_admission".into(),
+                    "admitted_op_work_enters_ingress".into(),
+                    "ingress_ready_starts_runtime_control".into(),
+                    "runtime_control_starts_execution".into(),
+                    "ops_barrier_satisfied_enters_turn_execution".into(),
+                    "execution_boundary_updates_ingress".into(),
+                    "execution_completion_updates_ingress".into(),
+                    "execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("ops_lifecycle", Some("Active"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "RegisterOperation"),
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("ops_lifecycle", "CompleteOperation"),
+                    witness_transition("ops_lifecycle", "WaitAll"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "LlmReturnedToolCalls"),
+                    witness_transition("turn_execution", "RegisterPendingOps"),
+                    witness_transition("turn_execution", "OpsBarrierSatisfied"),
+                    witness_transition("turn_execution", "ToolCallsResolved"),
+                    witness_transition("turn_execution", "BoundaryContinue"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "turn_execution",
+                        "RegisterPendingOps",
+                        "ops_lifecycle",
+                        "WaitAll",
+                    ),
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "WaitAll",
+                        "turn_execution",
+                        "OpsBarrierSatisfied",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "OpsBarrierSatisfied",
+                        "turn_execution",
+                        "ToolCallsResolved",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "ToolCallsResolved",
+                        "turn_execution",
+                        "BoundaryContinue",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 16,
+                    pending_input_limit: 15,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 9,
+                    emitted_effect_limit: 10,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 3,
+                },
+            },
         ],
         deep_domain_cardinality: 2,
         deep_domain_overrides: BTreeMap::new(),
@@ -3768,6 +4261,12 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 actor: "turn_executor".into(),
             },
         ],
+        actors: vec![
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+        ],
+        handoff_protocols: vec![],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
@@ -4820,6 +5319,12 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 actor: "turn_executor".into(),
             },
         ],
+        actors: vec![
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+        ],
+        handoff_protocols: vec![],
         entry_inputs: vec![
             EntryInput {
                 name: "control_initialize".into(),
@@ -5828,6 +6333,32 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 actor: "turn_executor".into(),
             },
         ],
+        actors: vec![
+            machine_actor("mob_lifecycle_actor"),
+            machine_actor("mob_orchestrator_actor"),
+            machine_actor("flow_engine"),
+            machine_actor("ops_plane"),
+            machine_actor("peer_plane"),
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+            owner_actor("agent_loop"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "ops_barrier_satisfaction".into(),
+            producer_instance: "ops_lifecycle".into(),
+            effect_variant: "WaitAllSatisfied".into(),
+            realizing_actor: "agent_loop".into(),
+            correlation_fields: vec!["operation_ids".into()],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "turn_execution".into(),
+                input_variant: "OpsBarrierSatisfied".into(),
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback under task-scheduling fairness".into(),
+            ),
+        }],
         entry_inputs: vec![
             EntryInput { name: "control_initialize".into(), machine: "runtime_control".into(), input_variant: "Initialize".into() },
             EntryInput { name: "mob_initialize".into(), machine: "mob_orchestrator".into(), input_variant: "InitializeOrchestrator".into() },
@@ -7714,6 +8245,24 @@ pub fn ops_peer_bundle_composition() -> CompositionSchema {
                 actor: "peer_plane".into(),
             },
         ],
+        actors: vec![
+            machine_actor("ops_plane"),
+            machine_actor("peer_plane"),
+            owner_actor("agent_loop"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "ops_barrier_satisfaction".into(),
+            producer_instance: "ops_lifecycle".into(),
+            effect_variant: "WaitAllSatisfied".into(),
+            realizing_actor: "agent_loop".into(),
+            correlation_fields: vec!["operation_ids".into()],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "owner acknowledges barrier satisfaction; no turn-execution in this composition scope"
+                    .into(),
+            ),
+        }],
         entry_inputs: vec![
             EntryInput {
                 name: "register_operation".into(),
@@ -8074,4 +8623,354 @@ fn peer_envelope_fields(
                 .unwrap_or(Expr::None),
         },
     ]
+}
+
+pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "comms_drain_lifecycle".into(),
+        machines: vec![MachineInstance {
+            instance_id: "comms_drain".into(),
+            machine_name: "CommsDrainLifecycleMachine".into(),
+            actor: "drain_plane".into(),
+        }],
+        actors: vec![machine_actor("drain_plane"), owner_actor("session_host")],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "comms_drain_spawn".into(),
+                producer_instance: "comms_drain".into(),
+                effect_variant: "SpawnDrainTask".into(),
+                realizing_actor: "session_host".into(),
+                correlation_fields: vec!["mode".into()],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "comms_drain".into(),
+                        input_variant: "TaskSpawned".into(),
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "comms_drain".into(),
+                        input_variant: "TaskExited".into(),
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback under task-scheduling fairness".into(),
+                ),
+            },
+            EffectHandoffProtocol {
+                name: "comms_drain_abort".into(),
+                producer_instance: "comms_drain".into(),
+                effect_variant: "AbortDrainTask".into(),
+                realizing_actor: "session_host".into(),
+                correlation_fields: vec![],
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: "comms_drain".into(),
+                    input_variant: "AbortObserved".into(),
+                }],
+                closure_policy: ClosurePolicy::TerminalClosure,
+                liveness_annotation: None,
+            },
+        ],
+        entry_inputs: vec![
+            EntryInput {
+                name: "drain_ensure_running".into(),
+                machine: "comms_drain".into(),
+                input_variant: "EnsureRunning".into(),
+            },
+            EntryInput {
+                name: "drain_task_spawned".into(),
+                machine: "comms_drain".into(),
+                input_variant: "TaskSpawned".into(),
+            },
+            EntryInput {
+                name: "drain_task_exited".into(),
+                machine: "comms_drain".into(),
+                input_variant: "TaskExited".into(),
+            },
+            EntryInput {
+                name: "drain_stop_requested".into(),
+                machine: "comms_drain".into(),
+                input_variant: "StopRequested".into(),
+            },
+            EntryInput {
+                name: "drain_abort_observed".into(),
+                machine: "comms_drain".into(),
+                input_variant: "AbortObserved".into(),
+            },
+        ],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "spawn_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "comms_drain".into(),
+                    effect_variant: "SpawnDrainTask".into(),
+                    protocol_name: "comms_drain_spawn".into(),
+                },
+                statement: "SpawnDrainTask effect is covered by comms_drain_spawn handoff protocol"
+                    .into(),
+                references_machines: vec!["comms_drain".into()],
+                references_actors: vec!["session_host".into()],
+            },
+            CompositionInvariant {
+                name: "abort_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "comms_drain".into(),
+                    effect_variant: "AbortDrainTask".into(),
+                    protocol_name: "comms_drain_abort".into(),
+                },
+                statement: "AbortDrainTask effect is covered by comms_drain_abort handoff protocol"
+                    .into(),
+                references_machines: vec!["comms_drain".into()],
+                references_actors: vec!["session_host".into()],
+            },
+        ],
+        witnesses: vec![
+            // Happy path: Inactive -> Starting -> Running -> Stopped (via stop)
+            CompositionWitness {
+                name: "spawn_run_stop".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "PersistentHost".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "TaskSpawned".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "StopRequested".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![CompositionWitnessState {
+                    machine: "comms_drain".into(),
+                    phase: Some("Stopped".into()),
+                    fields: vec![],
+                }],
+                expected_transitions: vec![
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromInactive".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "TaskSpawnedFromStarting".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "StopRequestedFromRunning".into(),
+                    },
+                ],
+                expected_transition_order: vec![
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromInactive".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                    },
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "StopRequestedFromRunning".into(),
+                        },
+                    },
+                ],
+                state_limits: CompositionStateLimits::ci_defaults(),
+            },
+            // Respawn path: failure in PersistentHost -> ExitedRespawnable -> re-spawn
+            CompositionWitness {
+                name: "failure_respawn".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "PersistentHost".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "TaskExited".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "reason".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "DrainExitReason".into(),
+                                variant: "Failed".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "PersistentHost".into(),
+                            },
+                        }],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![CompositionWitnessState {
+                    machine: "comms_drain".into(),
+                    phase: Some("Starting".into()),
+                    fields: vec![],
+                }],
+                expected_transitions: vec![
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromInactive".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "TaskExitedFromStartingRespawnable".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromExitedRespawnable".into(),
+                    },
+                ],
+                expected_transition_order: vec![
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromInactive".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskExitedFromStartingRespawnable".into(),
+                        },
+                    },
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskExitedFromStartingRespawnable".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromExitedRespawnable".into(),
+                        },
+                    },
+                ],
+                state_limits: CompositionStateLimits::ci_defaults(),
+            },
+            // Abort observed path: Running -> AbortObserved -> Stopped
+            CompositionWitness {
+                name: "abort_observed".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "Timed".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "TaskSpawned".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "AbortObserved".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![CompositionWitnessState {
+                    machine: "comms_drain".into(),
+                    phase: Some("Stopped".into()),
+                    fields: vec![],
+                }],
+                expected_transitions: vec![
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromInactive".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "TaskSpawnedFromStarting".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "AbortObservedFromActive".into(),
+                    },
+                ],
+                expected_transition_order: vec![
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromInactive".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                    },
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "AbortObservedFromActive".into(),
+                        },
+                    },
+                ],
+                state_limits: CompositionStateLimits::ci_defaults(),
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(CompositionStateLimits::ci_defaults()),
+        closed_world: true,
+    }
+}
+
+fn machine_actor(name: &str) -> ActorSchema {
+    ActorSchema {
+        name: name.into(),
+        kind: ActorKind::Machine,
+    }
+}
+
+fn owner_actor(name: &str) -> ActorSchema {
+    ActorSchema {
+        name: name.into(),
+        kind: ActorKind::Owner,
+    }
 }

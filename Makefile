@@ -12,7 +12,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -151,12 +151,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity audit
+ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint test-all test-minimal audit
+ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint test-all test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # RMAT read-seam lint: detect shell code that reads authority state to gate
@@ -202,6 +202,12 @@ machine-verify: xtask-build
 machine-check-drift: xtask-build
 	@echo "$(GREEN)Running machine-check-drift...$(NC)"
 	$(XTASK_BIN) machine-check-drift --all
+
+# RMAT structural seam audit: protocol coverage, feedback constraints,
+# terminal mapping, and heuristic authority hygiene checks.
+rmat-audit:
+	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
+	$(CARGO) run -p xtask -- rmat-audit --strict
 
 # Generate documentation
 doc:
@@ -399,6 +405,9 @@ help:
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"
 	@echo "  $(GREEN)ci-smoke$(NC)       - Run CI smoke pipeline (no full feature matrices)"
+	@echo "  $(GREEN)machine-verify$(NC)- Verify machine/composition authority artifacts"
+	@echo "  $(GREEN)machine-check-drift$(NC)- Check generated authority artifacts for drift"
+	@echo "  $(GREEN)rmat-audit$(NC)    - Run RMAT structural seam audit (strict mode)"
 	@echo "  $(GREEN)verify-version$(NC)- Verify Cargo.toml version matches git tag"
 	@echo ""
 	@echo "Release targets:"

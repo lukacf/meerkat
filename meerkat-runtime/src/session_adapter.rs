@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use meerkat_core::comms_drain_lifecycle_authority::{
-    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleInput,
-    CommsDrainLifecycleMutator, CommsDrainMode, DrainExitReason,
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, DrainExitReason,
 };
+use meerkat_core::generated::{protocol_comms_drain_abort, protocol_comms_drain_spawn};
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -239,6 +239,56 @@ impl CommsDrainSlot {
             authority: CommsDrainLifecycleAuthority::new(),
             handle: None,
             control: None,
+        }
+    }
+}
+
+fn apply_runtime_drain_effects(slot: &CommsDrainSlot, effects: &[CommsDrainLifecycleEffect]) {
+    for effect in effects {
+        if matches!(
+            effect,
+            CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. }
+        ) {
+            if let Some(control) = &slot.control {
+                control.store(
+                    slot.authority.suppresses_turn_boundary_drain(),
+                    Ordering::Release,
+                );
+            }
+        }
+    }
+}
+
+fn abort_slot(slot: &mut CommsDrainSlot) {
+    match protocol_comms_drain_abort::execute_stop_requested(&mut slot.authority) {
+        Ok(result) => {
+            for effect in &result.effects {
+                match effect {
+                    CommsDrainLifecycleEffect::AbortDrainTask => {
+                        if let Some(handle) = slot.handle.take() {
+                            handle.abort();
+                        }
+                    }
+                    CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
+                        if let Some(control) = &slot.control {
+                            control.store(
+                                slot.authority.suppresses_turn_boundary_drain(),
+                                Ordering::Release,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Under TerminalClosure policy, the abort obligation is implicitly
+            // satisfied when the machine reaches Stopped phase. Drop it.
+            drop(result.abort_obligation);
+        }
+        Err(_) => {
+            // Already stopped or inactive — just clean up the handle
+            if let Some(handle) = slot.handle.take() {
+                handle.abort();
+            }
         }
     }
 }
@@ -818,19 +868,17 @@ impl RuntimeSessionAdapter {
             .entry(session_id.clone())
             .or_insert_with(CommsDrainSlot::new);
 
-        let transition = match slot
-            .authority
-            .apply(CommsDrainLifecycleInput::EnsureRunning { mode })
-        {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::trace!(error = %e, "comms drain authority rejected EnsureRunning");
-                return false;
-            }
-        };
+        let result =
+            match protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::trace!(error = %e, "comms drain authority rejected EnsureRunning");
+                    return false;
+                }
+            };
 
         // Execute effects from the transition
-        for effect in &transition.effects {
+        for effect in &result.effects {
             match effect {
                 CommsDrainLifecycleEffect::SpawnDrainTask { mode: spawn_mode } => {
                     let idle_timeout = match spawn_mode {
@@ -843,8 +891,6 @@ impl RuntimeSessionAdapter {
                         comms.clone(),
                         idle_timeout,
                     );
-                    // Immediately confirm the task was spawned
-                    let _ = slot.authority.apply(CommsDrainLifecycleInput::TaskSpawned);
                     slot.handle = Some(handle);
                 }
                 CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
@@ -860,6 +906,20 @@ impl RuntimeSessionAdapter {
                         handle.abort();
                     }
                 }
+            }
+        }
+
+        // The runtime spawns the drain task synchronously (as a tokio task
+        // above), so we immediately close the spawn obligation.
+        match protocol_comms_drain_spawn::submit_task_spawned(
+            &mut slot.authority,
+            result.obligation,
+        ) {
+            Ok(effects) => {
+                apply_runtime_drain_effects(slot, &effects);
+            }
+            Err(e) => {
+                tracing::trace!(error = %e, "comms drain authority rejected TaskSpawned");
             }
         }
         true
@@ -884,23 +944,12 @@ impl RuntimeSessionAdapter {
         let mut slots = self.comms_drain_slots.write().await;
         if let Some(slot) = slots.get_mut(session_id) {
             slot.handle.take(); // clean up finished handle
-            match slot
-                .authority
-                .apply(CommsDrainLifecycleInput::TaskExited { reason })
-            {
-                Ok(transition) => {
-                    for effect in &transition.effects {
-                        if matches!(
-                            effect,
-                            CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. }
-                        ) && let Some(control) = &slot.control
-                        {
-                            control.store(
-                                slot.authority.suppresses_turn_boundary_drain(),
-                                Ordering::Release,
-                            );
-                        }
-                    }
+            match protocol_comms_drain_spawn::notify_running_task_exited(
+                &mut slot.authority,
+                reason,
+            ) {
+                Ok(effects) => {
+                    apply_runtime_drain_effects(slot, &effects);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
@@ -913,34 +962,7 @@ impl RuntimeSessionAdapter {
     pub async fn abort_comms_drains(&self) {
         let mut slots = self.comms_drain_slots.write().await;
         for (_, slot) in slots.iter_mut() {
-            if let Ok(transition) = slot
-                .authority
-                .apply(CommsDrainLifecycleInput::StopRequested)
-            {
-                for effect in &transition.effects {
-                    match effect {
-                        CommsDrainLifecycleEffect::AbortDrainTask => {
-                            if let Some(handle) = slot.handle.take() {
-                                handle.abort();
-                            }
-                        }
-                        CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
-                            if let Some(control) = &slot.control {
-                                control.store(
-                                    slot.authority.suppresses_turn_boundary_drain(),
-                                    Ordering::Release,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            } else {
-                // Already stopped or inactive -- just clean up the handle
-                if let Some(handle) = slot.handle.take() {
-                    handle.abort();
-                }
-            }
+            abort_slot(slot);
         }
     }
 
@@ -948,34 +970,7 @@ impl RuntimeSessionAdapter {
     pub async fn abort_comms_drain(&self, session_id: &SessionId) {
         let mut slots = self.comms_drain_slots.write().await;
         if let Some(slot) = slots.get_mut(session_id) {
-            if let Ok(transition) = slot
-                .authority
-                .apply(CommsDrainLifecycleInput::StopRequested)
-            {
-                for effect in &transition.effects {
-                    match effect {
-                        CommsDrainLifecycleEffect::AbortDrainTask => {
-                            if let Some(handle) = slot.handle.take() {
-                                handle.abort();
-                            }
-                        }
-                        CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. } => {
-                            if let Some(control) = &slot.control {
-                                control.store(
-                                    slot.authority.suppresses_turn_boundary_drain(),
-                                    Ordering::Release,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            } else {
-                // Already stopped or inactive -- just clean up the handle
-                if let Some(handle) = slot.handle.take() {
-                    handle.abort();
-                }
-            }
+            abort_slot(slot);
         }
     }
 

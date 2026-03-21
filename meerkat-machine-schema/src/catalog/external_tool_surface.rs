@@ -901,7 +901,11 @@ pub fn external_tool_surface_machine() -> MachineSchema {
             },
         ],
         effect_dispositions: vec![
-            disposition("ScheduleSurfaceCompletion", EffectDisposition::External),
+            EffectDispositionRule {
+                effect_variant: "ScheduleSurfaceCompletion".into(),
+                disposition: EffectDisposition::Local,
+                handoff_protocol: Some("surface_completion".into()),
+            },
             disposition("RefreshVisibleSurfaceSet", EffectDisposition::Local),
             disposition("EmitExternalToolDelta", EffectDisposition::External),
             disposition("CloseSurfaceConnection", EffectDisposition::External),
@@ -914,6 +918,7 @@ fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
     EffectDispositionRule {
         effect_variant: name.into(),
         disposition: d,
+        handoff_protocol: None,
     }
 }
 

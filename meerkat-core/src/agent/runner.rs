@@ -146,13 +146,12 @@ where
     }
 
     /// Set whether a separate host-mode drain owns comms inbox consumption.
+    ///
+    /// Only called through the `SessionAgent` trait as the realization endpoint
+    /// for `CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed`. Must
+    /// not be called directly from shell code — use protocol helpers instead.
     pub fn set_comms_drain_active(&mut self, active: bool) {
         self.comms_drain_active.store(active, Ordering::Release);
-    }
-
-    /// Backward-compatible helper for older call sites that only ever sealed.
-    pub fn seal_comms_drain_active(&mut self) {
-        self.set_comms_drain_active(true);
     }
 
     /// Shared comms-drain control flag used by host-mode owners.

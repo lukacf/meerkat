@@ -4,9 +4,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use meerkat_core::McpServerConfig;
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::event::ToolConfigChangeOperation;
-use meerkat_mcp::{McpLifecyclePhase, McpRouter, McpRouterAdapter, McpServerConfig};
+use meerkat_mcp::{McpLifecyclePhase, McpRouter, McpRouterAdapter};
 
 fn invalid_server_config(name: &str) -> McpServerConfig {
     McpServerConfig::stdio(

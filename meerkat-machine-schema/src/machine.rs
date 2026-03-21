@@ -154,6 +154,13 @@ impl MachineSchema {
                         variant: rule.effect_variant.clone(),
                     });
                 }
+                if rule.handoff_protocol.is_some()
+                    && matches!(rule.disposition, EffectDisposition::Routed { .. })
+                {
+                    return Err(MachineSchemaError::HandoffProtocolOnRoutedEffect {
+                        variant: rule.effect_variant.clone(),
+                    });
+                }
             }
             for variant in &effect_variants {
                 if !disposed_variants.contains(*variant) {
@@ -182,6 +189,11 @@ pub enum EffectDisposition {
 pub struct EffectDispositionRule {
     pub effect_variant: String,
     pub disposition: EffectDisposition,
+    /// When set, this effect participates in an owner-handoff protocol.
+    /// The named protocol must be declared as an `EffectHandoffProtocol`
+    /// in every composition that includes this machine.
+    /// Only meaningful for `Local` or `External` dispositions.
+    pub handoff_protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -901,6 +913,7 @@ pub enum MachineSchemaError {
     UnknownEffectDispositionVariant { variant: String },
     DuplicateEffectDisposition { variant: String },
     MissingEffectDisposition { variant: String },
+    HandoffProtocolOnRoutedEffect { variant: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -933,6 +946,12 @@ impl fmt::Display for MachineSchemaError {
             }
             Self::MissingEffectDisposition { variant } => {
                 write!(f, "effect variant `{variant}` has no disposition rule")
+            }
+            Self::HandoffProtocolOnRoutedEffect { variant } => {
+                write!(
+                    f,
+                    "effect variant `{variant}` has handoff_protocol set but disposition is Routed (use routes instead)"
+                )
             }
         }
     }

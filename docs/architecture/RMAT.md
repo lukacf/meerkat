@@ -218,15 +218,19 @@ Every important RMAT claim should be labeled explicitly:
 - **Liveness**: under explicit fairness assumptions, required feedback
   eventually arrives
 
-Tranche 1 seam work proves:
+Seam work currently proves:
 
-- structural coverage for owner handoffs
-- safety for comms drain seam closure
-- safety for the initial barrier fix inside `TurnExecution`
-- safety for terminal outcome alignment
-- one explicit liveness claim for comms drain feedback closure
-
-Tranche 2 is where the stronger cross-machine op-barrier proof lands.
+- structural coverage for all owner handoffs (protocol exists, realization
+  sites declared, feedback constrained to generated helpers)
+- safety for comms drain seam closure (obligation invariants, no shell bypass)
+- safety for turn-execution barrier (barrier satisfaction gated by authority,
+  `ToolCallsResolved` requires `barrier_satisfied == true`)
+- safety for terminal outcome alignment (exhaustive generated classifier, no
+  default arm)
+- one explicit liveness claim for comms drain feedback closure (spawn protocol
+  under task-scheduling fairness)
+- cross-machine barrier composition (OpsLifecycle `WaitAllSatisfied` routed to
+  TurnExecution `OpsBarrierSatisfied` through declared handoff protocol)
 
 ## Shell vs Authority Boundary
 
@@ -300,6 +304,49 @@ rest of the platform. If it fails there, we learn whether:
 - the schema language needs richer guards/effects
 - the kernel API shape needs to grow
 - or the approach has real limits
+
+## Adding a New Handoff Protocol
+
+When adding a new async boundary that crosses an ownership seam:
+
+1. **Annotate the effect** — set `handoff_protocol: Some("protocol_name")` on the
+   `EffectDispositionRule` in the machine catalog file.
+
+2. **Declare the protocol** — add an `EffectHandoffProtocol` to every composition
+   that includes the producing machine. Specify the realizing actor, allowed
+   feedback inputs, correlation fields, and closure policy.
+
+3. **Run schema validation** — `./scripts/repo-cargo nextest run -p meerkat-machine-schema`
+   catches missing protocols in closed-world compositions.
+
+4. **Generate protocol helpers** — `./scripts/repo-cargo run -p xtask -- protocol-codegen`
+   creates typed feedback submitters and (for `TerminalClosure` protocols) terminal
+   classification helpers.
+
+5. **Wire the shell** — replace handwritten feedback submission with calls to the
+   generated protocol helpers. Generated code carries `// @generated` markers.
+
+6. **Run the RMAT audit** — `./scripts/repo-cargo run -p xtask -- rmat-audit --strict`
+   catches:
+   - effects with `handoff_protocol` but no matching composition protocol
+   - protocols without generated helper files
+   - feedback submitted outside generated helpers
+   - terminal classification without generated classifiers
+
+   If a finding is expected in-progress work, update the baseline with
+   `--update-baseline`. The baseline lives at `xtask/rmat-baseline.toml`.
+
+7. **Add composition witnesses** — witnesses exercise the handoff path and verify
+   that the protocol's feedback inputs are reachable.
+
+## CI Enforcement
+
+`make ci` runs `rmat-audit --strict` as a hard gate. New handoff-annotated effects
+without protocols, protocol feedback outside generated helpers, and terminal
+classification outside generated classifiers all fail the build unless baselined.
+
+The baseline (`xtask/rmat-baseline.toml`) must be kept current. Stale entries
+(findings in the baseline that no longer reproduce) also fail strict mode.
 
 ## End State
 

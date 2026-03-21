@@ -3,10 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::McpServerConfig;
 use meerkat_core::event::ToolConfigChangeOperation;
-use meerkat_mcp::{
-    McpLifecycleAction, McpLifecyclePhase, McpRouter, McpRouterAdapter, McpServerConfig,
-};
+use meerkat_mcp::{McpLifecycleAction, McpLifecyclePhase, McpRouter, McpRouterAdapter};
 
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 fn test_server_path() -> PathBuf {

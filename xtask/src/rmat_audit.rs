@@ -149,6 +149,13 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
     }
 
     findings.extend(route_coverage);
+
+    // Structural seam rules (hard errors)
+    findings.extend(collect_handoff_protocol_coverage_findings(policy));
+    findings.extend(collect_protocol_realization_site_findings(root, policy));
+    findings.extend(collect_protocol_feedback_constraint_findings(root, policy));
+    findings.extend(collect_terminal_mapping_constraint_findings(root, policy));
+
     findings.sort_by(|a, b| a.key.cmp(&b.key));
     findings.dedup_by(|a, b| a.key == b.key);
     Ok(findings)
@@ -684,6 +691,191 @@ fn has_rmat_allow(source: &str, span: proc_macro2::Span, rule: &str) -> bool {
     }
 
     false
+}
+
+/// Structural seam rule: every effect with `handoff_protocol: Some(name)` must have
+/// a corresponding `EffectHandoffProtocol` declared in compositions that include
+/// the producing machine. This is validated at the composition schema level; the audit
+/// cross-checks that the annotation on the machine schema side is consistent.
+fn collect_handoff_protocol_coverage_findings(policy: &AuditPolicy) -> Vec<Finding> {
+    use meerkat_machine_schema::canonical_composition_schemas;
+    let mut findings = Vec::new();
+    let compositions = canonical_composition_schemas();
+
+    for rule in &policy.handoff_protocol_coverage {
+        // For every composition that includes the annotated machine,
+        // verify the protocol is declared.
+        let mut found_in_any_composition = false;
+        for composition in &compositions {
+            let machine_present = composition
+                .machines
+                .iter()
+                .any(|m| m.machine_name == rule.machine);
+            if !machine_present {
+                continue;
+            }
+            found_in_any_composition = true;
+            let protocol_present = composition
+                .handoff_protocols
+                .iter()
+                .any(|p| p.name == rule.protocol_name && p.effect_variant == rule.effect_variant);
+            if !protocol_present {
+                findings.push(error_finding(
+                    "HandoffProtocolCoverage",
+                    "<schema>",
+                    &format!("{}::{}", rule.machine, rule.effect_variant),
+                    format!(
+                        "effect `{}::{}` declares handoff_protocol `{}` but composition `{}` has no matching EffectHandoffProtocol",
+                        rule.machine, rule.effect_variant, rule.protocol_name, composition.name
+                    ),
+                    false,
+                ));
+            }
+        }
+        if !found_in_any_composition {
+            // Machine with handoff annotation not present in any composition is also a problem.
+            findings.push(error_finding(
+                "HandoffProtocolCoverage",
+                "<schema>",
+                &format!("{}::{}", rule.machine, rule.effect_variant),
+                format!(
+                    "effect `{}::{}` declares handoff_protocol `{}` but machine is not present in any composition",
+                    rule.machine, rule.effect_variant, rule.protocol_name
+                ),
+                false,
+            ));
+        }
+    }
+    findings
+}
+
+/// Structural seam rule: every declared `EffectHandoffProtocol` must have a generated
+/// protocol helper file at the expected path.
+fn collect_protocol_realization_site_findings(root: &Path, policy: &AuditPolicy) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for rule in &policy.protocol_realization_sites {
+        let found = rule.candidate_paths.iter().any(|p| root.join(p).exists());
+        if !found {
+            let paths_display = rule.candidate_paths.join(", ");
+            findings.push(error_finding(
+                "ProtocolRealizationSiteCoverage",
+                rule.candidate_paths.first().map(|s| s.as_str()).unwrap_or(""),
+                &rule.protocol_name,
+                format!(
+                    "protocol `{}` has no generated helper file at any of [{}]; run `xtask protocol-codegen`",
+                    rule.protocol_name, paths_display
+                ),
+                false,
+            ));
+        }
+    }
+    findings
+}
+
+/// Structural seam rule: feedback inputs declared in a protocol must only be submitted
+/// through generated helper code (files containing `// @generated` marker).
+/// This checks that no non-generated file constructs the feedback input variant
+/// in a way that bypasses the protocol helper.
+fn collect_protocol_feedback_constraint_findings(
+    root: &Path,
+    policy: &AuditPolicy,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if policy.protocol_feedback_constraints.is_empty() {
+        return findings;
+    }
+
+    let files = match collect_repo_rs_files(root) {
+        Ok(f) => f,
+        Err(_) => return findings,
+    };
+
+    for rule in &policy.protocol_feedback_constraints {
+        let variant_pattern = &rule.feedback_input_variant;
+        for file in &files {
+            let relative = file
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            // Generated files are allowed to reference the feedback variant.
+            if relative.contains("/src/generated/") {
+                continue;
+            }
+            // Authority files are allowed — they are the machine truth.
+            if relative.contains("authority") {
+                continue;
+            }
+            // Schema/catalog files are allowed — they declare the variant.
+            if relative.contains("meerkat-machine-schema/") {
+                continue;
+            }
+            // xtask files are allowed — they generate/audit.
+            if relative.starts_with("xtask/") {
+                continue;
+            }
+
+            let source = match fs::read_to_string(file) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            // Look for construction of the feedback variant (e.g., `Input::VariantName`)
+            // in non-generated, non-authority code.
+            let construction_pattern = format!("::{}", variant_pattern);
+            if source.contains(&construction_pattern) {
+                findings.push(error_finding(
+                    "ProtocolFeedbackThroughGeneratedHelpers",
+                    &relative,
+                    &format!("{}::{}", rule.protocol_name, variant_pattern),
+                    format!(
+                        "feedback input `{}` for protocol `{}` is constructed in non-generated code; \
+                         use the generated protocol helper instead",
+                        variant_pattern, rule.protocol_name
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// Structural seam rule: terminal outcome classification for protocol-producing machines
+/// must use generated classification helpers, not handwritten match arms.
+/// This checks that a generated terminal classifier exists when a protocol requires one.
+fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolicy) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for rule in &policy.terminal_mapping_constraints {
+        // Find the generated helper from the realization site candidates.
+        let site_rule = policy
+            .protocol_realization_sites
+            .iter()
+            .find(|r| r.protocol_name == rule.protocol_name);
+        let found_path =
+            site_rule.and_then(|sr| sr.candidate_paths.iter().find(|p| root.join(p).exists()));
+        if let Some(path) = found_path {
+            let source = match fs::read_to_string(root.join(path)) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if !source.contains("classify_terminal") {
+                findings.push(error_finding(
+                    "TerminalMappingThroughGeneratedHelpers",
+                    path,
+                    &rule.protocol_name,
+                    format!(
+                        "generated protocol helper for `{}` exists but does not contain `classify_terminal`; \
+                         the protocol codegen should generate terminal classification for producer `{}`",
+                        rule.protocol_name, rule.producer_machine
+                    ),
+                    false,
+                ));
+            }
+        }
+        // If the file doesn't exist, ProtocolRealizationSiteCoverage already catches that.
+    }
+    findings
 }
 
 fn error_finding(

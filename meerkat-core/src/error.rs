@@ -252,6 +252,10 @@ pub enum AgentError {
 
     #[error("Hook configuration invalid: {reason}")]
     HookConfigInvalid { reason: String },
+
+    /// Turn execution reached a terminal outcome classified as HardFailure.
+    #[error("Terminal failure: {outcome}")]
+    TerminalFailure { outcome: String },
 }
 
 impl AgentError {

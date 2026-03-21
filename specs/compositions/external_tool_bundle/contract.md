@@ -16,6 +16,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Structural Requirements
 - `control_preempts_surface_boundary` — runtime control outranks surface-boundary work when both are ready
+- `surface_completion_protocol_covered` — ScheduleSurfaceCompletion effect is covered by surface_completion handoff protocol
 
 ## Behavioral Invariants
 - `external_tool_delta_enters_runtime_control` — canonical external-tool deltas enter runtime through the runtime-control boundary

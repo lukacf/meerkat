@@ -156,6 +156,7 @@ finished `0.5` system.
 | `TurnExecutionMachine` | `SchemaKernel` | The core turn loop is too central to leave on prose-plus-kernel alignment forever |
 | `FlowRunMachine` | `SchemaKernel` | Durable flow/run truth must converge to catalog-backed executable authority |
 | `MobOrchestratorMachine` | `SchemaKernel` | Long-lived orchestration semantics must converge to catalog-backed executable authority |
+| `CommsDrainLifecycleMachine` | `SchemaKernel` | Comms drain lifecycle with explicit terminal semantics and suppression flag is closed and catalog-ready |
 
 ## Starting Status Before The 0.5 Refactor Lands
 

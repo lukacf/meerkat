@@ -1063,7 +1063,11 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
             ),
             disposition("RetainTerminalRecord", EffectDisposition::Local),
             disposition("EvictCompletedRecord", EffectDisposition::Local),
-            disposition("WaitAllSatisfied", EffectDisposition::Local),
+            EffectDispositionRule {
+                effect_variant: "WaitAllSatisfied".into(),
+                disposition: EffectDisposition::Local,
+                handoff_protocol: Some("ops_barrier_satisfaction".into()),
+            },
             disposition("CollectCompletedResult", EffectDisposition::Local),
             disposition("ConcurrencyLimitExceeded", EffectDisposition::External),
         ],
@@ -1074,6 +1078,7 @@ fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
     EffectDispositionRule {
         effect_variant: name.into(),
         disposition: d,
+        handoff_protocol: None,
     }
 }
 

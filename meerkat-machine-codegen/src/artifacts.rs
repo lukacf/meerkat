@@ -1917,6 +1917,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         let mut out = String::new();
         let constants = self.collect_binding_domains();
         let machine_vars = self.machine_vars();
+        let obligation_vars = self.obligation_vars();
         let mut machine_invariant_names = Vec::new();
 
         pushln!(&mut out, "---- MODULE model ----");
@@ -2028,18 +2029,22 @@ impl<'a> CompositionTlaCompiler<'a> {
         .expect("write to string");
         self.render_static_sets(&mut out);
 
-        writeln!(
-            &mut out,
-            "VARIABLES {}, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs",
-            machine_vars.join(", ")
-        )
-        .expect("write to string");
-        writeln!(
-            &mut out,
-            "vars == << {}, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>",
-            machine_vars.join(", ")
-        )
-        .expect("write to string");
+        let all_vars = {
+            let mut v = machine_vars.clone();
+            v.extend(obligation_vars.clone());
+            v.push("model_step_count".into());
+            v.push("pending_inputs".into());
+            v.push("observed_inputs".into());
+            v.push("pending_routes".into());
+            v.push("delivered_routes".into());
+            v.push("emitted_effects".into());
+            v.push("observed_transitions".into());
+            v.push("witness_current_script_input".into());
+            v.push("witness_remaining_script_inputs".into());
+            v
+        };
+        writeln!(&mut out, "VARIABLES {}", all_vars.join(", ")).expect("write to string");
+        writeln!(&mut out, "vars == << {} >>", all_vars.join(", ")).expect("write to string");
         pushln!(&mut out);
 
         writeln!(
@@ -2096,6 +2101,9 @@ impl<'a> CompositionTlaCompiler<'a> {
                 )
                 .expect("write to string");
             }
+        }
+        for var in &obligation_vars {
+            pushln!(&mut out, "    /\\ {} = {{}}", var);
         }
         pushln!(&mut out, "    /\\ model_step_count = 0");
         pushln!(&mut out, "    /\\ pending_routes = <<>>");
@@ -2276,6 +2284,9 @@ impl<'a> CompositionTlaCompiler<'a> {
         if !self.schema.invariants.is_empty() {
             pushln!(&mut out);
         }
+
+        self.render_obligation_invariants(&mut out, &mut machine_invariant_names);
+        self.render_owner_actor_processes(&mut out);
 
         self.render_coverage_instrumentation(&mut out);
 
@@ -2528,6 +2539,169 @@ impl<'a> CompositionTlaCompiler<'a> {
                 )
             })
             .collect()
+    }
+
+    /// Returns TLA+ variable names for obligation tracking — one per handoff protocol.
+    fn obligation_vars(&self) -> Vec<String> {
+        self.schema
+            .handoff_protocols
+            .iter()
+            .map(|protocol| format!("obligation_{}", tla_ident(&protocol.name)))
+            .collect()
+    }
+
+    /// Renders obligation closure invariants into the TLA+ output.
+    ///
+    /// For each handoff protocol, generates:
+    /// - `NoOpenObligationsOnTerminal_<protocol>`: when the producer machine is
+    ///   in a terminal phase, the obligation set must be empty.
+    /// - `NoFeedbackWithoutObligation_<protocol>`: a feedback input can only be
+    ///   observed if there's a corresponding outstanding obligation.
+    fn render_obligation_invariants(&self, out: &mut String, invariant_names: &mut Vec<String>) {
+        for protocol in &self.schema.handoff_protocols {
+            let var = format!("obligation_{}", tla_ident(&protocol.name));
+            let phase_var = self.phase_var(&protocol.producer_instance);
+
+            // Find terminal phases for the producer machine.
+            let machine = self.machine(&protocol.producer_instance);
+            let terminal_phases: Vec<&str> = machine
+                .state
+                .terminal_phases
+                .iter()
+                .map(String::as_str)
+                .collect();
+
+            // NoOpenObligationsOnTerminal: terminal phase => obligation set is empty
+            if !terminal_phases.is_empty() {
+                let inv_name = format!("NoOpenObligationsOnTerminal_{}", tla_ident(&protocol.name));
+                let terminal_disjuncts: Vec<String> = terminal_phases
+                    .iter()
+                    .map(|phase| format!("{} = {}", phase_var, tla_string(phase)))
+                    .collect();
+                writeln!(
+                    out,
+                    "{} == ({}) => {} = {{}}",
+                    inv_name,
+                    terminal_disjuncts.join(" \\/ "),
+                    var
+                )
+                .expect("write to string");
+                invariant_names.push(inv_name);
+            }
+
+            // NoFeedbackWithoutObligation: feedback input observed => obligation non-empty
+            if !protocol.allowed_feedback_inputs.is_empty() {
+                let inv_name = format!("NoFeedbackWithoutObligation_{}", tla_ident(&protocol.name));
+                let feedback_disjuncts: Vec<String> = protocol
+                    .allowed_feedback_inputs
+                    .iter()
+                    .map(|fb| {
+                        format!(
+                            "input_packet.machine = {} /\\ input_packet.variant = {}",
+                            tla_string(&fb.machine_instance),
+                            tla_string(&fb.input_variant)
+                        )
+                    })
+                    .collect();
+                writeln!(
+                    out,
+                    "{} == \\A input_packet \\in observed_inputs : (({}) => {} /= {{}})",
+                    inv_name,
+                    feedback_disjuncts.join(" \\/ "),
+                    var
+                )
+                .expect("write to string");
+                invariant_names.push(inv_name);
+            }
+        }
+
+        if !self.schema.handoff_protocols.is_empty() {
+            pushln!(out);
+        }
+    }
+
+    /// Renders owner-actor process definitions: nondeterministic actions that
+    /// model the owner choosing to submit protocol-allowed feedback when an
+    /// obligation is outstanding.
+    ///
+    /// Each protocol generates an `OwnerFeedback_<protocol>` action that:
+    /// - Is enabled when the obligation set is non-empty
+    /// - Nondeterministically picks one of the allowed feedback inputs
+    /// - Removes one obligation token from the set
+    /// - Injects the feedback as a pending input
+    ///
+    /// If any protocols have `liveness_annotation`, fairness comments are added.
+    fn render_owner_actor_processes(&self, out: &mut String) {
+        for protocol in &self.schema.handoff_protocols {
+            let var = format!("obligation_{}", tla_ident(&protocol.name));
+            let action_name = format!("OwnerFeedback_{}", tla_ident(&protocol.name));
+
+            if protocol.allowed_feedback_inputs.is_empty() {
+                continue;
+            }
+
+            if let Some(liveness) = &protocol.liveness_annotation {
+                writeln!(out, "\\* Liveness: {liveness}").expect("write to string");
+            }
+
+            writeln!(out, "{action_name} ==").expect("write to string");
+            writeln!(out, "    /\\ {} /= {{}}", var).expect("write to string");
+            writeln!(out, "    /\\ \\E token \\in {} :", var).expect("write to string");
+
+            let feedback_branches: Vec<String> = protocol
+                .allowed_feedback_inputs
+                .iter()
+                .map(|fb| {
+                    format!(
+                        "        /\\ pending_inputs' = Append(pending_inputs, [machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token, payload |-> \"feedback\"])\n        /\\ {}' = {} \\ {{token}}",
+                        tla_string(&fb.machine_instance),
+                        tla_string(&fb.input_variant),
+                        tla_string(&protocol.producer_instance),
+                        tla_string(&protocol.effect_variant),
+                        var,
+                        var
+                    )
+                })
+                .collect();
+
+            if feedback_branches.len() == 1 {
+                writeln!(out, "{}", feedback_branches[0]).expect("write to string");
+            } else {
+                for (i, branch) in feedback_branches.iter().enumerate() {
+                    if i == 0 {
+                        writeln!(out, "        \\/ {}", branch.trim_start())
+                            .expect("write to string");
+                    } else {
+                        writeln!(out, "        \\/ {}", branch.trim_start())
+                            .expect("write to string");
+                    }
+                }
+            }
+
+            // Frame: all other variables unchanged
+            let unchanged_vars: Vec<String> = self
+                .machine_vars()
+                .into_iter()
+                .chain(self.obligation_vars().into_iter().filter(|v| *v != var))
+                .chain(
+                    [
+                        "model_step_count",
+                        "observed_inputs",
+                        "pending_routes",
+                        "delivered_routes",
+                        "emitted_effects",
+                        "observed_transitions",
+                        "witness_current_script_input",
+                        "witness_remaining_script_inputs",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string()),
+                )
+                .collect();
+            writeln!(out, "    /\\ UNCHANGED << {} >>", unchanged_vars.join(", "))
+                .expect("write to string");
+            pushln!(out);
+        }
     }
 
     fn render_coverage_instrumentation(&self, out: &mut String) {
@@ -5443,6 +5617,10 @@ fn render_composition_invariant_formula(
                     required
                 )
             }
+        }
+        CompositionInvariantKind::HandoffProtocolCovered { .. } => {
+            // Structural invariant — validated at schema level, always TRUE in TLA+.
+            "TRUE".into()
         }
     }
 }

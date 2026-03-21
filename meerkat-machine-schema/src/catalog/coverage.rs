@@ -3,10 +3,10 @@ use crate::{CompositionSchema, MachineSchema, SchedulerRule};
 use super::{
     comms_drain_lifecycle::comms_drain_lifecycle_machine,
     compositions::{
-        continuation_runtime_bundle_composition, external_tool_bundle_composition,
-        mob_bundle_composition, ops_peer_bundle_composition, ops_runtime_bundle_composition,
-        peer_runtime_bundle_composition, runtime_pipeline_composition,
-        surface_event_runtime_bundle_composition,
+        comms_drain_lifecycle_composition, continuation_runtime_bundle_composition,
+        external_tool_bundle_composition, mob_bundle_composition, ops_peer_bundle_composition,
+        ops_runtime_bundle_composition, peer_runtime_bundle_composition,
+        runtime_pipeline_composition, surface_event_runtime_bundle_composition,
     },
     external_tool_surface::external_tool_surface_machine,
     flow_run::flow_run_machine,
@@ -69,11 +69,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "input_state",
                     "meerkat-runtime/src/input_state.rs",
                     "authoritative input lifecycle record shape",
-                ),
-                anchor(
-                    "input_machine",
-                    "meerkat-runtime/src/input_machine.rs",
-                    "lifecycle transition validator/reducer precursor",
                 ),
                 anchor(
                     "input_ledger",
@@ -806,6 +801,36 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
             ],
         ),
+        composition_manifest_from_schema(
+            &comms_drain_lifecycle_composition(),
+            &[
+                anchor(
+                    "comms_drain_authority",
+                    "meerkat-core/src/comms_drain_lifecycle_authority.rs",
+                    "comms drain lifecycle authority (sealed mutator + evaluate)",
+                ),
+                anchor(
+                    "comms_drain_protocol",
+                    "meerkat-core/src/generated/protocol_comms_drain_spawn.rs",
+                    "generated spawn protocol helper for comms drain handoff",
+                ),
+                anchor(
+                    "comms_drain_impl",
+                    "meerkat-core/src/agent/comms_impl.rs",
+                    "comms drain shell implementation (effect realization + feedback)",
+                ),
+            ],
+            &[
+                scenario(
+                    "spawn-feedback-cycle",
+                    "SpawnDrainTask obligation is closed by TaskSpawned or TaskExited feedback",
+                ),
+                scenario(
+                    "abort-terminal-closure",
+                    "AbortDrainTask obligation closes on terminal phase without explicit feedback",
+                ),
+            ],
+        ),
     ]
 }
 
@@ -1176,6 +1201,13 @@ fn composition_scenario_ids(
                     all_scenarios,
                     &["mob-peer-orchestration", "wasm-mob-examples"],
                 )
+            }
+        }
+        "comms_drain_lifecycle" => {
+            if normalized.contains("abort") {
+                select_exact_scenarios(all_scenarios, &["abort-terminal-closure"])
+            } else {
+                select_exact_scenarios(all_scenarios, &["spawn-feedback-cycle"])
             }
         }
         _ => select_matching_scenarios(all_scenarios, &[]),

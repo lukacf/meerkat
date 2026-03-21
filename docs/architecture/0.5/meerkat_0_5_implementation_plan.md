@@ -125,6 +125,7 @@ machines.
 | `TurnExecutionMachine` | `SchemaKernel` | `meerkat-core` | `meerkat-machine-schema/src/catalog/turn_execution.rs` plus generated owner under `src/agent/machines/turn_execution/` | `src/agent/state.rs`, `src/agent/runner.rs`, `src/agent/comms_impl.rs` | generated Rust + generated TLA + agent regression tests |
 | `FlowRunMachine` | `SchemaKernel` | `meerkat-mob` | `meerkat-machine-schema/src/catalog/flow_run.rs` plus generated owner under `src/runtime/machines/flow_run/` | `src/runtime/flow.rs`, `src/runtime/actor_turn_executor.rs`, `src/run.rs` | generated Rust + generated TLA + flow replay tests |
 | `MobOrchestratorMachine` | `SchemaKernel` | `meerkat-mob` | `meerkat-machine-schema/src/catalog/mob_orchestrator.rs` plus generated owner under `src/runtime/machines/mob_orchestrator/` | `src/runtime/actor.rs`, `src/runtime/builder.rs`, `src/runtime/provisioner.rs` | generated Rust + generated TLA + orchestration replay tests |
+| `CommsDrainLifecycleMachine` | `SchemaKernel` | `meerkat-runtime` | `meerkat-machine-schema/src/catalog/comms_drain_lifecycle.rs` plus generated owner under `src/machines/comms_drain_lifecycle/` | `meerkat-core/src/comms_drain_lifecycle_authority.rs`, `meerkat-runtime/src/comms_drain.rs`, `meerkat-runtime/src/session_adapter.rs` | generated Rust + generated TLA + comms drain lifecycle tests |
 
 ## Critical Path
 

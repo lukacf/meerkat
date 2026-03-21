@@ -99,7 +99,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `meerkat-runtime/src/input_state.rs` — authoritative input lifecycle record shape
-- `meerkat-runtime/src/input_machine.rs` — lifecycle transition validator/reducer precursor
 - `meerkat-runtime/src/input_ledger.rs` — runtime-owned lifecycle ledger precursor
 
 ### Scenarios

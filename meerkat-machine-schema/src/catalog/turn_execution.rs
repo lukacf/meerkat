@@ -45,11 +45,13 @@ pub fn turn_execution_machine() -> MachineSchema {
                 field("image_tool_results_enabled", TypeRef::Bool),
                 field("tool_calls_pending", TypeRef::U32),
                 field(
-                    "pending_op_ids",
+                    "pending_op_refs",
                     TypeRef::Option(Box::new(TypeRef::Seq(Box::new(TypeRef::Named(
-                        "OperationId".into(),
+                        "AsyncOpRef".into(),
                     ))))),
                 ),
+                field("has_barrier_ops", TypeRef::Bool),
+                field("barrier_satisfied", TypeRef::Bool),
                 field("boundary_count", TypeRef::U32),
                 field("cancel_after_boundary", TypeRef::Bool),
                 field(
@@ -68,7 +70,9 @@ pub fn turn_execution_machine() -> MachineSchema {
                     init("vision_enabled", Expr::Bool(false)),
                     init("image_tool_results_enabled", Expr::Bool(false)),
                     init("tool_calls_pending", Expr::U64(0)),
-                    init("pending_op_ids", Expr::None),
+                    init("pending_op_refs", Expr::None),
+                    init("has_barrier_ops", Expr::Bool(false)),
+                    init("barrier_satisfied", Expr::Bool(true)),
                     init("boundary_count", Expr::U64(0)),
                     init("cancel_after_boundary", Expr::Bool(false)),
                     init("terminal_outcome", Expr::String("None".into())),
@@ -121,13 +125,18 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![
                         field("run_id", TypeRef::Named("RunId".into())),
                         field(
-                            "operation_ids",
-                            TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                            "op_refs",
+                            TypeRef::Seq(Box::new(TypeRef::Named("AsyncOpRef".into()))),
                         ),
+                        field("has_barrier_ops", TypeRef::Bool),
                     ],
                 },
                 VariantSchema {
                     name: "ToolCallsResolved".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
+                    name: "OpsBarrierSatisfied".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
@@ -318,14 +327,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                 ]),
             },
             InvariantSchema {
-                name: "pending_op_ids_only_used_while_waiting".into(),
+                name: "pending_op_refs_only_used_while_waiting".into(),
                 expr: Expr::Or(vec![
                     Expr::Eq(
                         Box::new(Expr::CurrentPhase),
                         Box::new(Expr::Phase("WaitingForOps".into())),
                     ),
                     Expr::Eq(
-                        Box::new(Expr::Field("pending_op_ids".into())),
+                        Box::new(Expr::Field("pending_op_refs".into())),
                         Box::new(Expr::None),
                     ),
                 ]),
@@ -991,8 +1000,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::Binding("tool_count".into()),
                     },
                     Update::Assign {
-                        field: "pending_op_ids".into(),
+                        field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
                     },
                 ],
                 to: "WaitingForOps".into(),
@@ -1003,7 +1020,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                 from: vec!["WaitingForOps".into()],
                 on: InputMatch {
                     variant: "RegisterPendingOps".into(),
-                    bindings: vec!["run_id".into(), "operation_ids".into()],
+                    bindings: vec!["run_id".into(), "op_refs".into(), "has_barrier_ops".into()],
                 },
                 guards: vec![
                     Guard {
@@ -1021,9 +1038,53 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ),
                     },
                 ],
+                updates: vec![
+                    Update::Assign {
+                        field: "pending_op_refs".into(),
+                        expr: Expr::Some(Box::new(Expr::Binding("op_refs".into()))),
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Binding("has_barrier_ops".into()),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::IfElse {
+                            condition: Box::new(Expr::Binding("has_barrier_ops".into())),
+                            then_expr: Box::new(Expr::Bool(false)),
+                            else_expr: Box::new(Expr::Bool(true)),
+                        },
+                    },
+                ],
+                to: "WaitingForOps".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "OpsBarrierSatisfied".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "OpsBarrierSatisfied".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "run_matches_active".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("active_run".into())),
+                            Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                        ),
+                    },
+                    Guard {
+                        name: "barrier_not_yet_satisfied".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("barrier_satisfied".into())),
+                            Box::new(Expr::Bool(false)),
+                        ),
+                    },
+                ],
                 updates: vec![Update::Assign {
-                    field: "pending_op_ids".into(),
-                    expr: Expr::Some(Box::new(Expr::Binding("operation_ids".into()))),
+                    field: "barrier_satisfied".into(),
+                    expr: Expr::Bool(true),
                 }],
                 to: "WaitingForOps".into(),
                 emit: vec![],
@@ -1051,10 +1112,17 @@ pub fn turn_execution_machine() -> MachineSchema {
                         ),
                     },
                     Guard {
-                        name: "pending_op_ids_registered".into(),
+                        name: "pending_op_refs_registered".into(),
                         expr: Expr::Neq(
-                            Box::new(Expr::Field("pending_op_ids".into())),
+                            Box::new(Expr::Field("pending_op_refs".into())),
                             Box::new(Expr::None),
+                        ),
+                    },
+                    Guard {
+                        name: "barrier_satisfied".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("barrier_satisfied".into())),
+                            Box::new(Expr::Bool(true)),
                         ),
                     },
                 ],
@@ -1064,8 +1132,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::U64(0),
                     },
                     Update::Assign {
-                        field: "pending_op_ids".into(),
+                        field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
                     },
                     Update::Increment {
                         field: "boundary_count".into(),
@@ -1406,10 +1482,20 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
                     ),
                 }],
-                updates: vec![Update::Assign {
-                    field: "pending_op_ids".into(),
-                    expr: Expr::None,
-                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "pending_op_refs".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
+                    },
+                ],
                 to: "ErrorRecovery".into(),
                 emit: vec![],
             },
@@ -1522,8 +1608,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
                 updates: vec![
                     Update::Assign {
-                        field: "pending_op_ids".into(),
+                        field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
                     },
                     Update::Assign {
                         field: "terminal_outcome".into(),
@@ -1658,10 +1752,20 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
                     ),
                 }],
-                updates: vec![Update::Assign {
-                    field: "pending_op_ids".into(),
-                    expr: Expr::None,
-                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "pending_op_refs".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
+                    },
+                ],
                 to: "Cancelling".into(),
                 emit: vec![],
             },
@@ -1975,8 +2079,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
                 updates: vec![
                     Update::Assign {
-                        field: "pending_op_ids".into(),
+                        field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
                     },
                     Update::Increment {
                         field: "boundary_count".into(),
@@ -2231,8 +2343,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
                 updates: vec![
                     Update::Assign {
-                        field: "pending_op_ids".into(),
+                        field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
                     },
                     Update::Increment {
                         field: "boundary_count".into(),
@@ -2442,8 +2562,16 @@ pub fn turn_execution_machine() -> MachineSchema {
                 guards: vec![],
                 updates: vec![
                     Update::Assign {
-                        field: "pending_op_ids".into(),
+                        field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
                     },
                     Update::Assign {
                         field: "terminal_outcome".into(),
@@ -2748,6 +2876,7 @@ fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
     EffectDispositionRule {
         effect_variant: name.into(),
         disposition: d,
+        handoff_protocol: None,
     }
 }
 

@@ -877,6 +877,14 @@ fn render_composition_invariant_kind(kind: &CompositionInvariantKind) -> String 
                 .collect::<Vec<_>>()
                 .join(" | ")
         ),
+        CompositionInvariantKind::HandoffProtocolCovered {
+            producer_instance,
+            effect_variant,
+            protocol_name,
+        } => format!(
+            "HandoffProtocolCovered({}, {}, {})",
+            producer_instance, effect_variant, protocol_name
+        ),
     }
 }
 

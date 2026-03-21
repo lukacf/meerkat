@@ -114,6 +114,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RegisterPendingOps`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `OpsBarrierSatisfied`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `ToolCallsResolved`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
@@ -319,7 +322,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `waiting_for_ops_implies_pending_tools`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `tool-and-retry-loop`
-- `pending_op_ids_only_used_while_waiting`
+- `pending_op_refs_only_used_while_waiting`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
 - `ready_has_no_boundary_cancel_request`

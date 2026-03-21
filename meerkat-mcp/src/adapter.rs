@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::{McpApplyResult, McpReloadTarget, McpRouter, McpServerConfig};
+use crate::{McpApplyResult, McpReloadTarget, McpRouter};
+use meerkat_core::McpServerConfig;
 
 /// Adapter that wraps an [`McpRouter`] to implement [`AgentToolDispatcher`].
 ///
@@ -300,8 +301,8 @@ mod tests {
         }
     }
 
-    fn test_server_config(name: &str, path: &Path) -> crate::McpServerConfig {
-        crate::McpServerConfig::stdio(
+    fn test_server_config(name: &str, path: &Path) -> meerkat_core::McpServerConfig {
+        meerkat_core::McpServerConfig::stdio(
             name,
             path.to_string_lossy().to_string(),
             vec![],

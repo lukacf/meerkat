@@ -435,8 +435,15 @@ pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<S
         }
 
         let owner_file = owner_module_file(root, &machine.rust.crate_name, &machine.rust.module)?;
-        let owner_mod =
-            owner_module_dir(root, &machine.rust.crate_name, &machine.rust.module).join("mod.rs");
+        let leaf = machine
+            .rust
+            .module
+            .rsplit("::")
+            .next()
+            .unwrap_or(&machine.rust.module);
+        let owner_mod = owner_module_dir(root, &machine.rust.crate_name, &machine.rust.module)
+            .join(leaf)
+            .join("mod.rs");
 
         if owner_file.exists() {
             mismatches.push(format!(

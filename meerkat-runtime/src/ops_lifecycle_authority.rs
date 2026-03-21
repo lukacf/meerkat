@@ -12,10 +12,10 @@
 //!   the real state dimension
 //! - Per-operation statuses: Absent, Provisioning, Running, Retiring,
 //!   Completed, Failed, Cancelled, Retired, Terminated
-//! - 13 inputs: RegisterOperation, ProvisioningSucceeded, ProvisioningFailed,
+//! - 14 inputs: RegisterOperation, ProvisioningSucceeded, ProvisioningFailed,
 //!   PeerReady, RegisterWatcher, ProgressReported, CompleteOperation,
 //!   FailOperation, CancelOperation, RetireRequested, RetireCompleted,
-//!   CollectTerminal, OwnerTerminated
+//!   CollectTerminal, OwnerTerminated, WaitAll
 //! - 8 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
 //!   RetainTerminalRecord, EvictCompletedRecord, WaitAllSatisfied,
 //!   CollectCompletedResult, ConcurrencyLimitExceeded
@@ -64,6 +64,12 @@ pub(crate) enum OpsLifecycleInput {
     CollectTerminal { operation_id: OperationId },
     /// Terminate all non-terminal operations.
     OwnerTerminated,
+    /// Wait for all specified operations to reach terminal status.
+    ///
+    /// Emits `WaitAllSatisfied` immediately (the shell has already awaited
+    /// the actual completions; this input exists so the authority can emit
+    /// the formal effect for cross-machine handoff).
+    WaitAll { operation_ids: Vec<OperationId> },
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +102,11 @@ pub(crate) enum OpsLifecycleEffect {
     },
     /// Evict a completed operation from retention.
     EvictCompletedRecord { operation_id: OperationId },
+    /// All specified operations have reached terminal status.
+    ///
+    /// Handoff protocol: `ops_barrier_satisfaction` — the shell routes this
+    /// to TurnExecution's `OpsBarrierSatisfied` input.
+    WaitAllSatisfied { operation_ids: Vec<OperationId> },
 }
 
 /// Event kind for SubmitOpEvent effects.
@@ -755,6 +766,16 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
                 self.evict_completed(&mut effects);
 
                 Ok(OpsLifecycleTransition { effects })
+            }
+
+            OpsLifecycleInput::WaitAll { operation_ids } => {
+                // The shell has already awaited the actual completions.
+                // This input exists so the authority emits the formal
+                // WaitAllSatisfied effect for cross-machine handoff
+                // (ops_barrier_satisfaction protocol).
+                Ok(OpsLifecycleTransition {
+                    effects: vec![OpsLifecycleEffect::WaitAllSatisfied { operation_ids }],
+                })
             }
         }
     }
@@ -1527,5 +1548,44 @@ mod tests {
         auth.apply(OpsLifecycleInput::FailOperation { operation_id: id2 })
             .unwrap();
         assert_eq!(auth.active_count(), 0);
+    }
+
+    // ---- WaitAll ----
+
+    #[test]
+    fn wait_all_emits_wait_all_satisfied_with_operation_ids() {
+        let mut auth = make_authority();
+        let id1 = OperationId::new();
+        let id2 = OperationId::new();
+        register(&mut auth, &id1, OperationKind::BackgroundToolOp);
+        register(&mut auth, &id2, OperationKind::BackgroundToolOp);
+        provision_succeed(&mut auth, &id1);
+        provision_succeed(&mut auth, &id2);
+
+        // Complete both operations
+        auth.apply(OpsLifecycleInput::CompleteOperation {
+            operation_id: id1.clone(),
+        })
+        .unwrap();
+        auth.apply(OpsLifecycleInput::CompleteOperation {
+            operation_id: id2.clone(),
+        })
+        .unwrap();
+
+        // WaitAll should emit WaitAllSatisfied
+        let ids = vec![id1.clone(), id2.clone()];
+        let transition = auth
+            .apply(OpsLifecycleInput::WaitAll {
+                operation_ids: ids.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(transition.effects.len(), 1);
+        match &transition.effects[0] {
+            OpsLifecycleEffect::WaitAllSatisfied { operation_ids } => {
+                assert_eq!(*operation_ids, ids);
+            }
+            other => panic!("expected WaitAllSatisfied, got {other:?}"),
+        }
     }
 }

@@ -34,7 +34,6 @@ pub mod identifiers;
 pub mod input;
 pub mod input_ledger;
 pub mod input_lifecycle_authority;
-pub mod input_machine;
 pub mod input_scope;
 pub mod input_state;
 pub mod lifecycle_ops;
@@ -79,7 +78,6 @@ pub use input_lifecycle_authority::{
     InputLifecycleAuthority, InputLifecycleEffect, InputLifecycleError, InputLifecycleInput,
     InputLifecycleMutator, InputLifecycleTransition,
 };
-pub use input_machine::{InputStateMachine, InputStateMachineError};
 pub use input_scope::InputScope;
 pub use input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateEvent, InputStateHistoryEntry,

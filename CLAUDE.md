@@ -207,7 +207,7 @@ make fmt         # Auto-fix formatting
 make audit       # Security audit via cargo-deny
 ```
 
-**`make ci` runs** (in order): `fmt-check` → `legacy-surface-gate` → `verify-version-parity` → `lint` → `lint-feature-matrix` → `test-all` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `audit`
+**`make ci` runs** (in order): `fmt-check` → `legacy-surface-gate` → `rmat-read-seam-lint` → `verify-version-parity` → `lint` → `lint-feature-matrix` → `test-all` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `rmat-audit` → `audit`
 
 ### GitHub Workflows
 

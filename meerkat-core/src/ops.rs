@@ -11,6 +11,60 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OperationId(pub Uuid);
 
+/// Wait policy for async operations.
+///
+/// Determines whether an operation blocks the turn boundary (`Barrier`) or runs
+/// independently (`Detached`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitPolicy {
+    /// Operation must complete before `ToolCallsResolved` can fire.
+    Barrier,
+    /// Operation runs independently and does not block the turn.
+    Detached,
+}
+
+/// Typed async operation reference carrying an operation ID and its wait policy.
+///
+/// Replaces raw `OperationId` sequences in the TurnExecution machine state to
+/// enable barrier-aware scheduling. Only `Barrier` ops block the turn boundary;
+/// `Detached` ops are recorded but do not gate `ToolCallsResolved`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AsyncOpRef {
+    pub operation_id: OperationId,
+    pub wait_policy: WaitPolicy,
+}
+
+impl WaitPolicy {
+    /// Normal tool-call operations that must complete before the turn boundary.
+    pub fn barrier() -> Self {
+        Self::Barrier
+    }
+
+    /// Background or mob-child operations that run independently of the turn.
+    pub fn detached() -> Self {
+        Self::Detached
+    }
+}
+
+impl AsyncOpRef {
+    /// Create a barrier op ref — blocks the turn boundary until resolved.
+    pub fn barrier(operation_id: OperationId) -> Self {
+        Self {
+            operation_id,
+            wait_policy: WaitPolicy::barrier(),
+        }
+    }
+
+    /// Create a detached op ref — runs independently, does not block the turn.
+    pub fn detached(operation_id: OperationId) -> Self {
+        Self {
+            operation_id,
+            wait_policy: WaitPolicy::detached(),
+        }
+    }
+}
+
 impl OperationId {
     /// Create a new operation ID
     pub fn new() -> Self {
@@ -213,6 +267,20 @@ pub struct ForkBranch {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barrier_constructor_produces_barrier_policy() {
+        assert_eq!(WaitPolicy::barrier(), WaitPolicy::Barrier);
+        let op_ref = AsyncOpRef::barrier(OperationId::new());
+        assert_eq!(op_ref.wait_policy, WaitPolicy::Barrier);
+    }
+
+    #[test]
+    fn detached_constructor_produces_detached_policy() {
+        assert_eq!(WaitPolicy::detached(), WaitPolicy::Detached);
+        let op_ref = AsyncOpRef::detached(OperationId::new());
+        assert_eq!(op_ref.wait_policy, WaitPolicy::Detached);
+    }
 
     #[test]
     fn test_operation_id_encoding() {

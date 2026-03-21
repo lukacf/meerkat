@@ -95,6 +95,7 @@ pub use meerkat_core::{
     LlmStreamResult,
     // State
     LoopState,
+    McpServerConfig,
     MeerkatSchema,
     // Types
     Message,
@@ -262,7 +263,7 @@ pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 #[cfg(feature = "mcp")]
 pub use meerkat_mcp::{
     McpApplyDelta, McpApplyResult, McpConnection, McpError, McpLifecycleAction, McpLifecyclePhase,
-    McpReloadTarget, McpRouter, McpRouterAdapter, McpServerConfig, McpServerLifecycleState,
+    McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
 };
 
 // Skill types re-exports

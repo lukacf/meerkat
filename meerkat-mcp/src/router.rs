@@ -10,10 +10,12 @@ use crate::external_tool_surface_authority::{
     ExternalToolSurfaceMutator, SurfaceBaseState, SurfaceDeltaOperation, SurfaceDeltaPhase,
     SurfaceId, TurnNumber,
 };
-use crate::{McpConnection, McpError, McpServerConfig};
+use crate::generated::protocol_surface_completion::{self, SurfaceCompletionObligation};
+use crate::{McpConnection, McpError};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
+use meerkat_core::McpServerConfig;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
 use meerkat_core::types::ToolDef;
@@ -96,6 +98,9 @@ enum PendingOp {
 
 struct PendingState {
     generation: u64,
+    /// Obligation token from the surface_completion handoff protocol.
+    /// Consumed when the pending result arrives (succeeded or failed).
+    obligation: SurfaceCompletionObligation,
 }
 
 struct PendingResult {
@@ -413,6 +418,12 @@ impl McpRouter {
         delta: &mut McpApplyDelta,
         config: Option<&McpServerConfig>,
     ) {
+        // Extract obligation tokens from ScheduleSurfaceCompletion effects
+        // before iterating — these are consumed by spawn_pending.
+        let mut obligations = protocol_surface_completion::extract_obligations(effects)
+            .into_iter()
+            .collect::<VecDeque<_>>();
+
         for effect in effects {
             match effect {
                 ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
@@ -425,7 +436,9 @@ impl McpRouter {
                             SurfaceDeltaOperation::Reload => PendingOp::Reload,
                             _ => continue,
                         };
-                        self.spawn_pending(config.clone(), op);
+                        if let Some(obligation) = obligations.pop_front() {
+                            self.spawn_pending(config.clone(), op, obligation);
+                        }
                     }
                 }
                 ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet => {
@@ -477,13 +490,23 @@ impl McpRouter {
     }
 
     /// Spawn a background task to connect and enumerate tools for a server.
-    fn spawn_pending(&mut self, config: McpServerConfig, op: PendingOp) {
+    fn spawn_pending(
+        &mut self,
+        config: McpServerConfig,
+        op: PendingOp,
+        obligation: SurfaceCompletionObligation,
+    ) {
         let generation = self.next_generation;
         self.next_generation += 1;
 
         let server_name = config.name.clone();
-        self.pending_servers
-            .insert(server_name.clone(), PendingState { generation });
+        self.pending_servers.insert(
+            server_name.clone(),
+            PendingState {
+                generation,
+                obligation,
+            },
+        );
 
         let tx = self.pending_tx.clone();
         tokio::spawn(async move {
@@ -551,21 +574,23 @@ impl McpRouter {
             return;
         }
 
-        self.pending_servers.remove(&result.server_name);
+        let pending_state = self.pending_servers.remove(&result.server_name);
+        let obligation = pending_state
+            .expect("pending_servers entry must exist for current-generation result")
+            .obligation;
         let server_name = result.server_name.clone();
-        let sid = SurfaceId::from(server_name.as_str());
 
         match result.result {
             Ok((conn, tools)) => {
                 let tool_count = tools.len();
 
-                // Notify authority of success.
-                match self
-                    .auth_mut()
-                    .apply(ExternalToolSurfaceInput::PendingSucceeded {
-                        surface_id: sid,
-                        applied_at_turn: TurnNumber(0),
-                    }) {
+                // Submit success feedback through the generated protocol helper,
+                // consuming the obligation token from ScheduleSurfaceCompletion.
+                match protocol_surface_completion::submit_pending_succeeded(
+                    self.auth_mut(),
+                    obligation,
+                    TurnNumber(0),
+                ) {
                     Ok(_transition) => {
                         let operation = match result.op {
                             PendingOp::Add => ToolConfigChangeOperation::Add,
@@ -645,14 +670,13 @@ impl McpRouter {
                     PendingOp::Reload => ToolConfigChangeOperation::Reload,
                 };
 
-                // Notify authority of failure.
-                if let Err(e) = self
-                    .auth_mut()
-                    .apply(ExternalToolSurfaceInput::PendingFailed {
-                        surface_id: SurfaceId::from(server_name.as_str()),
-                        applied_at_turn: TurnNumber(0),
-                    })
-                {
+                // Submit failure feedback through the generated protocol helper,
+                // consuming the obligation token from ScheduleSurfaceCompletion.
+                if let Err(e) = protocol_surface_completion::submit_pending_failed(
+                    self.auth_mut(),
+                    obligation,
+                    TurnNumber(0),
+                ) {
                     tracing::warn!(
                         server = %server_name,
                         error = %e,
@@ -718,28 +742,34 @@ impl McpRouter {
         let sid = SurfaceId::from(server_name.as_str());
 
         // Drive authority: StageAdd -> ApplyBoundary -> PendingSucceeded.
+        // Uses the generated protocol helper for the completion feedback.
         if let Err(e) = self.auth_mut().apply(ExternalToolSurfaceInput::StageAdd {
             surface_id: sid.clone(),
         }) {
             tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd in install path");
         }
-        if let Err(e) = self
-            .auth_mut()
-            .apply(ExternalToolSurfaceInput::ApplyBoundary {
+        let boundary_effects = match self.auth_mut().apply(
+            ExternalToolSurfaceInput::ApplyBoundary {
                 surface_id: sid.clone(),
                 applied_at_turn: TurnNumber(0),
-            })
-        {
-            tracing::warn!(server = %server_name, error = %e, "Authority rejected ApplyBoundary in install path");
-        }
-        if let Err(e) = self
-            .auth_mut()
-            .apply(ExternalToolSurfaceInput::PendingSucceeded {
-                surface_id: sid,
-                applied_at_turn: TurnNumber(0),
-            })
-        {
-            tracing::warn!(server = %server_name, error = %e, "Authority rejected PendingSucceeded in install path");
+            },
+        ) {
+            Ok(t) => t.effects,
+            Err(e) => {
+                tracing::warn!(server = %server_name, error = %e, "Authority rejected ApplyBoundary in install path");
+                vec![]
+            }
+        };
+        // Extract and immediately consume the obligation for the synchronous install path.
+        let obligations = protocol_surface_completion::extract_obligations(&boundary_effects);
+        for obligation in obligations {
+            if let Err(e) = protocol_surface_completion::submit_pending_succeeded(
+                self.auth_mut(),
+                obligation,
+                TurnNumber(0),
+            ) {
+                tracing::warn!(server = %server_name, error = %e, "Authority rejected PendingSucceeded in install path");
+            }
         }
 
         let new_entry = ServerEntry {

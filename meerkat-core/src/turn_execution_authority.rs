@@ -11,24 +11,25 @@
 //!
 //! - 11 states: Ready, ApplyingPrimitive, CallingLlm, WaitingForOps,
 //!   DrainingBoundary, Extracting, ErrorRecovery, Cancelling, Completed, Failed, Cancelled
-//! - 26 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
+//! - 27 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
 //!   PrimitiveApplied, LlmReturnedToolCalls, LlmReturnedTerminal,
-//!   RegisterPendingOps, ToolCallsResolved, BoundaryContinue, BoundaryComplete, EnterExtraction,
+//!   RegisterPendingOps, ToolCallsResolved, OpsBarrierSatisfied,
+//!   BoundaryContinue, BoundaryComplete, EnterExtraction,
 //!   ExtractionValidationPassed, ExtractionRetry, ExtractionExhausted,
 //!   RecoverableFailure, FatalFailure, RetryRequested, CancelNow,
 //!   CancelAfterBoundary, CancellationObserved, AcknowledgeTerminal,
 //!   TurnLimitReached, BudgetExhausted, ForceCancelNoRun, RunCompleted,
 //!   RunFailed, RunCancelled
-//! - 12 fields: active_run, primitive_kind, admitted_content_shape,
-//!   vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_ids,
-//!   boundary_count, cancel_after_boundary, terminal_outcome,
-//!   extraction_attempts, max_extraction_retries
+//! - 14 fields: active_run, primitive_kind, admitted_content_shape,
+//!   vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs,
+//!   has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary,
+//!   terminal_outcome, extraction_attempts, max_extraction_retries
 //! - 5 effects: RunStarted, BoundaryApplied, RunCompleted, RunFailed,
 //!   RunCancelled
 
 use crate::error::AgentError;
 use crate::lifecycle::RunId;
-use crate::ops::OperationId;
+use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
 
 // ---------------------------------------------------------------------------
 // Phase enum — mirrors the machine schema's state variants
@@ -112,6 +113,8 @@ pub enum TurnTerminalOutcome {
     Failed,
     Cancelled,
     BudgetExhausted,
+    /// Structured output extraction retries exhausted without valid output.
+    StructuredOutputValidationFailed,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,9 +160,13 @@ pub enum TurnExecutionInput {
     },
     RegisterPendingOps {
         run_id: RunId,
-        operation_ids: Vec<OperationId>,
+        op_refs: Vec<AsyncOpRef>,
+        has_barrier_ops: bool,
     },
     ToolCallsResolved {
+        run_id: RunId,
+    },
+    OpsBarrierSatisfied {
         run_id: RunId,
     },
     BoundaryContinue {
@@ -292,7 +299,9 @@ struct TurnExecutionFields {
     vision_enabled: bool,
     image_tool_results_enabled: bool,
     tool_calls_pending: u32,
-    pending_op_ids: Option<Vec<OperationId>>,
+    pending_op_refs: Option<Vec<AsyncOpRef>>,
+    has_barrier_ops: bool,
+    barrier_satisfied: bool,
     boundary_count: u32,
     cancel_after_boundary: bool,
     terminal_outcome: TurnTerminalOutcome,
@@ -309,7 +318,9 @@ impl TurnExecutionFields {
             vision_enabled: false,
             image_tool_results_enabled: false,
             tool_calls_pending: 0,
-            pending_op_ids: None,
+            pending_op_refs: None,
+            has_barrier_ops: false,
+            barrier_satisfied: true,
             boundary_count: 0,
             cancel_after_boundary: false,
             terminal_outcome: TurnTerminalOutcome::None,
@@ -413,13 +424,43 @@ impl TurnExecutionAuthority {
         self.fields.tool_calls_pending
     }
 
-    /// Exact turn-local operation IDs owned by the current WaitingForOps state.
+    /// Exact turn-local async op references owned by the current WaitingForOps state.
     ///
     /// `None` means the wait-set has not yet been registered for the current
     /// waiting phase. `Some([])` means registration happened and no async ops
     /// need waiting.
-    pub fn pending_op_ids(&self) -> Option<&[OperationId]> {
-        self.fields.pending_op_ids.as_deref()
+    pub fn pending_op_refs(&self) -> Option<&[AsyncOpRef]> {
+        self.fields.pending_op_refs.as_deref()
+    }
+
+    /// Whether any registered ops have `WaitPolicy::Barrier`.
+    pub fn has_barrier_ops(&self) -> bool {
+        self.fields.has_barrier_ops
+    }
+
+    /// Whether all barrier ops have been satisfied (wait_all completed).
+    pub fn barrier_satisfied(&self) -> bool {
+        self.fields.barrier_satisfied
+    }
+
+    /// Computed projection: operation IDs of barrier ops only.
+    pub fn barrier_op_ids(&self) -> Vec<&OperationId> {
+        self.fields
+            .pending_op_refs
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|r| r.wait_policy == WaitPolicy::Barrier)
+            .map(|r| &r.operation_id)
+            .collect()
+    }
+
+    /// Computed projection: all pending operation IDs (both Barrier and Detached).
+    pub fn pending_op_ids(&self) -> Option<Vec<&OperationId>> {
+        self.fields
+            .pending_op_refs
+            .as_ref()
+            .map(|refs| refs.iter().map(|r| &r.operation_id).collect())
     }
 
     /// Whether vision is enabled for the current run.
@@ -474,9 +515,10 @@ impl TurnExecutionAuthority {
             AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
             CancelAfterBoundary, CancelNow, CancellationObserved, EnterExtraction,
             ExtractionExhausted, ExtractionRetry, ExtractionValidationPassed, FatalFailure,
-            ForceCancelNoRun, LlmReturnedTerminal, LlmReturnedToolCalls, PrimitiveApplied,
-            RecoverableFailure, RegisterPendingOps, RetryRequested, StartConversationRun,
-            StartImmediateAppend, StartImmediateContext, ToolCallsResolved, TurnLimitReached,
+            ForceCancelNoRun, LlmReturnedTerminal, LlmReturnedToolCalls, OpsBarrierSatisfied,
+            PrimitiveApplied, RecoverableFailure, RegisterPendingOps, RetryRequested,
+            StartConversationRun, StartImmediateAppend, StartImmediateContext, ToolCallsResolved,
+            TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
@@ -501,7 +543,8 @@ impl TurnExecutionAuthority {
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
-                fields.pending_op_ids = None;
+                fields.pending_op_refs = None;
+                fields.has_barrier_ops = false;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
@@ -518,7 +561,8 @@ impl TurnExecutionAuthority {
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
-                fields.pending_op_ids = None;
+                fields.pending_op_refs = None;
+                fields.has_barrier_ops = false;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
@@ -535,7 +579,8 @@ impl TurnExecutionAuthority {
                 fields.boundary_count = 0;
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
-                fields.pending_op_ids = None;
+                fields.pending_op_refs = None;
+                fields.has_barrier_ops = false;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
                 });
@@ -633,7 +678,9 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 fields.tool_calls_pending = *tool_count;
-                fields.pending_op_ids = None;
+                fields.pending_op_refs = None;
+                fields.has_barrier_ops = false;
+                fields.barrier_satisfied = true;
                 WaitingForOps
             }
 
@@ -659,7 +706,8 @@ impl TurnExecutionAuthority {
                 WaitingForOps,
                 RegisterPendingOps {
                     run_id,
-                    operation_ids,
+                    op_refs,
+                    has_barrier_ops,
                 },
             ) => {
                 if !self.guard_run_matches(run_id) {
@@ -668,7 +716,23 @@ impl TurnExecutionAuthority {
                 if fields.tool_calls_pending == 0 {
                     return Err(Self::invalid(phase, input));
                 }
-                fields.pending_op_ids = Some(operation_ids.clone());
+                fields.pending_op_refs = Some(op_refs.clone());
+                fields.has_barrier_ops = *has_barrier_ops;
+                fields.barrier_satisfied = !*has_barrier_ops;
+                WaitingForOps
+            }
+
+            // ---------------------------------------------------------------
+            // OpsBarrierSatisfied: WaitingForOps -> WaitingForOps
+            // ---------------------------------------------------------------
+            (WaitingForOps, OpsBarrierSatisfied { run_id }) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                if fields.barrier_satisfied {
+                    return Err(Self::invalid(phase, input));
+                }
+                fields.barrier_satisfied = true;
                 WaitingForOps
             }
 
@@ -682,11 +746,16 @@ impl TurnExecutionAuthority {
                 if fields.tool_calls_pending == 0 {
                     return Err(Self::invalid(phase, input));
                 }
-                if fields.pending_op_ids.is_none() {
+                if fields.pending_op_refs.is_none() {
+                    return Err(Self::invalid(phase, input));
+                }
+                if !fields.barrier_satisfied {
                     return Err(Self::invalid(phase, input));
                 }
                 fields.tool_calls_pending = 0;
-                fields.pending_op_ids = None;
+                fields.pending_op_refs = None;
+                fields.has_barrier_ops = false;
+                fields.barrier_satisfied = true;
                 fields.boundary_count += 1;
                 effects.push(TurnExecutionEffect::BoundaryApplied {
                     run_id: run_id.clone(),
@@ -792,17 +861,17 @@ impl TurnExecutionAuthority {
             }
 
             // ---------------------------------------------------------------
-            // ExtractionExhausted: Extracting -> Completed
+            // ExtractionExhausted: Extracting -> Failed
             // ---------------------------------------------------------------
             (Extracting, ExtractionExhausted { run_id }) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
-                fields.terminal_outcome = TurnTerminalOutcome::Completed;
-                effects.push(TurnExecutionEffect::RunCompleted {
+                fields.terminal_outcome = TurnTerminalOutcome::StructuredOutputValidationFailed;
+                effects.push(TurnExecutionEffect::RunFailed {
                     run_id: run_id.clone(),
                 });
-                Completed
+                Failed
             }
 
             // ---------------------------------------------------------------
@@ -813,7 +882,9 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids = None;
+                    fields.pending_op_refs = None;
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
                 }
                 ErrorRecovery
             }
@@ -843,7 +914,9 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids = None;
+                    fields.pending_op_refs = None;
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
                 }
                 fields.terminal_outcome = TurnTerminalOutcome::Failed;
                 effects.push(TurnExecutionEffect::RunFailed {
@@ -865,7 +938,9 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids = None;
+                    fields.pending_op_refs = None;
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
                 }
                 Cancelling
             }
@@ -914,7 +989,9 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids = None;
+                    fields.pending_op_refs = None;
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::Completed;
@@ -940,7 +1017,9 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids = None;
+                    fields.pending_op_refs = None;
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
@@ -964,7 +1043,9 @@ impl TurnExecutionAuthority {
                 ForceCancelNoRun,
             ) => {
                 if matches!(phase, WaitingForOps) {
-                    fields.pending_op_ids = None;
+                    fields.pending_op_refs = None;
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
                 }
                 fields.terminal_outcome = TurnTerminalOutcome::Cancelled;
                 if let Some(ref run_id) = fields.active_run {
@@ -1095,9 +1176,14 @@ mod tests {
         let mut auth = authority_at_waiting_for_ops();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            operation_ids: vec![OperationId::new()],
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
         })
         .expect("register pending ops");
+        auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id: test_run_id(),
+        })
+        .expect("ops barrier satisfied");
         auth.apply(TurnExecutionInput::ToolCallsResolved {
             run_id: test_run_id(),
         })
@@ -1275,7 +1361,7 @@ mod tests {
             .expect("tool calls");
         assert_eq!(t.next_phase, TurnPhase::WaitingForOps);
         assert_eq!(auth.tool_calls_pending(), 5);
-        assert_eq!(auth.pending_op_ids(), None);
+        assert_eq!(auth.pending_op_refs(), None);
     }
 
     #[test]
@@ -1317,11 +1403,25 @@ mod tests {
         let t = auth
             .apply(TurnExecutionInput::RegisterPendingOps {
                 run_id: test_run_id(),
-                operation_ids: vec![op_a.clone(), op_b.clone()],
+                op_refs: vec![
+                    AsyncOpRef::barrier(op_a.clone()),
+                    AsyncOpRef::detached(op_b.clone()),
+                ],
+                has_barrier_ops: true,
             })
             .expect("register pending ops");
         assert_eq!(t.next_phase, TurnPhase::WaitingForOps);
-        assert_eq!(auth.pending_op_ids(), Some([op_a, op_b].as_slice()));
+        assert!(auth.has_barrier_ops());
+        let refs = auth.pending_op_refs().expect("should have refs");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].operation_id, op_a);
+        assert_eq!(refs[0].wait_policy, WaitPolicy::Barrier);
+        assert_eq!(refs[1].operation_id, op_b);
+        assert_eq!(refs[1].wait_policy, WaitPolicy::Detached);
+        // barrier_op_ids only includes barrier ops
+        let barrier_ids = auth.barrier_op_ids();
+        assert_eq!(barrier_ids.len(), 1);
+        assert_eq!(*barrier_ids[0], op_a);
     }
 
     #[test]
@@ -1329,7 +1429,8 @@ mod tests {
         let mut auth = authority_at_waiting_for_ops();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            operation_ids: vec![],
+            op_refs: vec![],
+            has_barrier_ops: false,
         })
         .expect("register empty pending ops");
         let t = auth
@@ -1339,7 +1440,7 @@ mod tests {
             .expect("resolved");
         assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
         assert_eq!(auth.tool_calls_pending(), 0);
-        assert_eq!(auth.pending_op_ids(), None);
+        assert_eq!(auth.pending_op_refs(), None);
         assert_eq!(auth.boundary_count(), 1);
     }
 
@@ -1360,7 +1461,8 @@ mod tests {
         let mut auth = authority_at_waiting_for_ops();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            operation_ids: vec![],
+            op_refs: vec![],
+            has_barrier_ops: false,
         })
         .expect("register empty pending ops");
         auth.apply(TurnExecutionInput::ToolCallsResolved {
@@ -1470,11 +1572,12 @@ mod tests {
     }
 
     #[test]
-    fn recoverable_failure_from_waiting_for_ops_clears_pending_op_ids() {
+    fn recoverable_failure_from_waiting_for_ops_clears_pending_op_refs() {
         let mut auth = authority_at_waiting_for_ops();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            operation_ids: vec![OperationId::new()],
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
         })
         .expect("register pending ops");
         auth.apply(TurnExecutionInput::RecoverableFailure {
@@ -1482,7 +1585,7 @@ mod tests {
         })
         .expect("recoverable");
         assert_eq!(auth.phase(), TurnPhase::ErrorRecovery);
-        assert_eq!(auth.pending_op_ids(), None);
+        assert_eq!(auth.pending_op_refs(), None);
     }
 
     #[test]
@@ -1607,11 +1710,12 @@ mod tests {
     }
 
     #[test]
-    fn cancel_now_from_waiting_for_ops_clears_pending_op_ids() {
+    fn cancel_now_from_waiting_for_ops_clears_pending_op_refs() {
         let mut auth = authority_at_waiting_for_ops();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            operation_ids: vec![OperationId::new()],
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
         })
         .expect("register pending ops");
         auth.apply(TurnExecutionInput::CancelNow {
@@ -1619,7 +1723,7 @@ mod tests {
         })
         .expect("cancel now");
         assert_eq!(auth.phase(), TurnPhase::Cancelling);
-        assert_eq!(auth.pending_op_ids(), None);
+        assert_eq!(auth.pending_op_refs(), None);
     }
 
     // === CancelAfterBoundary ===
@@ -1768,9 +1872,16 @@ mod tests {
         assert_eq!(auth.phase(), TurnPhase::WaitingForOps);
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
-            operation_ids: vec![OperationId::new()],
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
         })
         .expect("register pending ops");
+
+        // Satisfy barrier before resolving
+        auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id: rid.clone(),
+        })
+        .expect("barrier satisfied");
 
         // Tools resolved
         auth.apply(TurnExecutionInput::ToolCallsResolved {
@@ -1861,7 +1972,8 @@ mod tests {
         .expect("tool calls");
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
-            operation_ids: vec![],
+            op_refs: vec![],
+            has_barrier_ops: false,
         })
         .expect("register empty pending ops");
 
@@ -1995,7 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn extraction_exhausted_completes() {
+    fn extraction_exhausted_fails() {
         let mut auth = authority_at_draining_boundary_terminal();
         auth.apply(TurnExecutionInput::EnterExtraction {
             run_id: test_run_id(),
@@ -2008,8 +2120,16 @@ mod tests {
                 run_id: test_run_id(),
             })
             .expect("exhausted");
-        assert_eq!(t.next_phase, TurnPhase::Completed);
-        assert_eq!(auth.terminal_outcome(), TurnTerminalOutcome::Completed);
+        assert_eq!(t.next_phase, TurnPhase::Failed);
+        assert_eq!(
+            auth.terminal_outcome(),
+            TurnTerminalOutcome::StructuredOutputValidationFailed
+        );
+        assert!(
+            t.effects
+                .iter()
+                .any(|e| matches!(e, TurnExecutionEffect::RunFailed { .. }))
+        );
     }
 
     #[test]
@@ -2122,5 +2242,218 @@ mod tests {
             })
             .expect("cancel");
         assert_eq!(t.next_phase, TurnPhase::Cancelling);
+    }
+
+    // === Barrier semantics ===
+
+    #[test]
+    fn all_barrier_ops_block_tool_calls_resolved_until_satisfied() {
+        let mut auth = authority_at_waiting_for_ops();
+        let rid = test_run_id();
+        let op_a = OperationId::new();
+        let op_b = OperationId::new();
+
+        // Register all-barrier ops
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            op_refs: vec![AsyncOpRef::barrier(op_a), AsyncOpRef::barrier(op_b)],
+            has_barrier_ops: true,
+        })
+        .expect("register all-barrier ops");
+
+        assert!(auth.has_barrier_ops());
+        assert!(!auth.barrier_satisfied());
+        assert_eq!(auth.barrier_op_ids().len(), 2);
+
+        // ToolCallsResolved must be rejected
+        assert!(
+            auth.apply(TurnExecutionInput::ToolCallsResolved {
+                run_id: rid.clone(),
+            })
+            .is_err()
+        );
+
+        // Satisfy barrier
+        auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id: rid.clone(),
+        })
+        .expect("barrier satisfied");
+        assert!(auth.barrier_satisfied());
+
+        // Now ToolCallsResolved succeeds
+        let t = auth
+            .apply(TurnExecutionInput::ToolCallsResolved { run_id: rid })
+            .expect("tool calls resolved");
+        assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
+    }
+
+    #[test]
+    fn mixed_barrier_and_detached_ops_still_block_until_barrier_satisfied() {
+        let mut auth = authority_at_waiting_for_ops();
+        let rid = test_run_id();
+
+        // Mixed: one barrier + one detached
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            op_refs: vec![
+                AsyncOpRef::barrier(OperationId::new()),
+                AsyncOpRef::detached(OperationId::new()),
+            ],
+            has_barrier_ops: true,
+        })
+        .expect("register mixed ops");
+
+        assert!(auth.has_barrier_ops());
+        assert!(!auth.barrier_satisfied());
+        assert_eq!(auth.barrier_op_ids().len(), 1);
+        assert_eq!(auth.pending_op_refs().unwrap().len(), 2);
+
+        // Blocked
+        assert!(
+            auth.apply(TurnExecutionInput::ToolCallsResolved {
+                run_id: rid.clone(),
+            })
+            .is_err()
+        );
+
+        // Satisfy
+        auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id: rid.clone(),
+        })
+        .expect("barrier satisfied");
+
+        // Unblocked
+        let t = auth
+            .apply(TurnExecutionInput::ToolCallsResolved { run_id: rid })
+            .expect("resolved");
+        assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
+    }
+
+    #[test]
+    fn detached_only_ops_do_not_block_tool_calls_resolved() {
+        let mut auth = authority_at_waiting_for_ops();
+        let rid = test_run_id();
+
+        // All detached
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            op_refs: vec![
+                AsyncOpRef::detached(OperationId::new()),
+                AsyncOpRef::detached(OperationId::new()),
+            ],
+            has_barrier_ops: false,
+        })
+        .expect("register detached-only ops");
+
+        assert!(!auth.has_barrier_ops());
+        assert!(auth.barrier_satisfied());
+        assert_eq!(auth.barrier_op_ids().len(), 0);
+
+        // Not blocked — resolves immediately
+        let t = auth
+            .apply(TurnExecutionInput::ToolCallsResolved { run_id: rid })
+            .expect("resolved without barrier");
+        assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
+    }
+
+    #[test]
+    fn ops_barrier_satisfied_rejected_when_already_satisfied() {
+        let mut auth = authority_at_waiting_for_ops();
+        let rid = test_run_id();
+
+        // Register with no barrier
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            op_refs: vec![],
+            has_barrier_ops: false,
+        })
+        .expect("register");
+
+        assert!(auth.barrier_satisfied());
+
+        // OpsBarrierSatisfied rejected when already satisfied
+        assert!(
+            auth.apply(TurnExecutionInput::OpsBarrierSatisfied { run_id: rid })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ops_barrier_satisfied_wrong_run_id_rejected() {
+        let mut auth = authority_at_waiting_for_ops();
+        let rid = test_run_id();
+
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid,
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
+        })
+        .expect("register");
+
+        assert!(
+            auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+                run_id: other_run_id(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn barrier_satisfied_reset_after_tool_calls_resolved() {
+        let mut auth = authority_at_waiting_for_ops();
+        let rid = test_run_id();
+
+        // First cycle: barrier ops
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
+        })
+        .expect("register");
+        auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id: rid.clone(),
+        })
+        .expect("satisfy");
+        auth.apply(TurnExecutionInput::ToolCallsResolved {
+            run_id: rid.clone(),
+        })
+        .expect("resolved");
+
+        // After resolution, barrier_satisfied should be reset to true
+        assert!(auth.barrier_satisfied());
+        assert!(!auth.has_barrier_ops());
+
+        // Continue to second tool call cycle
+        auth.apply(TurnExecutionInput::BoundaryContinue {
+            run_id: rid.clone(),
+        })
+        .expect("continue");
+        auth.apply(TurnExecutionInput::LlmReturnedToolCalls {
+            run_id: rid.clone(),
+            tool_count: 1,
+        })
+        .expect("tool calls");
+
+        // barrier_satisfied starts true in new cycle
+        assert!(auth.barrier_satisfied());
+
+        // Register barrier ops again — should block
+        auth.apply(TurnExecutionInput::RegisterPendingOps {
+            run_id: rid.clone(),
+            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            has_barrier_ops: true,
+        })
+        .expect("register again");
+        assert!(!auth.barrier_satisfied());
+
+        // Must satisfy again
+        auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+            run_id: rid.clone(),
+        })
+        .expect("satisfy again");
+        let t = auth
+            .apply(TurnExecutionInput::ToolCallsResolved { run_id: rid })
+            .expect("resolved again");
+        assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
     }
 }

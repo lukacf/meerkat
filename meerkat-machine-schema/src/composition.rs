@@ -7,6 +7,8 @@ use std::fmt;
 pub struct CompositionSchema {
     pub name: String,
     pub machines: Vec<MachineInstance>,
+    pub actors: Vec<ActorSchema>,
+    pub handoff_protocols: Vec<EffectHandoffProtocol>,
     pub entry_inputs: Vec<EntryInput>,
     pub routes: Vec<Route>,
     pub actor_priorities: Vec<ActorPriority>,
@@ -18,6 +20,66 @@ pub struct CompositionSchema {
     pub witness_domain_cardinality: usize,
     pub ci_limits: Option<CompositionStateLimits>,
     pub closed_world: bool,
+}
+
+/// Declares a named actor participating in a composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorSchema {
+    pub name: String,
+    pub kind: ActorKind,
+}
+
+/// Distinguishes machine actors from owner actors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorKind {
+    /// Driven by machine transitions — deterministic given inputs.
+    Machine,
+    /// Represents a host/runtime that realizes effects and provides
+    /// protocol-constrained feedback.
+    Owner,
+}
+
+/// Declares the contract between a machine that emits an effect and an
+/// owner actor that realizes it and provides feedback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectHandoffProtocol {
+    /// Protocol name — must match `handoff_protocol` on the producing
+    /// machine's `EffectDispositionRule`.
+    pub name: String,
+    /// The machine instance that produces the effect.
+    pub producer_instance: String,
+    /// The effect variant that triggers this protocol.
+    pub effect_variant: String,
+    /// The owner actor that realizes the effect.
+    pub realizing_actor: String,
+    /// Fields from the effect variant that correlate the obligation to feedback.
+    pub correlation_fields: Vec<String>,
+    /// Machine inputs the owner may submit as feedback.
+    pub allowed_feedback_inputs: Vec<FeedbackInputRef>,
+    /// When and how the obligation must be closed.
+    pub closure_policy: ClosurePolicy,
+    /// Optional fairness annotation for TLA+ liveness claims.
+    pub liveness_annotation: Option<String>,
+}
+
+/// References a specific machine input that the owner may submit as feedback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackInputRef {
+    /// The machine instance receiving the feedback.
+    pub machine_instance: String,
+    /// The input variant on that machine.
+    pub input_variant: String,
+}
+
+/// Determines when a handoff obligation is considered closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClosurePolicy {
+    /// Owner must acknowledge (provide at least one feedback input).
+    AckRequired,
+    /// Owner must acknowledge or machine must reach terminal/abort phase.
+    AckOrAbort,
+    /// Obligation is closed when machine reaches terminal phase.
+    TerminalClosure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,10 +194,68 @@ impl CompositionSchema {
         )?;
         let route_names =
             unique_names(self.routes.iter().map(|route| route.name.as_str()), "route")?;
-        let actor_ids = unique_names(
-            self.machines.iter().map(|item| item.actor.as_str()),
-            "actor",
+        let actor_ids = unique_names(self.actors.iter().map(|actor| actor.name.as_str()), "actor")?;
+
+        // Every MachineInstance.actor must reference an ActorSchema with kind Machine.
+        for machine in &self.machines {
+            if !actor_ids.contains(machine.actor.as_str()) {
+                return Err(CompositionSchemaError::UnknownActor {
+                    actor: machine.actor.clone(),
+                });
+            }
+            let actor_schema = self
+                .actors
+                .iter()
+                .find(|a| a.name == machine.actor)
+                .expect("actor exists — just checked");
+            if actor_schema.kind != ActorKind::Machine {
+                return Err(CompositionSchemaError::ActorKindMismatch {
+                    actor: machine.actor.clone(),
+                    expected: ActorKind::Machine,
+                    actual: actor_schema.kind.clone(),
+                });
+            }
+        }
+
+        // Validate handoff protocols (structural checks only — no schema cross-ref here).
+        let _protocol_names = unique_names(
+            self.handoff_protocols.iter().map(|p| p.name.as_str()),
+            "handoff protocol",
         )?;
+        for protocol in &self.handoff_protocols {
+            if !machine_ids.contains(protocol.producer_instance.as_str()) {
+                return Err(CompositionSchemaError::UnknownHandoffProducer {
+                    protocol: protocol.name.clone(),
+                    instance: protocol.producer_instance.clone(),
+                });
+            }
+            if !actor_ids.contains(protocol.realizing_actor.as_str()) {
+                return Err(CompositionSchemaError::UnknownHandoffActor {
+                    protocol: protocol.name.clone(),
+                    actor: protocol.realizing_actor.clone(),
+                });
+            }
+            let realizing = self
+                .actors
+                .iter()
+                .find(|a| a.name == protocol.realizing_actor)
+                .expect("actor exists — just checked");
+            if realizing.kind != ActorKind::Owner {
+                return Err(CompositionSchemaError::HandoffActorNotOwner {
+                    protocol: protocol.name.clone(),
+                    actor: protocol.realizing_actor.clone(),
+                });
+            }
+            for feedback in &protocol.allowed_feedback_inputs {
+                if !machine_ids.contains(feedback.machine_instance.as_str()) {
+                    return Err(CompositionSchemaError::UnknownHandoffFeedbackMachine {
+                        protocol: protocol.name.clone(),
+                        machine: feedback.machine_instance.clone(),
+                    });
+                }
+            }
+        }
+
         let mut witnessed_routes = IndexSet::new();
         let mut witnessed_scheduler_rules = Vec::new();
 
@@ -401,6 +521,24 @@ impl CompositionSchema {
                                 input_variant: target.input_variant.clone(),
                             });
                         }
+                    }
+                }
+                CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance,
+                    effect_variant,
+                    protocol_name,
+                } => {
+                    let present = self.handoff_protocols.iter().any(|p| {
+                        p.name == *protocol_name
+                            && p.producer_instance == *producer_instance
+                            && p.effect_variant == *effect_variant
+                    });
+                    if !present {
+                        return Err(CompositionSchemaError::MissingHandoffProtocol {
+                            from_instance: producer_instance.clone(),
+                            effect_variant: effect_variant.clone(),
+                            expected_protocol: protocol_name.clone(),
+                        });
                     }
                 }
             }
@@ -692,6 +830,103 @@ impl CompositionSchema {
             }
         }
 
+        // Validate handoff protocols against machine schemas.
+        for protocol in &self.handoff_protocols {
+            let producer_schema = schemas
+                .iter()
+                .find(|schema| {
+                    self.machines.iter().any(|instance| {
+                        instance.instance_id == protocol.producer_instance
+                            && instance.machine_name == schema.machine
+                    })
+                })
+                .ok_or_else(|| CompositionSchemaError::UnknownMachine {
+                    machine: protocol.producer_instance.clone(),
+                })?;
+
+            // Effect variant must exist on the producer.
+            let effect_variants = producer_schema
+                .effects
+                .variants_by_name()
+                .map_err(CompositionSchemaError::MachineSchema)?;
+            if !effect_variants.contains(&protocol.effect_variant) {
+                return Err(CompositionSchemaError::UnknownHandoffEffect {
+                    protocol: protocol.name.clone(),
+                    effect: protocol.effect_variant.clone(),
+                });
+            }
+
+            // The producer's disposition rule must reference this protocol.
+            let disposition_rule = producer_schema
+                .effect_dispositions
+                .iter()
+                .find(|rule| rule.effect_variant == protocol.effect_variant);
+            if let Some(rule) = disposition_rule {
+                match &rule.handoff_protocol {
+                    Some(hp) if hp == &protocol.name => {}
+                    _ => {
+                        return Err(CompositionSchemaError::HandoffProtocolMismatch {
+                            protocol: protocol.name.clone(),
+                            effect_variant: protocol.effect_variant.clone(),
+                            expected_protocol: protocol.name.clone(),
+                        });
+                    }
+                }
+            }
+
+            // Correlation fields must exist on the effect variant.
+            let effect_variant_schema = producer_schema
+                .effects
+                .variant_named(&protocol.effect_variant)
+                .map_err(CompositionSchemaError::MachineSchema)?;
+            for field in &protocol.correlation_fields {
+                effect_variant_schema.field_named(field).map_err(|_| {
+                    CompositionSchemaError::UnknownHandoffCorrelationField {
+                        protocol: protocol.name.clone(),
+                        field: field.clone(),
+                    }
+                })?;
+            }
+
+            // Feedback inputs must exist on their target machines.
+            for feedback in &protocol.allowed_feedback_inputs {
+                let target_schema = schemas
+                    .iter()
+                    .find(|schema| {
+                        self.machines.iter().any(|instance| {
+                            instance.instance_id == feedback.machine_instance
+                                && instance.machine_name == schema.machine
+                        })
+                    })
+                    .ok_or_else(|| CompositionSchemaError::UnknownMachine {
+                        machine: feedback.machine_instance.clone(),
+                    })?;
+                let input_variants = target_schema
+                    .inputs
+                    .variants_by_name()
+                    .map_err(CompositionSchemaError::MachineSchema)?;
+                if !input_variants.contains(&feedback.input_variant) {
+                    return Err(CompositionSchemaError::UnknownHandoffFeedbackInput {
+                        protocol: protocol.name.clone(),
+                        machine: feedback.machine_instance.clone(),
+                        input: feedback.input_variant.clone(),
+                    });
+                }
+            }
+
+            // TerminalClosure requires the producer machine to have terminal phases.
+            if protocol.closure_policy == ClosurePolicy::TerminalClosure
+                && producer_schema.state.terminal_phases.is_empty()
+            {
+                return Err(
+                    CompositionSchemaError::TerminalClosureRequiresTerminalPhases {
+                        protocol: protocol.name.clone(),
+                        producer_instance: protocol.producer_instance.clone(),
+                    },
+                );
+            }
+        }
+
         // Closed-world validation: every Routed effect must have a matching route
         // to every consumer instance in this composition.
         if self.closed_world {
@@ -728,6 +963,34 @@ impl CompositionSchema {
                                     });
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Closed-world validation: every effect with handoff_protocol set
+            // must have a matching EffectHandoffProtocol in the composition.
+            for machine_instance in &self.machines {
+                let machine_schema = schemas
+                    .iter()
+                    .find(|schema| schema.machine == machine_instance.machine_name)
+                    .ok_or_else(|| CompositionSchemaError::UnknownMachineSchema {
+                        schema: machine_instance.machine_name.clone(),
+                    })?;
+
+                for rule in &machine_schema.effect_dispositions {
+                    if let Some(protocol_name) = &rule.handoff_protocol {
+                        let protocol_exists = self.handoff_protocols.iter().any(|p| {
+                            p.name == *protocol_name
+                                && p.producer_instance == machine_instance.instance_id
+                                && p.effect_variant == rule.effect_variant
+                        });
+                        if !protocol_exists {
+                            return Err(CompositionSchemaError::MissingHandoffProtocol {
+                                from_instance: machine_instance.instance_id.clone(),
+                                effect_variant: rule.effect_variant.clone(),
+                                expected_protocol: protocol_name.clone(),
+                            });
                         }
                     }
                 }
@@ -843,6 +1106,11 @@ pub enum CompositionInvariantKind {
         effect_variant: String,
         required_targets: Vec<RouteTarget>,
     },
+    HandoffProtocolCovered {
+        producer_instance: String,
+        effect_variant: String,
+        protocol_name: String,
+    },
 }
 
 impl CompositionInvariantKind {
@@ -852,6 +1120,7 @@ impl CompositionInvariantKind {
             CompositionInvariantKind::RoutePresent { .. }
                 | CompositionInvariantKind::ActorPriorityPresent { .. }
                 | CompositionInvariantKind::SchedulerRulePresent { .. }
+                | CompositionInvariantKind::HandoffProtocolCovered { .. }
         )
     }
 
@@ -895,6 +1164,11 @@ pub enum CompositionSchemaError {
     },
     UnknownActor {
         actor: String,
+    },
+    ActorKindMismatch {
+        actor: String,
+        expected: ActorKind,
+        actual: ActorKind,
     },
     UnknownRouteEffect {
         machine: String,
@@ -1032,6 +1306,49 @@ pub enum CompositionSchemaError {
         consumer_machine: String,
         consumer_instance: String,
     },
+    MissingHandoffProtocol {
+        from_instance: String,
+        effect_variant: String,
+        expected_protocol: String,
+    },
+    UnknownHandoffProducer {
+        protocol: String,
+        instance: String,
+    },
+    UnknownHandoffEffect {
+        protocol: String,
+        effect: String,
+    },
+    UnknownHandoffActor {
+        protocol: String,
+        actor: String,
+    },
+    HandoffActorNotOwner {
+        protocol: String,
+        actor: String,
+    },
+    UnknownHandoffFeedbackMachine {
+        protocol: String,
+        machine: String,
+    },
+    UnknownHandoffFeedbackInput {
+        protocol: String,
+        machine: String,
+        input: String,
+    },
+    HandoffProtocolMismatch {
+        protocol: String,
+        effect_variant: String,
+        expected_protocol: String,
+    },
+    UnknownHandoffCorrelationField {
+        protocol: String,
+        field: String,
+    },
+    TerminalClosureRequiresTerminalPhases {
+        protocol: String,
+        producer_instance: String,
+    },
     MachineSchema(MachineSchemaError),
 }
 
@@ -1043,6 +1360,14 @@ impl fmt::Display for CompositionSchemaError {
             Self::UnknownMachine { machine } => write!(f, "unknown machine instance `{machine}`"),
             Self::UnknownMachineSchema { schema } => write!(f, "unknown machine schema `{schema}`"),
             Self::UnknownActor { actor } => write!(f, "unknown actor `{actor}`"),
+            Self::ActorKindMismatch {
+                actor,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "actor `{actor}` has kind {actual:?} but expected {expected:?}"
+            ),
             Self::UnknownRouteEffect { machine, effect } => {
                 write!(
                     f,
@@ -1232,6 +1557,61 @@ impl fmt::Display for CompositionSchemaError {
             } => write!(
                 f,
                 "closed-world violation: instance `{from_instance}` emits routed effect `{effect_variant}` targeting `{consumer_machine}` but no route exists to instance `{consumer_instance}`"
+            ),
+            Self::MissingHandoffProtocol {
+                from_instance,
+                effect_variant,
+                expected_protocol,
+            } => write!(
+                f,
+                "closed-world violation: instance `{from_instance}` emits effect `{effect_variant}` with handoff_protocol `{expected_protocol}` but no matching EffectHandoffProtocol exists in the composition"
+            ),
+            Self::UnknownHandoffProducer { protocol, instance } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown producer instance `{instance}`"
+            ),
+            Self::UnknownHandoffEffect { protocol, effect } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown effect `{effect}`"
+            ),
+            Self::UnknownHandoffActor { protocol, actor } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown actor `{actor}`"
+            ),
+            Self::HandoffActorNotOwner { protocol, actor } => write!(
+                f,
+                "handoff protocol `{protocol}` requires actor `{actor}` to be Owner, but it is not"
+            ),
+            Self::UnknownHandoffFeedbackMachine { protocol, machine } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown feedback machine `{machine}`"
+            ),
+            Self::UnknownHandoffFeedbackInput {
+                protocol,
+                machine,
+                input,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown feedback input `{input}` on machine `{machine}`"
+            ),
+            Self::HandoffProtocolMismatch {
+                protocol,
+                effect_variant,
+                expected_protocol,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` expects effect `{effect_variant}` to declare handoff_protocol `{expected_protocol}`, but it does not"
+            ),
+            Self::UnknownHandoffCorrelationField { protocol, field } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown correlation field `{field}`"
+            ),
+            Self::TerminalClosureRequiresTerminalPhases {
+                protocol,
+                producer_instance,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` uses TerminalClosure but producer `{producer_instance}` has no terminal phases"
             ),
             Self::MachineSchema(err) => err.fmt(f),
         }

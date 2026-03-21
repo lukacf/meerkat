@@ -279,8 +279,9 @@ fn closed_world_audit_all_routed_effects_have_routes() {
 fn rejects_routed_effect_without_route_in_closed_world_composition() {
     use indexmap::IndexMap;
     use meerkat_machine_schema::{
-        CompositionSchema, EffectDispositionRule, EffectEmit, EntryInput, EnumSchema, InitSchema,
-        MachineInstance, MachineSchema, RustBinding, StateSchema, VariantSchema,
+        ActorKind, ActorSchema, CompositionSchema, EffectDispositionRule, EffectEmit, EntryInput,
+        EnumSchema, InitSchema, MachineInstance, MachineSchema, RustBinding, StateSchema,
+        VariantSchema,
     };
 
     let producer = MachineSchema {
@@ -342,6 +343,7 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
             disposition: EffectDisposition::Routed {
                 consumer_machines: vec!["ConsumerMachine".into()],
             },
+            handoff_protocol: None,
         }],
     };
 
@@ -399,6 +401,17 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
                 actor: "actor_b".into(),
             },
         ],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "actor_b".into(),
+                kind: ActorKind::Machine,
+            },
+        ],
+        handoff_protocols: vec![],
         entry_inputs: vec![EntryInput {
             name: "go".into(),
             machine: "producer".into(),
@@ -424,4 +437,965 @@ fn rejects_routed_effect_without_route_in_closed_world_composition() {
         ),
         "expected MissingRoutedEffect error, got: {result:?}"
     );
+}
+
+#[test]
+fn handoff_protocol_accepted_on_local_effect() {
+    use meerkat_machine_schema::{
+        EffectDispositionRule, EnumSchema, InitSchema, MachineSchema, RustBinding, StateSchema,
+        VariantSchema,
+    };
+
+    let schema = MachineSchema {
+        machine: "TestMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::handoff".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![VariantSchema {
+                    name: "Ready".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Ready".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "DoSomething".into(),
+                fields: vec![],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "DoSomething".into(),
+            disposition: EffectDisposition::Local,
+            handoff_protocol: Some("my_protocol".into()),
+        }],
+    };
+
+    assert_eq!(schema.validate(), Ok(()));
+}
+
+#[test]
+fn handoff_protocol_accepted_on_external_effect() {
+    use meerkat_machine_schema::{
+        EffectDispositionRule, EnumSchema, InitSchema, MachineSchema, RustBinding, StateSchema,
+        VariantSchema,
+    };
+
+    let schema = MachineSchema {
+        machine: "TestMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::handoff_ext".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![VariantSchema {
+                    name: "Ready".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Ready".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "Notify".into(),
+                fields: vec![],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "Notify".into(),
+            disposition: EffectDisposition::External,
+            handoff_protocol: Some("notify_protocol".into()),
+        }],
+    };
+
+    assert_eq!(schema.validate(), Ok(()));
+}
+
+#[test]
+fn handoff_protocol_rejected_on_routed_effect() {
+    use meerkat_machine_schema::{
+        EffectDispositionRule, EnumSchema, InitSchema, MachineSchema, MachineSchemaError,
+        RustBinding, StateSchema, VariantSchema,
+    };
+
+    let schema = MachineSchema {
+        machine: "TestMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::handoff_routed".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![VariantSchema {
+                    name: "Ready".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Ready".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "Route".into(),
+                fields: vec![],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "Route".into(),
+            disposition: EffectDisposition::Routed {
+                consumer_machines: vec!["SomeConsumer".into()],
+            },
+            handoff_protocol: Some("bad_protocol".into()),
+        }],
+    };
+
+    assert_eq!(
+        schema.validate(),
+        Err(MachineSchemaError::HandoffProtocolOnRoutedEffect {
+            variant: "Route".into(),
+        })
+    );
+}
+
+#[test]
+fn actor_kind_owner_accepted_in_composition() {
+    use meerkat_machine_schema::{ActorKind, ActorSchema, CompositionSchema, MachineInstance};
+    use std::collections::BTreeMap;
+
+    // Owner actors are allowed in the composition but cannot own machine instances
+    let composition = CompositionSchema {
+        name: "test_owner_actor".into(),
+        machines: vec![MachineInstance {
+            instance_id: "some_machine".into(),
+            machine_name: "SomeMachine".into(),
+            actor: "machine_actor".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "machine_actor".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "session_host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(composition.validate(), Ok(()));
+}
+
+#[test]
+fn machine_instance_with_owner_actor_rejected() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, CompositionSchema, CompositionSchemaError, MachineInstance,
+    };
+    use std::collections::BTreeMap;
+
+    let composition = CompositionSchema {
+        name: "test_owner_mismatch".into(),
+        machines: vec![MachineInstance {
+            instance_id: "some_machine".into(),
+            machine_name: "SomeMachine".into(),
+            actor: "owner_actor".into(),
+        }],
+        actors: vec![ActorSchema {
+            name: "owner_actor".into(),
+            kind: ActorKind::Owner,
+        }],
+        handoff_protocols: vec![],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(
+        composition.validate(),
+        Err(CompositionSchemaError::ActorKindMismatch {
+            actor: "owner_actor".into(),
+            expected: ActorKind::Machine,
+            actual: ActorKind::Owner,
+        })
+    );
+}
+
+#[test]
+fn handoff_protocol_valid_round_trip() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
+        EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FeedbackInputRef, FieldSchema,
+        InitSchema, MachineInstance, MachineSchema, RustBinding, StateSchema, TypeRef,
+        VariantSchema,
+    };
+    use std::collections::BTreeMap;
+
+    let producer_machine = MachineSchema {
+        machine: "ProducerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::producer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "ProducerPhase".into(),
+                variants: vec![
+                    VariantSchema {
+                        name: "Running".into(),
+                        fields: vec![],
+                    },
+                    VariantSchema {
+                        name: "Done".into(),
+                        fields: vec![],
+                    },
+                ],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Running".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec!["Done".into()],
+        },
+        inputs: EnumSchema {
+            name: "ProducerInput".into(),
+            variants: vec![
+                VariantSchema {
+                    name: "Go".into(),
+                    fields: vec![],
+                },
+                VariantSchema {
+                    name: "Ack".into(),
+                    fields: vec![FieldSchema {
+                        name: "op_id".into(),
+                        ty: TypeRef::String,
+                    }],
+                },
+            ],
+        },
+        effects: EnumSchema {
+            name: "ProducerEffect".into(),
+            variants: vec![VariantSchema {
+                name: "RequestWork".into(),
+                fields: vec![FieldSchema {
+                    name: "op_id".into(),
+                    ty: TypeRef::String,
+                }],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "RequestWork".into(),
+            disposition: EffectDisposition::External,
+            handoff_protocol: Some("work_handoff".into()),
+        }],
+    };
+
+    let composition = CompositionSchema {
+        name: "test_handoff_valid".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "ProducerMachine".into(),
+            actor: "machine_actor".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "machine_actor".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "work_handoff".into(),
+            producer_instance: "producer".into(),
+            effect_variant: "RequestWork".into(),
+            realizing_actor: "host".into(),
+            correlation_fields: vec!["op_id".into()],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "producer".into(),
+                input_variant: "Ack".into(),
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    composition
+        .validate_against(&[&producer_machine])
+        .expect("valid handoff protocol should pass");
+}
+
+#[test]
+fn handoff_protocol_unknown_producer() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
+        MachineInstance,
+    };
+    use std::collections::BTreeMap;
+
+    let composition = CompositionSchema {
+        name: "test_unknown_producer".into(),
+        machines: vec![MachineInstance {
+            instance_id: "real_machine".into(),
+            machine_name: "M".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "bad_proto".into(),
+            producer_instance: "nonexistent".into(),
+            effect_variant: "E".into(),
+            realizing_actor: "host".into(),
+            correlation_fields: vec![],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(
+        composition.validate(),
+        Err(CompositionSchemaError::UnknownHandoffProducer {
+            protocol: "bad_proto".into(),
+            instance: "nonexistent".into(),
+        })
+    );
+}
+
+#[test]
+fn handoff_protocol_actor_not_owner() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
+        MachineInstance,
+    };
+    use std::collections::BTreeMap;
+
+    let composition = CompositionSchema {
+        name: "test_actor_not_owner".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "M".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "also_machine".into(),
+                kind: ActorKind::Machine,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "bad_proto".into(),
+            producer_instance: "producer".into(),
+            effect_variant: "E".into(),
+            realizing_actor: "also_machine".into(),
+            correlation_fields: vec![],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(
+        composition.validate(),
+        Err(CompositionSchemaError::HandoffActorNotOwner {
+            protocol: "bad_proto".into(),
+            actor: "also_machine".into(),
+        })
+    );
+}
+
+#[test]
+fn handoff_protocol_unknown_feedback_machine() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
+        FeedbackInputRef, MachineInstance,
+    };
+    use std::collections::BTreeMap;
+
+    let composition = CompositionSchema {
+        name: "test_unknown_feedback_machine".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "M".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "bad_proto".into(),
+            producer_instance: "producer".into(),
+            effect_variant: "E".into(),
+            realizing_actor: "host".into(),
+            correlation_fields: vec![],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "nonexistent".into(),
+                input_variant: "Ack".into(),
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(
+        composition.validate(),
+        Err(CompositionSchemaError::UnknownHandoffFeedbackMachine {
+            protocol: "bad_proto".into(),
+            machine: "nonexistent".into(),
+        })
+    );
+}
+
+#[test]
+fn handoff_protocol_unknown_effect_cross_schema() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
+        EffectDispositionRule, EffectHandoffProtocol, EnumSchema, InitSchema, MachineInstance,
+        MachineSchema, RustBinding, StateSchema, VariantSchema,
+    };
+    use std::collections::BTreeMap;
+
+    let producer_machine = MachineSchema {
+        machine: "ProducerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::producer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![VariantSchema {
+                    name: "Ready".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Ready".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "RealEffect".into(),
+                fields: vec![],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "RealEffect".into(),
+            disposition: EffectDisposition::External,
+            handoff_protocol: Some("proto".into()),
+        }],
+    };
+
+    let composition = CompositionSchema {
+        name: "test_unknown_effect".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "ProducerMachine".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "proto".into(),
+            producer_instance: "producer".into(),
+            effect_variant: "NonexistentEffect".into(),
+            realizing_actor: "host".into(),
+            correlation_fields: vec![],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(
+        composition.validate_against(&[&producer_machine]),
+        Err(CompositionSchemaError::UnknownHandoffEffect {
+            protocol: "proto".into(),
+            effect: "NonexistentEffect".into(),
+        })
+    );
+}
+
+#[test]
+fn handoff_protocol_terminal_closure_requires_terminal_phases() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
+        EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FieldSchema, InitSchema,
+        MachineInstance, MachineSchema, RustBinding, StateSchema, TypeRef, VariantSchema,
+    };
+    use std::collections::BTreeMap;
+
+    let producer_machine = MachineSchema {
+        machine: "ProducerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::producer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![VariantSchema {
+                    name: "Running".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Running".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![], // no terminal phases
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "Work".into(),
+                fields: vec![FieldSchema {
+                    name: "id".into(),
+                    ty: TypeRef::String,
+                }],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "Work".into(),
+            disposition: EffectDisposition::External,
+            handoff_protocol: Some("terminal_proto".into()),
+        }],
+    };
+
+    let composition = CompositionSchema {
+        name: "test_terminal_closure".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "ProducerMachine".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "terminal_proto".into(),
+            producer_instance: "producer".into(),
+            effect_variant: "Work".into(),
+            realizing_actor: "host".into(),
+            correlation_fields: vec!["id".into()],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::TerminalClosure,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: false,
+    };
+
+    assert_eq!(
+        composition.validate_against(&[&producer_machine]),
+        Err(
+            CompositionSchemaError::TerminalClosureRequiresTerminalPhases {
+                protocol: "terminal_proto".into(),
+                producer_instance: "producer".into(),
+            }
+        )
+    );
+}
+
+#[test]
+fn closed_world_rejects_missing_handoff_protocol() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, CompositionSchema, EffectDisposition, EffectDispositionRule,
+        EnumSchema, InitSchema, MachineInstance, MachineSchema, RustBinding, StateSchema,
+        VariantSchema,
+    };
+    use std::collections::BTreeMap;
+
+    let producer_machine = MachineSchema {
+        machine: "ProducerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::producer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![VariantSchema {
+                    name: "Ready".into(),
+                    fields: vec![],
+                }],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Ready".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec![],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "Work".into(),
+                fields: vec![],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "Work".into(),
+            disposition: EffectDisposition::External,
+            handoff_protocol: Some("missing_proto".into()),
+        }],
+    };
+
+    let composition = CompositionSchema {
+        name: "test_closed_world_missing_handoff".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "ProducerMachine".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![ActorSchema {
+            name: "actor_a".into(),
+            kind: ActorKind::Machine,
+        }],
+        handoff_protocols: vec![], // deliberately empty — should fail
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    };
+
+    assert_eq!(
+        composition.validate_against(&[&producer_machine]),
+        Err(CompositionSchemaError::MissingHandoffProtocol {
+            from_instance: "producer".into(),
+            effect_variant: "Work".into(),
+            expected_protocol: "missing_proto".into(),
+        })
+    );
+}
+
+#[test]
+fn closed_world_accepts_handoff_protocol_present() {
+    use meerkat_machine_schema::{
+        ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
+        EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FieldSchema, InitSchema,
+        MachineInstance, MachineSchema, RustBinding, StateSchema, TypeRef, VariantSchema,
+    };
+    use std::collections::BTreeMap;
+
+    let producer_machine = MachineSchema {
+        machine: "ProducerMachine".into(),
+        version: 1,
+        rust: RustBinding {
+            crate_name: "test".into(),
+            module: "test::producer".into(),
+        },
+        state: StateSchema {
+            phase: EnumSchema {
+                name: "Phase".into(),
+                variants: vec![
+                    VariantSchema {
+                        name: "Running".into(),
+                        fields: vec![],
+                    },
+                    VariantSchema {
+                        name: "Done".into(),
+                        fields: vec![],
+                    },
+                ],
+            },
+            fields: vec![],
+            init: InitSchema {
+                phase: "Running".into(),
+                fields: vec![],
+            },
+            terminal_phases: vec!["Done".into()],
+        },
+        inputs: EnumSchema {
+            name: "Input".into(),
+            variants: vec![VariantSchema {
+                name: "Ack".into(),
+                fields: vec![FieldSchema {
+                    name: "op_id".into(),
+                    ty: TypeRef::String,
+                }],
+            }],
+        },
+        effects: EnumSchema {
+            name: "Effect".into(),
+            variants: vec![VariantSchema {
+                name: "Work".into(),
+                fields: vec![FieldSchema {
+                    name: "op_id".into(),
+                    ty: TypeRef::String,
+                }],
+            }],
+        },
+        helpers: vec![],
+        derived: vec![],
+        invariants: vec![],
+        transitions: vec![],
+        effect_dispositions: vec![EffectDispositionRule {
+            effect_variant: "Work".into(),
+            disposition: EffectDisposition::External,
+            handoff_protocol: Some("work_proto".into()),
+        }],
+    };
+
+    let composition = CompositionSchema {
+        name: "test_closed_world_handoff_ok".into(),
+        machines: vec![MachineInstance {
+            instance_id: "producer".into(),
+            machine_name: "ProducerMachine".into(),
+            actor: "actor_a".into(),
+        }],
+        actors: vec![
+            ActorSchema {
+                name: "actor_a".into(),
+                kind: ActorKind::Machine,
+            },
+            ActorSchema {
+                name: "host".into(),
+                kind: ActorKind::Owner,
+            },
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "work_proto".into(),
+            producer_instance: "producer".into(),
+            effect_variant: "Work".into(),
+            realizing_actor: "host".into(),
+            correlation_fields: vec!["op_id".into()],
+            allowed_feedback_inputs: vec![meerkat_machine_schema::FeedbackInputRef {
+                machine_instance: "producer".into(),
+                input_variant: "Ack".into(),
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: None,
+        }],
+        entry_inputs: vec![],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses: vec![],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    };
+
+    composition
+        .validate_against(&[&producer_machine])
+        .expect("closed-world with matching handoff protocol should pass");
 }

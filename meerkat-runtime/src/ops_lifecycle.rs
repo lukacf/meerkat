@@ -173,6 +173,10 @@ impl ShellState {
                 OpsLifecycleEffect::SubmitOpEvent { .. } => {
                     // Future: emit observability events. Currently a no-op.
                 }
+                OpsLifecycleEffect::WaitAllSatisfied { .. } => {
+                    // Cross-machine handoff: routed to TurnExecution by the
+                    // caller (agent loop). No shell-local side effects.
+                }
             }
         }
     }
@@ -254,48 +258,6 @@ impl RuntimeOpsLifecycleRegistry {
         self.state
             .write()
             .map_err(|_| OpsLifecycleError::Internal("ops lifecycle registry poisoned".into()))
-    }
-
-    /// Register a completion watcher for each ID and await all of them.
-    pub async fn wait_all(
-        &self,
-        ids: &[OperationId],
-    ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
-        let watches: Vec<(OperationId, OperationCompletionWatch)> = {
-            let mut state = self.write_state()?;
-            ids.iter()
-                .map(|id| {
-                    // Check authority for terminal outcome first.
-                    let canonical = state
-                        .authority
-                        .operation(id)
-                        .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-                    if let Some(outcome) = canonical.terminal_outcome() {
-                        Ok((
-                            id.clone(),
-                            OperationCompletionWatch::already_resolved(outcome.clone()),
-                        ))
-                    } else {
-                        // Register watcher through authority for bookkeeping.
-                        state.authority.apply(OpsLifecycleInput::RegisterWatcher {
-                            operation_id: id.clone(),
-                        })?;
-                        let shell = state.shell_record_mut(id)?;
-                        let (tx, watch) = OperationCompletionWatch::channel();
-                        shell.watchers.push(tx);
-                        Ok((id.clone(), watch))
-                    }
-                })
-                .collect::<Result<Vec<_>, OpsLifecycleError>>()?
-        };
-
-        let mut results = Vec::with_capacity(watches.len());
-        for (id, watch) in watches {
-            let outcome = watch.wait().await;
-            results.push((id, outcome));
-        }
-        Ok(results)
     }
 }
 
@@ -612,6 +574,9 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 .collect()
         };
 
+        // Capture owned ids before moving into the future (ids is borrowed).
+        let owned_ids = ids.to_vec();
+
         Box::pin(async move {
             let watches = watches?;
             let mut results = Vec::with_capacity(watches.len());
@@ -619,6 +584,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 let outcome = watch.wait().await;
                 results.push((id, outcome));
             }
+
+            // Feed WaitAll through the authority so it emits WaitAllSatisfied
+            // for cross-machine handoff (ops_barrier_satisfaction protocol).
+            {
+                let mut state = self.write_state()?;
+                let _transition = state.authority.apply(OpsLifecycleInput::WaitAll {
+                    operation_ids: owned_ids,
+                })?;
+            }
+
             Ok(results)
         })
     }
@@ -766,6 +741,38 @@ mod tests {
         assert!(matches!(
             results[1].1,
             OperationTerminalOutcome::Failed { .. }
+        ));
+    }
+
+    /// Exercises the trait `wait_all` path (via `dyn OpsLifecycleRegistry`)
+    /// which must submit WaitAll through the authority for cross-machine handoff.
+    #[tokio::test]
+    async fn wait_all_trait_path_submits_through_authority() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("trait-wait");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        // Call through trait object to exercise the trait impl, not the inherent method.
+        let trait_ref: &dyn OpsLifecycleRegistry = &registry;
+        let results = trait_ref.wait_all(&[op_id.clone()]).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            results[0].1,
+            OperationTerminalOutcome::Completed(_)
         ));
     }
 

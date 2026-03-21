@@ -13,7 +13,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `vision_enabled`: `Bool`
 - `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u32`
-- `pending_op_ids`: `Option<Seq<OperationId>>`
+- `pending_op_refs`: `Option<Seq<AsyncOpRef>>`
+- `has_barrier_ops`: `Bool`
+- `barrier_satisfied`: `Bool`
 - `boundary_count`: `u32`
 - `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `TurnTerminalOutcome`
@@ -27,8 +29,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PrimitiveApplied`(run_id: RunId, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u32)
 - `LlmReturnedTerminal`(run_id: RunId)
-- `RegisterPendingOps`(run_id: RunId, operation_ids: Seq<OperationId>)
+- `RegisterPendingOps`(run_id: RunId, op_refs: Seq<AsyncOpRef>, has_barrier_ops: Bool)
 - `ToolCallsResolved`(run_id: RunId)
+- `OpsBarrierSatisfied`(run_id: RunId)
 - `BoundaryContinue`(run_id: RunId)
 - `BoundaryComplete`(run_id: RunId)
 - `RecoverableFailure`(run_id: RunId)
@@ -63,7 +66,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ready_has_no_admitted_content`
 - `non_ready_has_active_run`
 - `waiting_for_ops_implies_pending_tools`
-- `pending_op_ids_only_used_while_waiting`
+- `pending_op_refs_only_used_while_waiting`
 - `ready_has_no_boundary_cancel_request`
 - `immediate_primitives_skip_llm_and_recovery`
 - `terminal_states_match_terminal_outcome`
@@ -147,10 +150,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterPendingOps`
 - From: `WaitingForOps`
-- On: `RegisterPendingOps`(run_id, operation_ids)
+- On: `RegisterPendingOps`(run_id, op_refs, has_barrier_ops)
 - Guards:
   - `run_matches_active`
   - `tool_calls_pending_positive`
+- To: `WaitingForOps`
+
+### `OpsBarrierSatisfied`
+- From: `WaitingForOps`
+- On: `OpsBarrierSatisfied`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `barrier_not_yet_satisfied`
 - To: `WaitingForOps`
 
 ### `ToolCallsResolved`
@@ -159,7 +170,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_active`
   - `tool_calls_pending_positive`
-  - `pending_op_ids_registered`
+  - `pending_op_refs_registered`
+  - `barrier_satisfied`
 - Emits: `BoundaryApplied`
 - To: `DrainingBoundary`
 

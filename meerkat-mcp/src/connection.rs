@@ -1,10 +1,11 @@
 //! MCP connection management
 
+use crate::McpError;
 use crate::transport::sse::{SseClientConfig, SseClientTransport};
 use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
 };
-use crate::{McpError, McpServerConfig};
+use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::ContentBlock;

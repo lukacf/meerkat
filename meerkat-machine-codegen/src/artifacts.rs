@@ -2589,7 +2589,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 invariant_names.push(inv_name);
             }
 
-            // NoFeedbackWithoutObligation: feedback input observed => obligation non-empty
+            // NoFeedbackWithoutObligation: feedback input observed => matching obligation exists
             if !protocol.allowed_feedback_inputs.is_empty() {
                 let inv_name = format!("NoFeedbackWithoutObligation_{}", tla_ident(&protocol.name));
                 let feedback_disjuncts: Vec<String> = protocol
@@ -2597,18 +2597,38 @@ impl<'a> CompositionTlaCompiler<'a> {
                     .iter()
                     .map(|fb| {
                         format!(
-                            "input_packet.machine = {} /\\ input_packet.variant = {}",
+                            "(input_packet.machine = {} /\\ input_packet.variant = {})",
                             tla_string(&fb.machine_instance),
                             tla_string(&fb.input_variant)
                         )
                     })
                     .collect();
+                let obligation_check = if protocol.correlation_fields.is_empty() {
+                    format!("{} /= {{}}", var)
+                } else {
+                    let match_conjuncts: Vec<String> = protocol
+                        .correlation_fields
+                        .iter()
+                        .map(|cf| {
+                            format!(
+                                "record.{} = input_packet.payload.{}",
+                                tla_ident(cf),
+                                tla_ident(cf)
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "(\\E record \\in {} : ({}))",
+                        var,
+                        match_conjuncts.join(" /\\ ")
+                    )
+                };
                 writeln!(
                     out,
-                    "{} == \\A input_packet \\in observed_inputs : (({}) => {} /= {{}})",
+                    "{} == \\A input_packet \\in observed_inputs : (({}) => {})",
                     inv_name,
                     feedback_disjuncts.join(" \\/ "),
-                    var
+                    obligation_check
                 )
                 .expect("write to string");
                 invariant_names.push(inv_name);
@@ -2648,34 +2668,69 @@ impl<'a> CompositionTlaCompiler<'a> {
             writeln!(out, "    /\\ {} /= {{}}", var).expect("write to string");
             writeln!(out, "    /\\ \\E token \\in {} :", var).expect("write to string");
 
-            let feedback_branches: Vec<String> = protocol
+            let payload_expr = if protocol.correlation_fields.is_empty() {
+                "\"feedback\"".to_string()
+            } else {
+                let field_exprs: Vec<String> = protocol
+                    .correlation_fields
+                    .iter()
+                    .map(|cf| format!("{} |-> token.{}", tla_ident(cf), tla_ident(cf)))
+                    .collect();
+                format!("[{}]", field_exprs.join(", "))
+            };
+
+            let feedback_branches: Vec<(String, String)> = protocol
                 .allowed_feedback_inputs
                 .iter()
                 .map(|fb| {
-                    format!(
-                        "        /\\ pending_inputs' = Append(pending_inputs, [machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token, payload |-> \"feedback\"])\n        /\\ {}' = {} \\ {{token}}",
+                    let input_expr = format!(
+                        "[machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token, payload |-> {}]",
                         tla_string(&fb.machine_instance),
                         tla_string(&fb.input_variant),
                         tla_string(&protocol.producer_instance),
                         tla_string(&protocol.effect_variant),
-                        var,
-                        var
-                    )
+                        payload_expr,
+                    );
+                    let obligation_next = format!("{} \\ {{token}}", var);
+                    (input_expr, obligation_next)
                 })
                 .collect();
 
             if feedback_branches.len() == 1 {
-                writeln!(out, "{}", feedback_branches[0]).expect("write to string");
+                let (input_expr, obligation_next) = &feedback_branches[0];
+                writeln!(
+                    out,
+                    "        /\\ pending_inputs' = Append(pending_inputs, {})",
+                    input_expr
+                )
+                .expect("write to string");
+                writeln!(out, "        /\\ {}' = {}", var, obligation_next)
+                    .expect("write to string");
             } else {
-                for (i, branch) in feedback_branches.iter().enumerate() {
-                    if i == 0 {
-                        writeln!(out, "        \\/ {}", branch.trim_start())
-                            .expect("write to string");
-                    } else {
-                        writeln!(out, "        \\/ {}", branch.trim_start())
-                            .expect("write to string");
-                    }
-                }
+                writeln!(
+                    out,
+                    "        /\\ \\E fb_variant \\in {{{}}} :",
+                    feedback_branches
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("{}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .expect("write to string");
+                let case_branches: Vec<String> = feedback_branches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (input_expr, _))| format!("fb_variant = {} -> {}", i + 1, input_expr))
+                    .collect();
+                writeln!(
+                    out,
+                    "           /\\ pending_inputs' = Append(pending_inputs, CASE {})",
+                    case_branches.join(" [] ")
+                )
+                .expect("write to string");
+                writeln!(out, "           /\\ {}' = {} \\ {{token}}", var, var)
+                    .expect("write to string");
             }
 
             // Frame: all other variables unchanged
@@ -2982,12 +3037,20 @@ impl<'a> CompositionTlaCompiler<'a> {
             .expect("write to string");
             writeln!(out, "    /\\ model_step_count' = model_step_count + 1")
                 .expect("write to string");
-            writeln!(
-                out,
-                "    /\\ UNCHANGED << {}, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>",
-                self.machine_vars().join(", ")
-            )
-            .expect("write to string");
+            {
+                let mut unchanged = self.machine_vars();
+                unchanged.extend(self.obligation_vars());
+                unchanged.extend([
+                    "pending_routes".into(),
+                    "delivered_routes".into(),
+                    "emitted_effects".into(),
+                    "observed_transitions".into(),
+                    "witness_current_script_input".into(),
+                    "witness_remaining_script_inputs".into(),
+                ]);
+                writeln!(out, "    /\\ UNCHANGED << {} >>", unchanged.join(", "))
+                    .expect("write to string");
+            }
             pushln!(out);
         }
     }
@@ -3042,12 +3105,18 @@ impl<'a> CompositionTlaCompiler<'a> {
             "       /\\ observed_inputs' = observed_inputs \\cup {{[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> \"route\", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}}"
         )
         .expect("write to string");
-        writeln!(
-            out,
-            "       /\\ UNCHANGED << {}, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>",
-            self.machine_vars().join(", ")
-        )
-        .expect("write to string");
+        {
+            let mut unchanged = self.machine_vars();
+            unchanged.extend(self.obligation_vars());
+            unchanged.extend([
+                "emitted_effects".into(),
+                "observed_transitions".into(),
+                "witness_current_script_input".into(),
+                "witness_remaining_script_inputs".into(),
+            ]);
+            writeln!(out, "       /\\ UNCHANGED << {} >>", unchanged.join(", "))
+                .expect("write to string");
+        }
         pushln!(out);
     }
 
@@ -3302,12 +3371,18 @@ impl<'a> CompositionTlaCompiler<'a> {
             .expect("write to string");
             writeln!(out, "    /\\ model_step_count' = model_step_count + 1")
                 .expect("write to string");
-            writeln!(
-                out,
-                "    /\\ UNCHANGED << {}, pending_routes, delivered_routes, emitted_effects, observed_transitions >>",
-                self.machine_vars().join(", ")
-            )
-            .expect("write to string");
+            {
+                let mut unchanged = self.machine_vars();
+                unchanged.extend(self.obligation_vars());
+                unchanged.extend([
+                    "pending_routes".into(),
+                    "delivered_routes".into(),
+                    "emitted_effects".into(),
+                    "observed_transitions".into(),
+                ]);
+                writeln!(out, "    /\\ UNCHANGED << {} >>", unchanged.join(", "))
+                    .expect("write to string");
+            }
             pushln!(out);
         }
     }
@@ -3702,6 +3777,38 @@ impl<'a> CompositionTlaCompiler<'a> {
             self.transition_packet_expr(instance_id, transition)
         );
 
+        // Compute obligation set updates: when a transition emits an effect
+        // that matches a handoff_protocol, add a record to the obligation set
+        // with correlation fields from the effect payload.
+        let mut obligation_updates: BTreeMap<String, String> = BTreeMap::new();
+        for (effect_variant, _effect_packet, payload_fields) in &effect_packets {
+            for protocol in &self.schema.handoff_protocols {
+                if protocol.producer_instance == instance_id
+                    && protocol.effect_variant == *effect_variant
+                {
+                    let var = format!("obligation_{}", tla_ident(&protocol.name));
+                    let record_fields: Vec<String> = protocol
+                        .correlation_fields
+                        .iter()
+                        .map(|cf| {
+                            let tla_field = tla_ident(cf);
+                            let value = payload_fields
+                                .get(cf)
+                                .cloned()
+                                .unwrap_or_else(|| format!("\"unknown_{}\"", cf));
+                            format!("{} |-> {}", tla_field, value)
+                        })
+                        .collect();
+                    let record = if record_fields.is_empty() {
+                        "\"token\"".to_string()
+                    } else {
+                        format!("[{}]", record_fields.join(", "))
+                    };
+                    obligation_updates.insert(var.clone(), format!("{} \\cup {{{}}}", var, record));
+                }
+            }
+        }
+
         pushln!(out, "       /\\ pending_inputs' = {}", pending_inputs_next);
         writeln!(
             out,
@@ -3729,6 +3836,24 @@ impl<'a> CompositionTlaCompiler<'a> {
             observed_transitions_next
         )
         .expect("write to string");
+        // Write obligation variable updates — touched protocols get \cup, untouched get UNCHANGED
+        let all_obligation_vars = self.obligation_vars();
+        let mut unchanged_obligation_vars = Vec::new();
+        for ovar in &all_obligation_vars {
+            if let Some(next_expr) = obligation_updates.get(ovar) {
+                writeln!(out, "       /\\ {}' = {}", ovar, next_expr).expect("write to string");
+            } else {
+                unchanged_obligation_vars.push(ovar.clone());
+            }
+        }
+        if !unchanged_obligation_vars.is_empty() {
+            writeln!(
+                out,
+                "       /\\ UNCHANGED << {} >>",
+                unchanged_obligation_vars.join(", ")
+            )
+            .expect("write to string");
+        }
         writeln!(out, "       /\\ model_step_count' = model_step_count + 1")
             .expect("write to string");
     }
@@ -3774,11 +3899,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                     RouteBindingSource::Literal(expr) => {
                         compiler.render_expr_with_types(expr, next_env, binding_env, binding_types)
                     }
-                    RouteBindingSource::OwnerProvided => {
-                        // Owner-provided bindings are nondeterministic in the TLA model —
-                        // the owner actor chooses the value at runtime.
-                        format!("owner_provided_{}", tla_ident(&binding.to_field))
-                    }
+                    RouteBindingSource::OwnerProvided => "\"owner_val\"".to_string(),
                 };
                 (binding.to_field.clone(), expr)
             })

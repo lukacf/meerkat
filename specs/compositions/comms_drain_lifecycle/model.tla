@@ -118,6 +118,8 @@ comms_drain_EnsureRunningFromInactive(arg_mode) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SpawnDrainTask", payload |-> [mode |-> packet.payload.mode], effect_id |-> (model_step_count + 1), source_transition |-> "EnsureRunningFromInactive"], [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> TRUE], effect_id |-> (model_step_count + 1), source_transition |-> "EnsureRunningFromInactive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "EnsureRunningFromInactive", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Starting"]}
+       /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \cup {[mode |-> packet.payload.mode]}
+       /\ UNCHANGED << obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -135,6 +137,7 @@ comms_drain_TaskSpawnedFromStarting ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "TaskSpawnedFromStarting", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -156,6 +159,7 @@ comms_drain_TaskExitedFromStartingRespawnable(arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "TaskExitedFromStartingRespawnable"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "TaskExitedFromStartingRespawnable", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "ExitedRespawnable"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -176,6 +180,7 @@ comms_drain_TaskExitedFromStartingStopped(arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "TaskExitedFromStartingStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "TaskExitedFromStartingStopped", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Stopped"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -197,6 +202,7 @@ comms_drain_TaskExitedFromRunningRespawnable(arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "TaskExitedFromRunningRespawnable"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "TaskExitedFromRunningRespawnable", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "ExitedRespawnable"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -217,6 +223,7 @@ comms_drain_TaskExitedFromRunningStopped(arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "TaskExitedFromRunningStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "TaskExitedFromRunningStopped", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Stopped"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -235,6 +242,8 @@ comms_drain_StopRequestedFromRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "AbortDrainTask", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequestedFromRunning"], [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequestedFromRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "StopRequestedFromRunning", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Stopped"]}
+       /\ obligation_comms_drain_abort' = obligation_comms_drain_abort \cup {"token"}
+       /\ UNCHANGED << obligation_comms_drain_spawn >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -253,6 +262,8 @@ comms_drain_StopRequestedFromStarting ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "AbortDrainTask", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequestedFromStarting"], [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequestedFromStarting"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "StopRequestedFromStarting", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Stopped"]}
+       /\ obligation_comms_drain_abort' = obligation_comms_drain_abort \cup {"token"}
+       /\ UNCHANGED << obligation_comms_drain_spawn >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -272,6 +283,8 @@ comms_drain_EnsureRunningFromExitedRespawnable(arg_mode) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SpawnDrainTask", payload |-> [mode |-> packet.payload.mode], effect_id |-> (model_step_count + 1), source_transition |-> "EnsureRunningFromExitedRespawnable"], [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> TRUE], effect_id |-> (model_step_count + 1), source_transition |-> "EnsureRunningFromExitedRespawnable"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "EnsureRunningFromExitedRespawnable", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Starting"]}
+       /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \cup {[mode |-> packet.payload.mode]}
+       /\ UNCHANGED << obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -289,6 +302,7 @@ comms_drain_StopRequestedFromExitedRespawnable ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "StopRequestedFromExitedRespawnable", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Stopped"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -308,6 +322,8 @@ comms_drain_EnsureRunningFromStopped(arg_mode) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SpawnDrainTask", payload |-> [mode |-> packet.payload.mode], effect_id |-> (model_step_count + 1), source_transition |-> "EnsureRunningFromStopped"], [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> TRUE], effect_id |-> (model_step_count + 1), source_transition |-> "EnsureRunningFromStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "EnsureRunningFromStopped", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Starting"]}
+       /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \cup {[mode |-> packet.payload.mode]}
+       /\ UNCHANGED << obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -326,6 +342,7 @@ comms_drain_AbortObservedFromActive ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "comms_drain", variant |-> "SetTurnBoundaryDrainSuppressed", payload |-> [active |-> FALSE], effect_id |-> (model_step_count + 1), source_transition |-> "AbortObservedFromActive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "comms_drain", transition |-> "AbortObservedFromActive", actor |-> "drain_plane", step |-> (model_step_count + 1), from_phase |-> comms_drain_phase, to_phase |-> "Stopped"]}
+       /\ UNCHANGED << obligation_comms_drain_spawn, obligation_comms_drain_abort >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -337,35 +354,35 @@ Inject_drain_ensure_running(arg_mode) ==
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "EnsureRunning", payload |-> [mode |-> arg_mode], source_kind |-> "entry", source_route |-> "drain_ensure_running", source_machine |-> "external_entry", source_effect |-> "EnsureRunning", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "comms_drain", variant |-> "EnsureRunning", payload |-> [mode |-> arg_mode], source_kind |-> "entry", source_route |-> "drain_ensure_running", source_machine |-> "external_entry", source_effect |-> "EnsureRunning", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_drain_task_spawned ==
     /\ ~([machine |-> "comms_drain", variant |-> "TaskSpawned", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_task_spawned", source_machine |-> "external_entry", source_effect |-> "TaskSpawned", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "TaskSpawned", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_task_spawned", source_machine |-> "external_entry", source_effect |-> "TaskSpawned", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "comms_drain", variant |-> "TaskSpawned", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_task_spawned", source_machine |-> "external_entry", source_effect |-> "TaskSpawned", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_drain_task_exited(arg_reason) ==
     /\ ~([machine |-> "comms_drain", variant |-> "TaskExited", payload |-> [reason |-> arg_reason], source_kind |-> "entry", source_route |-> "drain_task_exited", source_machine |-> "external_entry", source_effect |-> "TaskExited", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "TaskExited", payload |-> [reason |-> arg_reason], source_kind |-> "entry", source_route |-> "drain_task_exited", source_machine |-> "external_entry", source_effect |-> "TaskExited", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "comms_drain", variant |-> "TaskExited", payload |-> [reason |-> arg_reason], source_kind |-> "entry", source_route |-> "drain_task_exited", source_machine |-> "external_entry", source_effect |-> "TaskExited", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_drain_stop_requested ==
     /\ ~([machine |-> "comms_drain", variant |-> "StopRequested", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_stop_requested", source_machine |-> "external_entry", source_effect |-> "StopRequested", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "StopRequested", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_stop_requested", source_machine |-> "external_entry", source_effect |-> "StopRequested", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "comms_drain", variant |-> "StopRequested", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_stop_requested", source_machine |-> "external_entry", source_effect |-> "StopRequested", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_drain_abort_observed ==
     /\ ~([machine |-> "comms_drain", variant |-> "AbortObserved", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_abort_observed", source_machine |-> "external_entry", source_effect |-> "AbortObserved", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "AbortObserved", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_abort_observed", source_machine |-> "external_entry", source_effect |-> "AbortObserved", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "comms_drain", variant |-> "AbortObserved", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "drain_abort_observed", source_machine |-> "external_entry", source_effect |-> "AbortObserved", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 DeliverQueuedRoute ==
     /\ Len(pending_routes) > 0
@@ -375,7 +392,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -393,7 +410,7 @@ WitnessInjectNext_spawn_run_stop ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 WitnessInjectNext_failure_respawn ==
     /\ witness_current_script_input # None
@@ -406,7 +423,7 @@ WitnessInjectNext_failure_respawn ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 WitnessInjectNext_abort_observed ==
     /\ witness_current_script_input # None
@@ -419,7 +436,7 @@ WitnessInjectNext_abort_observed ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, obligation_comms_drain_abort, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 CoreNext ==
     \/ \E arg_mode \in CommsDrainModeValues : comms_drain_EnsureRunningFromInactive(arg_mode)
@@ -464,18 +481,17 @@ spawn_protocol_covered == TRUE
 abort_protocol_covered == TRUE
 
 NoOpenObligationsOnTerminal_comms_drain_spawn == (comms_drain_phase = "Stopped") => obligation_comms_drain_spawn = {}
-NoFeedbackWithoutObligation_comms_drain_spawn == \A input_packet \in observed_inputs : ((input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskSpawned" \/ input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskExited") => obligation_comms_drain_spawn /= {})
+NoFeedbackWithoutObligation_comms_drain_spawn == \A input_packet \in observed_inputs : (((input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskSpawned") \/ (input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskExited")) => (\E record \in obligation_comms_drain_spawn : (record.mode = input_packet.payload.mode)))
 NoOpenObligationsOnTerminal_comms_drain_abort == (comms_drain_phase = "Stopped") => obligation_comms_drain_abort = {}
-NoFeedbackWithoutObligation_comms_drain_abort == \A input_packet \in observed_inputs : ((input_packet.machine = "comms_drain" /\ input_packet.variant = "AbortObserved") => obligation_comms_drain_abort /= {})
+NoFeedbackWithoutObligation_comms_drain_abort == \A input_packet \in observed_inputs : (((input_packet.machine = "comms_drain" /\ input_packet.variant = "AbortObserved")) => obligation_comms_drain_abort /= {})
 
 \* Liveness: eventual feedback under task-scheduling fairness
 OwnerFeedback_comms_drain_spawn ==
     /\ obligation_comms_drain_spawn /= {}
     /\ \E token \in obligation_comms_drain_spawn :
-        \/ /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "TaskSpawned", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> "feedback"])
-        /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \ {token}
-        \/ /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "TaskExited", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> "feedback"])
-        /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \ {token}
+        /\ \E fb_variant \in {1, 2} :
+           /\ pending_inputs' = Append(pending_inputs, CASE fb_variant = 1 -> [machine |-> "comms_drain", variant |-> "TaskSpawned", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [mode |-> token.mode]] [] fb_variant = 2 -> [machine |-> "comms_drain", variant |-> "TaskExited", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [mode |-> token.mode]])
+           /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \ {token}
     /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_abort, model_step_count, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 OwnerFeedback_comms_drain_abort ==

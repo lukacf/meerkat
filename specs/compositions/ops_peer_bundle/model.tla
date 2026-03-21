@@ -182,6 +182,7 @@ ops_lifecycle_RegisterOperation(arg_operation_id, arg_operation_kind) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "RegisterOperation", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -202,6 +203,7 @@ ops_lifecycle_ProvisioningSucceeded(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Started", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "ProvisioningSucceeded"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "ProvisioningSucceeded", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -226,6 +228,7 @@ ops_lifecycle_ProvisioningFailed(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Failed", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "ProvisioningFailed"], [machine |-> "ops_lifecycle", variant |-> "NotifyOpWatcher", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Failed"], effect_id |-> (model_step_count + 1), source_transition |-> "ProvisioningFailed"], [machine |-> "ops_lifecycle", variant |-> "RetainTerminalRecord", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Failed"], effect_id |-> (model_step_count + 1), source_transition |-> "ProvisioningFailed"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "ProvisioningFailed", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -248,6 +251,7 @@ ops_lifecycle_PeerReady(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "ops_peer_ready_trusts_peer_comms", source_machine |-> "ops_lifecycle", effect |-> "ExposeOperationPeer", target_machine |-> "peer_comms", target_input |-> "TrustPeer", payload |-> [peer_id |-> packet.payload.operation_id], actor |-> "peer_plane", effect_id |-> (model_step_count + 1), source_transition |-> "PeerReady"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "ExposeOperationPeer", payload |-> [operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "PeerReady"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "PeerReady", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -268,6 +272,7 @@ ops_lifecycle_RegisterWatcher(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "RegisterWatcher", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -288,6 +293,7 @@ ops_lifecycle_ProgressReported(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Progress", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "ProgressReported"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "ProgressReported", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -312,6 +318,7 @@ ops_lifecycle_CompleteOperation(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Completed", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteOperation"], [machine |-> "ops_lifecycle", variant |-> "NotifyOpWatcher", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Completed"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteOperation"], [machine |-> "ops_lifecycle", variant |-> "RetainTerminalRecord", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Completed"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteOperation"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "CompleteOperation", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -336,6 +343,7 @@ ops_lifecycle_FailOperation(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Failed", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "FailOperation"], [machine |-> "ops_lifecycle", variant |-> "NotifyOpWatcher", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Failed"], effect_id |-> (model_step_count + 1), source_transition |-> "FailOperation"], [machine |-> "ops_lifecycle", variant |-> "RetainTerminalRecord", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Failed"], effect_id |-> (model_step_count + 1), source_transition |-> "FailOperation"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "FailOperation", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -360,6 +368,7 @@ ops_lifecycle_CancelOperation(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Cancelled", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "CancelOperation"], [machine |-> "ops_lifecycle", variant |-> "NotifyOpWatcher", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Cancelled"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelOperation"], [machine |-> "ops_lifecycle", variant |-> "RetainTerminalRecord", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Cancelled"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelOperation"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "CancelOperation", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -380,6 +389,7 @@ ops_lifecycle_RetireRequested(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "RetireRequested", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -404,6 +414,7 @@ ops_lifecycle_RetireCompleted(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "SubmitOpEvent", payload |-> [event_kind |-> "Retired", operation_id |-> packet.payload.operation_id], effect_id |-> (model_step_count + 1), source_transition |-> "RetireCompleted"], [machine |-> "ops_lifecycle", variant |-> "NotifyOpWatcher", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Retired"], effect_id |-> (model_step_count + 1), source_transition |-> "RetireCompleted"], [machine |-> "ops_lifecycle", variant |-> "RetainTerminalRecord", payload |-> [operation_id |-> packet.payload.operation_id, terminal_outcome |-> "Retired"], effect_id |-> (model_step_count + 1), source_transition |-> "RetireCompleted"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "RetireCompleted", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -425,6 +436,7 @@ ops_lifecycle_CollectTerminal(arg_operation_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "CollectTerminal", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -445,6 +457,7 @@ ops_lifecycle_OwnerTerminated ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "OwnerTerminated", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -463,6 +476,7 @@ ops_lifecycle_WaitAll(arg_operation_ids) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "WaitAllSatisfied", payload |-> [operation_ids |-> packet.payload.operation_ids], effect_id |-> (model_step_count + 1), source_transition |-> "WaitAll"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "WaitAll", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ obligation_ops_barrier_satisfaction' = obligation_ops_barrier_satisfaction \cup {[operation_ids |-> packet.payload.operation_ids]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -480,6 +494,7 @@ ops_lifecycle_CollectCompleted ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "ops_lifecycle", variant |-> "CollectCompletedResult", payload |-> [operation_ids |-> ops_lifecycle_completed_order], effect_id |-> (model_step_count + 1), source_transition |-> "CollectCompleted"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "ops_lifecycle", transition |-> "CollectCompleted", actor |-> "ops_plane", step |-> (model_step_count + 1), from_phase |-> ops_lifecycle_phase, to_phase |-> "Active"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -508,6 +523,7 @@ peer_comms_TrustPeer(arg_peer_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "peer_comms", transition |-> "TrustPeer", actor |-> "peer_plane", step |-> (model_step_count + 1), from_phase |-> peer_comms_phase, to_phase |-> "Absent"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -542,6 +558,7 @@ peer_comms_ReceiveTrustedPeerEnvelope(arg_raw_item_id, arg_peer_id, arg_raw_kind
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "peer_comms", transition |-> "ReceiveTrustedPeerEnvelope", actor |-> "peer_plane", step |-> (model_step_count + 1), from_phase |-> peer_comms_phase, to_phase |-> "Received"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -574,6 +591,7 @@ peer_comms_DropUntrustedPeerEnvelope(arg_raw_item_id, arg_peer_id, arg_raw_kind,
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "peer_comms", transition |-> "DropUntrustedPeerEnvelope", actor |-> "peer_plane", step |-> (model_step_count + 1), from_phase |-> peer_comms_phase, to_phase |-> "Dropped"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -596,6 +614,7 @@ peer_comms_SubmitTypedPeerInputDelivered(arg_raw_item_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "peer_comms", variant |-> "SubmitPeerInputCandidate", payload |-> [content_shape |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_content_shape THEN peer_comms_content_shape[packet.payload.raw_item_id] ELSE "None"), peer_input_class |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_classified_as THEN peer_comms_classified_as[packet.payload.raw_item_id] ELSE "None"), raw_item_id |-> packet.payload.raw_item_id, request_id |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_request_id THEN peer_comms_request_id[packet.payload.raw_item_id] ELSE None), reservation_key |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_reservation_key THEN peer_comms_reservation_key[packet.payload.raw_item_id] ELSE None), text_projection |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_text_projection THEN peer_comms_text_projection[packet.payload.raw_item_id] ELSE "None")], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitTypedPeerInputDelivered"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "peer_comms", transition |-> "SubmitTypedPeerInputDelivered", actor |-> "peer_plane", step |-> (model_step_count + 1), from_phase |-> peer_comms_phase, to_phase |-> "Delivered"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -618,6 +637,7 @@ peer_comms_SubmitTypedPeerInputContinue(arg_raw_item_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "peer_comms", variant |-> "SubmitPeerInputCandidate", payload |-> [content_shape |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_content_shape THEN peer_comms_content_shape[packet.payload.raw_item_id] ELSE "None"), peer_input_class |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_classified_as THEN peer_comms_classified_as[packet.payload.raw_item_id] ELSE "None"), raw_item_id |-> packet.payload.raw_item_id, request_id |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_request_id THEN peer_comms_request_id[packet.payload.raw_item_id] ELSE None), reservation_key |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_reservation_key THEN peer_comms_reservation_key[packet.payload.raw_item_id] ELSE None), text_projection |-> (IF packet.payload.raw_item_id \in DOMAIN peer_comms_text_projection THEN peer_comms_text_projection[packet.payload.raw_item_id] ELSE "None")], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitTypedPeerInputContinue"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "peer_comms", transition |-> "SubmitTypedPeerInputContinue", actor |-> "peer_plane", step |-> (model_step_count + 1), from_phase |-> peer_comms_phase, to_phase |-> "Received"]}
+       /\ UNCHANGED << obligation_ops_barrier_satisfaction >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -631,42 +651,42 @@ Inject_register_operation(arg_operation_id, arg_operation_kind) ==
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "ops_lifecycle", variant |-> "RegisterOperation", payload |-> [operation_id |-> arg_operation_id, operation_kind |-> arg_operation_kind], source_kind |-> "entry", source_route |-> "register_operation", source_machine |-> "external_entry", source_effect |-> "RegisterOperation", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "ops_lifecycle", variant |-> "RegisterOperation", payload |-> [operation_id |-> arg_operation_id, operation_kind |-> arg_operation_kind], source_kind |-> "entry", source_route |-> "register_operation", source_machine |-> "external_entry", source_effect |-> "RegisterOperation", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_provisioning_succeeded(arg_operation_id) ==
     /\ ~([machine |-> "ops_lifecycle", variant |-> "ProvisioningSucceeded", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "provisioning_succeeded", source_machine |-> "external_entry", source_effect |-> "ProvisioningSucceeded", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "ops_lifecycle", variant |-> "ProvisioningSucceeded", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "provisioning_succeeded", source_machine |-> "external_entry", source_effect |-> "ProvisioningSucceeded", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "ops_lifecycle", variant |-> "ProvisioningSucceeded", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "provisioning_succeeded", source_machine |-> "external_entry", source_effect |-> "ProvisioningSucceeded", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_peer_ready(arg_operation_id) ==
     /\ ~([machine |-> "ops_lifecycle", variant |-> "PeerReady", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "peer_ready", source_machine |-> "external_entry", source_effect |-> "PeerReady", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "ops_lifecycle", variant |-> "PeerReady", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "peer_ready", source_machine |-> "external_entry", source_effect |-> "PeerReady", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "ops_lifecycle", variant |-> "PeerReady", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "peer_ready", source_machine |-> "external_entry", source_effect |-> "PeerReady", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_complete_operation(arg_operation_id) ==
     /\ ~([machine |-> "ops_lifecycle", variant |-> "CompleteOperation", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "complete_operation", source_machine |-> "external_entry", source_effect |-> "CompleteOperation", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "ops_lifecycle", variant |-> "CompleteOperation", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "complete_operation", source_machine |-> "external_entry", source_effect |-> "CompleteOperation", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "ops_lifecycle", variant |-> "CompleteOperation", payload |-> [operation_id |-> arg_operation_id], source_kind |-> "entry", source_route |-> "complete_operation", source_machine |-> "external_entry", source_effect |-> "CompleteOperation", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_peer_trust(arg_peer_id) ==
     /\ ~([machine |-> "peer_comms", variant |-> "TrustPeer", payload |-> [peer_id |-> arg_peer_id], source_kind |-> "entry", source_route |-> "peer_trust", source_machine |-> "external_entry", source_effect |-> "TrustPeer", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "peer_comms", variant |-> "TrustPeer", payload |-> [peer_id |-> arg_peer_id], source_kind |-> "entry", source_route |-> "peer_trust", source_machine |-> "external_entry", source_effect |-> "TrustPeer", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "peer_comms", variant |-> "TrustPeer", payload |-> [peer_id |-> arg_peer_id], source_kind |-> "entry", source_route |-> "peer_trust", source_machine |-> "external_entry", source_effect |-> "TrustPeer", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_peer_receive(arg_raw_item_id, arg_peer_id, arg_raw_kind, arg_text_projection, arg_content_shape, arg_request_id, arg_reservation_key) ==
     /\ ~([machine |-> "peer_comms", variant |-> "ReceivePeerEnvelope", payload |-> [content_shape |-> arg_content_shape, peer_id |-> arg_peer_id, raw_item_id |-> arg_raw_item_id, raw_kind |-> arg_raw_kind, request_id |-> arg_request_id, reservation_key |-> arg_reservation_key, text_projection |-> arg_text_projection], source_kind |-> "entry", source_route |-> "peer_receive", source_machine |-> "external_entry", source_effect |-> "ReceivePeerEnvelope", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "peer_comms", variant |-> "ReceivePeerEnvelope", payload |-> [content_shape |-> arg_content_shape, peer_id |-> arg_peer_id, raw_item_id |-> arg_raw_item_id, raw_kind |-> arg_raw_kind, request_id |-> arg_request_id, reservation_key |-> arg_reservation_key, text_projection |-> arg_text_projection], source_kind |-> "entry", source_route |-> "peer_receive", source_machine |-> "external_entry", source_effect |-> "ReceivePeerEnvelope", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "peer_comms", variant |-> "ReceivePeerEnvelope", payload |-> [content_shape |-> arg_content_shape, peer_id |-> arg_peer_id, raw_item_id |-> arg_raw_item_id, raw_kind |-> arg_raw_kind, request_id |-> arg_request_id, reservation_key |-> arg_reservation_key, text_projection |-> arg_text_projection], source_kind |-> "entry", source_route |-> "peer_receive", source_machine |-> "external_entry", source_effect |-> "ReceivePeerEnvelope", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 DeliverQueuedRoute ==
     /\ Len(pending_routes) > 0
@@ -676,7 +696,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -694,7 +714,7 @@ WitnessInjectNext_ops_peer_ready_trusts_peer_comms_path ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << ops_lifecycle_phase, ops_lifecycle_known_operations, ops_lifecycle_operation_status, ops_lifecycle_operation_kind, ops_lifecycle_peer_ready, ops_lifecycle_progress_count, ops_lifecycle_watcher_count, ops_lifecycle_terminal_outcome, ops_lifecycle_terminal_buffered, ops_lifecycle_completed_order, ops_lifecycle_max_completed, ops_lifecycle_max_concurrent, ops_lifecycle_active_count, ops_lifecycle_created_at_ms, ops_lifecycle_completed_at_ms, peer_comms_phase, peer_comms_trusted_peers, peer_comms_raw_item_peer, peer_comms_raw_item_kind, peer_comms_classified_as, peer_comms_text_projection, peer_comms_content_shape, peer_comms_request_id, peer_comms_reservation_key, peer_comms_trusted_snapshot, peer_comms_submission_queue, obligation_ops_barrier_satisfaction, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 CoreNext ==
     \/ DeliverQueuedRoute

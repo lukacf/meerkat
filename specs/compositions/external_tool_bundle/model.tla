@@ -189,6 +189,7 @@ external_tool_surface_StageAdd(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "StageAdd", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -209,6 +210,7 @@ external_tool_surface_StageRemove(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "StageRemove", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -230,6 +232,7 @@ external_tool_surface_StageReload(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "StageReload", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -256,6 +259,7 @@ external_tool_surface_ApplyBoundaryAdd(arg_surface_id, arg_applied_at_turn) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryAdd"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "ScheduleSurfaceCompletion", payload |-> [operation |-> "Add", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryAdd"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Add", persisted |-> FALSE, phase |-> "Pending", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryAdd"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "ApplyBoundaryAdd", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ obligation_surface_completion' = obligation_surface_completion \cup {[surface_id |-> packet.payload.surface_id]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -282,6 +286,7 @@ external_tool_surface_ApplyBoundaryReload(arg_surface_id, arg_applied_at_turn) =
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryReload"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "ScheduleSurfaceCompletion", payload |-> [operation |-> "Reload", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryReload"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Reload", persisted |-> FALSE, phase |-> "Pending", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryReload"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "ApplyBoundaryReload", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ obligation_surface_completion' = obligation_surface_completion \cup {[surface_id |-> packet.payload.surface_id]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -310,6 +315,7 @@ external_tool_surface_ApplyBoundaryRemoveDraining(arg_surface_id, arg_applied_at
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryRemoveDraining"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "RefreshVisibleSurfaceSet", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryRemoveDraining"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Remove", persisted |-> FALSE, phase |-> "Draining", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyBoundaryRemoveDraining"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "ApplyBoundaryRemoveDraining", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -334,6 +340,7 @@ external_tool_surface_ApplyBoundaryRemoveNoop(arg_surface_id, arg_applied_at_tur
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "ApplyBoundaryRemoveNoop", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -360,6 +367,7 @@ external_tool_surface_PendingSucceededAdd(arg_surface_id, arg_applied_at_turn) =
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "PendingSucceededAdd"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "RefreshVisibleSurfaceSet", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PendingSucceededAdd"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Add", persisted |-> TRUE, phase |-> "Applied", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "PendingSucceededAdd"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "PendingSucceededAdd", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -386,6 +394,7 @@ external_tool_surface_PendingSucceededReload(arg_surface_id, arg_applied_at_turn
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "PendingSucceededReload"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "RefreshVisibleSurfaceSet", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PendingSucceededReload"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Reload", persisted |-> TRUE, phase |-> "Applied", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "PendingSucceededReload"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "PendingSucceededReload", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -410,6 +419,7 @@ external_tool_surface_PendingFailedAdd(arg_surface_id, arg_applied_at_turn) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "PendingFailedAdd"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Add", persisted |-> TRUE, phase |-> "Failed", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "PendingFailedAdd"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "PendingFailedAdd", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -434,6 +444,7 @@ external_tool_surface_PendingFailedReload(arg_surface_id, arg_applied_at_turn) =
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "PendingFailedReload"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Reload", persisted |-> TRUE, phase |-> "Failed", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "PendingFailedReload"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "PendingFailedReload", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -455,6 +466,7 @@ external_tool_surface_CallStartedActive(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "CallStartedActive", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -475,6 +487,7 @@ external_tool_surface_CallStartedRejectWhileRemoving(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "RejectSurfaceCall", payload |-> [reason |-> "surface_draining", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "CallStartedRejectWhileRemoving"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "CallStartedRejectWhileRemoving", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -495,6 +508,7 @@ external_tool_surface_CallStartedRejectWhileUnavailable(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "RejectSurfaceCall", payload |-> [reason |-> "surface_unavailable", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "CallStartedRejectWhileUnavailable"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "CallStartedRejectWhileUnavailable", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -517,6 +531,7 @@ external_tool_surface_CallFinishedActive(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "CallFinishedActive", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -539,6 +554,7 @@ external_tool_surface_CallFinishedRemoving(arg_surface_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "CallFinishedRemoving", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -566,6 +582,7 @@ external_tool_surface_FinalizeRemovalClean(arg_surface_id, arg_applied_at_turn) 
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalClean"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "CloseSurfaceConnection", payload |-> [surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalClean"], [machine |-> "external_tool_surface", variant |-> "RefreshVisibleSurfaceSet", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalClean"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Remove", persisted |-> TRUE, phase |-> "Applied", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalClean"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "FinalizeRemovalClean", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -593,6 +610,7 @@ external_tool_surface_FinalizeRemovalForced(arg_surface_id, arg_applied_at_turn)
        /\ delivered_routes' = delivered_routes \cup { [route |-> "surface_delta_notifies_runtime_control", source_machine |-> "external_tool_surface", effect |-> "EmitExternalToolDelta", target_machine |-> "runtime_control", target_input |-> "ExternalToolDeltaReceived", payload |-> [tag |-> "unit"], actor |-> "control_plane", effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalForced"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "external_tool_surface", variant |-> "CloseSurfaceConnection", payload |-> [surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalForced"], [machine |-> "external_tool_surface", variant |-> "RefreshVisibleSurfaceSet", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalForced"], [machine |-> "external_tool_surface", variant |-> "EmitExternalToolDelta", payload |-> [applied_at_turn |-> packet.payload.applied_at_turn, operation |-> "Remove", persisted |-> TRUE, phase |-> "Forced", surface_id |-> packet.payload.surface_id], effect_id |-> (model_step_count + 1), source_transition |-> "FinalizeRemovalForced"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "FinalizeRemovalForced", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Operating"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -618,6 +636,7 @@ external_tool_surface_Shutdown ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "external_tool_surface", transition |-> "Shutdown", actor |-> "surface_boundary", step |-> (model_step_count + 1), from_phase |-> external_tool_surface_phase, to_phase |-> "Shutdown"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -644,6 +663,7 @@ runtime_control_Initialize ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "Initialize", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -661,6 +681,7 @@ runtime_control_AttachFromIdle ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AttachFromIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -678,6 +699,7 @@ runtime_control_DetachToIdle ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "DetachToIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -701,6 +723,7 @@ runtime_control_BeginRunFromIdle(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitRunPrimitive", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRunFromIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "BeginRunFromIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -724,6 +747,7 @@ runtime_control_BeginRunFromRetired(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitRunPrimitive", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRunFromRetired"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "BeginRunFromRetired", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -747,6 +771,7 @@ runtime_control_BeginRunFromAttached(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitRunPrimitive", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRunFromAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "BeginRunFromAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -770,6 +795,7 @@ runtime_control_BeginRunFromRecovering(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitRunPrimitive", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRunFromRecovering"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "BeginRunFromRecovering", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -792,6 +818,7 @@ runtime_control_RunCompletedToIdle(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCompletedToIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -814,6 +841,7 @@ runtime_control_RunCompletedToAttached(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCompletedToAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -836,6 +864,7 @@ runtime_control_RunCompletedToRetired(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCompletedToRetired", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -858,6 +887,7 @@ runtime_control_RunFailedToIdle(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunFailedToIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -880,6 +910,7 @@ runtime_control_RunFailedToAttached(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunFailedToAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -902,6 +933,7 @@ runtime_control_RunFailedToRetired(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunFailedToRetired", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -924,6 +956,7 @@ runtime_control_RunCancelledToIdle(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCancelledToIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -946,6 +979,7 @@ runtime_control_RunCancelledToAttached(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCancelledToAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -968,6 +1002,7 @@ runtime_control_RunCancelledToRetired(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCancelledToRetired", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -989,6 +1024,7 @@ runtime_control_RunCompletedFromRetiredInFlight(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCompletedFromRetiredInFlight", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1010,6 +1046,7 @@ runtime_control_RunFailedFromRetiredInFlight(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunFailedFromRetiredInFlight", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1031,6 +1068,7 @@ runtime_control_RunCancelledFromRetiredInFlight(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RunCancelledFromRetiredInFlight", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1049,6 +1087,7 @@ runtime_control_RecoverRequestedFromIdle ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecoverRequestedFromIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1068,6 +1107,7 @@ runtime_control_RecoverRequestedFromRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecoverRequestedFromRunning", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1086,6 +1126,7 @@ runtime_control_RecoverRequestedFromAttached ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecoverRequestedFromAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1107,6 +1148,7 @@ runtime_control_RecoverySucceeded ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecoverySucceeded", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1124,6 +1166,7 @@ runtime_control_RetireRequestedFromIdle ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Retire"], effect_id |-> (model_step_count + 1), source_transition |-> "RetireRequestedFromIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RetireRequestedFromIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1141,6 +1184,7 @@ runtime_control_RetireRequestedFromRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Retire"], effect_id |-> (model_step_count + 1), source_transition |-> "RetireRequestedFromRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RetireRequestedFromRunning", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1158,6 +1202,7 @@ runtime_control_RetireRequestedFromAttached ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Retire"], effect_id |-> (model_step_count + 1), source_transition |-> "RetireRequestedFromAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RetireRequestedFromAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1179,6 +1224,7 @@ runtime_control_ResetRequested ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Reset"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetRequested"], [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Reset"], effect_id |-> (model_step_count + 1), source_transition |-> "ResetRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ResetRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1198,6 +1244,7 @@ runtime_control_StopRequested ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequested"], [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Stopped"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "StopRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Stopped"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1217,6 +1264,7 @@ runtime_control_DestroyRequested ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ApplyControlPlaneCommand", payload |-> [command |-> "Destroy"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyRequested"], [machine |-> "runtime_control", variant |-> "ResolveCompletionAsTerminated", payload |-> [reason |-> "Destroyed"], effect_id |-> (model_step_count + 1), source_transition |-> "DestroyRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "DestroyRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Destroyed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1234,6 +1282,7 @@ runtime_control_ResumeRequested ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ResumeRequested", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1256,6 +1305,7 @@ runtime_control_SubmitWorkFromIdle(arg_work_id, arg_content_shape, arg_handling_
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ResolveAdmission", payload |-> [work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkFromIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "SubmitWorkFromIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1278,6 +1328,7 @@ runtime_control_SubmitWorkFromRunning(arg_work_id, arg_content_shape, arg_handli
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ResolveAdmission", payload |-> [work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkFromRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "SubmitWorkFromRunning", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1300,6 +1351,7 @@ runtime_control_SubmitWorkFromAttached(arg_work_id, arg_content_shape, arg_handl
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "ResolveAdmission", payload |-> [work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkFromAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "SubmitWorkFromAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1326,6 +1378,7 @@ runtime_control_AdmissionAcceptedIdleQueue(arg_work_id, arg_content_shape, arg_h
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitAdmittedIngressEffect", payload |-> [admission_effect |-> packet.payload.admission_effect, content_shape |-> packet.payload.content_shape, handling_mode |-> packet.payload.handling_mode, request_id |-> packet.payload.request_id, reservation_key |-> packet.payload.reservation_key, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedIdleQueue"], [machine |-> "runtime_control", variant |-> "SignalWake", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedIdleQueue"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionAcceptedIdleQueue", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1352,6 +1405,7 @@ runtime_control_AdmissionAcceptedIdleSteer(arg_work_id, arg_content_shape, arg_h
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitAdmittedIngressEffect", payload |-> [admission_effect |-> packet.payload.admission_effect, content_shape |-> packet.payload.content_shape, handling_mode |-> packet.payload.handling_mode, request_id |-> packet.payload.request_id, reservation_key |-> packet.payload.reservation_key, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedIdleSteer"], [machine |-> "runtime_control", variant |-> "SignalWake", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedIdleSteer"], [machine |-> "runtime_control", variant |-> "SignalImmediateProcess", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedIdleSteer"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionAcceptedIdleSteer", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1378,6 +1432,7 @@ runtime_control_AdmissionAcceptedRunningQueue(arg_work_id, arg_content_shape, ar
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitAdmittedIngressEffect", payload |-> [admission_effect |-> packet.payload.admission_effect, content_shape |-> packet.payload.content_shape, handling_mode |-> packet.payload.handling_mode, request_id |-> packet.payload.request_id, reservation_key |-> packet.payload.reservation_key, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedRunningQueue"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionAcceptedRunningQueue", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1404,6 +1459,7 @@ runtime_control_AdmissionAcceptedRunningSteer(arg_work_id, arg_content_shape, ar
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitAdmittedIngressEffect", payload |-> [admission_effect |-> packet.payload.admission_effect, content_shape |-> packet.payload.content_shape, handling_mode |-> packet.payload.handling_mode, request_id |-> packet.payload.request_id, reservation_key |-> packet.payload.reservation_key, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedRunningSteer"], [machine |-> "runtime_control", variant |-> "SignalWake", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedRunningSteer"], [machine |-> "runtime_control", variant |-> "SignalImmediateProcess", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedRunningSteer"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionAcceptedRunningSteer", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1430,6 +1486,7 @@ runtime_control_AdmissionAcceptedAttachedQueue(arg_work_id, arg_content_shape, a
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitAdmittedIngressEffect", payload |-> [admission_effect |-> packet.payload.admission_effect, content_shape |-> packet.payload.content_shape, handling_mode |-> packet.payload.handling_mode, request_id |-> packet.payload.request_id, reservation_key |-> packet.payload.reservation_key, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedAttachedQueue"], [machine |-> "runtime_control", variant |-> "SignalWake", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedAttachedQueue"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionAcceptedAttachedQueue", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1456,6 +1513,7 @@ runtime_control_AdmissionAcceptedAttachedSteer(arg_work_id, arg_content_shape, a
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "SubmitAdmittedIngressEffect", payload |-> [admission_effect |-> packet.payload.admission_effect, content_shape |-> packet.payload.content_shape, handling_mode |-> packet.payload.handling_mode, request_id |-> packet.payload.request_id, reservation_key |-> packet.payload.reservation_key, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedAttachedSteer"], [machine |-> "runtime_control", variant |-> "SignalWake", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedAttachedSteer"], [machine |-> "runtime_control", variant |-> "SignalImmediateProcess", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionAcceptedAttachedSteer"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionAcceptedAttachedSteer", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1475,6 +1533,7 @@ runtime_control_AdmissionRejectedIdle(arg_work_id, arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> packet.payload.reason, kind |-> "AdmissionRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionRejectedIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionRejectedIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1494,6 +1553,7 @@ runtime_control_AdmissionRejectedRunning(arg_work_id, arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> packet.payload.reason, kind |-> "AdmissionRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionRejectedRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionRejectedRunning", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1513,6 +1573,7 @@ runtime_control_AdmissionRejectedAttached(arg_work_id, arg_reason) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> packet.payload.reason, kind |-> "AdmissionRejected"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionRejectedAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionRejectedAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1532,6 +1593,7 @@ runtime_control_AdmissionDeduplicatedIdle(arg_work_id, arg_existing_work_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "ExistingInputLinked", kind |-> "AdmissionDeduplicated"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionDeduplicatedIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionDeduplicatedIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1551,6 +1613,7 @@ runtime_control_AdmissionDeduplicatedRunning(arg_work_id, arg_existing_work_id) 
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "ExistingInputLinked", kind |-> "AdmissionDeduplicated"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionDeduplicatedRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionDeduplicatedRunning", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1570,6 +1633,7 @@ runtime_control_AdmissionDeduplicatedAttached(arg_work_id, arg_existing_work_id)
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "ExistingInputLinked", kind |-> "AdmissionDeduplicated"], effect_id |-> (model_step_count + 1), source_transition |-> "AdmissionDeduplicatedAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "AdmissionDeduplicatedAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1587,6 +1651,7 @@ runtime_control_ExternalToolDeltaReceivedIdle ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "Received", kind |-> "ExternalToolDelta"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalToolDeltaReceivedIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ExternalToolDeltaReceivedIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1604,6 +1669,7 @@ runtime_control_ExternalToolDeltaReceivedRunning ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "Received", kind |-> "ExternalToolDelta"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalToolDeltaReceivedRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ExternalToolDeltaReceivedRunning", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Running"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1621,6 +1687,7 @@ runtime_control_ExternalToolDeltaReceivedRecovering ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "Received", kind |-> "ExternalToolDelta"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalToolDeltaReceivedRecovering"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ExternalToolDeltaReceivedRecovering", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1638,6 +1705,7 @@ runtime_control_ExternalToolDeltaReceivedRetired ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "Received", kind |-> "ExternalToolDelta"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalToolDeltaReceivedRetired"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ExternalToolDeltaReceivedRetired", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Retired"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1655,6 +1723,7 @@ runtime_control_ExternalToolDeltaReceivedAttached ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "Received", kind |-> "ExternalToolDelta"], effect_id |-> (model_step_count + 1), source_transition |-> "ExternalToolDeltaReceivedAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "ExternalToolDeltaReceivedAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Attached"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1674,6 +1743,7 @@ runtime_control_RecycleRequestedFromRetired ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "InitiateRecycle", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RecycleRequestedFromRetired"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecycleRequestedFromRetired", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1693,6 +1763,7 @@ runtime_control_RecycleRequestedFromIdle ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "InitiateRecycle", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RecycleRequestedFromIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecycleRequestedFromIdle", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1712,6 +1783,7 @@ runtime_control_RecycleRequestedFromAttached ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "InitiateRecycle", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RecycleRequestedFromAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecycleRequestedFromAttached", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Recovering"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1733,6 +1805,7 @@ runtime_control_RecycleSucceeded ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "runtime_control", variant |-> "EmitRuntimeNotice", payload |-> [detail |-> "Succeeded", kind |-> "Recycle"], effect_id |-> (model_step_count + 1), source_transition |-> "RecycleSucceeded"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "runtime_control", transition |-> "RecycleSucceeded", actor |-> "control_plane", step |-> (model_step_count + 1), from_phase |-> runtime_control_phase, to_phase |-> "Idle"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1765,6 +1838,7 @@ turn_execution_StartConversationRun(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunStarted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "StartConversationRun"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "StartConversationRun", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ApplyingPrimitive"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1794,6 +1868,7 @@ turn_execution_StartImmediateAppend(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunStarted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "StartImmediateAppend"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "StartImmediateAppend", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ApplyingPrimitive"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1823,6 +1898,7 @@ turn_execution_StartImmediateContext(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunStarted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "StartImmediateContext"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "StartImmediateContext", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ApplyingPrimitive"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1849,6 +1925,7 @@ turn_execution_PrimitiveAppliedConversationTurn(arg_run_id, arg_admitted_content
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedConversationTurn"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedConversationTurn"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "PrimitiveAppliedConversationTurn", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1878,6 +1955,7 @@ turn_execution_PrimitiveAppliedImmediateAppend(arg_run_id, arg_admitted_content_
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateAppend"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateAppend"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateAppend"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "PrimitiveAppliedImmediateAppend", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1908,6 +1986,7 @@ turn_execution_PrimitiveAppliedImmediateAppendCancelsAfterBoundary(arg_run_id, a
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateAppendCancelsAfterBoundary"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateAppendCancelsAfterBoundary"], [machine |-> "turn_execution", variant |-> "RunCancelled", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateAppendCancelsAfterBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "PrimitiveAppliedImmediateAppendCancelsAfterBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1937,6 +2016,7 @@ turn_execution_PrimitiveAppliedImmediateContext(arg_run_id, arg_admitted_content
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateContext"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateContext"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateContext"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "PrimitiveAppliedImmediateContext", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1967,6 +2047,7 @@ turn_execution_PrimitiveAppliedImmediateContextCancelsAfterBoundary(arg_run_id, 
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateContextCancelsAfterBoundary"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateContextCancelsAfterBoundary"], [machine |-> "turn_execution", variant |-> "RunCancelled", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedImmediateContextCancelsAfterBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "PrimitiveAppliedImmediateContextCancelsAfterBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -1992,6 +2073,7 @@ turn_execution_LlmReturnedToolCalls(arg_run_id, arg_tool_count) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "LlmReturnedToolCalls", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "WaitingForOps"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2017,6 +2099,7 @@ turn_execution_RegisterPendingOps(arg_run_id, arg_op_refs, arg_has_barrier_ops) 
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "RegisterPendingOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "WaitingForOps"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2038,6 +2121,7 @@ turn_execution_OpsBarrierSatisfied(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "OpsBarrierSatisfied", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "WaitingForOps"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2065,6 +2149,7 @@ turn_execution_ToolCallsResolved(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "ToolCallsResolved"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "ToolCallsResolved"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ToolCallsResolved", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "DrainingBoundary"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2085,6 +2170,7 @@ turn_execution_LlmReturnedTerminal(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "LlmReturnedTerminal"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "LlmReturnedTerminal"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "LlmReturnedTerminal", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "DrainingBoundary"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2106,6 +2192,7 @@ turn_execution_BoundaryContinue(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryContinue"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryContinue"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BoundaryContinue", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2129,6 +2216,7 @@ turn_execution_BoundaryContinueCancelsAfterBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunCancelled", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryContinueCancelsAfterBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BoundaryContinueCancelsAfterBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2150,6 +2238,7 @@ turn_execution_BoundaryComplete(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryComplete"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BoundaryComplete", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2172,6 +2261,7 @@ turn_execution_BoundaryCompleteCancelsAfterBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunCancelled", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryCompleteCancelsAfterBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BoundaryCompleteCancelsAfterBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2193,6 +2283,7 @@ turn_execution_EnterExtraction(arg_run_id, arg_max_retries) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "EnterExtraction", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Extracting"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2213,6 +2304,7 @@ turn_execution_ExtractionValidationPassed(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionValidationPassed"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ExtractionValidationPassed", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2233,6 +2325,7 @@ turn_execution_ExtractionRetry(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionRetry"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionRetry"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ExtractionRetry", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2253,6 +2346,7 @@ turn_execution_ExtractionExhausted(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionExhausted"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ExtractionExhausted", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2272,6 +2366,7 @@ turn_execution_RecoverableFailureFromCallingLlm(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "RecoverableFailureFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ErrorRecovery"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2294,6 +2389,7 @@ turn_execution_RecoverableFailureFromWaitingForOps(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "RecoverableFailureFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ErrorRecovery"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2313,6 +2409,7 @@ turn_execution_RecoverableFailureFromDrainingBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "RecoverableFailureFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ErrorRecovery"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2332,6 +2429,7 @@ turn_execution_RetryRequested(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RetryRequested"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RetryRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "RetryRequested", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2352,6 +2450,7 @@ turn_execution_FatalFailureFromApplyingPrimitive(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunFailed", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "FatalFailureFromApplyingPrimitive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "FatalFailureFromApplyingPrimitive", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Failed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2372,6 +2471,7 @@ turn_execution_FatalFailureFromCallingLlm(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunFailed", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "FatalFailureFromCallingLlm"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "FatalFailureFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Failed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2395,6 +2495,7 @@ turn_execution_FatalFailureFromWaitingForOps(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunFailed", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "FatalFailureFromWaitingForOps"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "FatalFailureFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Failed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2415,6 +2516,7 @@ turn_execution_FatalFailureFromDrainingBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunFailed", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "FatalFailureFromDrainingBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "FatalFailureFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Failed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2435,6 +2537,7 @@ turn_execution_FatalFailureFromExtracting(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunFailed", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "FatalFailureFromExtracting"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "FatalFailureFromExtracting", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Failed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2455,6 +2558,7 @@ turn_execution_FatalFailureFromErrorRecovery(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunFailed", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "FatalFailureFromErrorRecovery"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "FatalFailureFromErrorRecovery", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Failed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2474,6 +2578,7 @@ turn_execution_CancelNowFromApplyingPrimitive(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelNowFromApplyingPrimitive", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelling"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2493,6 +2598,7 @@ turn_execution_CancelNowFromCallingLlm(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelNowFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelling"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2515,6 +2621,7 @@ turn_execution_CancelNowFromWaitingForOps(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelNowFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelling"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2534,6 +2641,7 @@ turn_execution_CancelNowFromDrainingBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelNowFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelling"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2553,6 +2661,7 @@ turn_execution_CancelNowFromExtracting(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelNowFromExtracting", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelling"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2572,6 +2681,7 @@ turn_execution_CancelNowFromErrorRecovery(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelNowFromErrorRecovery", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelling"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2592,6 +2702,7 @@ turn_execution_CancelAfterBoundaryFromApplyingPrimitive(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelAfterBoundaryFromApplyingPrimitive", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ApplyingPrimitive"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2612,6 +2723,7 @@ turn_execution_CancelAfterBoundaryFromCallingLlm(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelAfterBoundaryFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2632,6 +2744,7 @@ turn_execution_CancelAfterBoundaryFromWaitingForOps(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelAfterBoundaryFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "WaitingForOps"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2652,6 +2765,7 @@ turn_execution_CancelAfterBoundaryFromDrainingBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelAfterBoundaryFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "DrainingBoundary"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2672,6 +2786,7 @@ turn_execution_CancelAfterBoundaryFromExtracting(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelAfterBoundaryFromExtracting", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Extracting"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2692,6 +2807,7 @@ turn_execution_CancelAfterBoundaryFromErrorRecovery(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancelAfterBoundaryFromErrorRecovery", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "ErrorRecovery"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2713,6 +2829,7 @@ turn_execution_CancellationObserved(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "RunCancelled", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "CancellationObserved"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "CancellationObserved", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2734,6 +2851,7 @@ turn_execution_TurnLimitReachedFromApplyingPrimitive(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromApplyingPrimitive"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromApplyingPrimitive"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromApplyingPrimitive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "TurnLimitReachedFromApplyingPrimitive", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2755,6 +2873,7 @@ turn_execution_TurnLimitReachedFromCallingLlm(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromCallingLlm"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromCallingLlm"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromCallingLlm"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "TurnLimitReachedFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2779,6 +2898,7 @@ turn_execution_TurnLimitReachedFromWaitingForOps(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromWaitingForOps"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromWaitingForOps"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromWaitingForOps"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "TurnLimitReachedFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2800,6 +2920,7 @@ turn_execution_TurnLimitReachedFromDrainingBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromDrainingBoundary"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromDrainingBoundary"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromDrainingBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "TurnLimitReachedFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2821,6 +2942,7 @@ turn_execution_TurnLimitReachedFromExtracting(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromExtracting"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromExtracting"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromExtracting"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "TurnLimitReachedFromExtracting", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2842,6 +2964,7 @@ turn_execution_TurnLimitReachedFromErrorRecovery(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromErrorRecovery"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromErrorRecovery"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "TurnLimitReachedFromErrorRecovery"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "TurnLimitReachedFromErrorRecovery", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2863,6 +2986,7 @@ turn_execution_BudgetExhaustedFromApplyingPrimitive(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromApplyingPrimitive"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromApplyingPrimitive"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromApplyingPrimitive"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BudgetExhaustedFromApplyingPrimitive", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2884,6 +3008,7 @@ turn_execution_BudgetExhaustedFromCallingLlm(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromCallingLlm"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromCallingLlm"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromCallingLlm"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BudgetExhaustedFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2908,6 +3033,7 @@ turn_execution_BudgetExhaustedFromWaitingForOps(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromWaitingForOps"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromWaitingForOps"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromWaitingForOps"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BudgetExhaustedFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2929,6 +3055,7 @@ turn_execution_BudgetExhaustedFromDrainingBoundary(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromDrainingBoundary"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromDrainingBoundary"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromDrainingBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BudgetExhaustedFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2950,6 +3077,7 @@ turn_execution_BudgetExhaustedFromExtracting(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromExtracting"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromExtracting"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromExtracting"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BudgetExhaustedFromExtracting", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2971,6 +3099,7 @@ turn_execution_BudgetExhaustedFromErrorRecovery(arg_run_id) ==
        /\ delivered_routes' = delivered_routes \cup { [route |-> "turn_boundary_applies_surface_changes", source_machine |-> "turn_execution", effect |-> "BoundaryApplied", target_machine |-> "external_tool_surface", target_input |-> "ApplyBoundary", payload |-> [applied_at_turn |-> "turn_1", surface_id |-> "default_surface"], actor |-> "surface_boundary", effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromErrorRecovery"] }
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "BoundaryApplied", payload |-> [boundary_sequence |-> (turn_execution_boundary_count) + 1, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromErrorRecovery"], [machine |-> "turn_execution", variant |-> "RunCompleted", payload |-> [run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "BudgetExhaustedFromErrorRecovery"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BudgetExhaustedFromErrorRecovery", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Completed"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -2989,6 +3118,7 @@ turn_execution_ForceCancelNoRunFromReady ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromReady", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3007,6 +3137,7 @@ turn_execution_ForceCancelNoRunFromApplyingPrimitive ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromApplyingPrimitive", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3025,6 +3156,7 @@ turn_execution_ForceCancelNoRunFromCallingLlm ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromCallingLlm", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3046,6 +3178,7 @@ turn_execution_ForceCancelNoRunFromWaitingForOps ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromWaitingForOps", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3064,6 +3197,7 @@ turn_execution_ForceCancelNoRunFromDrainingBoundary ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromDrainingBoundary", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3082,6 +3216,7 @@ turn_execution_ForceCancelNoRunFromExtracting ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromExtracting", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3100,6 +3235,7 @@ turn_execution_ForceCancelNoRunFromErrorRecovery ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromErrorRecovery", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3118,6 +3254,7 @@ turn_execution_ForceCancelNoRunFromCancelling ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ForceCancelNoRunFromCancelling", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Cancelled"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3148,6 +3285,7 @@ turn_execution_AcknowledgeTerminalFromCompleted(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "AcknowledgeTerminalFromCompleted", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Ready"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3178,6 +3316,7 @@ turn_execution_AcknowledgeTerminalFromFailed(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "AcknowledgeTerminalFromFailed", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Ready"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3208,6 +3347,7 @@ turn_execution_AcknowledgeTerminalFromCancelled(arg_run_id) ==
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "AcknowledgeTerminalFromCancelled", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "Ready"]}
+       /\ UNCHANGED << obligation_surface_completion >>
        /\ model_step_count' = model_step_count + 1
 
 
@@ -3226,98 +3366,98 @@ Inject_control_initialize ==
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "runtime_control", variant |-> "Initialize", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "control_initialize", source_machine |-> "external_entry", source_effect |-> "Initialize", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "runtime_control", variant |-> "Initialize", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "control_initialize", source_machine |-> "external_entry", source_effect |-> "Initialize", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_stage_add(arg_surface_id) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "StageAdd", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_add", source_machine |-> "external_entry", source_effect |-> "StageAdd", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "StageAdd", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_add", source_machine |-> "external_entry", source_effect |-> "StageAdd", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "StageAdd", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_add", source_machine |-> "external_entry", source_effect |-> "StageAdd", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_stage_remove(arg_surface_id) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "StageRemove", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_remove", source_machine |-> "external_entry", source_effect |-> "StageRemove", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "StageRemove", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_remove", source_machine |-> "external_entry", source_effect |-> "StageRemove", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "StageRemove", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_remove", source_machine |-> "external_entry", source_effect |-> "StageRemove", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_stage_reload(arg_surface_id) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "StageReload", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_reload", source_machine |-> "external_entry", source_effect |-> "StageReload", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "StageReload", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_reload", source_machine |-> "external_entry", source_effect |-> "StageReload", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "StageReload", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "stage_reload", source_machine |-> "external_entry", source_effect |-> "StageReload", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_pending_succeeded(arg_surface_id, arg_applied_at_turn) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "PendingSucceeded", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "pending_succeeded", source_machine |-> "external_entry", source_effect |-> "PendingSucceeded", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "PendingSucceeded", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "pending_succeeded", source_machine |-> "external_entry", source_effect |-> "PendingSucceeded", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "PendingSucceeded", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "pending_succeeded", source_machine |-> "external_entry", source_effect |-> "PendingSucceeded", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_pending_failed(arg_surface_id, arg_applied_at_turn) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "PendingFailed", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "pending_failed", source_machine |-> "external_entry", source_effect |-> "PendingFailed", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "PendingFailed", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "pending_failed", source_machine |-> "external_entry", source_effect |-> "PendingFailed", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "PendingFailed", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "pending_failed", source_machine |-> "external_entry", source_effect |-> "PendingFailed", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_call_started(arg_surface_id) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "CallStarted", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "call_started", source_machine |-> "external_entry", source_effect |-> "CallStarted", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "CallStarted", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "call_started", source_machine |-> "external_entry", source_effect |-> "CallStarted", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "CallStarted", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "call_started", source_machine |-> "external_entry", source_effect |-> "CallStarted", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_call_finished(arg_surface_id) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "CallFinished", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "call_finished", source_machine |-> "external_entry", source_effect |-> "CallFinished", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "CallFinished", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "call_finished", source_machine |-> "external_entry", source_effect |-> "CallFinished", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "CallFinished", payload |-> [surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "call_finished", source_machine |-> "external_entry", source_effect |-> "CallFinished", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_finalize_removal_clean(arg_surface_id, arg_applied_at_turn) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "FinalizeRemovalClean", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "finalize_removal_clean", source_machine |-> "external_entry", source_effect |-> "FinalizeRemovalClean", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "FinalizeRemovalClean", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "finalize_removal_clean", source_machine |-> "external_entry", source_effect |-> "FinalizeRemovalClean", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "FinalizeRemovalClean", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "finalize_removal_clean", source_machine |-> "external_entry", source_effect |-> "FinalizeRemovalClean", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_finalize_removal_forced(arg_surface_id, arg_applied_at_turn) ==
     /\ ~([machine |-> "external_tool_surface", variant |-> "FinalizeRemovalForced", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "finalize_removal_forced", source_machine |-> "external_entry", source_effect |-> "FinalizeRemovalForced", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "FinalizeRemovalForced", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "finalize_removal_forced", source_machine |-> "external_entry", source_effect |-> "FinalizeRemovalForced", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "external_tool_surface", variant |-> "FinalizeRemovalForced", payload |-> [applied_at_turn |-> arg_applied_at_turn, surface_id |-> arg_surface_id], source_kind |-> "entry", source_route |-> "finalize_removal_forced", source_machine |-> "external_entry", source_effect |-> "FinalizeRemovalForced", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_turn_start_conversation(arg_run_id) ==
     /\ ~([machine |-> "turn_execution", variant |-> "StartConversationRun", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_start_conversation", source_machine |-> "external_entry", source_effect |-> "StartConversationRun", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "turn_execution", variant |-> "StartConversationRun", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_start_conversation", source_machine |-> "external_entry", source_effect |-> "StartConversationRun", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "turn_execution", variant |-> "StartConversationRun", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_start_conversation", source_machine |-> "external_entry", source_effect |-> "StartConversationRun", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_turn_primitive_applied(arg_run_id, arg_admitted_content_shape, arg_vision_enabled, arg_image_tool_results_enabled) ==
     /\ ~([machine |-> "turn_execution", variant |-> "PrimitiveApplied", payload |-> [admitted_content_shape |-> arg_admitted_content_shape, image_tool_results_enabled |-> arg_image_tool_results_enabled, run_id |-> arg_run_id, vision_enabled |-> arg_vision_enabled], source_kind |-> "entry", source_route |-> "turn_primitive_applied", source_machine |-> "external_entry", source_effect |-> "PrimitiveApplied", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "turn_execution", variant |-> "PrimitiveApplied", payload |-> [admitted_content_shape |-> arg_admitted_content_shape, image_tool_results_enabled |-> arg_image_tool_results_enabled, run_id |-> arg_run_id, vision_enabled |-> arg_vision_enabled], source_kind |-> "entry", source_route |-> "turn_primitive_applied", source_machine |-> "external_entry", source_effect |-> "PrimitiveApplied", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "turn_execution", variant |-> "PrimitiveApplied", payload |-> [admitted_content_shape |-> arg_admitted_content_shape, image_tool_results_enabled |-> arg_image_tool_results_enabled, run_id |-> arg_run_id, vision_enabled |-> arg_vision_enabled], source_kind |-> "entry", source_route |-> "turn_primitive_applied", source_machine |-> "external_entry", source_effect |-> "PrimitiveApplied", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_turn_llm_returned_terminal(arg_run_id) ==
     /\ ~([machine |-> "turn_execution", variant |-> "LlmReturnedTerminal", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_llm_returned_terminal", source_machine |-> "external_entry", source_effect |-> "LlmReturnedTerminal", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "turn_execution", variant |-> "LlmReturnedTerminal", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_llm_returned_terminal", source_machine |-> "external_entry", source_effect |-> "LlmReturnedTerminal", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "turn_execution", variant |-> "LlmReturnedTerminal", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_llm_returned_terminal", source_machine |-> "external_entry", source_effect |-> "LlmReturnedTerminal", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_turn_boundary_complete(arg_run_id) ==
     /\ ~([machine |-> "turn_execution", variant |-> "BoundaryComplete", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_boundary_complete", source_machine |-> "external_entry", source_effect |-> "BoundaryComplete", effect_id |-> 0] \in SeqElements(pending_inputs))
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "turn_execution", variant |-> "BoundaryComplete", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_boundary_complete", source_machine |-> "external_entry", source_effect |-> "BoundaryComplete", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "turn_execution", variant |-> "BoundaryComplete", payload |-> [run_id |-> arg_run_id], source_kind |-> "entry", source_route |-> "turn_boundary_complete", source_machine |-> "external_entry", source_effect |-> "BoundaryComplete", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 DeliverQueuedRoute ==
     /\ Len(pending_routes) > 0
@@ -3327,7 +3467,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -3345,7 +3485,7 @@ WitnessInjectNext_surface_add_notifies_control ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 WitnessInjectNext_turn_boundary_reaches_surface ==
     /\ witness_current_script_input # None
@@ -3358,7 +3498,7 @@ WitnessInjectNext_turn_boundary_reaches_surface ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 WitnessInjectNext_control_preempts_surface ==
     /\ witness_current_script_input # None
@@ -3371,7 +3511,7 @@ WitnessInjectNext_control_preempts_surface ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 WitnessInjectNext_surface_completion_feedback ==
     /\ witness_current_script_input # None
@@ -3384,7 +3524,7 @@ WitnessInjectNext_surface_completion_feedback ==
     /\ witness_current_script_input' = Head(witness_remaining_script_inputs)
     /\ witness_remaining_script_inputs' = Tail(witness_remaining_script_inputs)
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
+    /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, obligation_surface_completion, pending_routes, delivered_routes, emitted_effects, observed_transitions >>
 
 CoreNext ==
     \/ DeliverQueuedRoute
@@ -3573,16 +3713,15 @@ control_preempts_surface_boundary == <<"PreemptWhenReady", "control_plane", "sur
 surface_completion_protocol_covered == TRUE
 
 NoOpenObligationsOnTerminal_surface_completion == (external_tool_surface_phase = "Shutdown") => obligation_surface_completion = {}
-NoFeedbackWithoutObligation_surface_completion == \A input_packet \in observed_inputs : ((input_packet.machine = "external_tool_surface" /\ input_packet.variant = "PendingSucceeded" \/ input_packet.machine = "external_tool_surface" /\ input_packet.variant = "PendingFailed") => obligation_surface_completion /= {})
+NoFeedbackWithoutObligation_surface_completion == \A input_packet \in observed_inputs : (((input_packet.machine = "external_tool_surface" /\ input_packet.variant = "PendingSucceeded") \/ (input_packet.machine = "external_tool_surface" /\ input_packet.variant = "PendingFailed")) => (\E record \in obligation_surface_completion : (record.surface_id = input_packet.payload.surface_id)))
 
 \* Liveness: eventual feedback under surface connection liveness
 OwnerFeedback_surface_completion ==
     /\ obligation_surface_completion /= {}
     /\ \E token \in obligation_surface_completion :
-        \/ /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "PendingSucceeded", source_kind |-> "owner", source_machine |-> "external_tool_surface", source_effect |-> "ScheduleSurfaceCompletion", source_route |-> "none", effect_id |-> token, payload |-> "feedback"])
-        /\ obligation_surface_completion' = obligation_surface_completion \ {token}
-        \/ /\ pending_inputs' = Append(pending_inputs, [machine |-> "external_tool_surface", variant |-> "PendingFailed", source_kind |-> "owner", source_machine |-> "external_tool_surface", source_effect |-> "ScheduleSurfaceCompletion", source_route |-> "none", effect_id |-> token, payload |-> "feedback"])
-        /\ obligation_surface_completion' = obligation_surface_completion \ {token}
+        /\ \E fb_variant \in {1, 2} :
+           /\ pending_inputs' = Append(pending_inputs, CASE fb_variant = 1 -> [machine |-> "external_tool_surface", variant |-> "PendingSucceeded", source_kind |-> "owner", source_machine |-> "external_tool_surface", source_effect |-> "ScheduleSurfaceCompletion", source_route |-> "none", effect_id |-> token, payload |-> [surface_id |-> token.surface_id]] [] fb_variant = 2 -> [machine |-> "external_tool_surface", variant |-> "PendingFailed", source_kind |-> "owner", source_machine |-> "external_tool_surface", source_effect |-> "ScheduleSurfaceCompletion", source_route |-> "none", effect_id |-> token, payload |-> [surface_id |-> token.surface_id]])
+           /\ obligation_surface_completion' = obligation_surface_completion \ {token}
     /\ UNCHANGED << external_tool_surface_phase, external_tool_surface_known_surfaces, external_tool_surface_visible_surfaces, external_tool_surface_base_state, external_tool_surface_pending_op, external_tool_surface_staged_op, external_tool_surface_inflight_calls, external_tool_surface_last_delta_operation, external_tool_surface_last_delta_phase, runtime_control_phase, runtime_control_current_run_id, runtime_control_pre_run_state, runtime_control_wake_pending, runtime_control_process_pending, turn_execution_phase, turn_execution_active_run, turn_execution_primitive_kind, turn_execution_admitted_content_shape, turn_execution_vision_enabled, turn_execution_image_tool_results_enabled, turn_execution_tool_calls_pending, turn_execution_pending_op_refs, turn_execution_has_barrier_ops, turn_execution_barrier_satisfied, turn_execution_boundary_count, turn_execution_cancel_after_boundary, turn_execution_terminal_outcome, turn_execution_extraction_attempts, turn_execution_max_extraction_retries, model_step_count, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 RouteObserved_surface_delta_notifies_runtime_control == \E packet \in RoutePackets : packet.route = "surface_delta_notifies_runtime_control"

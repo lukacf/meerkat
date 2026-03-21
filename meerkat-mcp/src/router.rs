@@ -178,6 +178,7 @@ pub struct McpRouter {
     pending_rx: Mutex<mpsc::Receiver<PendingResult>>,
     pending_servers: HashMap<String, PendingState>,
     next_generation: u64,
+    next_boundary_turn: u64,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
 }
@@ -196,6 +197,7 @@ impl McpRouter {
             pending_rx: Mutex::new(rx),
             pending_servers: HashMap::new(),
             next_generation: 0,
+            next_boundary_turn: 0,
             completed_updates: VecDeque::new(),
         }
     }
@@ -215,6 +217,7 @@ impl McpRouter {
             pending_rx: Mutex::new(rx),
             pending_servers: HashMap::new(),
             next_generation: 0,
+            next_boundary_turn: 0,
             completed_updates: VecDeque::new(),
         }
     }
@@ -232,6 +235,12 @@ impl McpRouter {
     fn auth(&self) -> std::sync::MutexGuard<'_, ExternalToolSurfaceAuthority> {
         #[allow(clippy::expect_used)]
         self.authority.lock().expect("authority mutex poisoned")
+    }
+
+    fn next_boundary_turn(&mut self) -> TurnNumber {
+        let turn = TurnNumber(self.next_boundary_turn);
+        self.next_boundary_turn += 1;
+        turn
     }
 
     /// Override remove-drain timeout.
@@ -283,6 +292,7 @@ impl McpRouter {
                 StagedRouterOp::Add(config) => {
                     let server_name = config.name.clone();
                     let sid = SurfaceId::from(server_name.as_str());
+                    let applied_at_turn = self.next_boundary_turn();
 
                     // Stage through authority.
                     if let Err(e) = self.auth_mut().apply(ExternalToolSurfaceInput::StageAdd {
@@ -300,7 +310,7 @@ impl McpRouter {
                         .auth_mut()
                         .apply(ExternalToolSurfaceInput::ApplyBoundary {
                             surface_id: sid,
-                            applied_at_turn: TurnNumber(0),
+                            applied_at_turn,
                         }) {
                         Ok(transition) => {
                             self.execute_effects(&transition.effects, &mut delta, Some(&config));
@@ -316,6 +326,7 @@ impl McpRouter {
                 }
                 StagedRouterOp::Remove(server_name) => {
                     let sid = SurfaceId::from(server_name.as_str());
+                    let applied_at_turn = self.next_boundary_turn();
 
                     // Cancel pending for same server if any.
                     self.pending_servers.remove(&server_name);
@@ -336,7 +347,7 @@ impl McpRouter {
                         .auth_mut()
                         .apply(ExternalToolSurfaceInput::ApplyBoundary {
                             surface_id: sid,
-                            applied_at_turn: TurnNumber(0),
+                            applied_at_turn,
                         }) {
                         Ok(transition) => {
                             self.execute_effects(&transition.effects, &mut delta, None);
@@ -364,6 +375,7 @@ impl McpRouter {
 
                     let server_name = config.name.clone();
                     let sid = SurfaceId::from(server_name.as_str());
+                    let applied_at_turn = self.next_boundary_turn();
 
                     // Cancel any existing pending op for this server.
                     self.pending_servers.remove(&server_name);
@@ -384,7 +396,7 @@ impl McpRouter {
                         .auth_mut()
                         .apply(ExternalToolSurfaceInput::ApplyBoundary {
                             surface_id: sid,
-                            applied_at_turn: TurnNumber(0),
+                            applied_at_turn,
                         }) {
                         Ok(transition) => {
                             self.execute_effects(&transition.effects, &mut delta, Some(&config));
@@ -429,6 +441,7 @@ impl McpRouter {
                 ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                     surface_id: _,
                     operation,
+                    ..
                 } => {
                     if let Some(config) = config {
                         let op = match operation {
@@ -589,7 +602,6 @@ impl McpRouter {
                 match protocol_surface_completion::submit_pending_succeeded(
                     self.auth_mut(),
                     obligation,
-                    TurnNumber(0),
                 ) {
                     Ok(_transition) => {
                         let operation = match result.op {
@@ -672,11 +684,9 @@ impl McpRouter {
 
                 // Submit failure feedback through the generated protocol helper,
                 // consuming the obligation token from ScheduleSurfaceCompletion.
-                if let Err(e) = protocol_surface_completion::submit_pending_failed(
-                    self.auth_mut(),
-                    obligation,
-                    TurnNumber(0),
-                ) {
+                if let Err(e) =
+                    protocol_surface_completion::submit_pending_failed(self.auth_mut(), obligation)
+                {
                     tracing::warn!(
                         server = %server_name,
                         error = %e,
@@ -748,10 +758,11 @@ impl McpRouter {
         }) {
             tracing::warn!(server = %server_name, error = %e, "Authority rejected StageAdd in install path");
         }
+        let applied_at_turn = self.next_boundary_turn();
         let boundary_effects = match self.auth_mut().apply(
             ExternalToolSurfaceInput::ApplyBoundary {
                 surface_id: sid.clone(),
-                applied_at_turn: TurnNumber(0),
+                applied_at_turn,
             },
         ) {
             Ok(t) => t.effects,
@@ -763,11 +774,9 @@ impl McpRouter {
         // Extract and immediately consume the obligation for the synchronous install path.
         let obligations = protocol_surface_completion::extract_obligations(&boundary_effects);
         for obligation in obligations {
-            if let Err(e) = protocol_surface_completion::submit_pending_succeeded(
-                self.auth_mut(),
-                obligation,
-                TurnNumber(0),
-            ) {
+            if let Err(e) =
+                protocol_surface_completion::submit_pending_succeeded(self.auth_mut(), obligation)
+            {
                 tracing::warn!(server = %server_name, error = %e, "Authority rejected PendingSucceeded in install path");
             }
         }
@@ -815,15 +824,16 @@ impl McpRouter {
 
         for (server_name, degraded) in finalized {
             let sid = SurfaceId::from(server_name.as_str());
+            let applied_at_turn = self.next_boundary_turn();
             let input = if degraded {
                 ExternalToolSurfaceInput::FinalizeRemovalForced {
                     surface_id: sid,
-                    applied_at_turn: TurnNumber(0),
+                    applied_at_turn,
                 }
             } else {
                 ExternalToolSurfaceInput::FinalizeRemovalClean {
                     surface_id: sid,
-                    applied_at_turn: TurnNumber(0),
+                    applied_at_turn,
                 }
             };
 

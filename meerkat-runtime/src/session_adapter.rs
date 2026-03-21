@@ -282,7 +282,7 @@ fn abort_slot(slot: &mut CommsDrainSlot) {
             }
             // Under TerminalClosure policy, the abort obligation is implicitly
             // satisfied when the machine reaches Stopped phase. Drop it.
-            drop(result.abort_obligation);
+            drop(result.obligation);
         }
         Err(_) => {
             // Already stopped or inactive — just clean up the handle
@@ -944,10 +944,7 @@ impl RuntimeSessionAdapter {
         let mut slots = self.comms_drain_slots.write().await;
         if let Some(slot) = slots.get_mut(session_id) {
             slot.handle.take(); // clean up finished handle
-            match protocol_comms_drain_spawn::notify_running_task_exited(
-                &mut slot.authority,
-                reason,
-            ) {
+            match protocol_comms_drain_spawn::notify_task_exited(&mut slot.authority, reason) {
                 Ok(effects) => {
                     apply_runtime_drain_effects(slot, &effects);
                 }
@@ -1002,7 +999,7 @@ impl RuntimeSessionAdapter {
                     "comms_drain: task exited without notifying authority (likely panicked), \
                      submitting Failed safety net"
                 );
-                match protocol_comms_drain_spawn::notify_running_task_exited(
+                match protocol_comms_drain_spawn::notify_task_exited(
                     &mut slot.authority,
                     DrainExitReason::Failed,
                 ) {
@@ -1452,5 +1449,191 @@ impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+    use meerkat_core::comms_drain_lifecycle_authority::{CommsDrainMode, CommsDrainPhase};
+    use tokio::sync::Notify;
+
+    struct FakeDrainRuntime {
+        notify: Arc<Notify>,
+        dismiss: AtomicBool,
+    }
+
+    impl FakeDrainRuntime {
+        fn dismissing() -> Self {
+            Self {
+                notify: Arc::new(Notify::new()),
+                dismiss: AtomicBool::new(true),
+            }
+        }
+
+        fn idle() -> Self {
+            Self {
+                notify: Arc::new(Notify::new()),
+                dismiss: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for FakeDrainRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
+        }
+
+        fn dismiss_received(&self) -> bool {
+            self.dismiss.load(Ordering::Acquire)
+        }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn spawn_test_comms_drain(
+        adapter: &Arc<RuntimeSessionAdapter>,
+        session_id: &SessionId,
+        mode: CommsDrainMode,
+        comms_runtime: Arc<dyn CommsRuntime>,
+        idle_timeout: Duration,
+    ) {
+        let mut slots = adapter.comms_drain_slots.write().await;
+        let slot = slots
+            .entry(session_id.clone())
+            .or_insert_with(CommsDrainSlot::new);
+        let result = protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode)
+            .expect("ensure running");
+
+        apply_runtime_drain_effects(slot, &result.effects);
+        for effect in &result.effects {
+            if let CommsDrainLifecycleEffect::SpawnDrainTask { .. } = effect {
+                slot.handle = Some(crate::comms_drain::spawn_comms_drain(
+                    Arc::clone(adapter),
+                    session_id.clone(),
+                    Arc::clone(&comms_runtime),
+                    Some(idle_timeout),
+                ));
+            }
+        }
+
+        let feedback_effects =
+            protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, result.obligation)
+                .expect("task spawned");
+        apply_runtime_drain_effects(slot, &feedback_effects);
+    }
+
+    async fn current_phase(
+        adapter: &Arc<RuntimeSessionAdapter>,
+        session_id: &SessionId,
+    ) -> Option<CommsDrainPhase> {
+        let slots = adapter.comms_drain_slots.read().await;
+        slots.get(session_id).map(|slot| slot.authority.phase())
+    }
+
+    async fn handle_present(adapter: &Arc<RuntimeSessionAdapter>, session_id: &SessionId) -> bool {
+        let slots = adapter.comms_drain_slots.read().await;
+        slots
+            .get(session_id)
+            .and_then(|slot| slot.handle.as_ref())
+            .is_some()
+    }
+
+    async fn wait_for_phase(
+        adapter: &Arc<RuntimeSessionAdapter>,
+        session_id: &SessionId,
+        expected: CommsDrainPhase,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if current_phase(adapter, session_id).await == Some(expected) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("phase transition");
+    }
+
+    #[tokio::test]
+    async fn dismiss_exit_updates_authority_before_join() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::dismissing());
+
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::PersistentHost,
+            comms_runtime,
+            Duration::from_millis(25),
+        )
+        .await;
+
+        wait_for_phase(&adapter, &session_id, CommsDrainPhase::Stopped).await;
+        assert!(
+            !adapter
+                .comms_drain_suppresses_turn_boundary(&session_id)
+                .await
+        );
+        assert!(
+            !handle_present(&adapter, &session_id).await,
+            "drain task should clear its slot before wait_comms_drain joins"
+        );
+
+        adapter.wait_comms_drain(&session_id).await;
+        assert_eq!(
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Stopped)
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_updates_authority_before_join() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::Timed,
+            comms_runtime,
+            Duration::from_millis(25),
+        )
+        .await;
+
+        wait_for_phase(&adapter, &session_id, CommsDrainPhase::Stopped).await;
+        assert!(
+            !adapter
+                .comms_drain_suppresses_turn_boundary(&session_id)
+                .await
+        );
+        assert!(
+            !handle_present(&adapter, &session_id).await,
+            "drain task should clear its slot before wait_comms_drain joins"
+        );
+
+        adapter.wait_comms_drain(&session_id).await;
+        assert_eq!(
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Stopped)
+        );
     }
 }

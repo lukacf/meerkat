@@ -38,10 +38,125 @@ macro_rules! writeln {
 
 use meerkat_machine_schema::{
     CompositionCoverageManifest, CompositionInvariantKind, CompositionSchema,
-    CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, Guard, HelperSchema,
-    MachineCoverageManifest, MachineSchema, Quantifier, Route, RouteBindingSource, RouteDelivery,
-    SchedulerRule, TransitionSchema, TypeRef, Update, canonical_machine_schemas,
+    CompositionStateLimits, CompositionWitness, EntryInput, EnumSchema, Expr, FeedbackFieldSource,
+    FeedbackInputRef, Guard, HelperSchema, MachineCoverageManifest, MachineSchema, Quantifier,
+    Route, RouteBindingSource, RouteDelivery, SchedulerRule, TransitionSchema, TypeRef, Update,
+    VariantSchema, canonical_machine_schemas,
 };
+
+fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::NamedVariant { .. }
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                collect_helper_calls(item, calls);
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_helper_calls(condition, calls);
+            collect_helper_calls(then_expr, calls);
+            collect_helper_calls(else_expr, calls);
+        }
+        Expr::Not(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::Some(inner) => collect_helper_calls(inner, calls),
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right)
+        | Expr::SeqStartsWith {
+            seq: left,
+            prefix: right,
+        } => {
+            collect_helper_calls(left, calls);
+            collect_helper_calls(right, calls);
+        }
+        Expr::Contains { collection, value } => {
+            collect_helper_calls(collection, calls);
+            collect_helper_calls(value, calls);
+        }
+        Expr::MapGet { map, key } => {
+            collect_helper_calls(map, calls);
+            collect_helper_calls(key, calls);
+        }
+        Expr::Call { helper, args } => {
+            calls.insert(helper.clone());
+            for arg in args {
+                collect_helper_calls(arg, calls);
+            }
+        }
+        Expr::Quantified { over, body, .. } => {
+            collect_helper_calls(over, calls);
+            collect_helper_calls(body, calls);
+        }
+    }
+}
+
+fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
+    let defs = schema
+        .helpers
+        .iter()
+        .chain(schema.derived.iter())
+        .collect::<Vec<_>>();
+    let known = defs
+        .iter()
+        .map(|helper| helper.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut remaining = defs;
+    let mut ordered = Vec::new();
+
+    while !remaining.is_empty() {
+        let remaining_names = remaining
+            .iter()
+            .map(|helper| helper.name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut ready_indices = Vec::new();
+
+        for (index, helper) in remaining.iter().enumerate() {
+            let mut deps = BTreeSet::new();
+            collect_helper_calls(&helper.body, &mut deps);
+            let unresolved = deps.into_iter().filter(|dep| {
+                dep != &helper.name && known.contains(dep) && remaining_names.contains(dep)
+            });
+            if unresolved.count() == 0 {
+                ready_indices.push(index);
+            }
+        }
+
+        if ready_indices.is_empty() {
+            ordered.extend(remaining.into_iter());
+            break;
+        }
+
+        for index in ready_indices.into_iter().rev() {
+            ordered.push(remaining.remove(index));
+        }
+    }
+
+    ordered
+}
 
 pub fn render_machine_contract_markdown(
     schema: &MachineSchema,
@@ -2161,11 +2276,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             let mut compiler = MachineTlaCompiler::new_with_helper_prefix(machine, helper_prefix)
                 .with_phase_symbol(self.phase_var(instance.instance_id.as_str()))
                 .with_field_env_override(self.machine_field_env(instance.instance_id.as_str()));
-            for helper in &machine.helpers {
-                compiler.render_helper(&mut out, helper);
-                pushln!(&mut out);
-            }
-            for derived in &machine.derived {
+            for derived in helper_dependency_order(machine) {
                 compiler.render_helper(&mut out, derived);
                 pushln!(&mut out);
             }
@@ -2550,6 +2661,93 @@ impl<'a> CompositionTlaCompiler<'a> {
             .collect()
     }
 
+    fn feedback_variant(&self, feedback: &FeedbackInputRef) -> &VariantSchema {
+        self.machine(&feedback.machine_instance)
+            .inputs
+            .variant_named(&feedback.input_variant)
+            .expect("validated feedback input variant")
+    }
+
+    fn correlation_match_expr(
+        &self,
+        protocol: &meerkat_machine_schema::EffectHandoffProtocol,
+        feedback: &FeedbackInputRef,
+        obligation_var: &str,
+        input_packet_var: &str,
+    ) -> String {
+        if protocol.correlation_fields.is_empty() {
+            return format!("{obligation_var} /= {{}}");
+        }
+
+        let clauses = protocol
+            .correlation_fields
+            .iter()
+            .map(|correlation_field| {
+                let binding = feedback
+                    .field_bindings
+                    .iter()
+                    .find(|binding| {
+                        matches!(
+                            &binding.source,
+                            FeedbackFieldSource::ObligationField(name)
+                                if name == correlation_field
+                        )
+                    })
+                    .expect("validated correlation binding");
+                format!(
+                    "record.{} = {}.payload.{}",
+                    tla_ident(correlation_field),
+                    input_packet_var,
+                    tla_ident(&binding.input_field)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        format!(
+            "(\\E record \\in {} : ({}))",
+            obligation_var,
+            clauses.join(" /\\ ")
+        )
+    }
+
+    fn feedback_payload_expr(
+        &self,
+        feedback: &FeedbackInputRef,
+        token_var: &str,
+    ) -> (String, Vec<String>) {
+        let variant = self.feedback_variant(feedback);
+        let mut owner_context_quantifiers = Vec::new();
+        let mut payload_fields = Vec::new();
+
+        for field in &variant.fields {
+            let binding = feedback
+                .field_bindings
+                .iter()
+                .find(|binding| binding.input_field == field.name)
+                .expect("validated feedback binding");
+            let expr = match &binding.source {
+                FeedbackFieldSource::ObligationField(source_field) => {
+                    format!("{token_var}.{}", tla_ident(source_field))
+                }
+                FeedbackFieldSource::OwnerContext(name) => {
+                    let var_name = format!("owner_ctx_{}", tla_ident(name));
+                    let domain = render_type_domain_expr(&field.ty);
+                    owner_context_quantifiers.push(format!("{var_name} \\in {domain}"));
+                    var_name
+                }
+            };
+            payload_fields.push(format!("{} |-> {}", tla_ident(&field.name), expr));
+        }
+
+        let payload_expr = if payload_fields.is_empty() {
+            "[tag |-> \"unit\"]".to_string()
+        } else {
+            format!("[{}]", payload_fields.join(", "))
+        };
+
+        (payload_expr, owner_context_quantifiers)
+    }
+
     /// Renders obligation closure invariants into the TLA+ output.
     ///
     /// For each handoff protocol, generates:
@@ -2592,43 +2790,25 @@ impl<'a> CompositionTlaCompiler<'a> {
             // NoFeedbackWithoutObligation: feedback input observed => matching obligation exists
             if !protocol.allowed_feedback_inputs.is_empty() {
                 let inv_name = format!("NoFeedbackWithoutObligation_{}", tla_ident(&protocol.name));
-                let feedback_disjuncts: Vec<String> = protocol
+                let obligation_checks: Vec<String> = protocol
                     .allowed_feedback_inputs
                     .iter()
-                    .map(|fb| {
-                        format!(
+                    .map(|feedback| {
+                        let packet_match = format!(
                             "(input_packet.machine = {} /\\ input_packet.variant = {})",
-                            tla_string(&fb.machine_instance),
-                            tla_string(&fb.input_variant)
-                        )
+                            tla_string(&feedback.machine_instance),
+                            tla_string(&feedback.input_variant)
+                        );
+                        let obligation_check =
+                            self.correlation_match_expr(protocol, feedback, &var, "input_packet");
+                        format!("(({packet_match}) => ({obligation_check}))")
                     })
                     .collect();
-                let obligation_check = if protocol.correlation_fields.is_empty() {
-                    format!("{} /= {{}}", var)
-                } else {
-                    let match_conjuncts: Vec<String> = protocol
-                        .correlation_fields
-                        .iter()
-                        .map(|cf| {
-                            format!(
-                                "record.{} = input_packet.payload.{}",
-                                tla_ident(cf),
-                                tla_ident(cf)
-                            )
-                        })
-                        .collect();
-                    format!(
-                        "(\\E record \\in {} : ({}))",
-                        var,
-                        match_conjuncts.join(" /\\ ")
-                    )
-                };
                 writeln!(
                     out,
-                    "{} == \\A input_packet \\in observed_inputs : (({}) => {})",
+                    "{} == \\A input_packet \\in observed_inputs : ({})",
                     inv_name,
-                    feedback_disjuncts.join(" \\/ "),
-                    obligation_check
+                    obligation_checks.join(" /\\ ")
                 )
                 .expect("write to string");
                 invariant_names.push(inv_name);
@@ -2667,71 +2847,37 @@ impl<'a> CompositionTlaCompiler<'a> {
             writeln!(out, "{action_name} ==").expect("write to string");
             writeln!(out, "    /\\ {} /= {{}}", var).expect("write to string");
             writeln!(out, "    /\\ \\E token \\in {} :", var).expect("write to string");
-
-            let payload_expr = if protocol.correlation_fields.is_empty() {
-                "\"feedback\"".to_string()
-            } else {
-                let field_exprs: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|cf| format!("{} |-> token.{}", tla_ident(cf), tla_ident(cf)))
-                    .collect();
-                format!("[{}]", field_exprs.join(", "))
-            };
-
-            let feedback_branches: Vec<(String, String)> = protocol
+            let feedback_branches: Vec<String> = protocol
                 .allowed_feedback_inputs
                 .iter()
-                .map(|fb| {
+                .map(|feedback| {
+                    let (payload_expr, owner_context_quantifiers) =
+                        self.feedback_payload_expr(feedback, "token");
                     let input_expr = format!(
                         "[machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token, payload |-> {}]",
-                        tla_string(&fb.machine_instance),
-                        tla_string(&fb.input_variant),
+                        tla_string(&feedback.machine_instance),
+                        tla_string(&feedback.input_variant),
                         tla_string(&protocol.producer_instance),
                         tla_string(&protocol.effect_variant),
                         payload_expr,
                     );
-                    let obligation_next = format!("{} \\ {{token}}", var);
-                    (input_expr, obligation_next)
+                    let quantifier_prefix = if owner_context_quantifiers.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\\E {} : ", owner_context_quantifiers.join(", "))
+                    };
+                    format!(
+                        "{}(/\\ pending_inputs' = Append(pending_inputs, {}) /\\ {}' = {} \\ {{token}})",
+                        quantifier_prefix,
+                        input_expr,
+                        var,
+                        var
+                    )
                 })
                 .collect();
 
-            if feedback_branches.len() == 1 {
-                let (input_expr, obligation_next) = &feedback_branches[0];
-                writeln!(
-                    out,
-                    "        /\\ pending_inputs' = Append(pending_inputs, {})",
-                    input_expr
-                )
+            writeln!(out, "        /\\ ({})", feedback_branches.join(" \\/ "))
                 .expect("write to string");
-                writeln!(out, "        /\\ {}' = {}", var, obligation_next)
-                    .expect("write to string");
-            } else {
-                writeln!(
-                    out,
-                    "        /\\ \\E fb_variant \\in {{{}}} :",
-                    feedback_branches
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| format!("{}", i + 1))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-                .expect("write to string");
-                let case_branches: Vec<String> = feedback_branches
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (input_expr, _))| format!("fb_variant = {} -> {}", i + 1, input_expr))
-                    .collect();
-                writeln!(
-                    out,
-                    "           /\\ pending_inputs' = Append(pending_inputs, CASE {})",
-                    case_branches.join(" [] ")
-                )
-                .expect("write to string");
-                writeln!(out, "           /\\ {}' = {} \\ {{token}}", var, var)
-                    .expect("write to string");
-            }
 
             // Frame: all other variables unchanged
             let unchanged_vars: Vec<String> = self
@@ -3716,9 +3862,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
         }
 
+        unchanged_machine_vars.push("witness_current_script_input".into());
+        unchanged_machine_vars.push("witness_remaining_script_inputs".into());
+
         if !unchanged_machine_vars.is_empty() {
-            unchanged_machine_vars.push("witness_current_script_input".into());
-            unchanged_machine_vars.push("witness_remaining_script_inputs".into());
             writeln!(
                 out,
                 "       /\\ UNCHANGED << {} >>",
@@ -3779,7 +3926,7 @@ impl<'a> CompositionTlaCompiler<'a> {
 
         // Compute obligation set updates: when a transition emits an effect
         // that matches a handoff_protocol, add a record to the obligation set
-        // with correlation fields from the effect payload.
+        // with the protocol's declared obligation fields from the effect payload.
         let mut obligation_updates: BTreeMap<String, String> = BTreeMap::new();
         for (effect_variant, _effect_packet, payload_fields) in &effect_packets {
             for protocol in &self.schema.handoff_protocols {
@@ -3788,14 +3935,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                 {
                     let var = format!("obligation_{}", tla_ident(&protocol.name));
                     let record_fields: Vec<String> = protocol
-                        .correlation_fields
+                        .obligation_fields
                         .iter()
-                        .map(|cf| {
-                            let tla_field = tla_ident(cf);
+                        .map(|field| {
+                            let tla_field = tla_ident(field);
                             let value = payload_fields
-                                .get(cf)
+                                .get(field)
                                 .cloned()
-                                .unwrap_or_else(|| format!("\"unknown_{}\"", cf));
+                                .unwrap_or_else(|| format!("\"unknown_{}\"", field));
                             format!("{} |-> {}", tla_field, value)
                         })
                         .collect();
@@ -4119,11 +4266,8 @@ impl<'a> MachineTlaCompiler<'a> {
         pushln!(&mut out, "vars == << {} >>", vars.join(", "));
         pushln!(&mut out);
 
-        for helper in &self.schema.helpers {
+        for helper in helper_dependency_order(self.schema) {
             self.render_helper(&mut out, helper);
-        }
-        for derived in &self.schema.derived {
-            self.render_helper(&mut out, derived);
         }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
             pushln!(&mut out);

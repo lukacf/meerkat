@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use meerkat_machine_schema::{
-    ClosurePolicy, CompositionSchema, EffectHandoffProtocol, MachineSchema,
-    canonical_composition_schemas, canonical_machine_schemas,
+    ClosurePolicy, CompositionSchema, EffectHandoffProtocol, FeedbackFieldSource, MachineSchema,
+    ProtocolGenerationMode, TypeRef, canonical_composition_schemas, canonical_machine_schemas,
 };
 
 use crate::public_contracts::repo_root;
@@ -33,7 +33,12 @@ pub fn run_protocol_codegen() -> Result<()> {
                 .find(|m| m.instance_id == protocol.producer_instance)
                 .and_then(|inst| machine_by_name.get(inst.machine_name.as_str()).copied());
 
-            let code = generate_protocol_helpers(protocol, producer_machine, composition);
+            let code = generate_protocol_helpers(
+                protocol,
+                producer_machine,
+                composition,
+                &machine_by_name,
+            )?;
             let output_path = protocol_output_path(&root, protocol);
 
             if let Some(parent) = output_path.parent() {
@@ -73,290 +78,648 @@ pub fn run_protocol_codegen() -> Result<()> {
 }
 
 fn protocol_output_path(root: &Path, protocol: &EffectHandoffProtocol) -> std::path::PathBuf {
-    if let Some(ref target_crate) = protocol.target_crate {
-        root.join(format!("{}/protocol_{}.rs", target_crate, protocol.name))
-    } else {
-        root.join(format!(
-            "meerkat-core/src/generated/protocol_{}.rs",
-            protocol.name
-        ))
-    }
+    root.join(&protocol.rust.module_path)
 }
 
 fn generate_protocol_helpers(
     protocol: &EffectHandoffProtocol,
     producer_machine: Option<&MachineSchema>,
     composition: &CompositionSchema,
-) -> String {
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+) -> Result<String> {
     let mut out = String::new();
+    let producer_machine = producer_machine.context("producer machine missing")?;
 
     writeln!(
         &mut out,
         "// @generated — protocol helpers for `{}`",
         protocol.name
-    )
-    .expect("write");
+    )?;
     writeln!(
         &mut out,
         "// Composition: {}, Producer: {}, Effect: {}",
         composition.name, protocol.producer_instance, protocol.effect_variant
-    )
-    .expect("write");
+    )?;
     writeln!(
         &mut out,
         "// Closure policy: {}",
         closure_policy_label(&protocol.closure_policy)
-    )
-    .expect("write");
+    )?;
     if let Some(liveness) = &protocol.liveness_annotation {
-        writeln!(&mut out, "// Liveness: {liveness}").expect("write");
+        writeln!(&mut out, "// Liveness: {liveness}")?;
     }
-    writeln!(&mut out).expect("write");
+    writeln!(&mut out)?;
 
-    // --- Obligation record ---
-    generate_obligation_struct(&mut out, protocol);
+    for import in &protocol.rust.required_imports {
+        writeln!(&mut out, "{import}")?;
+    }
+    if !protocol.rust.required_imports.is_empty() {
+        writeln!(&mut out)?;
+    }
 
-    // --- Executor function ---
-    generate_executor(&mut out, protocol, producer_machine);
+    let obligation_type = generate_obligation_struct(&mut out, protocol, producer_machine)?;
 
-    // --- Feedback submitter(s) ---
-    generate_feedback_submitters(&mut out, protocol);
-
-    // --- Terminal classification helper (if producer has terminal phases) ---
-    if let Some(machine) = producer_machine {
-        if !machine.state.terminal_phases.is_empty() {
-            generate_terminal_classifier(&mut out, machine);
+    match protocol.rust.generation_mode {
+        ProtocolGenerationMode::Executor => {
+            generate_executor_helpers(&mut out, protocol, producer_machine, &obligation_type)?
         }
+        ProtocolGenerationMode::EffectExtractor => generate_effect_extractor_helpers(
+            &mut out,
+            protocol,
+            producer_machine,
+            composition,
+            machine_by_name,
+            &obligation_type,
+        )?,
+        ProtocolGenerationMode::ShellBridge => generate_shell_bridge_helpers(
+            &mut out,
+            protocol,
+            composition,
+            machine_by_name,
+            &obligation_type,
+        )?,
     }
 
-    out
+    Ok(out)
 }
 
-fn generate_obligation_struct(out: &mut String, protocol: &EffectHandoffProtocol) {
-    let struct_name = to_pascal_case(&protocol.name);
-
-    writeln!(
-        out,
-        "/// Obligation token for the `{}` protocol.",
-        protocol.name
-    )
-    .expect("write");
-    writeln!(
-        out,
-        "/// Captures correlation fields from the `{}` effect.",
-        protocol.effect_variant
-    )
-    .expect("write");
-    writeln!(out, "#[derive(Debug, Clone)]").expect("write");
-    writeln!(out, "pub struct {struct_name}Obligation {{").expect("write");
-
-    if protocol.correlation_fields.is_empty() {
-        writeln!(out, "    _private: (),").expect("write");
-    } else {
-        for field in &protocol.correlation_fields {
-            let rust_name = to_snake_case(field);
-            writeln!(out, "    pub {rust_name}: String,").expect("write");
-        }
-    }
-
-    writeln!(out, "}}").expect("write");
-    writeln!(out).expect("write");
-}
-
-fn generate_executor(
+fn generate_obligation_struct(
     out: &mut String,
     protocol: &EffectHandoffProtocol,
-    _producer_machine: Option<&MachineSchema>,
-) {
-    use meerkat_machine_schema::ProtocolGenerationMode;
-
+    producer_machine: &MachineSchema,
+) -> Result<String> {
     let obligation_type = format!("{}Obligation", to_pascal_case(&protocol.name));
+    let producer_effect = producer_machine
+        .effects
+        .variant_named(&protocol.effect_variant)
+        .context("producer effect variant missing")?;
 
-    match &protocol.generation_mode {
-        ProtocolGenerationMode::Executor => {
-            // Executor mode: generates a function that calls authority.apply() and
-            // returns effects + obligation. The exact authority type varies per
-            // machine, so we generate the contract shape with typed parameters.
-            let fn_name = format!("execute_{}", to_snake_case(&protocol.name));
+    writeln!(out, "#[derive(Debug, Clone)]")?;
+    writeln!(out, "pub struct {obligation_type} {{")?;
+    if protocol.obligation_fields.is_empty() {
+        writeln!(out, "    _private: (),")?;
+    } else {
+        for field in &protocol.obligation_fields {
+            let effect_field = producer_effect.field_named(field).with_context(|| {
+                format!("obligation field `{field}` missing from producer effect")
+            })?;
             writeln!(
                 out,
-                "/// Execute the `{}` effect through the authority and return an obligation token.",
-                protocol.effect_variant
-            )
-            .expect("write");
-            writeln!(
-                out,
-                "/// The caller must eventually close this obligation via one of the feedback submitters."
-            )
-            .expect("write");
-            writeln!(
-                out,
-                "/// Closure policy: {}.",
-                closure_policy_label(&protocol.closure_policy)
-            )
-            .expect("write");
-
-            if protocol.correlation_fields.is_empty() {
-                writeln!(
-                    out,
-                    "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
-                )
-                .expect("write");
-            } else {
-                let params: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|f| format!("{}: String", to_snake_case(f)))
-                    .collect();
-                let fields: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|f| to_snake_case(f))
-                    .collect();
-                writeln!(
-                    out,
-                    "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
-                    params.join(", "),
-                    fields.join(", ")
-                )
-                .expect("write");
-            }
-        }
-        ProtocolGenerationMode::EffectExtractor => {
-            // Effect-extractor mode: scans already-emitted effects for the
-            // handoff-annotated variant and extracts the obligation token.
-            let fn_name = format!("extract_{}", to_snake_case(&protocol.name));
-            writeln!(
-                out,
-                "/// Extract the `{}` obligation from already-emitted effects.",
-                protocol.effect_variant
-            )
-            .expect("write");
-            writeln!(
-                out,
-                "/// Scans the effect list for `{}` and creates the obligation token.",
-                protocol.effect_variant
-            )
-            .expect("write");
-
-            if protocol.correlation_fields.is_empty() {
-                writeln!(
-                    out,
-                    "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
-                )
-                .expect("write");
-            } else {
-                let params: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|f| format!("{}: String", to_snake_case(f)))
-                    .collect();
-                let fields: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|f| to_snake_case(f))
-                    .collect();
-                writeln!(
-                    out,
-                    "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
-                    params.join(", "),
-                    fields.join(", ")
-                )
-                .expect("write");
-            }
-        }
-        ProtocolGenerationMode::ShellBridge => {
-            // Shell-bridge mode: wraps authority-derived data into an obligation
-            // token for cross-machine handoff. The data comes from the producing
-            // machine's effect, not from a direct authority.apply() call.
-            let fn_name = format!("accept_{}", to_snake_case(&protocol.name));
-            writeln!(
-                out,
-                "/// Accept authority-derived `{}` data and create an obligation token.",
-                protocol.effect_variant
-            )
-            .expect("write");
-            writeln!(
-                out,
-                "/// The caller provides data extracted from the producing machine's effect."
-            )
-            .expect("write");
-
-            if protocol.correlation_fields.is_empty() {
-                writeln!(
-                    out,
-                    "pub fn {fn_name}() -> {obligation_type} {{\n    {obligation_type} {{ _private: () }}\n}}"
-                )
-                .expect("write");
-            } else {
-                let params: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|f| format!("{}: String", to_snake_case(f)))
-                    .collect();
-                let fields: Vec<String> = protocol
-                    .correlation_fields
-                    .iter()
-                    .map(|f| to_snake_case(f))
-                    .collect();
-                writeln!(
-                    out,
-                    "pub fn {fn_name}({}) -> {obligation_type} {{\n    {obligation_type} {{ {} }}\n}}",
-                    params.join(", "),
-                    fields.join(", ")
-                )
-                .expect("write");
-            }
+                "    pub {}: {},",
+                to_snake_case(field),
+                rust_type(&effect_field.ty)
+            )?;
         }
     }
-    writeln!(out).expect("write");
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    Ok(obligation_type)
 }
 
-fn generate_feedback_submitters(out: &mut String, protocol: &EffectHandoffProtocol) {
-    let obligation_type = format!("{}Obligation", to_pascal_case(&protocol.name));
+fn generate_executor_helpers(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    obligation_type: &str,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let authority_type = short_type(
+        rust.authority_type_path
+            .as_deref()
+            .context("executor authority type missing")?,
+    );
+    let input_enum = short_type(
+        rust.input_enum_path
+            .as_deref()
+            .context("executor input enum missing")?,
+    );
+    let effect_enum = short_type(
+        rust.effect_enum_path
+            .as_deref()
+            .context("executor effect enum missing")?,
+    );
+    let error_type = short_type(
+        rust.error_type_path
+            .as_deref()
+            .context("executor error type missing")?,
+    );
+    let trigger_variant_name = rust
+        .executor_trigger_input_variant
+        .as_deref()
+        .context("executor trigger variant missing")?;
+    let trigger_variant = producer_machine
+        .inputs
+        .variant_named(trigger_variant_name)
+        .context("executor trigger variant missing from producer machine")?;
+    let producer_effect = producer_machine
+        .effects
+        .variant_named(&protocol.effect_variant)
+        .context("producer effect missing")?;
+
+    let result_type = format!("{}ExecutionResult", to_pascal_case(&protocol.name));
+    writeln!(out, "#[derive(Debug)]")?;
+    writeln!(out, "pub struct {result_type} {{")?;
+    writeln!(out, "    pub effects: Vec<{effect_enum}>,")?;
+    match protocol.closure_policy {
+        ClosurePolicy::TerminalClosure => {
+            writeln!(out, "    pub obligation: Option<{obligation_type}>,")?;
+        }
+        _ => {
+            writeln!(out, "    pub obligation: {obligation_type},")?;
+        }
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    let execute_name = format!("execute_{}", to_snake_case(trigger_variant_name));
+    let trigger_params = trigger_variant
+        .fields
+        .iter()
+        .map(|field| format!("{}: {}", to_snake_case(&field.name), rust_type(&field.ty)))
+        .collect::<Vec<_>>();
+    writeln!(
+        out,
+        "pub fn {execute_name}(authority: &mut {authority_type}{}{}) -> Result<{result_type}, {error_type}> {{",
+        if trigger_params.is_empty() { "" } else { ", " },
+        trigger_params.join(", ")
+    )?;
+    writeln!(
+        out,
+        "    let transition = authority.apply({}{}{})?;",
+        input_enum,
+        "::",
+        ctor_field_list(trigger_variant)
+    )?;
+    writeln!(
+        out,
+        "    let obligation = transition.effects.iter().find_map(|effect| match effect {{"
+    )?;
+    writeln!(
+        out,
+        "        {}{} => Some({}),",
+        effect_enum,
+        match_pattern_for_variant(producer_effect),
+        obligation_ctor_expr(protocol, obligation_type)
+    )?;
+    writeln!(out, "        _ => None,")?;
+    writeln!(out, "    }});")?;
+    match protocol.closure_policy {
+        ClosurePolicy::TerminalClosure => {
+            writeln!(
+                out,
+                "    Ok({result_type} {{ effects: transition.effects, obligation }})"
+            )?;
+        }
+        _ => {
+            writeln!(
+                out,
+                "    Ok({result_type} {{ effects: transition.effects, obligation: obligation.expect(\"protocol effect `{}` must be emitted\") }})",
+                protocol.effect_variant
+            )?;
+        }
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
 
     for feedback in &protocol.allowed_feedback_inputs {
-        let fn_name = format!("submit_{}", to_snake_case(&feedback.input_variant));
-
-        writeln!(
+        generate_feedback_submitter(
             out,
-            "/// Submit `{}` feedback to `{}`, consuming the obligation token.",
-            feedback.input_variant, feedback.machine_instance
-        )
-        .expect("write");
-        writeln!(
-            out,
-            "/// This closes (or partially closes) the `{}` obligation.",
-            protocol.name
-        )
-        .expect("write");
-        writeln!(out, "///").expect("write");
-        writeln!(
-            out,
-            "/// Target machine instance: `{}`",
-            feedback.machine_instance
-        )
-        .expect("write");
-        writeln!(
-            out,
-            "/// Target input variant: `{}`",
-            feedback.input_variant
-        )
-        .expect("write");
-
-        // Generate a feedback submitter that consumes the obligation by move.
-        // The actual authority.apply() call is machine-specific — the generated
-        // function enforces the obligation contract (move semantics), and the
-        // hand-written body in the checked-in file provides the authority call.
-        writeln!(
-            out,
-            "pub fn {fn_name}(_obligation: {obligation_type}) {{\n    // Obligation consumed by move semantics.\n    // The hand-written implementation calls authority.apply({input})\n    // on the {instance} machine instance.\n}}",
-            input = feedback.input_variant,
-            instance = feedback.machine_instance,
-        )
-        .expect("write");
-        writeln!(out).expect("write");
+            protocol,
+            feedback,
+            producer_machine
+                .inputs
+                .variant_named(&feedback.input_variant)?,
+            FeedbackReturnKind::Effects,
+            obligation_type,
+        )?;
+        if feedback
+            .field_bindings
+            .iter()
+            .all(|binding| matches!(binding.source, FeedbackFieldSource::OwnerContext(_)))
+        {
+            generate_notify_helper(
+                out,
+                protocol,
+                feedback,
+                producer_machine
+                    .inputs
+                    .variant_named(&feedback.input_variant)?,
+                FeedbackReturnKind::Effects,
+            )?;
+        }
     }
+
+    Ok(())
+}
+
+fn generate_effect_extractor_helpers(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    producer_machine: &MachineSchema,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+    obligation_type: &str,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let effect_enum = short_type(
+        rust.effect_enum_path
+            .as_deref()
+            .context("effect extractor effect enum missing")?,
+    );
+    let producer_effect = producer_machine
+        .effects
+        .variant_named(&protocol.effect_variant)
+        .context("producer effect missing")?;
+
+    writeln!(
+        out,
+        "pub fn extract_obligations(effects: &[{effect_enum}]) -> Vec<{obligation_type}> {{"
+    )?;
+    writeln!(out, "    effects")?;
+    writeln!(out, "        .iter()")?;
+    writeln!(out, "        .filter_map(|effect| match effect {{")?;
+    writeln!(
+        out,
+        "            {}{} => Some({}),",
+        effect_enum,
+        match_pattern_for_variant(producer_effect),
+        obligation_ctor_expr(protocol, obligation_type)
+    )?;
+    writeln!(out, "            _ => None,")?;
+    writeln!(out, "        }})")?;
+    writeln!(out, "        .collect()")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    for feedback in &protocol.allowed_feedback_inputs {
+        let target_machine =
+            machine_for_instance(composition, machine_by_name, &feedback.machine_instance)?;
+        generate_feedback_submitter(
+            out,
+            protocol,
+            feedback,
+            target_machine
+                .inputs
+                .variant_named(&feedback.input_variant)?,
+            FeedbackReturnKind::Transition(std::marker::PhantomData),
+            obligation_type,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn generate_shell_bridge_helpers(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &MachineSchema>,
+    obligation_type: &str,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let bridge_source = short_type(
+        rust.bridge_source_type_path
+            .as_deref()
+            .context("shell bridge source type missing")?,
+    );
+    let accept_name = format!("accept_{}", to_snake_case(&protocol.effect_variant));
+
+    writeln!(
+        out,
+        "pub fn {accept_name}(source: {bridge_source}) -> {obligation_type} {{"
+    )?;
+    writeln!(out, "    {obligation_type} {{")?;
+    if protocol.obligation_fields.is_empty() {
+        writeln!(out, "        _private: (),")?;
+    } else {
+        for field in &protocol.obligation_fields {
+            let rust_field = to_snake_case(field);
+            writeln!(out, "        {rust_field}: source.{rust_field},")?;
+        }
+    }
+    writeln!(out, "    }}")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    for feedback in &protocol.allowed_feedback_inputs {
+        let target_machine =
+            machine_for_instance(composition, machine_by_name, &feedback.machine_instance)?;
+        generate_feedback_submitter(
+            out,
+            protocol,
+            feedback,
+            target_machine
+                .inputs
+                .variant_named(&feedback.input_variant)?,
+            FeedbackReturnKind::Transition(std::marker::PhantomData),
+            obligation_type,
+        )?;
+    }
+
+    Ok(())
+}
+
+enum FeedbackReturnKind<'a> {
+    Effects,
+    Transition(std::marker::PhantomData<&'a MachineSchema>),
+}
+
+fn generate_feedback_submitter(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    feedback: &meerkat_machine_schema::FeedbackInputRef,
+    target_variant: &meerkat_machine_schema::VariantSchema,
+    return_kind: FeedbackReturnKind<'_>,
+    obligation_type: &str,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let authority_type = short_type(
+        rust.authority_type_path
+            .as_deref()
+            .context("feedback authority type missing")?,
+    );
+    let input_enum = short_type(
+        rust.input_enum_path
+            .as_deref()
+            .context("feedback input enum missing")?,
+    );
+    let effect_enum = rust.effect_enum_path.as_deref().map(short_type);
+    let transition_type = rust.transition_type_path.as_deref().map(short_type);
+    let error_type = short_type(
+        rust.error_type_path
+            .as_deref()
+            .context("feedback error type missing")?,
+    );
+    let owner_params = owner_context_params(target_variant, feedback);
+    let fn_name = format!("submit_{}", to_snake_case(&feedback.input_variant));
+    let return_type = match return_kind {
+        FeedbackReturnKind::Effects => format!(
+            "Result<Vec<{}>, {}>",
+            effect_enum.context("feedback effects enum missing")?,
+            error_type
+        ),
+        FeedbackReturnKind::Transition(_) => format!(
+            "Result<{}, {}>",
+            transition_type.context("feedback transition type missing")?,
+            error_type
+        ),
+    };
+    writeln!(
+        out,
+        "pub fn {fn_name}(authority: &mut {authority_type}, obligation: {obligation_type}{}{}) -> {return_type} {{",
+        if owner_params.is_empty() { "" } else { ", " },
+        owner_params.join(", ")
+    )?;
+    writeln!(
+        out,
+        "    let transition = authority.apply({}{}{})?;",
+        input_enum,
+        "::",
+        ctor_field_list_from_bindings(target_variant, feedback)
+    )?;
+    match return_kind {
+        FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
+        FeedbackReturnKind::Transition(_) => writeln!(out, "    Ok(transition)")?,
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    Ok(())
+}
+
+fn generate_notify_helper(
+    out: &mut String,
+    protocol: &EffectHandoffProtocol,
+    feedback: &meerkat_machine_schema::FeedbackInputRef,
+    target_variant: &meerkat_machine_schema::VariantSchema,
+    return_kind: FeedbackReturnKind<'_>,
+) -> Result<()> {
+    let rust = &protocol.rust;
+    let authority_type = short_type(
+        rust.authority_type_path
+            .as_deref()
+            .context("notify authority type missing")?,
+    );
+    let input_enum = short_type(
+        rust.input_enum_path
+            .as_deref()
+            .context("notify input enum missing")?,
+    );
+    let effect_enum = rust.effect_enum_path.as_deref().map(short_type);
+    let error_type = short_type(
+        rust.error_type_path
+            .as_deref()
+            .context("notify error type missing")?,
+    );
+    let owner_params = owner_context_params(target_variant, feedback);
+    let fn_name = format!("notify_{}", to_snake_case(&feedback.input_variant));
+    let return_type = match return_kind {
+        FeedbackReturnKind::Effects => format!(
+            "Result<Vec<{}>, {}>",
+            effect_enum.context("notify effects enum missing")?,
+            error_type
+        ),
+        FeedbackReturnKind::Transition(_) => format!(
+            "Result<{}, {}>",
+            short_type(
+                protocol
+                    .rust
+                    .transition_type_path
+                    .as_deref()
+                    .context("notify transition type missing")?,
+            ),
+            error_type
+        ),
+    };
+
+    writeln!(
+        out,
+        "pub fn {fn_name}(authority: &mut {authority_type}{}{}) -> {return_type} {{",
+        if owner_params.is_empty() { "" } else { ", " },
+        owner_params.join(", ")
+    )?;
+    writeln!(
+        out,
+        "    let transition = authority.apply({}{}{})?;",
+        input_enum,
+        "::",
+        ctor_field_list_from_bindings_without_obligation(target_variant, feedback)
+    )?;
+    match return_kind {
+        FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
+        FeedbackReturnKind::Transition(_) => writeln!(out, "    Ok(transition)")?,
+    }
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+
+    Ok(())
+}
+
+fn machine_for_instance<'a>(
+    composition: &CompositionSchema,
+    machine_by_name: &std::collections::BTreeMap<&str, &'a MachineSchema>,
+    instance_id: &str,
+) -> Result<&'a MachineSchema> {
+    let instance = composition
+        .machines
+        .iter()
+        .find(|instance| instance.instance_id == instance_id)
+        .with_context(|| format!("machine instance `{instance_id}` missing from composition"))?;
+    machine_by_name
+        .get(instance.machine_name.as_str())
+        .copied()
+        .with_context(|| format!("machine `{}` missing from registry", instance.machine_name))
+}
+
+fn short_type(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
+fn rust_type(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "bool".into(),
+        TypeRef::U32 => "u32".into(),
+        TypeRef::U64 => "u64".into(),
+        TypeRef::String => "String".into(),
+        TypeRef::Named(name) | TypeRef::Enum(name) => name.clone(),
+        TypeRef::Option(inner) => format!("Option<{}>", rust_type(inner)),
+        TypeRef::Set(inner) | TypeRef::Seq(inner) => format!("Vec<{}>", rust_type(inner)),
+        TypeRef::Map(key, value) => {
+            format!(
+                "std::collections::BTreeMap<{}, {}>",
+                rust_type(key),
+                rust_type(value)
+            )
+        }
+    }
+}
+
+fn owner_context_params(
+    target_variant: &meerkat_machine_schema::VariantSchema,
+    feedback: &meerkat_machine_schema::FeedbackInputRef,
+) -> Vec<String> {
+    let mut params = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for binding in &feedback.field_bindings {
+        if let FeedbackFieldSource::OwnerContext(name) = &binding.source
+            && seen.insert(name.clone())
+        {
+            let field = target_variant
+                .field_named(&binding.input_field)
+                .expect("validated feedback binding field");
+            params.push(format!("{}: {}", to_snake_case(name), rust_type(&field.ty)));
+        }
+    }
+    params
+}
+
+fn ctor_field_list(variant: &meerkat_machine_schema::VariantSchema) -> String {
+    if variant.fields.is_empty() {
+        variant.name.clone()
+    } else {
+        let fields = variant
+            .fields
+            .iter()
+            .map(|field| {
+                let name = to_snake_case(&field.name);
+                format!("{}: {}", field.name, name)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{} {{ {} }}", variant.name, fields)
+    }
+}
+
+fn ctor_field_list_from_bindings(
+    target_variant: &meerkat_machine_schema::VariantSchema,
+    feedback: &meerkat_machine_schema::FeedbackInputRef,
+) -> String {
+    if target_variant.fields.is_empty() {
+        return target_variant.name.clone();
+    }
+
+    let fields = target_variant
+        .fields
+        .iter()
+        .map(|field| {
+            let binding = feedback
+                .field_bindings
+                .iter()
+                .find(|binding| binding.input_field == field.name)
+                .expect("validated feedback binding");
+            let value = match &binding.source {
+                FeedbackFieldSource::ObligationField(source) => {
+                    format!("obligation.{}", to_snake_case(source))
+                }
+                FeedbackFieldSource::OwnerContext(name) => to_snake_case(name),
+            };
+            format!("{}: {}", field.name, value)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} {{ {} }}", target_variant.name, fields)
+}
+
+fn ctor_field_list_from_bindings_without_obligation(
+    target_variant: &meerkat_machine_schema::VariantSchema,
+    feedback: &meerkat_machine_schema::FeedbackInputRef,
+) -> String {
+    if target_variant.fields.is_empty() {
+        return target_variant.name.clone();
+    }
+
+    let fields = target_variant
+        .fields
+        .iter()
+        .map(|field| {
+            let binding = feedback
+                .field_bindings
+                .iter()
+                .find(|binding| binding.input_field == field.name)
+                .expect("validated feedback binding");
+            let value = match &binding.source {
+                FeedbackFieldSource::OwnerContext(name) => to_snake_case(name),
+                FeedbackFieldSource::ObligationField(source) => {
+                    panic!("notify helper cannot synthesize obligation field `{source}`")
+                }
+            };
+            format!("{}: {}", field.name, value)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} {{ {} }}", target_variant.name, fields)
+}
+
+fn match_pattern_for_variant(variant: &meerkat_machine_schema::VariantSchema) -> String {
+    if variant.fields.is_empty() {
+        format!("::{}", variant.name)
+    } else {
+        let fields = variant
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("::{} {{ {} }}", variant.name, fields)
+    }
+}
+
+fn obligation_ctor_expr(protocol: &EffectHandoffProtocol, obligation_type: &str) -> String {
+    if protocol.obligation_fields.is_empty() {
+        return format!("{obligation_type} {{ _private: () }}");
+    }
+
+    let fields = protocol
+        .obligation_fields
+        .iter()
+        .map(|field| {
+            let rust_name = to_snake_case(field);
+            format!("{rust_name}: {rust_name}.clone()")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{obligation_type} {{ {fields} }}")
 }
 
 /// Generate a standalone terminal surface mapping module for TurnExecutionMachine.

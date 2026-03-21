@@ -112,6 +112,7 @@ comms_drain_EnsureRunningFromInactive(arg_mode) ==
        /\ comms_drain_phase' = "Starting"
        /\ comms_drain_mode' = Some(packet.payload.mode)
        /\ comms_drain_suppresses_turn_boundary_drain' = TRUE
+       /\ UNCHANGED << witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -277,6 +278,7 @@ comms_drain_EnsureRunningFromExitedRespawnable(arg_mode) ==
        /\ comms_drain_phase' = "Starting"
        /\ comms_drain_mode' = Some(packet.payload.mode)
        /\ comms_drain_suppresses_turn_boundary_drain' = TRUE
+       /\ UNCHANGED << witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -316,6 +318,7 @@ comms_drain_EnsureRunningFromStopped(arg_mode) ==
        /\ comms_drain_phase' = "Starting"
        /\ comms_drain_mode' = Some(packet.payload.mode)
        /\ comms_drain_suppresses_turn_boundary_drain' = TRUE
+       /\ UNCHANGED << witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -481,24 +484,21 @@ spawn_protocol_covered == TRUE
 abort_protocol_covered == TRUE
 
 NoOpenObligationsOnTerminal_comms_drain_spawn == (comms_drain_phase = "Stopped") => obligation_comms_drain_spawn = {}
-NoFeedbackWithoutObligation_comms_drain_spawn == \A input_packet \in observed_inputs : (((input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskSpawned") \/ (input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskExited")) => (\E record \in obligation_comms_drain_spawn : (record.mode = input_packet.payload.mode)))
+NoFeedbackWithoutObligation_comms_drain_spawn == \A input_packet \in observed_inputs : ((((input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskSpawned")) => (obligation_comms_drain_spawn /= {})) /\ (((input_packet.machine = "comms_drain" /\ input_packet.variant = "TaskExited")) => (obligation_comms_drain_spawn /= {})))
 NoOpenObligationsOnTerminal_comms_drain_abort == (comms_drain_phase = "Stopped") => obligation_comms_drain_abort = {}
-NoFeedbackWithoutObligation_comms_drain_abort == \A input_packet \in observed_inputs : (((input_packet.machine = "comms_drain" /\ input_packet.variant = "AbortObserved")) => obligation_comms_drain_abort /= {})
+NoFeedbackWithoutObligation_comms_drain_abort == \A input_packet \in observed_inputs : ((((input_packet.machine = "comms_drain" /\ input_packet.variant = "AbortObserved")) => (obligation_comms_drain_abort /= {})))
 
 \* Liveness: eventual feedback under task-scheduling fairness
 OwnerFeedback_comms_drain_spawn ==
     /\ obligation_comms_drain_spawn /= {}
     /\ \E token \in obligation_comms_drain_spawn :
-        /\ \E fb_variant \in {1, 2} :
-           /\ pending_inputs' = Append(pending_inputs, CASE fb_variant = 1 -> [machine |-> "comms_drain", variant |-> "TaskSpawned", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [mode |-> token.mode]] [] fb_variant = 2 -> [machine |-> "comms_drain", variant |-> "TaskExited", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [mode |-> token.mode]])
-           /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \ {token}
+        /\ ((/\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "TaskSpawned", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [tag |-> "unit"]]) /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \ {token}) \/ \E owner_ctx_reason \in DrainExitReasonValues : (/\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "TaskExited", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "SpawnDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [reason |-> owner_ctx_reason]]) /\ obligation_comms_drain_spawn' = obligation_comms_drain_spawn \ {token}))
     /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_abort, model_step_count, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 OwnerFeedback_comms_drain_abort ==
     /\ obligation_comms_drain_abort /= {}
     /\ \E token \in obligation_comms_drain_abort :
-        /\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "AbortObserved", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "AbortDrainTask", source_route |-> "none", effect_id |-> token, payload |-> "feedback"])
-        /\ obligation_comms_drain_abort' = obligation_comms_drain_abort \ {token}
+        /\ ((/\ pending_inputs' = Append(pending_inputs, [machine |-> "comms_drain", variant |-> "AbortObserved", source_kind |-> "owner", source_machine |-> "comms_drain", source_effect |-> "AbortDrainTask", source_route |-> "none", effect_id |-> token, payload |-> [tag |-> "unit"]]) /\ obligation_comms_drain_abort' = obligation_comms_drain_abort \ {token}))
     /\ UNCHANGED << comms_drain_phase, comms_drain_mode, comms_drain_suppresses_turn_boundary_drain, obligation_comms_drain_spawn, model_step_count, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 CoverageInstrumentation == TRUE

@@ -3,7 +3,8 @@ use crate::{
     CompositionInvariantKind, CompositionSchema, CompositionStateLimits, CompositionWitness,
     CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
-    EntryInput, Expr, FeedbackInputRef, MachineInstance, ProtocolGenerationMode, Route,
+    EntryInput, Expr, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
+    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
     RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
 };
 use std::collections::BTreeMap;
@@ -1867,22 +1868,49 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
             effect_variant: "ScheduleSurfaceCompletion".into(),
             realizing_actor: "surface_host".into(),
             correlation_fields: vec!["surface_id".into()],
+            obligation_fields: vec![
+                "surface_id".into(),
+                "operation".into(),
+                "applied_at_turn".into(),
+            ],
             allowed_feedback_inputs: vec![
                 FeedbackInputRef {
                     machine_instance: "external_tool_surface".into(),
                     input_variant: "PendingSucceeded".into(),
+                    field_bindings: vec![
+                        binding("surface_id", obligation_field("surface_id")),
+                        binding("applied_at_turn", obligation_field("applied_at_turn")),
+                    ],
                 },
                 FeedbackInputRef {
                     machine_instance: "external_tool_surface".into(),
                     input_variant: "PendingFailed".into(),
+                    field_bindings: vec![
+                        binding("surface_id", obligation_field("surface_id")),
+                        binding("applied_at_turn", obligation_field("applied_at_turn")),
+                    ],
                 },
             ],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "eventual feedback under surface connection liveness".into(),
             ),
-            generation_mode: ProtocolGenerationMode::EffectExtractor,
-            target_crate: Some("meerkat-mcp/src/generated".into()),
+            rust: protocol_rust(
+                "meerkat-mcp/src/generated/protocol_surface_completion.rs",
+                ProtocolGenerationMode::EffectExtractor,
+                Some("crate::external_tool_surface_authority::ExternalToolSurfaceAuthority"),
+                Some("crate::external_tool_surface_authority::ExternalToolSurfaceMutator"),
+                Some("crate::external_tool_surface_authority::ExternalToolSurfaceInput"),
+                Some("crate::external_tool_surface_authority::ExternalToolSurfaceEffect"),
+                Some("crate::external_tool_surface_authority::ExternalToolSurfaceTransition"),
+                Some("crate::external_tool_surface_authority::ExternalToolSurfaceError"),
+                None,
+                None,
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition, SurfaceDeltaOperation, SurfaceId, TurnNumber};",
+                ],
+            ),
         }],
         entry_inputs: vec![
             EntryInput {
@@ -3021,16 +3049,39 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
             effect_variant: "WaitAllSatisfied".into(),
             realizing_actor: "agent_loop".into(),
             correlation_fields: vec!["operation_ids".into()],
+            obligation_fields: vec!["wait_request_id".into(), "operation_ids".into()],
             allowed_feedback_inputs: vec![FeedbackInputRef {
                 machine_instance: "turn_execution".into(),
                 input_variant: "OpsBarrierSatisfied".into(),
+                field_bindings: vec![
+                    binding("run_id", owner_context("run_id")),
+                    binding("operation_ids", obligation_field("operation_ids")),
+                ],
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "eventual feedback under task-scheduling fairness".into(),
             ),
-            generation_mode: ProtocolGenerationMode::ShellBridge,
-            target_crate: None,
+            rust: protocol_rust(
+                "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::turn_execution_authority::TurnExecutionAuthority"),
+                Some("crate::turn_execution_authority::TurnExecutionMutator"),
+                Some("crate::turn_execution_authority::TurnExecutionInput"),
+                None,
+                Some("crate::turn_execution_authority::TurnExecutionTransition"),
+                Some("crate::error::AgentError"),
+                None,
+                Some("crate::ops_lifecycle::WaitAllSatisfied"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::AgentError;",
+                    "use crate::lifecycle::identifiers::{RunId, WaitRequestId};",
+                    "use crate::ops::OperationId;",
+                    "use crate::ops_lifecycle::WaitAllSatisfied;",
+                    "use crate::turn_execution_authority::{TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition};",
+                ],
+            ),
         }],
         entry_inputs: vec![
             EntryInput {
@@ -3041,7 +3092,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
             EntryInput {
                 name: "ops_wait_all".into(),
                 machine: "ops_lifecycle".into(),
-                input_variant: "WaitAll".into(),
+                input_variant: "BeginWaitAll".into(),
             },
             EntryInput {
                 name: "turn_ops_barrier_satisfied".into(),
@@ -3391,24 +3442,6 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 }],
                 delivery: RouteDelivery::Immediate,
             },
-            // Barrier satisfaction: OpsLifecycle WaitAllSatisfied -> TurnExecution OpsBarrierSatisfied
-            // This is an owner-mediated handoff: the agent loop provides run_id at runtime
-            // because OpsLifecycle has no knowledge of TurnExecution's run concept.
-            // The protocol helper (ops_barrier_satisfaction) enforces the obligation.
-            Route {
-                name: "ops_barrier_satisfied_enters_turn_execution".into(),
-                from_machine: "ops_lifecycle".into(),
-                effect_variant: "WaitAllSatisfied".into(),
-                to: RouteTarget {
-                    machine: "turn_execution".into(),
-                    input_variant: "OpsBarrierSatisfied".into(),
-                },
-                bindings: vec![RouteFieldBinding {
-                    to_field: "run_id".into(),
-                    source: RouteBindingSource::OwnerProvided,
-                }],
-                delivery: RouteDelivery::Immediate,
-            },
         ],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
@@ -3524,7 +3557,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     protocol_name: "ops_barrier_satisfaction".into(),
                 },
                 statement:
-                    "OpsLifecycle WaitAllSatisfied effect is covered by the ops_barrier_satisfaction handoff protocol, routing barrier satisfaction to TurnExecution"
+                    "OpsLifecycle WaitAllSatisfied effect is covered by the ops_barrier_satisfaction handoff protocol, requiring owner feedback before TurnExecution advances"
                         .into(),
                 references_machines: vec![
                     "ops_lifecycle".into(),
@@ -4001,8 +4034,8 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     map_limit: 2,
                 },
             },
-            // Barrier satisfaction: tool loop with barrier ops triggers
-            // OpsLifecycle WaitAllSatisfied -> TurnExecution OpsBarrierSatisfied
+            // Barrier satisfaction: tool loop with barrier ops triggers the
+            // authority-owned wait lifecycle, then owner feedback closes the seam.
             CompositionWitness {
                 name: "barrier_tool_loop_path".into(),
                 preload_inputs: vec![
@@ -4097,12 +4130,16 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                                 expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
                             },
                             CompositionWitnessField {
+                                field: "barrier_operation_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                            CompositionWitnessField {
                                 field: "has_barrier_ops".into(),
                                 expr: Expr::Bool(true),
                             },
                         ],
                     },
-                    // OpsLifecycle completes -> shell calls WaitAll
+                    // OpsLifecycle completes -> shell begins the authority-owned wait lifecycle.
                     CompositionWitnessInput {
                         machine: "ops_lifecycle".into(),
                         input_variant: "CompleteOperation".into(),
@@ -4113,20 +4150,32 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     },
                     CompositionWitnessInput {
                         machine: "ops_lifecycle".into(),
-                        input_variant: "WaitAll".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "operation_ids".into(),
-                            expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
-                        }],
+                        input_variant: "BeginWaitAll".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "wait_request_id".into(),
+                                expr: Expr::String("wait_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
                     },
-                    // OpsBarrierSatisfied feeds into TurnExecution
+                    // Owner feedback feeds the validated barrier set into TurnExecution.
                     CompositionWitnessInput {
                         machine: "turn_execution".into(),
                         input_variant: "OpsBarrierSatisfied".into(),
-                        fields: vec![CompositionWitnessField {
-                            field: "run_id".into(),
-                            expr: Expr::String("runid_1".into()),
-                        }],
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
                     },
                     // ToolCallsResolved -> DrainingBoundary
                     CompositionWitnessInput {
@@ -4169,7 +4218,6 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     "admitted_op_work_enters_ingress".into(),
                     "ingress_ready_starts_runtime_control".into(),
                     "runtime_control_starts_execution".into(),
-                    "ops_barrier_satisfied_enters_turn_execution".into(),
                     "execution_boundary_updates_ingress".into(),
                     "execution_completion_updates_ingress".into(),
                     "execution_completion_notifies_control".into(),
@@ -4185,7 +4233,7 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                     witness_transition("ops_lifecycle", "RegisterOperation"),
                     witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
                     witness_transition("ops_lifecycle", "CompleteOperation"),
-                    witness_transition("ops_lifecycle", "WaitAll"),
+                    witness_transition("ops_lifecycle", "BeginWaitAllImmediate"),
                     witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
                     witness_transition("runtime_ingress", "AdmitQueuedSteer"),
                     witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
@@ -4202,14 +4250,14 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 ],
                 expected_transition_order: vec![
                     witness_transition_order(
-                        "turn_execution",
-                        "RegisterPendingOps",
                         "ops_lifecycle",
-                        "WaitAll",
+                        "CompleteOperation",
+                        "ops_lifecycle",
+                        "BeginWaitAllImmediate",
                     ),
                     witness_transition_order(
                         "ops_lifecycle",
-                        "WaitAll",
+                        "BeginWaitAllImmediate",
                         "turn_execution",
                         "OpsBarrierSatisfied",
                     ),
@@ -6355,16 +6403,39 @@ pub fn mob_bundle_composition() -> CompositionSchema {
             effect_variant: "WaitAllSatisfied".into(),
             realizing_actor: "agent_loop".into(),
             correlation_fields: vec!["operation_ids".into()],
+            obligation_fields: vec!["wait_request_id".into(), "operation_ids".into()],
             allowed_feedback_inputs: vec![FeedbackInputRef {
                 machine_instance: "turn_execution".into(),
                 input_variant: "OpsBarrierSatisfied".into(),
+                field_bindings: vec![
+                    binding("run_id", owner_context("run_id")),
+                    binding("operation_ids", obligation_field("operation_ids")),
+                ],
             }],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "eventual feedback under task-scheduling fairness".into(),
             ),
-            generation_mode: ProtocolGenerationMode::ShellBridge,
-            target_crate: None,
+            rust: protocol_rust(
+                "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::turn_execution_authority::TurnExecutionAuthority"),
+                Some("crate::turn_execution_authority::TurnExecutionMutator"),
+                Some("crate::turn_execution_authority::TurnExecutionInput"),
+                None,
+                Some("crate::turn_execution_authority::TurnExecutionTransition"),
+                Some("crate::error::AgentError"),
+                None,
+                Some("crate::ops_lifecycle::WaitAllSatisfied"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::AgentError;",
+                    "use crate::lifecycle::identifiers::{RunId, WaitRequestId};",
+                    "use crate::ops::OperationId;",
+                    "use crate::ops_lifecycle::WaitAllSatisfied;",
+                    "use crate::turn_execution_authority::{TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition};",
+                ],
+            ),
         }],
         entry_inputs: vec![
             EntryInput { name: "control_initialize".into(), machine: "runtime_control".into(), input_variant: "Initialize".into() },
@@ -8263,14 +8334,33 @@ pub fn ops_peer_bundle_composition() -> CompositionSchema {
             effect_variant: "WaitAllSatisfied".into(),
             realizing_actor: "agent_loop".into(),
             correlation_fields: vec!["operation_ids".into()],
+            obligation_fields: vec!["wait_request_id".into(), "operation_ids".into()],
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: Some(
                 "owner acknowledges barrier satisfaction; no turn-execution in this composition scope"
                     .into(),
             ),
-            generation_mode: ProtocolGenerationMode::ShellBridge,
-            target_crate: None,
+            rust: protocol_rust(
+                "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::turn_execution_authority::TurnExecutionAuthority"),
+                Some("crate::turn_execution_authority::TurnExecutionMutator"),
+                Some("crate::turn_execution_authority::TurnExecutionInput"),
+                None,
+                Some("crate::turn_execution_authority::TurnExecutionTransition"),
+                Some("crate::error::AgentError"),
+                None,
+                Some("crate::ops_lifecycle::WaitAllSatisfied"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::AgentError;",
+                    "use crate::lifecycle::identifiers::{RunId, WaitRequestId};",
+                    "use crate::ops::OperationId;",
+                    "use crate::ops_lifecycle::WaitAllSatisfied;",
+                    "use crate::turn_execution_authority::{TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition};",
+                ],
+            ),
         }],
         entry_inputs: vec![
             EntryInput {
@@ -8649,23 +8739,40 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
                 producer_instance: "comms_drain".into(),
                 effect_variant: "SpawnDrainTask".into(),
                 realizing_actor: "session_host".into(),
-                correlation_fields: vec!["mode".into()],
+                correlation_fields: vec![],
+                obligation_fields: vec!["mode".into()],
                 allowed_feedback_inputs: vec![
                     FeedbackInputRef {
                         machine_instance: "comms_drain".into(),
                         input_variant: "TaskSpawned".into(),
+                        field_bindings: vec![],
                     },
                     FeedbackInputRef {
                         machine_instance: "comms_drain".into(),
                         input_variant: "TaskExited".into(),
+                        field_bindings: vec![binding("reason", owner_context("reason"))],
                     },
                 ],
                 closure_policy: ClosurePolicy::AckRequired,
                 liveness_annotation: Some(
                     "eventual feedback under task-scheduling fairness".into(),
                 ),
-                generation_mode: ProtocolGenerationMode::Executor,
-                target_crate: None,
+                rust: protocol_rust(
+                    "meerkat-core/src/generated/protocol_comms_drain_spawn.rs",
+                    ProtocolGenerationMode::Executor,
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleAuthority"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleMutator"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleInput"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleEffect"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleTransition"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleError"),
+                    Some("EnsureRunning"),
+                    None,
+                    ProtocolHelperReturnShape::EffectsAndObligation,
+                    &[
+                        "use crate::comms_drain_lifecycle_authority::{CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError, CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainMode, DrainExitReason};",
+                    ],
+                ),
             },
             EffectHandoffProtocol {
                 name: "comms_drain_abort".into(),
@@ -8673,14 +8780,30 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
                 effect_variant: "AbortDrainTask".into(),
                 realizing_actor: "session_host".into(),
                 correlation_fields: vec![],
+                obligation_fields: vec![],
                 allowed_feedback_inputs: vec![FeedbackInputRef {
                     machine_instance: "comms_drain".into(),
                     input_variant: "AbortObserved".into(),
+                    field_bindings: vec![],
                 }],
                 closure_policy: ClosurePolicy::TerminalClosure,
                 liveness_annotation: None,
-                generation_mode: ProtocolGenerationMode::Executor,
-                target_crate: None,
+                rust: protocol_rust(
+                    "meerkat-core/src/generated/protocol_comms_drain_abort.rs",
+                    ProtocolGenerationMode::Executor,
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleAuthority"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleMutator"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleInput"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleEffect"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleTransition"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleError"),
+                    Some("StopRequested"),
+                    None,
+                    ProtocolHelperReturnShape::EffectsAndObligation,
+                    &[
+                        "use crate::comms_drain_lifecycle_authority::{CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError, CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainPhase};",
+                    ],
+                ),
             },
         ],
         entry_inputs: vec![
@@ -8985,5 +9108,51 @@ fn owner_actor(name: &str) -> ActorSchema {
     ActorSchema {
         name: name.into(),
         kind: ActorKind::Owner,
+    }
+}
+
+fn binding(input_field: &str, source: FeedbackFieldSource) -> FeedbackFieldBinding {
+    FeedbackFieldBinding {
+        input_field: input_field.into(),
+        source,
+    }
+}
+
+fn obligation_field(name: &str) -> FeedbackFieldSource {
+    FeedbackFieldSource::ObligationField(name.into())
+}
+
+fn owner_context(name: &str) -> FeedbackFieldSource {
+    FeedbackFieldSource::OwnerContext(name.into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn protocol_rust(
+    module_path: &str,
+    generation_mode: ProtocolGenerationMode,
+    authority_type_path: Option<&str>,
+    mutator_trait_path: Option<&str>,
+    input_enum_path: Option<&str>,
+    effect_enum_path: Option<&str>,
+    transition_type_path: Option<&str>,
+    error_type_path: Option<&str>,
+    executor_trigger_input_variant: Option<&str>,
+    bridge_source_type_path: Option<&str>,
+    helper_return_shape: ProtocolHelperReturnShape,
+    required_imports: &[&str],
+) -> ProtocolRustBinding {
+    ProtocolRustBinding {
+        module_path: module_path.into(),
+        generation_mode,
+        required_imports: required_imports.iter().map(|item| (*item).into()).collect(),
+        authority_type_path: authority_type_path.map(str::to_owned),
+        mutator_trait_path: mutator_trait_path.map(str::to_owned),
+        input_enum_path: input_enum_path.map(str::to_owned),
+        effect_enum_path: effect_enum_path.map(str::to_owned),
+        transition_type_path: transition_type_path.map(str::to_owned),
+        error_type_path: error_type_path.map(str::to_owned),
+        executor_trigger_input_variant: executor_trigger_input_variant.map(str::to_owned),
+        bridge_source_type_path: bridge_source_type_path.map(str::to_owned),
+        helper_return_shape,
     }
 }

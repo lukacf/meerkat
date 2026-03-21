@@ -23,6 +23,7 @@ use meerkat_core::comms::{
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::interaction::InteractionId;
+use meerkat_core::ops::{ToolDispatchOutcome, WaitPolicy};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
@@ -396,6 +397,17 @@ impl MockSessionService {
         tool_name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
+        self.dispatch_external_tool_outcome(session_id, tool_name, args)
+            .await
+            .map(|outcome| outcome.result)
+    }
+
+    async fn dispatch_external_tool_outcome(
+        &self,
+        session_id: &SessionId,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         let dispatcher = {
             let tools = self.external_tools_by_session.read().await;
             tools.get(session_id).cloned()
@@ -410,7 +422,6 @@ impl MockSessionService {
                 args: &raw,
             })
             .await
-            .map(|outcome| outcome.result)
     }
 
     async fn set_comms_behavior(&self, comms_name: &str, behavior: MockCommsBehavior) {
@@ -2867,21 +2878,23 @@ async fn test_mob_management_tools_dispatch_to_handle() {
         );
     }
 
-    service
-        .dispatch_external_tool(
+    let spawn_outcome = service
+        .dispatch_external_tool_outcome(
             &sid_1,
             "spawn_meerkat",
             serde_json::json!({"profile": "worker", "meerkat_id": "w-2"}),
         )
         .await
         .expect("spawn_meerkat tool");
+    assert_eq!(spawn_outcome.async_ops.len(), 1);
+    assert_eq!(spawn_outcome.async_ops[0].wait_policy, WaitPolicy::Detached);
     assert!(
         handle.get_member(&MeerkatId::from("w-2")).await.is_some(),
         "spawn_meerkat should create a new roster entry"
     );
 
-    service
-        .dispatch_external_tool(
+    let spawn_many_outcome = service
+        .dispatch_external_tool_outcome(
             &sid_1,
             "spawn_many_meerkats",
             serde_json::json!({
@@ -2893,6 +2906,13 @@ async fn test_mob_management_tools_dispatch_to_handle() {
         )
         .await
         .expect("spawn_many_meerkats tool");
+    assert_eq!(spawn_many_outcome.async_ops.len(), 2);
+    assert!(
+        spawn_many_outcome
+            .async_ops
+            .iter()
+            .all(|op| op.wait_policy == WaitPolicy::Detached)
+    );
     assert!(
         handle
             .get_member(&MeerkatId::from("w-many-1"))
@@ -2958,6 +2978,134 @@ async fn test_mob_management_tools_dispatch_to_handle() {
     assert!(
         handle.get_member(&MeerkatId::from("w-2")).await.is_none(),
         "retire_meerkat should remove roster entry"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let helper_id = MeerkatId::from("helper-spawn");
+    let result = handle
+        .spawn_helper(
+            helper_id.clone(),
+            "summarize this",
+            HelperOptions {
+                profile_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+        )
+        .await
+        .expect("spawn_helper succeeds");
+
+    let session_id = result.session_id.expect("helper session id");
+    assert!(
+        service.read(&session_id).await.is_err(),
+        "spawn_helper must retire the helper session once it returns"
+    );
+    assert!(
+        handle.get_member(&helper_id).await.is_none(),
+        "spawn_helper must remove the helper from the active roster once it returns"
+    );
+}
+
+#[tokio::test]
+async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_id = MeerkatId::from("fork-source");
+    let source_ref = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            source_id.clone(),
+            Some("source context".into()),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn source member");
+
+    let helper_id = MeerkatId::from("fork-helper");
+    let result = handle
+        .fork_helper(
+            &source_id,
+            helper_id.clone(),
+            "continue from source",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                profile_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+        )
+        .await
+        .expect("fork_helper succeeds");
+
+    let helper_session_id = result.session_id.expect("fork helper session id");
+    assert!(
+        service.read(&helper_session_id).await.is_err(),
+        "fork_helper must retire the helper session once it returns"
+    );
+    assert!(
+        handle.get_member(&helper_id).await.is_none(),
+        "fork_helper must remove the helper from the active roster once it returns"
+    );
+    assert_eq!(
+        source_ref.session_id().cloned(),
+        handle
+            .get_member(&source_id)
+            .await
+            .and_then(|entry| entry.member_ref.session_id().cloned()),
+        "fork_helper must not perturb the source member's canonical session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("respawn-target");
+    let original_ref = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn original member");
+    let old_session_id = original_ref
+        .session_id()
+        .cloned()
+        .expect("original session id");
+
+    let receipt = handle
+        .respawn(member_id.clone(), Some("resume task".into()))
+        .await
+        .expect("respawn succeeds");
+
+    assert_eq!(receipt.member_id, member_id);
+    assert_eq!(receipt.old_session_id, Some(old_session_id.clone()));
+    let new_session_id = receipt.new_session_id.clone().expect("new session id");
+    assert_ne!(new_session_id, old_session_id);
+    assert!(
+        service.read(&old_session_id).await.is_err(),
+        "respawn must archive the retired session before returning"
+    );
+
+    let snapshot = handle
+        .member_status(&receipt.member_id)
+        .await
+        .expect("member snapshot");
+    assert_eq!(snapshot.current_session_id, Some(new_session_id.clone()));
+    assert_eq!(
+        service
+            .read(&new_session_id)
+            .await
+            .expect("new session readable")
+            .state
+            .session_id,
+        new_session_id,
+        "respawn receipt must align with the canonical replacement session"
     );
 }
 

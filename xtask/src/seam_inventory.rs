@@ -1,6 +1,8 @@
 use std::fmt;
 
-use meerkat_machine_schema::{EffectDisposition, MachineSchema, canonical_machine_schemas};
+use meerkat_machine_schema::{
+    EffectDisposition, MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
+};
 
 /// Classification of an effect's ownership boundary characteristics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,20 @@ pub struct SeamEntry {
     pub disposition: String,
     pub classification: SeamClassification,
     pub notes: String,
+    pub explicitly_classified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractStatus {
+    Closed,
+    Open,
+}
+
+#[derive(Debug)]
+pub struct SurfaceContractEntry {
+    pub name: &'static str,
+    pub notes: &'static str,
+    pub status: ContractStatus,
 }
 
 /// Known effect classifications for canonical machines.
@@ -352,11 +368,11 @@ fn classify_effect(
     effect: &str,
     disposition: &EffectDisposition,
     known: &[(&str, &str, SeamClassification, &str)],
-) -> (SeamClassification, String) {
+) -> (SeamClassification, String, bool) {
     // Check known classifications first
     for (m, e, class, notes) in known {
         if *m == machine && *e == effect {
-            return (*class, notes.to_string());
+            return (*class, notes.to_string(), true);
         }
     }
 
@@ -365,10 +381,12 @@ fn classify_effect(
         EffectDisposition::Local => (
             SeamClassification::NoOwnerRealization,
             "Default: Local effect with no known owner feedback requirement".into(),
+            false,
         ),
         EffectDisposition::External => (
             SeamClassification::OwnerRealizationOnly,
             "Default: External effect assumed to need shell realization without feedback".into(),
+            false,
         ),
         EffectDisposition::Routed { .. } => {
             // Routed effects are handled by composition routes, not the seam inventory.
@@ -376,25 +394,119 @@ fn classify_effect(
             (
                 SeamClassification::NoOwnerRealization,
                 "Routed — handled by composition routes, not seam inventory".into(),
+                false,
             )
         }
     }
 }
 
+fn known_public_surface_contracts() -> Vec<SurfaceContractEntry> {
+    vec![
+        SurfaceContractEntry {
+            name: "mob::spawn_helper",
+            notes: "Contract-tested helper wrapper; return surface derives from canonical member/session terminal truth",
+            status: ContractStatus::Closed,
+        },
+        SurfaceContractEntry {
+            name: "mob::fork_helper",
+            notes: "Contract-tested helper wrapper; return surface derives from canonical member/session terminal truth",
+            status: ContractStatus::Closed,
+        },
+        SurfaceContractEntry {
+            name: "mob::respawn",
+            notes: "Contract-tested helper wrapper; receipt aligns with retired and replacement session truth",
+            status: ContractStatus::Closed,
+        },
+        SurfaceContractEntry {
+            name: "mob::wait_one",
+            notes: "Helper wrapper polls canonical member/session state rather than inventing terminal classification",
+            status: ContractStatus::Closed,
+        },
+        SurfaceContractEntry {
+            name: "mob::wait_all",
+            notes: "Helper wrapper composes wait_one over canonical member/session state",
+            status: ContractStatus::Closed,
+        },
+    ]
+}
+
 pub fn run_seam_inventory() -> anyhow::Result<()> {
     let machines = canonical_machine_schemas();
+    let compositions = canonical_composition_schemas();
     let known = known_classifications();
     let mut entries: Vec<SeamEntry> = Vec::new();
+    let public_surface_contracts = known_public_surface_contracts();
 
     for machine in &machines {
         collect_machine_seams(machine, &known, &mut entries);
     }
 
+    let protocol_index = compositions
+        .iter()
+        .flat_map(|composition| {
+            composition.handoff_protocols.iter().filter_map(|protocol| {
+                composition
+                    .machines
+                    .iter()
+                    .find(|instance| instance.instance_id == protocol.producer_instance)
+                    .map(|instance| {
+                        (
+                            (
+                                instance.machine_name.clone(),
+                                protocol.effect_variant.clone(),
+                            ),
+                            protocol.name.clone(),
+                        )
+                    })
+            })
+        })
+        .fold(
+            std::collections::BTreeMap::<(String, String), Vec<String>>::new(),
+            |mut acc, (key, protocol_name)| {
+                acc.entry(key).or_default().push(protocol_name);
+                acc
+            },
+        );
+
+    let unresolved_classification_debt = entries
+        .iter()
+        .filter(|entry| !entry.explicitly_classified)
+        .collect::<Vec<_>>();
+    let unresolved_protocol_debt = entries
+        .iter()
+        .filter(|entry| entry.classification == SeamClassification::OwnerRealizationPlusFeedback)
+        .filter(|entry| {
+            !protocol_index.contains_key(&(entry.machine.clone(), entry.effect_variant.clone()))
+        })
+        .collect::<Vec<_>>();
+    let unresolved_public_surface_alignment_debt = public_surface_contracts
+        .iter()
+        .filter(|entry| entry.status != ContractStatus::Closed)
+        .collect::<Vec<_>>();
+
     // Print the report
     print_report(&entries);
 
     // Summary statistics
-    print_summary(&entries);
+    print_summary(
+        &entries,
+        &unresolved_classification_debt,
+        &unresolved_protocol_debt,
+        &public_surface_contracts,
+        &unresolved_public_surface_alignment_debt,
+    );
+
+    if !unresolved_classification_debt.is_empty()
+        || !unresolved_protocol_debt.is_empty()
+        || !unresolved_public_surface_alignment_debt.is_empty()
+    {
+        anyhow::bail!(
+            "seam inventory has unresolved debt: classification={}, protocol={}, public_surface={}",
+            unresolved_classification_debt.len(),
+            unresolved_protocol_debt.len(),
+            unresolved_public_surface_alignment_debt.len()
+        );
+    }
 
     Ok(())
 }
@@ -413,7 +525,7 @@ fn collect_machine_seams(
                     EffectDisposition::Routed { .. } => unreachable!(),
                 };
 
-                let (classification, notes) = classify_effect(
+                let (classification, notes, explicitly_classified) = classify_effect(
                     &machine.machine,
                     &rule.effect_variant,
                     &rule.disposition,
@@ -426,6 +538,7 @@ fn collect_machine_seams(
                     disposition: disposition_str.to_string(),
                     classification,
                     notes,
+                    explicitly_classified,
                 });
             }
             EffectDisposition::Routed { .. } => {
@@ -457,7 +570,13 @@ fn print_report(entries: &[SeamEntry]) {
     }
 }
 
-fn print_summary(entries: &[SeamEntry]) {
+fn print_summary(
+    entries: &[SeamEntry],
+    unresolved_classification_debt: &[&SeamEntry],
+    unresolved_protocol_debt: &[&SeamEntry],
+    public_surface_contracts: &[SurfaceContractEntry],
+    unresolved_public_surface_alignment_debt: &[&SurfaceContractEntry],
+) {
     let total = entries.len();
     let no_owner = entries
         .iter()
@@ -490,4 +609,31 @@ fn print_summary(entries: &[SeamEntry]) {
             println!("  {} :: {}", entry.machine, entry.effect_variant);
         }
     }
+    println!();
+    println!("## Public Surface Contracts");
+    for entry in public_surface_contracts {
+        println!(
+            "  {:28} {:6} {}",
+            entry.name,
+            match entry.status {
+                ContractStatus::Closed => "closed",
+                ContractStatus::Open => "open",
+            },
+            entry.notes
+        );
+    }
+    println!();
+    println!("## Debt");
+    println!(
+        "  unresolved classification debt:            {}",
+        unresolved_classification_debt.len()
+    );
+    println!(
+        "  unresolved protocol debt:                  {}",
+        unresolved_protocol_debt.len()
+    );
+    println!(
+        "  unresolved public-surface alignment debt:  {}",
+        unresolved_public_surface_alignment_debt.len()
+    );
 }

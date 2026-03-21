@@ -1294,7 +1294,7 @@ async fn session_task<A: SessionAgent>(
                 match pump_result {
                     Ok(HostModePollOutcome::Idle | HostModePollOutcome::Ran(_)) => {}
                     Ok(HostModePollOutcome::Dismissed) => {
-                        if let Ok(effects) = protocol_comms_drain_spawn::notify_running_task_exited(
+                        if let Ok(effects) = protocol_comms_drain_spawn::notify_task_exited(
                             &mut host_mode_drain,
                             meerkat_core::DrainExitReason::Dismissed,
                         ) {
@@ -1334,7 +1334,7 @@ async fn session_task<A: SessionAgent>(
                         // Stopped phase (which StopRequested transitions to).
                         // No explicit AbortObserved feedback is needed here
                         // because the session is shutting down.
-                        drop(result.abort_obligation);
+                        drop(result.obligation);
                     }
                 }
                 control.state_tx.send_replace(SessionState::ShuttingDown);

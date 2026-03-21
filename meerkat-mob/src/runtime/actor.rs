@@ -106,7 +106,7 @@ pub(super) struct PendingSpawn {
     auto_wire_parent: bool,
     /// Peer wiring to restore after respawn completes.
     restore_wiring: Option<Vec<MeerkatId>>,
-    reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
+    reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,7 +1194,7 @@ impl MobActor {
     async fn enqueue_spawn(
         &mut self,
         spec: super::handle::SpawnMemberSpec,
-        reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
+        reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
         let super::handle::SpawnMemberSpec {
             profile_name,
@@ -1450,6 +1450,22 @@ impl MobActor {
 
         // ---------- Resume fast-path: skip async provisioning ----------
         if let Some(member_ref) = resume_member_ref {
+            let operation_id = self
+                .provisioner
+                .operation_id_for_member(&member_ref)
+                .await
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "resumed member '{meerkat_id}' has no tracked mob child operation"
+                    ))
+                });
+            let operation_id = match operation_id {
+                Ok(operation_id) => operation_id,
+                Err(error) => {
+                    let _ = reply_tx.send(Err(error));
+                    return;
+                }
+            };
             let provision =
                 PendingProvision::new(member_ref, meerkat_id.clone(), self.provisioner.clone());
             // Go straight to finalization — no async provisioning task needed.
@@ -1461,6 +1477,7 @@ impl MobActor {
                     prompt,
                     resolved_labels,
                     provision,
+                    operation_id,
                     auto_wire_parent,
                     None,
                 )
@@ -1512,24 +1529,27 @@ impl MobActor {
         let task = tokio::spawn(async move {
             let panic_meerkat_id = spawn_meerkat_id.clone();
             let provision_result = std::panic::AssertUnwindSafe(async {
-                let member_ref = provisioner.provision_member(provision_request).await?;
+                let spawn_receipt = provisioner.provision_member(provision_request).await?;
                 if spawn_runtime_mode == crate::MobRuntimeMode::AutonomousHost
                     && let Err(capability_error) =
                         Self::ensure_autonomous_dispatch_capability_for_provisioner(
                             &provisioner,
                             &spawn_meerkat_id,
-                            &member_ref,
+                            &spawn_receipt.member_ref,
                         )
                         .await
                 {
-                    if let Err(retire_error) = provisioner.retire_member(&member_ref).await {
+                    if let Err(retire_error) =
+                        provisioner.retire_member(&spawn_receipt.member_ref).await
+                    {
                         return Err(MobError::Internal(format!(
-                            "autonomous capability check failed for '{spawn_meerkat_id}': {capability_error}; cleanup retire failed for member '{member_ref:?}': {retire_error}"
+                            "autonomous capability check failed for '{spawn_meerkat_id}': {capability_error}; cleanup retire failed for member '{:?}': {retire_error}",
+                            spawn_receipt.member_ref
                         )));
                     }
                     return Err(capability_error);
                 }
-                Ok(member_ref)
+                Ok(spawn_receipt)
             })
             .catch_unwind()
             .await;
@@ -1547,14 +1567,15 @@ impl MobActor {
                 })
                 .await
                 && let MobCommand::SpawnProvisioned {
-                    result: Ok(member_ref),
+                    result: Ok(spawn_receipt),
                     ..
                 } = send_error.0
-                && let Err(cleanup_error) = provisioner.retire_member(&member_ref).await
+                && let Err(cleanup_error) =
+                    provisioner.retire_member(&spawn_receipt.member_ref).await
             {
                 tracing::warn!(
                     spawn_ticket,
-                    member_ref = ?member_ref,
+                    member_ref = ?spawn_receipt.member_ref,
                     error = %cleanup_error,
                     "spawn completion dropped; failed cleanup retire for provisioned member"
                 );
@@ -1565,16 +1586,16 @@ impl MobActor {
 
     async fn handle_spawn_provisioned_batch(
         &mut self,
-        completions: Vec<(u64, Result<MemberRef, MobError>)>,
+        completions: Vec<(u64, Result<super::handle::MemberSpawnReceipt, MobError>)>,
     ) {
         let mut pending_items = Vec::with_capacity(completions.len());
         for (spawn_ticket, result) in completions {
             self.pending_spawn_tasks.remove(&spawn_ticket);
             let Some(pending) = self.pending_spawns.remove(&spawn_ticket) else {
                 tracing::warn!(spawn_ticket, "received spawn completion for unknown ticket");
-                if let Ok(member_ref) = result {
+                if let Ok(spawn_receipt) = result {
                     let orphan = PendingProvision::new(
-                        member_ref,
+                        spawn_receipt.member_ref,
                         MeerkatId::from("__unknown_ticket__"),
                         self.provisioner.clone(),
                     );
@@ -1615,9 +1636,9 @@ impl MobActor {
             } = pending;
             in_flight.push(async move {
                 let reply = match result {
-                    Ok(member_ref) => {
+                    Ok(spawn_receipt) => {
                         let provision = PendingProvision::new(
-                            member_ref,
+                            spawn_receipt.member_ref.clone(),
                             meerkat_id.clone(),
                             actor.provisioner.clone(),
                         );
@@ -1639,6 +1660,7 @@ impl MobActor {
                                 prompt,
                                 labels,
                                 provision,
+                                spawn_receipt.operation_id,
                                 auto_wire_parent,
                                 restore_wiring,
                             )
@@ -1665,9 +1687,10 @@ impl MobActor {
         prompt: String,
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
+        operation_id: meerkat_core::ops::OperationId,
         auto_wire_parent: bool,
         restore_wiring: Option<Vec<MeerkatId>>,
-    ) -> Result<MemberRef, MobError> {
+    ) -> Result<super::handle::MemberSpawnReceipt, MobError> {
         if let Err(append_error) = self
             .events
             .append(NewMobEvent {
@@ -1796,7 +1819,10 @@ impl MobActor {
             meerkat_id = %meerkat_id,
             "MobActor::finalize_spawn_from_pending done"
         );
-        Ok(member_ref.clone())
+        Ok(super::handle::MemberSpawnReceipt {
+            member_ref,
+            operation_id,
+        })
     }
 
     async fn spawn_wiring_targets(
@@ -1957,52 +1983,128 @@ impl MobActor {
         // 3. Retire the existing member (archives the session, removes from roster).
         self.handle_retire(meerkat_id.clone()).await?;
 
-        // 4. Rebuild a spawn spec preserving identity, profile, labels, and mode.
+        // 4. Rebuild the replacement spawn preserving identity, profile, labels, and mode.
         let prompt = initial_message
             .unwrap_or_else(|| self.fallback_spawn_prompt(&entry.profile, &meerkat_id));
-        let mut spec =
-            crate::runtime::handle::SpawnMemberSpec::new(entry.profile.clone(), meerkat_id.clone());
-        spec.initial_message = Some(prompt);
-        spec.runtime_mode = Some(entry.runtime_mode);
-        spec.labels = Some(entry.labels.clone());
+        let profile = self
+            .definition
+            .profiles
+            .get(&entry.profile)
+            .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+        let external_tools = self.external_tools_for_profile(profile)?;
+        let mut config = build::build_agent_config(build::BuildAgentConfigParams {
+            mob_id: &self.definition.id,
+            profile_name: &entry.profile,
+            meerkat_id: &meerkat_id,
+            profile,
+            definition: &self.definition,
+            external_tools,
+            context: None,
+            labels: Some(entry.labels.clone()),
+            additional_instructions: None,
+            shell_env: None,
+        })
+        .await?;
+        if let Some(ref client) = self.default_llm_client {
+            config.llm_client_override = Some(client.clone());
+        }
+        let req = build::to_create_session_request(&config, prompt.clone());
+        let selected_backend = profile.backend.unwrap_or(self.definition.backend.default);
+        let peer_name = format!("{}/{}/{}", self.definition.id, entry.profile, meerkat_id);
+        let provision_request = ProvisionMemberRequest {
+            create_session: req,
+            backend: selected_backend,
+            peer_name,
+        };
 
-        // 5. Enqueue spawn with fresh session via the normal provisioning pipeline.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.enqueue_spawn(spec, reply_tx).await;
-
-        // 6. Attach restore_wiring to the pending spawn so finalization re-wires.
-        if !wired_peers.is_empty() {
-            for pending in self.pending_spawns.values_mut() {
-                if pending.meerkat_id == meerkat_id {
-                    pending.restore_wiring = Some(wired_peers.clone());
-                    break;
-                }
+        // 5. Provision and finalize the replacement member inline so the receipt reflects
+        //    the committed canonical member/session state before we return.
+        let spawn_receipt = self
+            .provisioner
+            .provision_member(provision_request)
+            .await
+            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                member_id: meerkat_id.clone(),
+                reason: error.to_string(),
+            })?;
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && let Err(capability_error) =
+                Self::ensure_autonomous_dispatch_capability_for_provisioner(
+                    &self.provisioner,
+                    &meerkat_id,
+                    &spawn_receipt.member_ref,
+                )
+                .await
+        {
+            if let Err(retire_error) = self
+                .provisioner
+                .retire_member(&spawn_receipt.member_ref)
+                .await
+            {
+                return Err(MobRespawnError::SpawnAfterRetire {
+                    member_id: meerkat_id.clone(),
+                    reason: format!(
+                        "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
+                    ),
+                });
             }
+            return Err(MobRespawnError::SpawnAfterRetire {
+                member_id: meerkat_id.clone(),
+                reason: capability_error.to_string(),
+            });
+        }
+
+        let provision = PendingProvision::new(
+            spawn_receipt.member_ref.clone(),
+            meerkat_id.clone(),
+            self.provisioner.clone(),
+        );
+        if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+            if let Err(retire_error) = provision.rollback().await {
+                return Err(MobRespawnError::SpawnAfterRetire {
+                    member_id: meerkat_id.clone(),
+                    reason: format!(
+                        "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
+                    ),
+                });
+            }
+            return Err(MobRespawnError::SpawnAfterRetire {
+                member_id: meerkat_id.clone(),
+                reason: error.to_string(),
+            });
+        }
+
+        if !wired_peers.is_empty() {
             tracing::info!(
                 meerkat_id = %meerkat_id,
                 peers = ?wired_peers,
-                "respawn: peer wiring queued for restoration after spawn completes"
+                "respawn: restoring peer wiring during replacement finalization"
             );
         }
 
-        // 7. Wait for spawn to complete (don't drop reply_rx — we need the result).
-        //    Note: The spawn completion comes through SpawnProvisioned which the
-        //    actor processes. Since we're inside the actor, we must drop into the
-        //    event loop to process it. We release the borrow on self by dropping
-        //    into a yield loop that processes commands until our spawn completes.
-        //
-        //    For now, we don't block the actor — we drop reply_rx and build the
-        //    receipt from what we know. The new session ID will be available once
-        //    the spawn finalizes through the provisioning pipeline.
-        drop(reply_rx);
+        let replacement = self
+            .finalize_spawn_from_pending(
+                &entry.profile,
+                &meerkat_id,
+                entry.runtime_mode,
+                prompt,
+                entry.labels.clone(),
+                provision,
+                spawn_receipt.operation_id,
+                false,
+                (!wired_peers.is_empty()).then_some(wired_peers),
+            )
+            .await
+            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                member_id: meerkat_id.clone(),
+                reason: error.to_string(),
+            })?;
 
-        // Build receipt with what we have. The new_session_id will be None here
-        // since we didn't wait for spawn — callers should listen for
-        // MeerkatSpawned to get the full session reference.
+        // 6. Build the receipt from the committed replacement member reference.
         Ok(MemberRespawnReceipt {
             member_id: meerkat_id,
             old_session_id,
-            new_session_id: None,
+            new_session_id: replacement.member_ref.session_id().cloned(),
         })
     }
 
@@ -2639,18 +2741,23 @@ impl MobActor {
                     // via a deferred ExternalTurn command.
                     let command_tx = self.command_tx.clone();
                     let target_id = meerkat_id.clone();
-                    let member_ref = spawn_reply_rx
+                    let spawn_receipt = spawn_reply_rx
                         .await
                         .map_err(|_| MobError::Internal("auto-spawn reply channel dropped".into()))?
                         .map_err(|e| {
                             MobError::Internal(format!("auto-spawn failed for '{target_id}': {e}"))
                         })?;
 
-                    let session_id = member_ref.session_id().cloned().ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "auto-spawned member '{target_id}' has no session"
-                        ))
-                    })?;
+                    let session_id =
+                        spawn_receipt
+                            .member_ref
+                            .session_id()
+                            .cloned()
+                            .ok_or_else(|| {
+                                MobError::Internal(format!(
+                                    "auto-spawned member '{target_id}' has no session"
+                                ))
+                            })?;
 
                     // Deferred delivery — fire and forget after spawn completes.
                     self.lifecycle_tasks.spawn(async move {

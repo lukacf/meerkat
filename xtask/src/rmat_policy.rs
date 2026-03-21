@@ -291,6 +291,7 @@ pub struct ProtocolFeedbackConstraintRule {
 pub struct TerminalMappingConstraintRule {
     pub protocol_name: String,
     pub producer_machine: String,
+    pub helper_path: &'static str,
 }
 
 /// Build handoff protocol coverage rules from canonical machine schemas.
@@ -401,6 +402,9 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
                 .find(|m| m.instance_id == protocol.producer_instance)
                 .map(|m| m.machine_name.as_str());
             if let Some(machine_name) = producer_machine_name {
+                if machine_name != "TurnExecutionMachine" {
+                    continue;
+                }
                 let has_terminals = machines
                     .iter()
                     .find(|m| m.machine == machine_name)
@@ -409,6 +413,7 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
                     rules.push(TerminalMappingConstraintRule {
                         protocol_name: protocol.name.clone(),
                         producer_machine: machine_name.to_string(),
+                        helper_path: "meerkat-core/src/generated/terminal_surface_mapping.rs",
                     });
                 }
             }

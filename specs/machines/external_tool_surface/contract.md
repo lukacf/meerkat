@@ -30,7 +30,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Shutdown`
 
 ## Effects
-- `ScheduleSurfaceCompletion`(surface_id: SurfaceId, operation: SurfaceDeltaOperation)
+- `ScheduleSurfaceCompletion`(surface_id: SurfaceId, operation: SurfaceDeltaOperation, applied_at_turn: TurnNumber)
 - `RefreshVisibleSurfaceSet`
 - `EmitExternalToolDelta`(surface_id: SurfaceId, operation: SurfaceDeltaOperation, phase: SurfaceDeltaPhase, persisted: Bool, applied_at_turn: TurnNumber)
 - `CloseSurfaceConnection`(surface_id: SurfaceId)

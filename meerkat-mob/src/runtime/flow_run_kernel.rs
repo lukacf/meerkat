@@ -861,44 +861,42 @@ fn parse_step_run_status(
     }
 }
 
-#[allow(dead_code)] // FlowRun Phase B integration pending
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlowRunEffectKind {
-    AdmitStepWork,
-    AppendFailureLedger,
-    EscalateSupervisor,
-    ProjectTargetSuccess,
-    ProjectTargetFailure,
-    ProjectTargetCanceled,
-}
-
-impl FlowRunEffectKind {
-    fn parse(effect: &KernelEffect) -> Option<Self> {
-        match effect.variant.as_str() {
-            "AdmitStepWork" => Some(Self::AdmitStepWork),
-            "AppendFailureLedger" => Some(Self::AppendFailureLedger),
-            "EscalateSupervisor" => Some(Self::EscalateSupervisor),
-            "ProjectTargetSuccess" => Some(Self::ProjectTargetSuccess),
-            "ProjectTargetFailure" => Some(Self::ProjectTargetFailure),
-            "ProjectTargetCanceled" => Some(Self::ProjectTargetCanceled),
-            _ => None,
-        }
-    }
-}
-
-#[allow(dead_code)] // FlowRun Phase B integration pending
-fn has_effect(effects: &[KernelEffect], expected: FlowRunEffectKind) -> bool {
-    effects
-        .iter()
-        .filter_map(FlowRunEffectKind::parse)
-        .any(|effect| effect == expected)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::MobEventKind;
     use crate::store::{InMemoryMobEventStore, InMemoryMobRunStore, MobEventStore, MobRunStore};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FlowRunEffectKind {
+        AdmitStepWork,
+        AppendFailureLedger,
+        EscalateSupervisor,
+        ProjectTargetSuccess,
+        ProjectTargetFailure,
+        ProjectTargetCanceled,
+    }
+
+    impl FlowRunEffectKind {
+        fn parse(effect: &KernelEffect) -> Option<Self> {
+            match effect.variant.as_str() {
+                "AdmitStepWork" => Some(Self::AdmitStepWork),
+                "AppendFailureLedger" => Some(Self::AppendFailureLedger),
+                "EscalateSupervisor" => Some(Self::EscalateSupervisor),
+                "ProjectTargetSuccess" => Some(Self::ProjectTargetSuccess),
+                "ProjectTargetFailure" => Some(Self::ProjectTargetFailure),
+                "ProjectTargetCanceled" => Some(Self::ProjectTargetCanceled),
+                _ => None,
+            }
+        }
+    }
+
+    fn has_effect(effects: &[KernelEffect], expected: FlowRunEffectKind) -> bool {
+        effects
+            .iter()
+            .filter_map(FlowRunEffectKind::parse)
+            .any(|effect| effect == expected)
+    }
 
     #[tokio::test]
     async fn flow_run_kernel_creates_pending_runs_from_durable_truth() {

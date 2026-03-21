@@ -840,6 +840,11 @@ where
                         }
 
                         let pending_op_refs = all_async_ops;
+                        let barrier_operation_ids = pending_op_refs
+                            .iter()
+                            .filter(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier)
+                            .map(|r| r.operation_id.clone())
+                            .collect::<Vec<_>>();
                         let has_barrier_ops = pending_op_refs
                             .iter()
                             .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
@@ -852,6 +857,7 @@ where
                         self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
                             run_id: run_id.clone(),
                             op_refs: pending_op_refs,
+                            barrier_operation_ids,
                             has_barrier_ops,
                         })?;
 
@@ -1092,7 +1098,7 @@ where
                         let owned_ids: Vec<crate::ops::OperationId> =
                             barrier_ids.iter().map(|id| (*id).clone()).collect();
                         let wait_result = if let Some(ref registry) = self.ops_lifecycle {
-                            registry.wait_all(&owned_ids).await.map_err(|e| {
+                            registry.wait_all(&run_id, &owned_ids).await.map_err(|e| {
                                 AgentError::InternalError(format!(
                                     "ops lifecycle wait_all failed: {e}"
                                 ))
@@ -1162,7 +1168,7 @@ where
         let classification = classify_terminal(&outcome);
 
         match classification {
-            Some(SurfaceResultClass::HardFailure) => Err(AgentError::TerminalFailure {
+            SurfaceResultClass::HardFailure => Err(AgentError::TerminalFailure {
                 outcome: format!("{outcome:?}"),
             }),
             _ => {

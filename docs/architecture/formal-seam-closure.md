@@ -132,25 +132,16 @@ barrier composition:
 
 The dependency line is strict:
 
-- **Steps 1-11 first**: lock the proof model, inventory seam candidates, extend
-  the current actor/effect ontology, add protocol-aware validation and TLA
-  generation, add generated Rust seam helpers, and upgrade RMAT/CI
-- **Steps 12-24 as tranche 1**: protocolize comms drain, remove shell bypasses,
-  do the initial barrier fix inside `TurnExecution`, replace raw operation IDs
-  with typed async-op references, and align terminal outcomes with surfaced
-  failure classes
-- **Steps 25-29 as tranche 2**: reconcile the `OpsLifecycle` schema/runtime gap,
-  harden barrier satisfaction to authority truth, and only then decide whether
-  extracting `TurnOpBarrierMachine` is warranted
-- **Steps 30-34 after the pattern is stable**: backfill the seam model onto the
-  next async boundaries, remove legacy realization paths, tighten release gates,
-  and run the final repo-wide seam audit
-
-Two tranche boundaries matter:
-
-- tranche 1 does **not** claim the final cross-machine op-barrier proof
-- tranche 1 does **not** replace every owner path in the repo; it establishes
-  the seam model and proves it on the first high-value boundaries honestly
+- **Formal layer first**: lock the proof model, inventory seam candidates,
+  extend the current actor/effect ontology, add protocol-aware validation and
+  TLA generation, add generated Rust seam helpers, and upgrade RMAT/CI
+- **Runtime seam conversion second**: protocolize comms drain, replace raw
+  operation IDs with typed async-op references, move ops waiting onto the
+  authority-owned wait lifecycle, align terminal outcomes with surfaced failure
+  classes, and preserve producer-derived feedback fields across live handoffs
+- **Closeout last**: backfill the seam model onto the remaining async
+  boundaries, remove legacy realization paths, tighten release gates, and run
+  the final repo-wide seam audit
 
 ## Ontology Extension — Type Sketches
 
@@ -588,16 +579,11 @@ This is a read-only view used by guards, not a mutable state field.
 #### Step 18: Formalize barrier-classification authority
 
 The classification of an operation as `Barrier` vs `Detached` is determined at
-`RegisterPendingOps` time by the shell. This is acceptable for tranche 1
-because:
-
-1. The shell classifies at registration time (observation moment)
-2. The classification is immutable once registered (no reclassification)
-3. The machine enforces the barrier gate — it cannot be bypassed
-
-In tranche 2 (step 25-26), barrier classification may move into authority-backed
-`OpsLifecycle` via a `ClassifyOp` input, but for tranche 1 the shell boundary
-is acceptable because it's a one-time observation, not ongoing semantic mapping.
+`RegisterPendingOps` time by the shell, but it is represented explicitly in the
+typed `AsyncOpRef` data crossing the dispatcher boundary and enforced by the
+turn machine. Classification is immutable once registered; the machine owns the
+barrier gate and the runtime waits against authority-owned `BeginWaitAll` /
+`WaitAllSatisfied` state rather than raw shell watcher timing.
 
 **RMAT audit rule**: `RegisterPendingOps` must be the sole entry point for
 `pending_op_refs` mutation. No shell code may directly modify `pending_op_refs`
@@ -691,26 +677,18 @@ Update::Assign {
 ```
 
 Note: `Expr::ContainsWhere` may require extending the `Expr` enum if the
-existing expression system cannot represent this. If so, an alternative is a
-separate boolean field `has_barrier_ops` set by the shell at registration time
-alongside `op_refs`. This is a tranche 1 pragmatic choice — the shell
-classifies at registration, the machine enforces.
-
-**Pragmatic fallback** (if `Expr` extension is too invasive): Add a
-`has_barrier_ops: Bool` field to `RegisterPendingOps` input, set by the shell.
-The machine trusts the classification at registration time but enforces the
-gate unconditionally. RMAT audit verifies that `has_barrier_ops` is set
-consistently with the `op_refs` content.
+existing expression system cannot represent this. If so, a separate boolean
+field `has_barrier_ops` may be carried alongside `op_refs`, but the machine
+must still enforce the gate and RMAT must verify consistency with the typed
+`AsyncOpRef` content.
 
 #### Composition wiring (Step 28)
 
-In tranche 2, `OpsBarrierSatisfied` will be wired as a routed effect from
-`OpsLifecycle` to `TurnExecution`:
-- `OpsLifecycle` emits `WaitAllSatisfied` effect
-- Composition route carries it to `TurnExecution.OpsBarrierSatisfied`
-- Handoff protocol on the barrier seam ensures obligation closure
-
-This is out of scope for tranche 1 steps 17-19 but is the target architecture.
+`OpsBarrierSatisfied` is not a direct routed effect. `OpsLifecycle` emits the
+authority-owned `WaitAllSatisfied` effect, the handoff protocol captures the
+obligation, and owner feedback submits `TurnExecution.OpsBarrierSatisfied`
+using explicit field bindings (`operation_ids` from the obligation, `run_id`
+from owner context).
 
 ## Shell Boundary Rule
 
@@ -760,7 +738,7 @@ cargo run -p xtask -- rmat-audit
   between machine truth and surface responses
 - Owner actors are first-class composition participants, not implicit runtime
   behavior
-- The proof model is incremental: tranche 1 closes three specific seams, tranche
-  2 extends to cross-machine barrier composition
+- The proof model is closed end-to-end for the current seam inventory rather
+  than staged behind later phases
 - CI enforces structural coverage — new handoff-annotated effects without
   protocols fail the build

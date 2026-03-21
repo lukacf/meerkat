@@ -103,10 +103,12 @@ impl Drop for PendingProvision {
 mod tests {
     use super::*;
     use crate::ids::MeerkatId;
+    use crate::runtime::handle::MemberSpawnReceipt;
     use crate::runtime::provisioner::ProvisionMemberRequest;
     use async_trait::async_trait;
     use meerkat_core::comms::TrustedPeerSpec;
     use meerkat_core::event_injector::SubscribableInjector;
+    use meerkat_core::ops::OperationId;
     use meerkat_core::service::StartTurnRequest;
     use meerkat_core::types::SessionId;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,8 +130,11 @@ mod tests {
         async fn provision_member(
             &self,
             _req: ProvisionMemberRequest,
-        ) -> Result<MemberRef, MobError> {
-            Ok(MemberRef::from_session_id(SessionId::new()))
+        ) -> Result<MemberSpawnReceipt, MobError> {
+            Ok(MemberSpawnReceipt {
+                member_ref: MemberRef::from_session_id(SessionId::new()),
+                operation_id: meerkat_core::ops::OperationId::new(),
+            })
         }
 
         async fn retire_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
@@ -177,6 +182,10 @@ mod tests {
             _fallback_peer_id: &str,
         ) -> Result<TrustedPeerSpec, MobError> {
             Err(MobError::Internal("not implemented".into()))
+        }
+
+        async fn operation_id_for_member(&self, _member_ref: &MemberRef) -> Option<OperationId> {
+            None
         }
     }
 

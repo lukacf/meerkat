@@ -27,6 +27,8 @@
 //! - 5 effects: RunStarted, BoundaryApplied, RunCompleted, RunFailed,
 //!   RunCancelled
 
+use std::collections::HashSet;
+
 use crate::error::AgentError;
 use crate::lifecycle::RunId;
 use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
@@ -161,6 +163,7 @@ pub enum TurnExecutionInput {
     RegisterPendingOps {
         run_id: RunId,
         op_refs: Vec<AsyncOpRef>,
+        barrier_operation_ids: Vec<OperationId>,
         has_barrier_ops: bool,
     },
     ToolCallsResolved {
@@ -168,6 +171,7 @@ pub enum TurnExecutionInput {
     },
     OpsBarrierSatisfied {
         run_id: RunId,
+        operation_ids: Vec<OperationId>,
     },
     BoundaryContinue {
         run_id: RunId,
@@ -300,6 +304,7 @@ struct TurnExecutionFields {
     image_tool_results_enabled: bool,
     tool_calls_pending: u32,
     pending_op_refs: Option<Vec<AsyncOpRef>>,
+    barrier_operation_ids: Vec<OperationId>,
     has_barrier_ops: bool,
     barrier_satisfied: bool,
     boundary_count: u32,
@@ -319,6 +324,7 @@ impl TurnExecutionFields {
             image_tool_results_enabled: false,
             tool_calls_pending: 0,
             pending_op_refs: None,
+            barrier_operation_ids: Vec::new(),
             has_barrier_ops: false,
             barrier_satisfied: true,
             boundary_count: 0,
@@ -445,14 +451,7 @@ impl TurnExecutionAuthority {
 
     /// Computed projection: operation IDs of barrier ops only.
     pub fn barrier_op_ids(&self) -> Vec<&OperationId> {
-        self.fields
-            .pending_op_refs
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .filter(|r| r.wait_policy == WaitPolicy::Barrier)
-            .map(|r| &r.operation_id)
-            .collect()
+        self.fields.barrier_operation_ids.iter().collect()
     }
 
     /// Computed projection: all pending operation IDs (both Barrier and Detached).
@@ -461,6 +460,17 @@ impl TurnExecutionAuthority {
             .pending_op_refs
             .as_ref()
             .map(|refs| refs.iter().map(|r| &r.operation_id).collect())
+    }
+
+    fn barrier_operation_ids_match(&self, operation_ids: &[OperationId]) -> bool {
+        let expected = self
+            .fields
+            .barrier_operation_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let actual = operation_ids.iter().cloned().collect::<HashSet<_>>();
+        expected.len() == operation_ids.len() && expected == actual
     }
 
     /// Whether vision is enabled for the current run.
@@ -544,6 +554,7 @@ impl TurnExecutionAuthority {
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
                 fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
                 fields.has_barrier_ops = false;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
@@ -562,6 +573,7 @@ impl TurnExecutionAuthority {
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
                 fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
                 fields.has_barrier_ops = false;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
@@ -580,6 +592,7 @@ impl TurnExecutionAuthority {
                 fields.cancel_after_boundary = false;
                 fields.terminal_outcome = TurnTerminalOutcome::None;
                 fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
                 fields.has_barrier_ops = false;
                 effects.push(TurnExecutionEffect::RunStarted {
                     run_id: run_id.clone(),
@@ -679,6 +692,7 @@ impl TurnExecutionAuthority {
                 }
                 fields.tool_calls_pending = *tool_count;
                 fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
                 fields.has_barrier_ops = false;
                 fields.barrier_satisfied = true;
                 WaitingForOps
@@ -707,6 +721,7 @@ impl TurnExecutionAuthority {
                 RegisterPendingOps {
                     run_id,
                     op_refs,
+                    barrier_operation_ids,
                     has_barrier_ops,
                 },
             ) => {
@@ -717,6 +732,7 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 fields.pending_op_refs = Some(op_refs.clone());
+                fields.barrier_operation_ids = barrier_operation_ids.clone();
                 fields.has_barrier_ops = *has_barrier_ops;
                 fields.barrier_satisfied = !*has_barrier_ops;
                 WaitingForOps
@@ -725,11 +741,20 @@ impl TurnExecutionAuthority {
             // ---------------------------------------------------------------
             // OpsBarrierSatisfied: WaitingForOps -> WaitingForOps
             // ---------------------------------------------------------------
-            (WaitingForOps, OpsBarrierSatisfied { run_id }) => {
+            (
+                WaitingForOps,
+                OpsBarrierSatisfied {
+                    run_id,
+                    operation_ids,
+                },
+            ) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
                 if fields.barrier_satisfied {
+                    return Err(Self::invalid(phase, input));
+                }
+                if !self.barrier_operation_ids_match(operation_ids) {
                     return Err(Self::invalid(phase, input));
                 }
                 fields.barrier_satisfied = true;
@@ -754,6 +779,7 @@ impl TurnExecutionAuthority {
                 }
                 fields.tool_calls_pending = 0;
                 fields.pending_op_refs = None;
+                fields.barrier_operation_ids = Vec::new();
                 fields.has_barrier_ops = false;
                 fields.barrier_satisfied = true;
                 fields.boundary_count += 1;
@@ -883,6 +909,7 @@ impl TurnExecutionAuthority {
                 }
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
                     fields.has_barrier_ops = false;
                     fields.barrier_satisfied = true;
                 }
@@ -915,6 +942,7 @@ impl TurnExecutionAuthority {
                 }
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
                     fields.has_barrier_ops = false;
                     fields.barrier_satisfied = true;
                 }
@@ -939,6 +967,7 @@ impl TurnExecutionAuthority {
                 }
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
                     fields.has_barrier_ops = false;
                     fields.barrier_satisfied = true;
                 }
@@ -990,6 +1019,7 @@ impl TurnExecutionAuthority {
                 }
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
                     fields.has_barrier_ops = false;
                     fields.barrier_satisfied = true;
                 }
@@ -1018,6 +1048,7 @@ impl TurnExecutionAuthority {
                 }
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
                     fields.has_barrier_ops = false;
                     fields.barrier_satisfied = true;
                 }
@@ -1044,6 +1075,7 @@ impl TurnExecutionAuthority {
             ) => {
                 if matches!(phase, WaitingForOps) {
                     fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
                     fields.has_barrier_ops = false;
                     fields.barrier_satisfied = true;
                 }
@@ -1174,14 +1206,17 @@ mod tests {
     /// Helper: reach DrainingBoundary via tool calls resolved.
     fn authority_at_draining_boundary() -> TurnExecutionAuthority {
         let mut auth = authority_at_waiting_for_ops();
+        let barrier_id = OperationId::new();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(barrier_id.clone())],
+            barrier_operation_ids: vec![barrier_id.clone()],
             has_barrier_ops: true,
         })
         .expect("register pending ops");
         auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
             run_id: test_run_id(),
+            operation_ids: vec![barrier_id],
         })
         .expect("ops barrier satisfied");
         auth.apply(TurnExecutionInput::ToolCallsResolved {
@@ -1407,6 +1442,7 @@ mod tests {
                     AsyncOpRef::barrier(op_a.clone()),
                     AsyncOpRef::detached(op_b.clone()),
                 ],
+                barrier_operation_ids: vec![op_a.clone()],
                 has_barrier_ops: true,
             })
             .expect("register pending ops");
@@ -1430,6 +1466,7 @@ mod tests {
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
             op_refs: vec![],
+            barrier_operation_ids: vec![],
             has_barrier_ops: false,
         })
         .expect("register empty pending ops");
@@ -1462,6 +1499,7 @@ mod tests {
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
             op_refs: vec![],
+            barrier_operation_ids: vec![],
             has_barrier_ops: false,
         })
         .expect("register empty pending ops");
@@ -1574,9 +1612,11 @@ mod tests {
     #[test]
     fn recoverable_failure_from_waiting_for_ops_clears_pending_op_refs() {
         let mut auth = authority_at_waiting_for_ops();
+        let barrier_id = OperationId::new();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(barrier_id.clone())],
+            barrier_operation_ids: vec![barrier_id],
             has_barrier_ops: true,
         })
         .expect("register pending ops");
@@ -1712,9 +1752,11 @@ mod tests {
     #[test]
     fn cancel_now_from_waiting_for_ops_clears_pending_op_refs() {
         let mut auth = authority_at_waiting_for_ops();
+        let barrier_id = OperationId::new();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: test_run_id(),
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(barrier_id.clone())],
+            barrier_operation_ids: vec![barrier_id],
             has_barrier_ops: true,
         })
         .expect("register pending ops");
@@ -1870,9 +1912,11 @@ mod tests {
         })
         .expect("tool calls");
         assert_eq!(auth.phase(), TurnPhase::WaitingForOps);
+        let barrier_id = OperationId::new();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(barrier_id.clone())],
+            barrier_operation_ids: vec![barrier_id.clone()],
             has_barrier_ops: true,
         })
         .expect("register pending ops");
@@ -1880,6 +1924,7 @@ mod tests {
         // Satisfy barrier before resolving
         auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
             run_id: rid.clone(),
+            operation_ids: vec![barrier_id],
         })
         .expect("barrier satisfied");
 
@@ -1973,6 +2018,7 @@ mod tests {
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
             op_refs: vec![],
+            barrier_operation_ids: vec![],
             has_barrier_ops: false,
         })
         .expect("register empty pending ops");
@@ -2256,7 +2302,11 @@ mod tests {
         // Register all-barrier ops
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
-            op_refs: vec![AsyncOpRef::barrier(op_a), AsyncOpRef::barrier(op_b)],
+            op_refs: vec![
+                AsyncOpRef::barrier(op_a.clone()),
+                AsyncOpRef::barrier(op_b.clone()),
+            ],
+            barrier_operation_ids: vec![op_a, op_b],
             has_barrier_ops: true,
         })
         .expect("register all-barrier ops");
@@ -2276,6 +2326,7 @@ mod tests {
         // Satisfy barrier
         auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
             run_id: rid.clone(),
+            operation_ids: auth.barrier_op_ids().into_iter().cloned().collect(),
         })
         .expect("barrier satisfied");
         assert!(auth.barrier_satisfied());
@@ -2291,14 +2342,17 @@ mod tests {
     fn mixed_barrier_and_detached_ops_still_block_until_barrier_satisfied() {
         let mut auth = authority_at_waiting_for_ops();
         let rid = test_run_id();
+        let barrier_id = OperationId::new();
+        let detached_id = OperationId::new();
 
         // Mixed: one barrier + one detached
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
             op_refs: vec![
-                AsyncOpRef::barrier(OperationId::new()),
-                AsyncOpRef::detached(OperationId::new()),
+                AsyncOpRef::barrier(barrier_id.clone()),
+                AsyncOpRef::detached(detached_id),
             ],
+            barrier_operation_ids: vec![barrier_id],
             has_barrier_ops: true,
         })
         .expect("register mixed ops");
@@ -2319,6 +2373,7 @@ mod tests {
         // Satisfy
         auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
             run_id: rid.clone(),
+            operation_ids: auth.barrier_op_ids().into_iter().cloned().collect(),
         })
         .expect("barrier satisfied");
 
@@ -2341,6 +2396,7 @@ mod tests {
                 AsyncOpRef::detached(OperationId::new()),
                 AsyncOpRef::detached(OperationId::new()),
             ],
+            barrier_operation_ids: vec![],
             has_barrier_ops: false,
         })
         .expect("register detached-only ops");
@@ -2365,6 +2421,7 @@ mod tests {
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
             op_refs: vec![],
+            barrier_operation_ids: vec![],
             has_barrier_ops: false,
         })
         .expect("register");
@@ -2373,8 +2430,11 @@ mod tests {
 
         // OpsBarrierSatisfied rejected when already satisfied
         assert!(
-            auth.apply(TurnExecutionInput::OpsBarrierSatisfied { run_id: rid })
-                .is_err()
+            auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
+                run_id: rid,
+                operation_ids: vec![],
+            })
+            .is_err()
         );
     }
 
@@ -2382,10 +2442,12 @@ mod tests {
     fn ops_barrier_satisfied_wrong_run_id_rejected() {
         let mut auth = authority_at_waiting_for_ops();
         let rid = test_run_id();
+        let barrier_id = OperationId::new();
 
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid,
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(barrier_id.clone())],
+            barrier_operation_ids: vec![barrier_id],
             has_barrier_ops: true,
         })
         .expect("register");
@@ -2393,6 +2455,7 @@ mod tests {
         assert!(
             auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
                 run_id: other_run_id(),
+                operation_ids: auth.barrier_op_ids().into_iter().cloned().collect(),
             })
             .is_err()
         );
@@ -2402,16 +2465,19 @@ mod tests {
     fn barrier_satisfied_reset_after_tool_calls_resolved() {
         let mut auth = authority_at_waiting_for_ops();
         let rid = test_run_id();
+        let first_barrier_id = OperationId::new();
 
         // First cycle: barrier ops
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(first_barrier_id.clone())],
+            barrier_operation_ids: vec![first_barrier_id],
             has_barrier_ops: true,
         })
         .expect("register");
         auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
             run_id: rid.clone(),
+            operation_ids: auth.barrier_op_ids().into_iter().cloned().collect(),
         })
         .expect("satisfy");
         auth.apply(TurnExecutionInput::ToolCallsResolved {
@@ -2438,9 +2504,11 @@ mod tests {
         assert!(auth.barrier_satisfied());
 
         // Register barrier ops again — should block
+        let second_barrier_id = OperationId::new();
         auth.apply(TurnExecutionInput::RegisterPendingOps {
             run_id: rid.clone(),
-            op_refs: vec![AsyncOpRef::barrier(OperationId::new())],
+            op_refs: vec![AsyncOpRef::barrier(second_barrier_id.clone())],
+            barrier_operation_ids: vec![second_barrier_id],
             has_barrier_ops: true,
         })
         .expect("register again");
@@ -2449,6 +2517,7 @@ mod tests {
         // Must satisfy again
         auth.apply(TurnExecutionInput::OpsBarrierSatisfied {
             run_id: rid.clone(),
+            operation_ids: auth.barrier_op_ids().into_iter().cloned().collect(),
         })
         .expect("satisfy again");
         let t = auth

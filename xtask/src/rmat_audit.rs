@@ -847,33 +847,24 @@ fn collect_protocol_feedback_constraint_findings(
 fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolicy) -> Vec<Finding> {
     let mut findings = Vec::new();
     for rule in &policy.terminal_mapping_constraints {
-        // Find the generated helper from the realization site candidates.
-        let site_rule = policy
-            .protocol_realization_sites
-            .iter()
-            .find(|r| r.protocol_name == rule.protocol_name);
-        let found_path =
-            site_rule.and_then(|sr| sr.candidate_paths.iter().find(|p| root.join(p).exists()));
-        if let Some(path) = found_path {
-            let source = match fs::read_to_string(root.join(path)) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            if !source.contains("classify_terminal") {
-                findings.push(error_finding(
-                    "TerminalMappingThroughGeneratedHelpers",
-                    path,
-                    &rule.protocol_name,
-                    format!(
-                        "generated protocol helper for `{}` exists but does not contain `classify_terminal`; \
-                         the protocol codegen should generate terminal classification for producer `{}`",
-                        rule.protocol_name, rule.producer_machine
-                    ),
-                    false,
-                ));
-            }
+        let path = rule.helper_path;
+        let source = match fs::read_to_string(root.join(path)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !source.contains("classify_terminal") {
+            findings.push(error_finding(
+                "TerminalMappingThroughGeneratedHelpers",
+                path,
+                &rule.protocol_name,
+                format!(
+                    "generated terminal mapping for producer `{}` is missing `classify_terminal`; \
+                     the protocol/codegen surface must generate terminal classification for `{}`",
+                    rule.producer_machine, rule.protocol_name
+                ),
+                false,
+            ));
         }
-        // If the file doesn't exist, ProtocolRealizationSiteCoverage already catches that.
     }
     findings
 }

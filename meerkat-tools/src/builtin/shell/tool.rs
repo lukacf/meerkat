@@ -883,6 +883,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_shell_output_produces_detached_async_op() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let output = tool
+            .call(json!({
+                "command": "sleep 60",
+                "background": true
+            }))
+            .await
+            .expect("background shell call");
+
+        let json = output.clone().into_json().expect("json output");
+        let job_id = crate::builtin::shell::JobId::from_string(
+            json["job_id"].as_str().expect("job id string").to_string(),
+        );
+        let operation_id: OperationId = serde_json::from_str(&format!(
+            "\"{}\"",
+            json["operation_id"].as_str().expect("operation id string")
+        ))
+        .expect("operation id parse");
+
+        let async_ops = tool.async_ops_for_output(&output);
+        assert_eq!(async_ops.len(), 1);
+        assert_eq!(
+            async_ops[0],
+            meerkat_core::ops::AsyncOpRef::detached(operation_id)
+        );
+
+        tool.job_manager
+            .cancel_job(&job_id)
+            .await
+            .expect("cancel background job");
+    }
+
+    #[tokio::test]
     #[cfg(feature = "integration-real-tests")]
     #[ignore = "integration-real: executes shell commands"]
     async fn integration_real_shell_tool_call_success() {

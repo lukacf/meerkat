@@ -31,7 +31,6 @@ use crate::runtime::MobState;
 /// Shell code classifies raw commands into these typed inputs, then calls
 /// [`MobLifecycleAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // All variants are part of the machine schema; some not yet used by shell code.
 pub(crate) enum MobLifecycleInput {
     Start,
     Stop,
@@ -65,7 +64,6 @@ pub(crate) enum MobLifecycleEffect {
 
 /// Successful transition outcome from the MobLifecycle authority.
 #[derive(Debug)]
-#[allow(dead_code)] // Fields are part of the authority contract; inspected by tests and future shell code.
 pub(crate) struct MobLifecycleTransition {
     /// The phase after the transition.
     pub next_phase: MobState,

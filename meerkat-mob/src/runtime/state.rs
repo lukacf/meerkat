@@ -62,11 +62,11 @@ impl std::fmt::Display for MobState {
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
-        reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
+        reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     },
     SpawnProvisioned {
         spawn_ticket: u64,
-        result: Result<MemberRef, MobError>,
+        result: Result<super::handle::MemberSpawnReceipt, MobError>,
     },
     Retire {
         meerkat_id: MeerkatId,

@@ -542,17 +542,21 @@ impl EphemeralRuntimeDriver {
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
         for input_id in input_ids {
-            if let Some(state) = self.ledger.get_mut(input_id)
-                && state.current_state() == InputLifecycleState::AppliedPendingConsumption
-            {
-                state.apply(InputLifecycleInput::Consume)?;
-                self.events
-                    .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                        InputLifecycleEvent::Consumed {
-                            input_id: input_id.clone(),
-                            run_id: run_id.clone(),
-                        },
-                    )));
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                match state.apply(InputLifecycleInput::Consume) {
+                    Ok(_) => {
+                        self.events
+                            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                                InputLifecycleEvent::Consumed {
+                                    input_id: input_id.clone(),
+                                    run_id: run_id.clone(),
+                                },
+                            )));
+                    }
+                    Err(InputLifecycleError::InvalidTransition { .. })
+                    | Err(InputLifecycleError::TerminalState { .. }) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(())
@@ -562,15 +566,19 @@ impl EphemeralRuntimeDriver {
         for input_id in input_ids {
             let mut requeue_input = None;
             let mut is_steer = false;
-            if let Some(state) = self.ledger.get_mut(input_id)
-                && state.current_state() == InputLifecycleState::Staged
-            {
-                state.apply(InputLifecycleInput::RollbackStaged)?;
-                requeue_input = state.persisted_input.clone();
-                is_steer = requeue_input
-                    .as_ref()
-                    .and_then(super::super::input::Input::handling_mode)
-                    == Some(HandlingMode::Steer);
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                match state.apply(InputLifecycleInput::RollbackStaged) {
+                    Ok(_) => {
+                        requeue_input = state.persisted_input.clone();
+                        is_steer = requeue_input
+                            .as_ref()
+                            .and_then(super::super::input::Input::handling_mode)
+                            == Some(HandlingMode::Steer);
+                    }
+                    Err(InputLifecycleError::InvalidTransition { .. })
+                    | Err(InputLifecycleError::TerminalState { .. }) => {}
+                    Err(err) => return Err(err),
+                }
             }
             if !self.has_queued_input(input_id)
                 && let Some(input) = requeue_input
@@ -633,16 +641,17 @@ impl EphemeralRuntimeDriver {
         self.steer_queue.drain();
         self.wake_requested = false;
         self.process_requested = false;
-        let from_phase = self.control.phase();
-        if from_phase != RuntimeState::Idle {
-            let transition = self
-                .control
-                .apply(RuntimeControlInput::ResetRequested)
-                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-                from: transition.from_phase,
-                to: transition.next_phase,
-            }));
+        match self.control.apply(RuntimeControlInput::ResetRequested) {
+            Ok(transition) => {
+                self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                    from: transition.from_phase,
+                    to: transition.next_phase,
+                }));
+            }
+            Err(err) if err.from == RuntimeState::Idle => {}
+            Err(err) => {
+                return Err(RuntimeDriverError::Internal(err.to_string()));
+            }
         }
         Ok(ResetReport {
             inputs_abandoned: abandoned,
@@ -794,10 +803,14 @@ impl EphemeralRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        if !self.control.phase().can_accept_input() {
-            return Err(RuntimeDriverError::NotReady {
-                state: self.control.phase(),
-            });
+        let control_phase = self.control.phase();
+        match control_phase.can_accept_input() {
+            true => {}
+            false => {
+                return Err(RuntimeDriverError::NotReady {
+                    state: control_phase,
+                });
+            }
         }
         if let Err(e) = validate_durability(&input) {
             match e {
@@ -1037,22 +1050,24 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 }
 
                 for input_id in &receipt.contributing_input_ids {
-                    if let Some(state) = self.ledger.get_mut(input_id)
-                        && state.current_state() == InputLifecycleState::Staged
-                    {
-                        let _ = state.apply(InputLifecycleInput::MarkApplied {
-                            run_id: run_id.clone(),
-                        });
+                    if let Some(state) = self.ledger.get_mut(input_id) {
+                        let applied = state
+                            .apply(InputLifecycleInput::MarkApplied {
+                                run_id: run_id.clone(),
+                            })
+                            .is_ok();
                         let _ = state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
                             boundary_sequence: receipt.sequence,
                         });
-                        self.events
-                            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                                InputLifecycleEvent::Applied {
-                                    input_id: input_id.clone(),
-                                    run_id: run_id.clone(),
-                                },
-                            )));
+                        if applied {
+                            self.events
+                                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                                    InputLifecycleEvent::Applied {
+                                        input_id: input_id.clone(),
+                                        run_id: run_id.clone(),
+                                    },
+                                )));
+                        }
                     }
                 }
             }
@@ -1068,17 +1083,15 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         match command {
             RuntimeControlCommand::Stop => {
                 // Ingress authority: Destroy (Stop abandons everything)
-                if !self.ingress.is_terminal() {
-                    match self.ingress.apply(RuntimeIngressInput::Destroy) {
-                        Ok(transition) => {
-                            self.process_ingress_effects(&transition.effects);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "ingress authority rejected Destroy on Stop"
-                            );
-                        }
+                match self.ingress.apply(RuntimeIngressInput::Destroy) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "ingress authority rejected Destroy on Stop"
+                        );
                     }
                 }
 
@@ -1095,10 +1108,12 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 self.steer_queue.drain();
             }
             RuntimeControlCommand::Resume => {
-                if self.control.phase() == RuntimeState::Recovering {
-                    self.control
-                        .apply(RuntimeControlInput::ResumeRequested)
-                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+                match self.control.apply(RuntimeControlInput::ResumeRequested) {
+                    Ok(_) => {}
+                    Err(err) if err.from != RuntimeState::Recovering => {}
+                    Err(err) => {
+                        return Err(RuntimeDriverError::Internal(err.to_string()));
+                    }
                 }
             }
         }

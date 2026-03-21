@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use meerkat_core::ops::OperationId;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,16 @@ pub struct MemberRespawnReceipt {
     pub old_session_id: Option<SessionId>,
     /// Session ID of the newly spawned session.
     pub new_session_id: Option<SessionId>,
+}
+
+/// Receipt returned by a successful member spawn.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct MemberSpawnReceipt {
+    /// The member identity that was provisioned and committed into the roster.
+    pub member_ref: MemberRef,
+    /// Canonical mob child operation for the spawned member lifecycle.
+    pub operation_id: OperationId,
 }
 
 /// Structured error for direct-Rust respawn failures.
@@ -572,7 +583,7 @@ impl MobHandle {
         spec.initial_message = initial_message;
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
-        self.spawn_spec(spec).await
+        Ok(self.spawn_spec_receipt(spec).await?.member_ref)
     }
 
     /// Attach an existing session by reusing the mob spawn control-plane path.
@@ -588,7 +599,7 @@ impl MobHandle {
         spec.launch_mode = crate::launch::MemberLaunchMode::Resume { session_id };
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
-        self.spawn_spec(spec).await
+        Ok(self.spawn_spec_receipt(spec).await?.member_ref)
     }
 
     /// Attach an existing session as the mob orchestrator.
@@ -615,6 +626,14 @@ impl MobHandle {
 
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
     pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
+        Ok(self.spawn_spec_receipt(spec).await?.member_ref)
+    }
+
+    /// Spawn a member and return the canonical lifecycle receipt.
+    pub async fn spawn_spec_receipt(
+        &self,
+        spec: SpawnMemberSpec,
+    ) -> Result<MemberSpawnReceipt, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Spawn {
@@ -636,6 +655,14 @@ impl MobHandle {
         specs: Vec<SpawnMemberSpec>,
     ) -> Vec<Result<MemberRef, MobError>> {
         futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec(spec))).await
+    }
+
+    /// Spawn multiple members and return lifecycle receipts preserving input order.
+    pub async fn spawn_many_receipts(
+        &self,
+        specs: Vec<SpawnMemberSpec>,
+    ) -> Vec<Result<MemberSpawnReceipt, MobError>> {
+        futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec_receipt(spec))).await
     }
 
     /// Retire a member, archiving its session and removing trust.

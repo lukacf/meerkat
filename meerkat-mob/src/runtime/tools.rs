@@ -1,4 +1,5 @@
 use super::*;
+use meerkat_core::ops::AsyncOpRef;
 
 // ---------------------------------------------------------------------------
 // Mob tool dispatcher
@@ -270,10 +271,21 @@ impl MobToolDispatcher {
     fn encode_result(
         call: ToolCallView<'_>,
         value: serde_json::Value,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        Self::encode_result_with_async_ops(call, value, Vec::new())
+    }
+
+    fn encode_result_with_async_ops(
+        call: ToolCallView<'_>,
+        value: serde_json::Value,
+        async_ops: Vec<AsyncOpRef>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
-        Ok(ToolResult::new(call.id.to_string(), content, false))
+        Ok(meerkat_core::ToolDispatchOutcome {
+            result: ToolResult::new(call.id.to_string(), content, false),
+            async_ops,
+        })
     }
 }
 
@@ -404,17 +416,19 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 if let Some(auto_wire) = args.auto_wire_parent {
                     spec = spec.with_auto_wire_parent(auto_wire);
                 }
-                let member_ref = self
+                let receipt = self
                     .handle
-                    .spawn_spec(spec)
+                    .spawn_spec_receipt(spec)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result(
+                Self::encode_result_with_async_ops(
                     call,
                     json!({
-                        "member_ref": member_ref,
-                        "session_id": member_ref.session_id(),
+                        "member_ref": receipt.member_ref,
+                        "session_id": receipt.member_ref.session_id(),
+                        "operation_id": receipt.operation_id,
                     }),
+                    vec![AsyncOpRef::detached(receipt.operation_id)],
                 )
             }
             TOOL_SPAWN_MANY_MEERKATS => {
@@ -449,14 +463,20 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let results = self.handle.spawn_many(specs).await;
-                let results = results
+                let receipts = self.handle.spawn_many_receipts(specs).await;
+                let async_ops = receipts
+                    .iter()
+                    .filter_map(|result| result.as_ref().ok())
+                    .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
+                    .collect::<Vec<_>>();
+                let results = receipts
                     .into_iter()
                     .map(|result| match result {
-                        Ok(member_ref) => json!({
+                        Ok(receipt) => json!({
                             "ok": true,
-                            "member_ref": member_ref,
-                            "session_id": member_ref.session_id(),
+                            "member_ref": receipt.member_ref,
+                            "session_id": receipt.member_ref.session_id(),
+                            "operation_id": receipt.operation_id,
                         }),
                         Err(error) => json!({
                             "ok": false,
@@ -464,7 +484,7 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         }),
                     })
                     .collect::<Vec<_>>();
-                Self::encode_result(call, json!({ "results": results }))
+                Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
             TOOL_RETIRE_MEERKAT => {
                 let args: RetireMeerkatArgs = call

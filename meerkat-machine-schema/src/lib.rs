@@ -19,7 +19,8 @@ pub use composition::{
     CompositionInvariantKind, CompositionSchema, CompositionSchemaError, CompositionStateLimits,
     CompositionWitness, CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
     CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
-    EntryInput, FeedbackInputRef, MachineInstance, ProtocolGenerationMode, Route,
+    EntryInput, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
+    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
     RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
 };
 pub use machine::{

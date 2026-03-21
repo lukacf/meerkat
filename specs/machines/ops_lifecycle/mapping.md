@@ -95,6 +95,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ProvisioningSucceeded`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
+- `ProvisioningFailedCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
 - `ProvisioningFailed`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`, `cancel-and-watch`
@@ -107,10 +110,19 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ProgressReported`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`, `peer-ready-handoff`
+- `CompleteOperationCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
 - `CompleteOperation`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
+- `FailOperationCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
 - `FailOperation`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `CancelOperationCompletesWait`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`, `cancel-and-watch`
 - `CancelOperation`
@@ -119,18 +131,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireRequested`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
+- `RetireCompletedCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
 - `RetireCompleted`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
 - `CollectTerminal`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
+- `OwnerTerminatedCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
 - `OwnerTerminated`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
-- `WaitAll`
+- `BeginWaitAllImmediate`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`
+- `BeginWaitAllPending`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CancelWaitAll`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
 - `CollectCompleted`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`

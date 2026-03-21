@@ -217,6 +217,7 @@ pub enum ExternalToolSurfaceEffect {
     ScheduleSurfaceCompletion {
         surface_id: SurfaceId,
         operation: SurfaceDeltaOperation,
+        applied_at_turn: TurnNumber,
     },
     /// Shell should rebuild its visible tool cache from authority state.
     RefreshVisibleSurfaceSet,
@@ -622,6 +623,7 @@ impl ExternalToolSurfaceAuthority {
                         effects.push(ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Add,
+                            applied_at_turn: *applied_at_turn,
                         });
                         effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                             surface_id: surface_id.clone(),
@@ -664,6 +666,7 @@ impl ExternalToolSurfaceAuthority {
                         effects.push(ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Reload,
+                            applied_at_turn: *applied_at_turn,
                         });
                         effects.push(ExternalToolSurfaceEffect::EmitExternalToolDelta {
                             surface_id: surface_id.clone(),

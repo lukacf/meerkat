@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `2`
+- Version: `3`
 - Rust owner: `meerkat-runtime` / `generated::ops_lifecycle`
 
 ## State
@@ -21,6 +21,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_count`: `u32`
 - `created_at_ms`: `Map<OperationId, u64>`
 - `completed_at_ms`: `Map<OperationId, u64>`
+- `wait_active`: `Bool`
+- `wait_request_id`: `WaitRequestId`
+- `wait_operation_ids`: `Seq<OperationId>`
 
 ## Inputs
 - `RegisterOperation`(operation_id: OperationId, operation_kind: OperationKind)
@@ -36,7 +39,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireCompleted`(operation_id: OperationId)
 - `CollectTerminal`(operation_id: OperationId)
 - `OwnerTerminated`
-- `WaitAll`(operation_ids: Seq<OperationId>)
+- `BeginWaitAll`(wait_request_id: WaitRequestId, operation_ids: Seq<OperationId>)
+- `CancelWaitAll`(wait_request_id: WaitRequestId)
 - `CollectCompleted`
 
 ## Effects
@@ -45,13 +49,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExposeOperationPeer`(operation_id: OperationId)
 - `RetainTerminalRecord`(operation_id: OperationId, terminal_outcome: OperationTerminalOutcome)
 - `EvictCompletedRecord`(operation_id: OperationId)
-- `WaitAllSatisfied`(operation_ids: Seq<OperationId>)
+- `WaitAllSatisfied`(wait_request_id: WaitRequestId, operation_ids: Seq<OperationId>)
 - `CollectCompletedResult`(operation_ids: Seq<OperationId>)
 - `ConcurrencyLimitExceeded`(operation_id: OperationId, limit: u32, active: u32)
 
 ## Helpers
 - `status_of`(operation_id: OperationId) -> `OperationStatus`
 - `kind_of`(operation_id: OperationId) -> `OperationKind`
+- `wait_is_active`() -> `Bool`
+- `all_operations_known`(operation_ids: Seq<OperationId>) -> `Bool`
+- `all_operations_terminal`(operation_ids: Seq<OperationId>) -> `Bool`
+- `wait_tracks_operation`(operation_id: OperationId) -> `Bool`
+- `wait_completes_on_terminal`(operation_id: OperationId) -> `Bool`
 - `peer_ready_of`(operation_id: OperationId) -> `Bool`
 - `watcher_count_of`(operation_id: OperationId) -> `u32`
 - `progress_count_of`(operation_id: OperationId) -> `u32`
@@ -87,11 +96,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitOpEvent`
 - To: `Active`
 
+### `ProvisioningFailedCompletesWait`
+- From: `Active`
+- On: `ProvisioningFailed`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_satisfies_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`, `WaitAllSatisfied`
+- To: `Active`
+
 ### `ProvisioningFailed`
 - From: `Active`
 - On: `ProvisioningFailed`(operation_id)
 - Guards:
   - `status_allows_terminalization`
+  - `terminalization_does_not_complete_wait`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
 - To: `Active`
 
@@ -120,12 +139,31 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitOpEvent`
 - To: `Active`
 
+### `CompleteOperationCompletesWait`
+- From: `Active`
+- On: `CompleteOperation`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_satisfies_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`, `WaitAllSatisfied`
+- To: `Active`
+
 ### `CompleteOperation`
 - From: `Active`
 - On: `CompleteOperation`(operation_id)
 - Guards:
   - `status_allows_terminalization`
+  - `terminalization_does_not_complete_wait`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `FailOperationCompletesWait`
+- From: `Active`
+- On: `FailOperation`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_satisfies_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`, `WaitAllSatisfied`
 - To: `Active`
 
 ### `FailOperation`
@@ -133,7 +171,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `FailOperation`(operation_id)
 - Guards:
   - `status_allows_terminalization`
+  - `terminalization_does_not_complete_wait`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `CancelOperationCompletesWait`
+- From: `Active`
+- On: `CancelOperation`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_satisfies_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`, `WaitAllSatisfied`
 - To: `Active`
 
 ### `CancelOperation`
@@ -141,6 +189,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `CancelOperation`(operation_id)
 - Guards:
   - `status_allows_terminalization`
+  - `terminalization_does_not_complete_wait`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
 - To: `Active`
 
@@ -151,11 +200,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `operation_running`
 - To: `Active`
 
+### `RetireCompletedCompletesWait`
+- From: `Active`
+- On: `RetireCompleted`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_satisfies_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`, `WaitAllSatisfied`
+- To: `Active`
+
 ### `RetireCompleted`
 - From: `Active`
 - On: `RetireCompleted`(operation_id)
 - Guards:
   - `status_allows_terminalization`
+  - `terminalization_does_not_complete_wait`
 - Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
 - To: `Active`
 
@@ -167,15 +226,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `terminal_is_buffered`
 - To: `Active`
 
+### `OwnerTerminatedCompletesWait`
+- From: `Active`
+- On: `OwnerTerminated`()
+- Guards:
+  - `wait_is_active`
+- Emits: `WaitAllSatisfied`
+- To: `Active`
+
 ### `OwnerTerminated`
 - From: `Active`
 - On: `OwnerTerminated`()
+- Guards:
+  - `wait_not_active`
 - To: `Active`
 
-### `WaitAll`
+### `BeginWaitAllImmediate`
 - From: `Active`
-- On: `WaitAll`(operation_ids)
+- On: `BeginWaitAll`(wait_request_id, operation_ids)
+- Guards:
+  - `wait_not_already_active`
+  - `all_wait_operations_known`
+  - `all_wait_operations_terminal`
 - Emits: `WaitAllSatisfied`
+- To: `Active`
+
+### `BeginWaitAllPending`
+- From: `Active`
+- On: `BeginWaitAll`(wait_request_id, operation_ids)
+- Guards:
+  - `wait_not_already_active`
+  - `all_wait_operations_known`
+  - `not_all_wait_operations_terminal`
+- To: `Active`
+
+### `CancelWaitAll`
+- From: `Active`
+- On: `CancelWaitAll`(wait_request_id)
+- Guards:
+  - `wait_is_active`
+  - `wait_request_matches`
 - To: `Active`
 
 ### `CollectCompleted`

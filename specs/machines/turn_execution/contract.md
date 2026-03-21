@@ -14,6 +14,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u32`
 - `pending_op_refs`: `Option<Seq<AsyncOpRef>>`
+- `barrier_operation_ids`: `Seq<OperationId>`
 - `has_barrier_ops`: `Bool`
 - `barrier_satisfied`: `Bool`
 - `boundary_count`: `u32`
@@ -29,9 +30,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PrimitiveApplied`(run_id: RunId, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool)
 - `LlmReturnedToolCalls`(run_id: RunId, tool_count: u32)
 - `LlmReturnedTerminal`(run_id: RunId)
-- `RegisterPendingOps`(run_id: RunId, op_refs: Seq<AsyncOpRef>, has_barrier_ops: Bool)
+- `RegisterPendingOps`(run_id: RunId, op_refs: Seq<AsyncOpRef>, barrier_operation_ids: Seq<OperationId>, has_barrier_ops: Bool)
 - `ToolCallsResolved`(run_id: RunId)
-- `OpsBarrierSatisfied`(run_id: RunId)
+- `OpsBarrierSatisfied`(run_id: RunId, operation_ids: Seq<OperationId>)
 - `BoundaryContinue`(run_id: RunId)
 - `BoundaryComplete`(run_id: RunId)
 - `RecoverableFailure`(run_id: RunId)
@@ -150,7 +151,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RegisterPendingOps`
 - From: `WaitingForOps`
-- On: `RegisterPendingOps`(run_id, op_refs, has_barrier_ops)
+- On: `RegisterPendingOps`(run_id, op_refs, barrier_operation_ids, has_barrier_ops)
 - Guards:
   - `run_matches_active`
   - `tool_calls_pending_positive`
@@ -158,10 +159,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `OpsBarrierSatisfied`
 - From: `WaitingForOps`
-- On: `OpsBarrierSatisfied`(run_id)
+- On: `OpsBarrierSatisfied`(run_id, operation_ids)
 - Guards:
   - `run_matches_active`
   - `barrier_not_yet_satisfied`
+  - `operation_ids_match_current_barrier_set`
 - To: `WaitingForOps`
 
 ### `ToolCallsResolved`

@@ -417,7 +417,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `meerkat-runtime/src/runtime_state.rs` — runtime lifecycle state precursor
-- `meerkat-runtime/src/state_machine.rs` — runtime control reducer precursor
+- `meerkat-runtime/src/runtime_control_authority.rs` — canonical runtime control authority and transition reducer
 - `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
 - `meerkat-runtime/src/control_plane.rs` — stop/preemption seam and completion-resolution precursor
 - `meerkat-runtime/src/session_adapter.rs` — surface-facing lifecycle and completion owner precursor

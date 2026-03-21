@@ -1,8 +1,8 @@
-//! State machine for the agent loop
+//! State projection for the agent loop.
 //!
-//! Defines valid states and transitions for the core loop.
+//! Canonical transition legality lives in `TurnExecutionAuthority`; this enum
+//! is the persisted/user-facing loop shape.
 
-use crate::error::AgentError;
 use serde::{Deserialize, Serialize};
 
 /// States of the core agent loop
@@ -34,44 +34,6 @@ impl LoopState {
     pub fn is_waiting(&self) -> bool {
         matches!(self, Self::CallingLlm | Self::WaitingForOps)
     }
-
-    /// Validate a transition from this state to another
-    pub fn can_transition_to(&self, next: &LoopState) -> bool {
-        use LoopState::{
-            CallingLlm, Cancelling, Completed, DrainingEvents, ErrorRecovery, WaitingForOps,
-        };
-
-        matches!(
-            (self, next),
-            (
-                CallingLlm,
-                WaitingForOps | DrainingEvents | Completed | ErrorRecovery | Cancelling
-            ) | (WaitingForOps, DrainingEvents | Cancelling)
-                | (
-                    DrainingEvents | ErrorRecovery,
-                    CallingLlm | Completed | Cancelling
-                )
-                | (Cancelling, Completed)
-        )
-    }
-
-    /// Transition to a new state, returning error if invalid
-    pub fn transition(&mut self, next: LoopState) -> Result<(), AgentError> {
-        if self.can_transition_to(&next) {
-            *self = next;
-            Ok(())
-        } else {
-            Err(AgentError::InvalidStateTransition {
-                from: format!("{self:?}"),
-                to: format!("{next:?}"),
-            })
-        }
-    }
-
-    /// Force a transition (use with caution)
-    pub fn force_transition(&mut self, next: LoopState) {
-        *self = next;
-    }
 }
 
 impl std::fmt::Display for LoopState {
@@ -91,6 +53,38 @@ impl std::fmt::Display for LoopState {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::error::AgentError;
+
+    fn can_transition(from: &LoopState, next: &LoopState) -> bool {
+        use LoopState::{
+            CallingLlm, Cancelling, Completed, DrainingEvents, ErrorRecovery, WaitingForOps,
+        };
+
+        matches!(
+            (from, next),
+            (
+                CallingLlm,
+                WaitingForOps | DrainingEvents | Completed | ErrorRecovery | Cancelling
+            ) | (WaitingForOps, DrainingEvents | Cancelling)
+                | (
+                    DrainingEvents | ErrorRecovery,
+                    CallingLlm | Completed | Cancelling
+                )
+                | (Cancelling, Completed)
+        )
+    }
+
+    fn transition(state: &mut LoopState, next: LoopState) -> Result<(), AgentError> {
+        if can_transition(state, &next) {
+            *state = next;
+            Ok(())
+        } else {
+            Err(AgentError::InvalidStateTransition {
+                from: format!("{state:?}"),
+                to: format!("{next:?}"),
+            })
+        }
+    }
 
     #[test]
     fn test_state_is_terminal() {
@@ -113,88 +107,82 @@ mod tests {
     #[test]
     fn test_valid_transitions_from_calling_llm() {
         let state = LoopState::CallingLlm;
-        assert!(state.can_transition_to(&LoopState::WaitingForOps));
-        assert!(state.can_transition_to(&LoopState::DrainingEvents));
-        assert!(state.can_transition_to(&LoopState::Completed));
-        assert!(state.can_transition_to(&LoopState::ErrorRecovery));
-        assert!(state.can_transition_to(&LoopState::Cancelling));
+        assert!(can_transition(&state, &LoopState::WaitingForOps));
+        assert!(can_transition(&state, &LoopState::DrainingEvents));
+        assert!(can_transition(&state, &LoopState::Completed));
+        assert!(can_transition(&state, &LoopState::ErrorRecovery));
+        assert!(can_transition(&state, &LoopState::Cancelling));
 
-        // Invalid
-        assert!(!state.can_transition_to(&LoopState::CallingLlm));
+        assert!(!can_transition(&state, &LoopState::CallingLlm));
     }
 
     #[test]
     fn test_valid_transitions_from_waiting_for_ops() {
         let state = LoopState::WaitingForOps;
-        assert!(state.can_transition_to(&LoopState::DrainingEvents));
-        assert!(state.can_transition_to(&LoopState::Cancelling));
+        assert!(can_transition(&state, &LoopState::DrainingEvents));
+        assert!(can_transition(&state, &LoopState::Cancelling));
 
-        // Invalid
-        assert!(!state.can_transition_to(&LoopState::CallingLlm));
-        assert!(!state.can_transition_to(&LoopState::Completed));
+        assert!(!can_transition(&state, &LoopState::CallingLlm));
+        assert!(!can_transition(&state, &LoopState::Completed));
     }
 
     #[test]
     fn test_valid_transitions_from_draining_events() {
         let state = LoopState::DrainingEvents;
-        assert!(state.can_transition_to(&LoopState::CallingLlm));
-        assert!(state.can_transition_to(&LoopState::Completed));
-        assert!(state.can_transition_to(&LoopState::Cancelling));
+        assert!(can_transition(&state, &LoopState::CallingLlm));
+        assert!(can_transition(&state, &LoopState::Completed));
+        assert!(can_transition(&state, &LoopState::Cancelling));
 
-        // Invalid
-        assert!(!state.can_transition_to(&LoopState::WaitingForOps));
-        assert!(!state.can_transition_to(&LoopState::ErrorRecovery));
+        assert!(!can_transition(&state, &LoopState::WaitingForOps));
+        assert!(!can_transition(&state, &LoopState::ErrorRecovery));
     }
 
     #[test]
     fn test_valid_transitions_from_cancelling() {
         let state = LoopState::Cancelling;
-        assert!(state.can_transition_to(&LoopState::Completed));
+        assert!(can_transition(&state, &LoopState::Completed));
 
-        // Invalid
-        assert!(!state.can_transition_to(&LoopState::CallingLlm));
-        assert!(!state.can_transition_to(&LoopState::WaitingForOps));
+        assert!(!can_transition(&state, &LoopState::CallingLlm));
+        assert!(!can_transition(&state, &LoopState::WaitingForOps));
     }
 
     #[test]
     fn test_valid_transitions_from_error_recovery() {
         let state = LoopState::ErrorRecovery;
-        assert!(state.can_transition_to(&LoopState::CallingLlm));
-        assert!(state.can_transition_to(&LoopState::Completed));
-        assert!(state.can_transition_to(&LoopState::Cancelling));
+        assert!(can_transition(&state, &LoopState::CallingLlm));
+        assert!(can_transition(&state, &LoopState::Completed));
+        assert!(can_transition(&state, &LoopState::Cancelling));
 
-        // Invalid
-        assert!(!state.can_transition_to(&LoopState::WaitingForOps));
-        assert!(!state.can_transition_to(&LoopState::DrainingEvents));
+        assert!(!can_transition(&state, &LoopState::WaitingForOps));
+        assert!(!can_transition(&state, &LoopState::DrainingEvents));
     }
 
     #[test]
     fn test_completed_is_terminal() {
         let state = LoopState::Completed;
 
-        // No transitions from completed state
-        assert!(!state.can_transition_to(&LoopState::CallingLlm));
-        assert!(!state.can_transition_to(&LoopState::WaitingForOps));
-        assert!(!state.can_transition_to(&LoopState::DrainingEvents));
-        assert!(!state.can_transition_to(&LoopState::Cancelling));
-        assert!(!state.can_transition_to(&LoopState::ErrorRecovery));
-        assert!(!state.can_transition_to(&LoopState::Completed));
+        assert!(!can_transition(&state, &LoopState::CallingLlm));
+        assert!(!can_transition(&state, &LoopState::WaitingForOps));
+        assert!(!can_transition(&state, &LoopState::DrainingEvents));
+        assert!(!can_transition(&state, &LoopState::Cancelling));
+        assert!(!can_transition(&state, &LoopState::ErrorRecovery));
+        assert!(!can_transition(&state, &LoopState::Completed));
     }
 
     #[test]
     fn test_state_transition_success() {
         let mut state = LoopState::CallingLlm;
-        assert!(state.transition(LoopState::DrainingEvents).is_ok());
+        assert!(transition(&mut state, LoopState::DrainingEvents).is_ok());
         assert_eq!(state, LoopState::DrainingEvents);
 
-        assert!(state.transition(LoopState::CallingLlm).is_ok());
+        assert!(transition(&mut state, LoopState::CallingLlm).is_ok());
         assert_eq!(state, LoopState::CallingLlm);
     }
 
     #[test]
     fn test_state_transition_failure() {
         let mut state = LoopState::Completed;
-        let result = state.transition(LoopState::CallingLlm);
+        let result = transition(&mut state, LoopState::CallingLlm);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -223,43 +211,25 @@ mod tests {
     #[test]
     fn test_full_happy_path() {
         let mut state = LoopState::CallingLlm;
-
-        // LLM returns tool_use
-        assert!(state.transition(LoopState::DrainingEvents).is_ok());
-
-        // Process events, need more work
-        assert!(state.transition(LoopState::CallingLlm).is_ok());
-
-        // LLM returns end_turn
-        assert!(state.transition(LoopState::Completed).is_ok());
-
+        assert!(transition(&mut state, LoopState::DrainingEvents).is_ok());
+        assert!(transition(&mut state, LoopState::CallingLlm).is_ok());
+        assert!(transition(&mut state, LoopState::Completed).is_ok());
         assert!(state.is_terminal());
     }
 
     #[test]
     fn test_cancellation_path() {
         let mut state = LoopState::CallingLlm;
-
-        // Cancel signal received
-        assert!(state.transition(LoopState::Cancelling).is_ok());
-
-        // Cleanup complete
-        assert!(state.transition(LoopState::Completed).is_ok());
-
+        assert!(transition(&mut state, LoopState::Cancelling).is_ok());
+        assert!(transition(&mut state, LoopState::Completed).is_ok());
         assert!(state.is_terminal());
     }
 
     #[test]
     fn test_error_recovery_path() {
         let mut state = LoopState::CallingLlm;
-
-        // LLM error
-        assert!(state.transition(LoopState::ErrorRecovery).is_ok());
-
-        // Successful retry
-        assert!(state.transition(LoopState::CallingLlm).is_ok());
-
-        // Complete normally
-        assert!(state.transition(LoopState::Completed).is_ok());
+        assert!(transition(&mut state, LoopState::ErrorRecovery).is_ok());
+        assert!(transition(&mut state, LoopState::CallingLlm).is_ok());
+        assert!(transition(&mut state, LoopState::Completed).is_ok());
     }
 }

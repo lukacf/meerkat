@@ -9,7 +9,7 @@ use crate::{
 pub fn ops_lifecycle_machine() -> MachineSchema {
     MachineSchema {
         machine: "OpsLifecycleMachine".into(),
-        version: 2,
+        version: 3,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
             module: "generated::ops_lifecycle".into(),
@@ -99,6 +99,12 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                         Box::new(TypeRef::U64),
                     ),
                 ),
+                field("wait_active", TypeRef::Bool),
+                field("wait_request_id", TypeRef::Named("WaitRequestId".into())),
+                field(
+                    "wait_operation_ids",
+                    TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                ),
             ],
             init: InitSchema {
                 phase: "Active".into(),
@@ -117,6 +123,9 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     init("active_count", Expr::U64(0)),
                     init("created_at_ms", Expr::EmptyMap),
                     init("completed_at_ms", Expr::EmptyMap),
+                    init("wait_active", Expr::Bool(false)),
+                    init("wait_request_id", Expr::String("wait_request_none".into())),
+                    init("wait_operation_ids", Expr::SeqLiteral(vec![])),
                 ],
             },
             terminal_phases: vec![],
@@ -176,12 +185,22 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     fields: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
                 },
                 variant("OwnerTerminated"),
-                // Phase B: wait for multiple operations to reach terminal
+                // Phase C: authority-owned barrier wait lifecycle
                 VariantSchema {
-                    name: "WaitAll".into(),
+                    name: "BeginWaitAll".into(),
+                    fields: vec![
+                        field("wait_request_id", TypeRef::Named("WaitRequestId".into())),
+                        field(
+                            "operation_ids",
+                            TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                        ),
+                    ],
+                },
+                VariantSchema {
+                    name: "CancelWaitAll".into(),
                     fields: vec![field(
-                        "operation_ids",
-                        TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                        "wait_request_id",
+                        TypeRef::Named("WaitRequestId".into()),
                     )],
                 },
                 // Phase B: drain all completed operations
@@ -230,10 +249,13 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 // Phase B: signal that wait_all barrier is satisfied
                 VariantSchema {
                     name: "WaitAllSatisfied".into(),
-                    fields: vec![field(
-                        "operation_ids",
-                        TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
-                    )],
+                    fields: vec![
+                        field("wait_request_id", TypeRef::Named("WaitRequestId".into())),
+                        field(
+                            "operation_ids",
+                            TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                        ),
+                    ],
                 },
                 // Phase B: result of collect_completed drain
                 VariantSchema {
@@ -286,6 +308,97 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     }),
                     else_expr: Box::new(Expr::String("None".into())),
                 },
+            },
+            HelperSchema {
+                name: "wait_is_active".into(),
+                params: vec![],
+                returns: TypeRef::Bool,
+                body: Expr::Field("wait_active".into()),
+            },
+            HelperSchema {
+                name: "all_operations_known".into(),
+                params: vec![field(
+                    "operation_ids",
+                    TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                )],
+                returns: TypeRef::Bool,
+                body: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "operation_id".into(),
+                    over: Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+                        "operation_ids".into(),
+                    )))),
+                    body: Box::new(Expr::Contains {
+                        collection: Box::new(Expr::Field("known_operations".into())),
+                        value: Box::new(Expr::Binding("operation_id".into())),
+                    }),
+                },
+            },
+            HelperSchema {
+                name: "all_operations_terminal".into(),
+                params: vec![field(
+                    "operation_ids",
+                    TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                )],
+                returns: TypeRef::Bool,
+                body: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "operation_id".into(),
+                    over: Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+                        "operation_ids".into(),
+                    )))),
+                    body: Box::new(Expr::Call {
+                        helper: "is_terminal_status".into(),
+                        args: vec![Expr::Call {
+                            helper: "status_of".into(),
+                            args: vec![Expr::Binding("operation_id".into())],
+                        }],
+                    }),
+                },
+            },
+            HelperSchema {
+                name: "wait_tracks_operation".into(),
+                params: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
+                returns: TypeRef::Bool,
+                body: Expr::Contains {
+                    collection: Box::new(Expr::Field("wait_operation_ids".into())),
+                    value: Box::new(Expr::Binding("operation_id".into())),
+                },
+            },
+            HelperSchema {
+                name: "wait_completes_on_terminal".into(),
+                params: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
+                returns: TypeRef::Bool,
+                body: Expr::And(vec![
+                    Expr::Call {
+                        helper: "wait_is_active".into(),
+                        args: vec![],
+                    },
+                    Expr::Call {
+                        helper: "wait_tracks_operation".into(),
+                        args: vec![Expr::Binding("operation_id".into())],
+                    },
+                    Expr::Quantified {
+                        quantifier: Quantifier::All,
+                        binding: "tracked_operation_id".into(),
+                        over: Box::new(Expr::SeqElements(Box::new(Expr::Field(
+                            "wait_operation_ids".into(),
+                        )))),
+                        body: Box::new(Expr::Or(vec![
+                            Expr::Eq(
+                                Box::new(Expr::Binding("tracked_operation_id".into())),
+                                Box::new(Expr::Binding("operation_id".into())),
+                            ),
+                            Expr::Call {
+                                helper: "is_terminal_status".into(),
+                                args: vec![Expr::Call {
+                                    helper: "status_of".into(),
+                                    args: vec![Expr::Binding("tracked_operation_id".into())],
+                                }],
+                            },
+                        ])),
+                    },
+                ]),
             },
             HelperSchema {
                 name: "peer_ready_of".into(),
@@ -743,6 +856,13 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 to: "Active".into(),
                 emit: vec![submit_op_event("operation_id", "Started")],
             },
+            terminal_transition_satisfies_wait(
+                "ProvisioningFailedCompletesWait",
+                "ProvisioningFailed",
+                &["Provisioning"],
+                "Failed",
+                "Failed",
+            ),
             terminal_transition(
                 "ProvisioningFailed",
                 "ProvisioningFailed",
@@ -883,6 +1003,13 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 to: "Active".into(),
                 emit: vec![submit_op_event("operation_id", "Progress")],
             },
+            terminal_transition_satisfies_wait(
+                "CompleteOperationCompletesWait",
+                "CompleteOperation",
+                &["Running", "Retiring"],
+                "Completed",
+                "Completed",
+            ),
             terminal_transition(
                 "CompleteOperation",
                 "CompleteOperation",
@@ -890,12 +1017,26 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 "Completed",
                 "Completed",
             ),
+            terminal_transition_satisfies_wait(
+                "FailOperationCompletesWait",
+                "FailOperation",
+                &["Provisioning", "Running", "Retiring"],
+                "Failed",
+                "Failed",
+            ),
             terminal_transition(
                 "FailOperation",
                 "FailOperation",
                 &["Provisioning", "Running", "Retiring"],
                 "Failed",
                 "Failed",
+            ),
+            terminal_transition_satisfies_wait(
+                "CancelOperationCompletesWait",
+                "CancelOperation",
+                &["Provisioning", "Running", "Retiring"],
+                "Cancelled",
+                "Cancelled",
             ),
             terminal_transition(
                 "CancelOperation",
@@ -920,6 +1061,13 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 to: "Active".into(),
                 emit: vec![],
             },
+            terminal_transition_satisfies_wait(
+                "RetireCompletedCompletesWait",
+                "RetireCompleted",
+                &["Running", "Retiring"],
+                "Retired",
+                "Retired",
+            ),
             terminal_transition(
                 "RetireCompleted",
                 "RetireCompleted",
@@ -962,71 +1110,265 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 emit: vec![],
             },
             TransitionSchema {
+                name: "OwnerTerminatedCompletesWait".into(),
+                from: vec!["Active".into()],
+                on: InputMatch {
+                    variant: "OwnerTerminated".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "wait_is_active".into(),
+                    expr: Expr::Call {
+                        helper: "wait_is_active".into(),
+                        args: vec![],
+                    },
+                }],
+                updates: vec![
+                    Update::ForEach {
+                        binding: "operation_id".into(),
+                        over: Expr::Field("known_operations".into()),
+                        updates: vec![Update::Conditional {
+                            condition: Expr::Call {
+                                helper: "is_owner_terminatable_status".into(),
+                                args: vec![Expr::Call {
+                                    helper: "status_of".into(),
+                                    args: vec![Expr::Binding("operation_id".into())],
+                                }],
+                            },
+                            then_updates: vec![
+                                Update::MapInsert {
+                                    field: "operation_status".into(),
+                                    key: Expr::Binding("operation_id".into()),
+                                    value: Expr::String("Terminated".into()),
+                                },
+                                Update::MapInsert {
+                                    field: "terminal_outcome".into(),
+                                    key: Expr::Binding("operation_id".into()),
+                                    value: Expr::String("Terminated".into()),
+                                },
+                                Update::MapInsert {
+                                    field: "terminal_buffered".into(),
+                                    key: Expr::Binding("operation_id".into()),
+                                    value: Expr::Bool(true),
+                                },
+                            ],
+                            else_updates: vec![],
+                        }],
+                    },
+                    Update::Assign {
+                        field: "active_count".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "wait_active".into(),
+                        expr: Expr::Bool(false),
+                    },
+                ],
+                to: "Active".into(),
+                emit: vec![EffectEmit {
+                    variant: "WaitAllSatisfied".into(),
+                    fields: IndexMap::from([
+                        (
+                            "wait_request_id".into(),
+                            Expr::Field("wait_request_id".into()),
+                        ),
+                        (
+                            "operation_ids".into(),
+                            Expr::Field("wait_operation_ids".into()),
+                        ),
+                    ]),
+                }],
+            },
+            TransitionSchema {
                 name: "OwnerTerminated".into(),
                 from: vec!["Active".into()],
                 on: InputMatch {
                     variant: "OwnerTerminated".into(),
                     bindings: vec![],
                 },
-                guards: vec![],
-                updates: vec![Update::ForEach {
-                    binding: "operation_id".into(),
-                    over: Expr::Field("known_operations".into()),
-                    updates: vec![Update::Conditional {
-                        condition: Expr::Call {
-                            helper: "is_owner_terminatable_status".into(),
-                            args: vec![Expr::Call {
-                                helper: "status_of".into(),
-                                args: vec![Expr::Binding("operation_id".into())],
-                            }],
-                        },
-                        then_updates: vec![
-                            Update::MapInsert {
-                                field: "operation_status".into(),
-                                key: Expr::Binding("operation_id".into()),
-                                value: Expr::String("Terminated".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_outcome".into(),
-                                key: Expr::Binding("operation_id".into()),
-                                value: Expr::String("Terminated".into()),
-                            },
-                            Update::MapInsert {
-                                field: "terminal_buffered".into(),
-                                key: Expr::Binding("operation_id".into()),
-                                value: Expr::Bool(true),
-                            },
-                        ],
-                        else_updates: vec![],
-                    }],
+                guards: vec![Guard {
+                    name: "wait_not_active".into(),
+                    expr: Expr::Not(Box::new(Expr::Call {
+                        helper: "wait_is_active".into(),
+                        args: vec![],
+                    })),
                 }],
+                updates: vec![
+                    Update::ForEach {
+                        binding: "operation_id".into(),
+                        over: Expr::Field("known_operations".into()),
+                        updates: vec![Update::Conditional {
+                            condition: Expr::Call {
+                                helper: "is_owner_terminatable_status".into(),
+                                args: vec![Expr::Call {
+                                    helper: "status_of".into(),
+                                    args: vec![Expr::Binding("operation_id".into())],
+                                }],
+                            },
+                            then_updates: vec![
+                                Update::MapInsert {
+                                    field: "operation_status".into(),
+                                    key: Expr::Binding("operation_id".into()),
+                                    value: Expr::String("Terminated".into()),
+                                },
+                                Update::MapInsert {
+                                    field: "terminal_outcome".into(),
+                                    key: Expr::Binding("operation_id".into()),
+                                    value: Expr::String("Terminated".into()),
+                                },
+                                Update::MapInsert {
+                                    field: "terminal_buffered".into(),
+                                    key: Expr::Binding("operation_id".into()),
+                                    value: Expr::Bool(true),
+                                },
+                            ],
+                            else_updates: vec![],
+                        }],
+                    },
+                    Update::Assign {
+                        field: "active_count".into(),
+                        expr: Expr::U64(0),
+                    },
+                ],
                 to: "Active".into(),
                 // Authority emits NotifyOpWatcher + RetainTerminalRecord per terminated op
                 // inside the ForEach loop. Schema DSL cannot express per-iteration effects,
                 // so these are documented here rather than in the emit list.
                 emit: vec![],
             },
-            // Phase B: not yet implemented in authority
-            // Phase B: WaitAll — registers watchers for all specified operations
             TransitionSchema {
-                name: "WaitAll".into(),
+                name: "BeginWaitAllImmediate".into(),
                 from: vec!["Active".into()],
                 on: InputMatch {
-                    variant: "WaitAll".into(),
-                    bindings: vec!["operation_ids".into()],
+                    variant: "BeginWaitAll".into(),
+                    bindings: vec!["wait_request_id".into(), "operation_ids".into()],
                 },
-                guards: vec![],
+                guards: vec![
+                    Guard {
+                        name: "wait_not_already_active".into(),
+                        expr: Expr::Not(Box::new(Expr::Call {
+                            helper: "wait_is_active".into(),
+                            args: vec![],
+                        })),
+                    },
+                    Guard {
+                        name: "all_wait_operations_known".into(),
+                        expr: Expr::Call {
+                            helper: "all_operations_known".into(),
+                            args: vec![Expr::Binding("operation_ids".into())],
+                        },
+                    },
+                    Guard {
+                        name: "all_wait_operations_terminal".into(),
+                        expr: Expr::Call {
+                            helper: "all_operations_terminal".into(),
+                            args: vec![Expr::Binding("operation_ids".into())],
+                        },
+                    },
+                ],
                 updates: vec![],
                 to: "Active".into(),
                 emit: vec![EffectEmit {
                     variant: "WaitAllSatisfied".into(),
-                    fields: IndexMap::from([(
-                        "operation_ids".into(),
-                        Expr::Binding("operation_ids".into()),
-                    )]),
+                    fields: IndexMap::from([
+                        (
+                            "wait_request_id".into(),
+                            Expr::Binding("wait_request_id".into()),
+                        ),
+                        (
+                            "operation_ids".into(),
+                            Expr::Binding("operation_ids".into()),
+                        ),
+                    ]),
                 }],
             },
-            // Phase B: not yet implemented in authority
+            TransitionSchema {
+                name: "BeginWaitAllPending".into(),
+                from: vec!["Active".into()],
+                on: InputMatch {
+                    variant: "BeginWaitAll".into(),
+                    bindings: vec!["wait_request_id".into(), "operation_ids".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "wait_not_already_active".into(),
+                        expr: Expr::Not(Box::new(Expr::Call {
+                            helper: "wait_is_active".into(),
+                            args: vec![],
+                        })),
+                    },
+                    Guard {
+                        name: "all_wait_operations_known".into(),
+                        expr: Expr::Call {
+                            helper: "all_operations_known".into(),
+                            args: vec![Expr::Binding("operation_ids".into())],
+                        },
+                    },
+                    Guard {
+                        name: "not_all_wait_operations_terminal".into(),
+                        expr: Expr::Not(Box::new(Expr::Call {
+                            helper: "all_operations_terminal".into(),
+                            args: vec![Expr::Binding("operation_ids".into())],
+                        })),
+                    },
+                ],
+                updates: vec![
+                    Update::Assign {
+                        field: "wait_active".into(),
+                        expr: Expr::Bool(true),
+                    },
+                    Update::Assign {
+                        field: "wait_request_id".into(),
+                        expr: Expr::Binding("wait_request_id".into()),
+                    },
+                    Update::Assign {
+                        field: "wait_operation_ids".into(),
+                        expr: Expr::Binding("operation_ids".into()),
+                    },
+                ],
+                to: "Active".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "CancelWaitAll".into(),
+                from: vec!["Active".into()],
+                on: InputMatch {
+                    variant: "CancelWaitAll".into(),
+                    bindings: vec!["wait_request_id".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "wait_is_active".into(),
+                        expr: Expr::Call {
+                            helper: "wait_is_active".into(),
+                            args: vec![],
+                        },
+                    },
+                    Guard {
+                        name: "wait_request_matches".into(),
+                        expr: Expr::Eq(
+                            Box::new(Expr::Field("wait_request_id".into())),
+                            Box::new(Expr::Binding("wait_request_id".into())),
+                        ),
+                    },
+                ],
+                updates: vec![
+                    Update::Assign {
+                        field: "wait_active".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "wait_request_id".into(),
+                        expr: Expr::String("wait_request_none".into()),
+                    },
+                    Update::Assign {
+                        field: "wait_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                ],
+                to: "Active".into(),
+                emit: vec![],
+            },
             // Phase B: CollectCompleted — drain all buffered terminal operations
             TransitionSchema {
                 name: "CollectCompleted".into(),
@@ -1176,23 +1518,32 @@ fn terminal_transition(
             variant: input_variant.into(),
             bindings: vec!["operation_id".into()],
         },
-        guards: vec![Guard {
-            name: "status_allows_terminalization".into(),
-            expr: Expr::Or(
-                from_statuses
-                    .iter()
-                    .map(|status| {
-                        Expr::Eq(
-                            Box::new(Expr::Call {
-                                helper: "status_of".into(),
-                                args: vec![operation_id.clone()],
-                            }),
-                            Box::new(Expr::String((*status).into())),
-                        )
-                    })
-                    .collect(),
-            ),
-        }],
+        guards: vec![
+            Guard {
+                name: "status_allows_terminalization".into(),
+                expr: Expr::Or(
+                    from_statuses
+                        .iter()
+                        .map(|status| {
+                            Expr::Eq(
+                                Box::new(Expr::Call {
+                                    helper: "status_of".into(),
+                                    args: vec![operation_id.clone()],
+                                }),
+                                Box::new(Expr::String((*status).into())),
+                            )
+                        })
+                        .collect(),
+                ),
+            },
+            Guard {
+                name: "terminalization_does_not_complete_wait".into(),
+                expr: Expr::Not(Box::new(Expr::Call {
+                    helper: "wait_completes_on_terminal".into(),
+                    args: vec![operation_id.clone()],
+                })),
+            },
+        ],
         updates: vec![
             Update::MapInsert {
                 field: "operation_status".into(),
@@ -1225,6 +1576,98 @@ fn terminal_transition(
             submit_op_event("operation_id", event_kind),
             notify_op_watcher("operation_id", terminal_status),
             retain_terminal_record("operation_id", terminal_status),
+        ],
+    }
+}
+
+fn terminal_transition_satisfies_wait(
+    name: &str,
+    input_variant: &str,
+    from_statuses: &[&str],
+    terminal_status: &str,
+    event_kind: &str,
+) -> TransitionSchema {
+    let operation_id = Expr::Binding("operation_id".into());
+    TransitionSchema {
+        name: name.into(),
+        from: vec!["Active".into()],
+        on: InputMatch {
+            variant: input_variant.into(),
+            bindings: vec!["operation_id".into()],
+        },
+        guards: vec![
+            Guard {
+                name: "status_allows_terminalization".into(),
+                expr: Expr::Or(
+                    from_statuses
+                        .iter()
+                        .map(|status| {
+                            Expr::Eq(
+                                Box::new(Expr::Call {
+                                    helper: "status_of".into(),
+                                    args: vec![operation_id.clone()],
+                                }),
+                                Box::new(Expr::String((*status).into())),
+                            )
+                        })
+                        .collect(),
+                ),
+            },
+            Guard {
+                name: "terminalization_satisfies_wait".into(),
+                expr: Expr::Call {
+                    helper: "wait_completes_on_terminal".into(),
+                    args: vec![operation_id.clone()],
+                },
+            },
+        ],
+        updates: vec![
+            Update::MapInsert {
+                field: "operation_status".into(),
+                key: operation_id.clone(),
+                value: Expr::String(terminal_status.into()),
+            },
+            Update::MapInsert {
+                field: "terminal_outcome".into(),
+                key: operation_id.clone(),
+                value: Expr::String(terminal_status.into()),
+            },
+            Update::MapInsert {
+                field: "terminal_buffered".into(),
+                key: operation_id.clone(),
+                value: Expr::Bool(true),
+            },
+            Update::Decrement {
+                field: "active_count".into(),
+                amount: 1,
+            },
+            Update::SeqAppend {
+                field: "completed_order".into(),
+                value: operation_id,
+            },
+            Update::Assign {
+                field: "wait_active".into(),
+                expr: Expr::Bool(false),
+            },
+        ],
+        to: "Active".into(),
+        emit: vec![
+            submit_op_event("operation_id", event_kind),
+            notify_op_watcher("operation_id", terminal_status),
+            retain_terminal_record("operation_id", terminal_status),
+            EffectEmit {
+                variant: "WaitAllSatisfied".into(),
+                fields: IndexMap::from([
+                    (
+                        "wait_request_id".into(),
+                        Expr::Field("wait_request_id".into()),
+                    ),
+                    (
+                        "operation_ids".into(),
+                        Expr::Field("wait_operation_ids".into()),
+                    ),
+                ]),
+            },
         ],
     }
 }

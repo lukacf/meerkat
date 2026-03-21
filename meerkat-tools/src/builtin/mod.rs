@@ -49,7 +49,7 @@ pub use store::TaskStore;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
-use meerkat_core::ops::{AsyncOpRef, OperationId};
+use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::types::ContentBlock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -112,16 +112,6 @@ pub trait BuiltinTool: Send + Sync {
     /// - `AsyncOpRef::detached(id)` — runs independently, does not block
     fn async_ops_for_output(&self, _output: &ToolOutput) -> Vec<AsyncOpRef> {
         Vec::new()
-    }
-
-    /// Deprecated: use [`async_ops_for_output`] instead.
-    /// Kept for backward compatibility — default implementation delegates to
-    /// `async_ops_for_output` extracting just the IDs.
-    fn operation_ids_for_output(&self, output: &ToolOutput) -> Vec<OperationId> {
-        self.async_ops_for_output(output)
-            .into_iter()
-            .map(|op| op.operation_id)
-            .collect()
     }
 }
 

@@ -51,7 +51,6 @@ pub mod runtime_state;
 pub mod service_ext;
 pub mod session_adapter;
 pub mod silent_intent;
-pub mod state_machine;
 pub mod store;
 pub mod traits;
 
@@ -107,7 +106,6 @@ pub use runtime_ingress_authority::{
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 pub use session_adapter::RuntimeSessionAdapter;
-pub use state_machine::RuntimeStateMachine;
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlCommand,

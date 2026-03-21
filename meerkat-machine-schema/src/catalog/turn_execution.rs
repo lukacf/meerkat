@@ -50,6 +50,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         "AsyncOpRef".into(),
                     ))))),
                 ),
+                field(
+                    "barrier_operation_ids",
+                    TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                ),
                 field("has_barrier_ops", TypeRef::Bool),
                 field("barrier_satisfied", TypeRef::Bool),
                 field("boundary_count", TypeRef::U32),
@@ -71,6 +75,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                     init("image_tool_results_enabled", Expr::Bool(false)),
                     init("tool_calls_pending", Expr::U64(0)),
                     init("pending_op_refs", Expr::None),
+                    init("barrier_operation_ids", Expr::SeqLiteral(vec![])),
                     init("has_barrier_ops", Expr::Bool(false)),
                     init("barrier_satisfied", Expr::Bool(true)),
                     init("boundary_count", Expr::U64(0)),
@@ -128,6 +133,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                             "op_refs",
                             TypeRef::Seq(Box::new(TypeRef::Named("AsyncOpRef".into()))),
                         ),
+                        field(
+                            "barrier_operation_ids",
+                            TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                        ),
                         field("has_barrier_ops", TypeRef::Bool),
                     ],
                 },
@@ -137,7 +146,13 @@ pub fn turn_execution_machine() -> MachineSchema {
                 },
                 VariantSchema {
                     name: "OpsBarrierSatisfied".into(),
-                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                    fields: vec![
+                        field("run_id", TypeRef::Named("RunId".into())),
+                        field(
+                            "operation_ids",
+                            TypeRef::Seq(Box::new(TypeRef::Named("OperationId".into()))),
+                        ),
+                    ],
                 },
                 VariantSchema {
                     name: "BoundaryContinue".into(),
@@ -1004,6 +1019,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
                         field: "has_barrier_ops".into(),
                         expr: Expr::Bool(false),
                     },
@@ -1020,7 +1039,12 @@ pub fn turn_execution_machine() -> MachineSchema {
                 from: vec!["WaitingForOps".into()],
                 on: InputMatch {
                     variant: "RegisterPendingOps".into(),
-                    bindings: vec!["run_id".into(), "op_refs".into(), "has_barrier_ops".into()],
+                    bindings: vec![
+                        "run_id".into(),
+                        "op_refs".into(),
+                        "barrier_operation_ids".into(),
+                        "has_barrier_ops".into(),
+                    ],
                 },
                 guards: vec![
                     Guard {
@@ -1044,6 +1068,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::Some(Box::new(Expr::Binding("op_refs".into()))),
                     },
                     Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::Binding("barrier_operation_ids".into()),
+                    },
+                    Update::Assign {
                         field: "has_barrier_ops".into(),
                         expr: Expr::Binding("has_barrier_ops".into()),
                     },
@@ -1064,7 +1092,7 @@ pub fn turn_execution_machine() -> MachineSchema {
                 from: vec!["WaitingForOps".into()],
                 on: InputMatch {
                     variant: "OpsBarrierSatisfied".into(),
-                    bindings: vec!["run_id".into()],
+                    bindings: vec!["run_id".into(), "operation_ids".into()],
                 },
                 guards: vec![
                     Guard {
@@ -1080,6 +1108,27 @@ pub fn turn_execution_machine() -> MachineSchema {
                             Box::new(Expr::Field("barrier_satisfied".into())),
                             Box::new(Expr::Bool(false)),
                         ),
+                    },
+                    Guard {
+                        name: "operation_ids_match_current_barrier_set".into(),
+                        expr: Expr::And(vec![
+                            Expr::Eq(
+                                Box::new(Expr::SeqElements(Box::new(Expr::Field(
+                                    "barrier_operation_ids".into(),
+                                )))),
+                                Box::new(Expr::SeqElements(Box::new(Expr::Binding(
+                                    "operation_ids".into(),
+                                )))),
+                            ),
+                            Expr::Eq(
+                                Box::new(Expr::Len(Box::new(Expr::Field(
+                                    "barrier_operation_ids".into(),
+                                )))),
+                                Box::new(Expr::Len(Box::new(Expr::Binding(
+                                    "operation_ids".into(),
+                                )))),
+                            ),
+                        ]),
                     },
                 ],
                 updates: vec![Update::Assign {
@@ -1134,6 +1183,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
                         field: "has_barrier_ops".into(),
@@ -1488,6 +1541,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
                         field: "has_barrier_ops".into(),
                         expr: Expr::Bool(false),
                     },
@@ -1610,6 +1667,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
                         field: "has_barrier_ops".into(),
@@ -1756,6 +1817,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
                         field: "has_barrier_ops".into(),
@@ -2083,6 +2148,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
                         field: "has_barrier_ops".into(),
                         expr: Expr::Bool(false),
                     },
@@ -2347,6 +2416,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
                         field: "has_barrier_ops".into(),
                         expr: Expr::Bool(false),
                     },
@@ -2564,6 +2637,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "pending_op_refs".into(),
                         expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
                     },
                     Update::Assign {
                         field: "has_barrier_ops".into(),

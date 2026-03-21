@@ -12,14 +12,15 @@
 //!   the real state dimension
 //! - Per-operation statuses: Absent, Provisioning, Running, Retiring,
 //!   Completed, Failed, Cancelled, Retired, Terminated
-//! - 14 inputs: RegisterOperation, ProvisioningSucceeded, ProvisioningFailed,
+//! - 15 inputs: RegisterOperation, ProvisioningSucceeded, ProvisioningFailed,
 //!   PeerReady, RegisterWatcher, ProgressReported, CompleteOperation,
 //!   FailOperation, CancelOperation, RetireRequested, RetireCompleted,
-//!   CollectTerminal, OwnerTerminated, WaitAll
+//!   CollectTerminal, OwnerTerminated, BeginWaitAll, CancelWaitAll
 //! - 8 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
 //!   RetainTerminalRecord, EvictCompletedRecord, WaitAllSatisfied,
 //!   CollectCompletedResult, ConcurrencyLimitExceeded
 
+use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::ops_lifecycle::{
     OperationId, OperationKind, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
 };
@@ -33,7 +34,6 @@ use meerkat_core::ops_lifecycle::{
 /// Shell code classifies raw commands into these typed inputs, then calls
 /// [`OpsLifecycleAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // CollectTerminal not yet used by shell; kept for transition-table completeness
 pub(crate) enum OpsLifecycleInput {
     /// Register a new operation (Absent -> Provisioning).
     RegisterOperation {
@@ -64,12 +64,17 @@ pub(crate) enum OpsLifecycleInput {
     CollectTerminal { operation_id: OperationId },
     /// Terminate all non-terminal operations.
     OwnerTerminated,
-    /// Wait for all specified operations to reach terminal status.
+    /// Begin an authority-owned barrier wait for the specified operations.
     ///
-    /// Emits `WaitAllSatisfied` immediately (the shell has already awaited
-    /// the actual completions; this input exists so the authority can emit
-    /// the formal effect for cross-machine handoff).
-    WaitAll { operation_ids: Vec<OperationId> },
+    /// Emits `WaitAllSatisfied` immediately if all operations are already
+    /// terminal; otherwise stores the outstanding wait until later terminal
+    /// transitions satisfy it.
+    BeginWaitAll {
+        wait_request_id: WaitRequestId,
+        operation_ids: Vec<OperationId>,
+    },
+    /// Cancel the currently active wait request.
+    CancelWaitAll { wait_request_id: WaitRequestId },
 }
 
 // ---------------------------------------------------------------------------
@@ -106,12 +111,14 @@ pub(crate) enum OpsLifecycleEffect {
     ///
     /// Handoff protocol: `ops_barrier_satisfaction` — the shell routes this
     /// to TurnExecution's `OpsBarrierSatisfied` input.
-    WaitAllSatisfied { operation_ids: Vec<OperationId> },
+    WaitAllSatisfied {
+        wait_request_id: WaitRequestId,
+        operation_ids: Vec<OperationId>,
+    },
 }
 
 /// Event kind for SubmitOpEvent effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Terminated not yet emitted by shell; kept for transition-table completeness
 pub(crate) enum OpEventKind {
     Started,
     Progress,
@@ -159,7 +166,6 @@ pub(crate) struct OperationCanonicalState {
     terminal_buffered: bool,
 }
 
-#[allow(dead_code)] // Some getters used only by authority tests; kept for canonical API completeness
 impl OperationCanonicalState {
     /// Current status.
     pub(crate) fn status(&self) -> OperationStatus {
@@ -217,6 +223,10 @@ struct RegistryCanonicalState {
     max_concurrent: Option<usize>,
     /// Count of currently non-terminal operations.
     active_count: usize,
+    /// Currently active barrier wait request, if any.
+    wait_request_id: Option<WaitRequestId>,
+    /// Operation IDs tracked by the active barrier wait.
+    wait_operation_ids: Vec<OperationId>,
 }
 
 impl RegistryCanonicalState {
@@ -227,6 +237,8 @@ impl RegistryCanonicalState {
             max_completed,
             max_concurrent,
             active_count: 0,
+            wait_request_id: None,
+            wait_operation_ids: Vec::new(),
         }
     }
 }
@@ -271,7 +283,6 @@ pub(crate) struct OpsLifecycleAuthority {
 
 impl sealed::Sealed for OpsLifecycleAuthority {}
 
-#[allow(dead_code)] // Some methods used only by authority tests; kept for canonical API completeness
 impl OpsLifecycleAuthority {
     /// Create a new authority with the given configuration.
     pub(crate) fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
@@ -298,6 +309,16 @@ impl OpsLifecycleAuthority {
     /// Number of non-terminal operations.
     pub(crate) fn active_count(&self) -> usize {
         self.state.active_count
+    }
+
+    /// Currently active barrier wait request, if any.
+    pub(crate) fn wait_request_id(&self) -> Option<&WaitRequestId> {
+        self.state.wait_request_id.as_ref()
+    }
+
+    /// Operation IDs tracked by the currently active barrier wait.
+    pub(crate) fn wait_operation_ids(&self) -> &[OperationId] {
+        &self.state.wait_operation_ids
     }
 
     /// Iterate over all operations' canonical state.
@@ -361,6 +382,64 @@ impl OpsLifecycleAuthority {
         collected
     }
 
+    fn wait_active(&self) -> bool {
+        self.state.wait_request_id.is_some()
+    }
+
+    fn all_operations_known(&self, operation_ids: &[OperationId]) -> Result<(), OpsLifecycleError> {
+        for operation_id in operation_ids {
+            if !self.state.operations.contains_key(operation_id) {
+                return Err(OpsLifecycleError::NotFound(operation_id.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_no_duplicate_operation_ids(
+        &self,
+        operation_ids: &[OperationId],
+    ) -> Result<(), OpsLifecycleError> {
+        let mut seen = std::collections::HashSet::new();
+        for operation_id in operation_ids {
+            if !seen.insert(operation_id.clone()) {
+                return Err(OpsLifecycleError::DuplicateWaitOperation(
+                    operation_id.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn all_operations_terminal(&self, operation_ids: &[OperationId]) -> bool {
+        operation_ids.iter().all(|operation_id| {
+            self.state
+                .operations
+                .get(operation_id)
+                .is_some_and(|op| op.status.is_terminal())
+        })
+    }
+
+    fn wait_tracks_operation(&self, operation_id: &OperationId) -> bool {
+        self.state.wait_operation_ids.contains(operation_id)
+    }
+
+    fn maybe_complete_wait(&mut self, effects: &mut Vec<OpsLifecycleEffect>) {
+        if !self.wait_active() || !self.all_operations_terminal(&self.state.wait_operation_ids) {
+            return;
+        }
+
+        let wait_request_id = self
+            .state
+            .wait_request_id
+            .take()
+            .expect("wait_active implies wait_request_id is set");
+        let operation_ids = std::mem::take(&mut self.state.wait_operation_ids);
+        effects.push(OpsLifecycleEffect::WaitAllSatisfied {
+            wait_request_id,
+            operation_ids,
+        });
+    }
+
     /// Evaluate and apply a transition for a terminal operation input.
     ///
     /// Shared logic for CompleteOperation, FailOperation, CancelOperation,
@@ -417,6 +496,8 @@ impl OpsLifecycleAuthority {
 
         // Append to completed ordering.
         self.state.completed_order.push_back(operation_id.clone());
+
+        self.maybe_complete_wait(&mut effects);
 
         // Evict oldest completed if over limit.
         self.evict_completed(&mut effects);
@@ -763,32 +844,51 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
                 }
 
                 self.state.active_count = 0;
+                self.maybe_complete_wait(&mut effects);
                 self.evict_completed(&mut effects);
 
                 Ok(OpsLifecycleTransition { effects })
             }
 
-            OpsLifecycleInput::WaitAll { operation_ids } => {
-                // Validate: every operation must be in a terminal state.
-                // The shell awaited the actual completions, but the authority
-                // must validate the claim — reject if any op is non-terminal.
-                for id in &operation_ids {
-                    match self.state.operations.get(id) {
-                        Some(op) if op.status.is_terminal() => {}
-                        Some(op) => {
-                            return Err(OpsLifecycleError::Internal(format!(
-                                "WaitAll rejected: operation {} is {:?}, not terminal",
-                                id, op.status
-                            )));
-                        }
-                        None => {
-                            return Err(OpsLifecycleError::NotFound(id.clone()));
-                        }
-                    }
+            OpsLifecycleInput::BeginWaitAll {
+                wait_request_id,
+                operation_ids,
+            } => {
+                if self.wait_active() {
+                    return Err(OpsLifecycleError::WaitAlreadyActive);
                 }
+
+                self.ensure_no_duplicate_operation_ids(&operation_ids)?;
+                self.all_operations_known(&operation_ids)?;
+
+                if self.all_operations_terminal(&operation_ids) {
+                    return Ok(OpsLifecycleTransition {
+                        effects: vec![OpsLifecycleEffect::WaitAllSatisfied {
+                            wait_request_id,
+                            operation_ids,
+                        }],
+                    });
+                }
+
+                self.state.wait_request_id = Some(wait_request_id);
+                self.state.wait_operation_ids = operation_ids;
+
                 Ok(OpsLifecycleTransition {
-                    effects: vec![OpsLifecycleEffect::WaitAllSatisfied { operation_ids }],
+                    effects: Vec::new(),
                 })
+            }
+
+            OpsLifecycleInput::CancelWaitAll { wait_request_id } => {
+                match self.state.wait_request_id.as_ref() {
+                    Some(active_wait_request_id) if *active_wait_request_id == wait_request_id => {
+                        self.state.wait_request_id = None;
+                        self.state.wait_operation_ids.clear();
+                        Ok(OpsLifecycleTransition {
+                            effects: Vec::new(),
+                        })
+                    }
+                    _ => Err(OpsLifecycleError::WaitNotActive(wait_request_id)),
+                }
             }
         }
     }
@@ -814,7 +914,13 @@ fn terminal_status_action(status: OperationStatus) -> &'static str {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::lifecycle::WaitRequestId;
     use meerkat_core::ops_lifecycle::DEFAULT_MAX_COMPLETED;
+    use uuid::Uuid;
+
+    fn test_wait_request_id() -> WaitRequestId {
+        WaitRequestId(Uuid::from_u128(1))
+    }
 
     fn make_authority() -> OpsLifecycleAuthority {
         OpsLifecycleAuthority::new(DEFAULT_MAX_COMPLETED, None)
@@ -1563,10 +1669,10 @@ mod tests {
         assert_eq!(auth.active_count(), 0);
     }
 
-    // ---- WaitAll ----
+    // ---- BeginWaitAll / CancelWaitAll ----
 
     #[test]
-    fn wait_all_emits_wait_all_satisfied_with_operation_ids() {
+    fn begin_wait_all_emits_wait_all_satisfied_with_operation_ids() {
         let mut auth = make_authority();
         let id1 = OperationId::new();
         let id2 = OperationId::new();
@@ -1585,20 +1691,80 @@ mod tests {
         })
         .unwrap();
 
-        // WaitAll should emit WaitAllSatisfied
+        // BeginWaitAll should emit WaitAllSatisfied immediately
         let ids = vec![id1.clone(), id2.clone()];
         let transition = auth
-            .apply(OpsLifecycleInput::WaitAll {
+            .apply(OpsLifecycleInput::BeginWaitAll {
+                wait_request_id: test_wait_request_id(),
                 operation_ids: ids.clone(),
             })
             .unwrap();
 
         assert_eq!(transition.effects.len(), 1);
         match &transition.effects[0] {
-            OpsLifecycleEffect::WaitAllSatisfied { operation_ids } => {
+            OpsLifecycleEffect::WaitAllSatisfied {
+                wait_request_id,
+                operation_ids,
+            } => {
+                assert_eq!(*wait_request_id, test_wait_request_id());
                 assert_eq!(*operation_ids, ids);
             }
             other => panic!("expected WaitAllSatisfied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn begin_wait_all_tracks_pending_wait_until_terminal_completion() {
+        let mut auth = make_authority();
+        let wait_request_id = test_wait_request_id();
+        let id = OperationId::new();
+        register(&mut auth, &id, OperationKind::BackgroundToolOp);
+        provision_succeed(&mut auth, &id);
+
+        let start = auth
+            .apply(OpsLifecycleInput::BeginWaitAll {
+                wait_request_id: wait_request_id.clone(),
+                operation_ids: vec![id.clone()],
+            })
+            .unwrap();
+        assert!(start.effects.is_empty());
+        assert_eq!(auth.wait_request_id(), Some(&wait_request_id));
+        assert_eq!(auth.wait_operation_ids(), &[id.clone()]);
+
+        let completion = auth
+            .apply(OpsLifecycleInput::CompleteOperation {
+                operation_id: id.clone(),
+            })
+            .unwrap();
+        assert!(completion.effects.iter().any(|effect| matches!(
+            effect,
+            OpsLifecycleEffect::WaitAllSatisfied {
+                wait_request_id: effect_wait_request_id,
+                operation_ids,
+            } if *effect_wait_request_id == wait_request_id && *operation_ids == vec![id.clone()]
+        )));
+        assert!(auth.wait_request_id().is_none());
+        assert!(auth.wait_operation_ids().is_empty());
+    }
+
+    #[test]
+    fn cancel_wait_all_clears_pending_wait() {
+        let mut auth = make_authority();
+        let wait_request_id = test_wait_request_id();
+        let id = OperationId::new();
+        register(&mut auth, &id, OperationKind::BackgroundToolOp);
+        provision_succeed(&mut auth, &id);
+
+        auth.apply(OpsLifecycleInput::BeginWaitAll {
+            wait_request_id: wait_request_id.clone(),
+            operation_ids: vec![id],
+        })
+        .unwrap();
+        assert_eq!(auth.wait_request_id(), Some(&wait_request_id));
+
+        auth.apply(OpsLifecycleInput::CancelWaitAll { wait_request_id })
+            .unwrap();
+        assert!(auth.wait_request_id().is_none());
+        assert!(auth.wait_operation_ids().is_empty());
     }
 }

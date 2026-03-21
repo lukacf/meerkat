@@ -2,6 +2,7 @@ use super::*;
 use crate::MobBackendKind;
 use crate::definition::ExternalBackendConfig;
 use crate::event::MemberRef;
+use crate::runtime::handle::MemberSpawnReceipt;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -11,6 +12,7 @@ use meerkat_core::lifecycle::RunId as CoreRunId;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::ops::OperationId;
 use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
 use meerkat_core::types::SessionId;
 #[allow(unused_imports)]
@@ -31,7 +33,10 @@ pub struct ProvisionMemberRequest {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobProvisioner: Send + Sync {
-    async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError>;
+    async fn provision_member(
+        &self,
+        req: ProvisionMemberRequest,
+    ) -> Result<MemberSpawnReceipt, MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn start_turn(
@@ -61,6 +66,7 @@ pub trait MobProvisioner: Send + Sync {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerSpec, MobError>;
+    async fn operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId>;
 
     /// Cancel all active checkpointer gates so in-flight saves complete but
     /// subsequent checkpoints are no-ops. Call during mob stop.
@@ -391,7 +397,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SessionBackend {
-    async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
+    async fn provision_member(
+        &self,
+        req: ProvisionMemberRequest,
+    ) -> Result<MemberSpawnReceipt, MobError> {
         tracing::debug!(
             backend = ?req.backend,
             peer_name = %req.peer_name,
@@ -404,14 +413,18 @@ impl MobProvisioner for SessionBackend {
         if self.runtime_adapter.is_some() {
             let _ = self.runtime_session_state(&created.session_id).await;
         }
-        self.ops_adapter
+        let operation_id = self
+            .ops_adapter
             .mark_member_provisioned(&created.session_id, &req.peer_name)
             .await?;
         tracing::debug!(
             session_id = %created.session_id,
             "SessionBackend::provision_member created session"
         );
-        Ok(MemberRef::from_session_id(created.session_id))
+        Ok(MemberSpawnReceipt {
+            member_ref: MemberRef::from_session_id(created.session_id),
+            operation_id,
+        })
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
@@ -558,6 +571,11 @@ impl MobProvisioner for SessionBackend {
         Ok(trusted_peer)
     }
 
+    async fn operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
+        let session_id = member_ref.session_id()?;
+        self.ops_adapter.operation_id_for_session(session_id).await
+    }
+
     async fn cancel_all_checkpointers(&self) {
         self.session_service.cancel_all_checkpointers().await;
     }
@@ -632,7 +650,7 @@ impl MultiBackendProvisioner {
         &self,
         create_session: CreateSessionRequest,
         peer_name: String,
-    ) -> Result<MemberRef, MobError> {
+    ) -> Result<MemberSpawnReceipt, MobError> {
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
                 "invalid external peer name '{peer_name}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments"
@@ -649,6 +667,11 @@ impl MultiBackendProvisioner {
         let created = external
             .session_service
             .create_session(create_session)
+            .await?;
+        let operation_id = self
+            .session
+            .ops_adapter
+            .mark_member_provisioned(&created.session_id, &peer_name)
             .await?;
         tracing::debug!(
             session_id = %created.session_id,
@@ -674,10 +697,13 @@ impl MultiBackendProvisioner {
             address = %address,
             "ExternalBackend::external_member_ref success"
         );
-        Ok(MemberRef::BackendPeer {
-            peer_id,
-            address,
-            session_id: Some(created.session_id),
+        Ok(MemberSpawnReceipt {
+            member_ref: MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id: Some(created.session_id),
+            },
+            operation_id,
         })
     }
 }
@@ -685,7 +711,10 @@ impl MultiBackendProvisioner {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {
-    async fn provision_member(&self, req: ProvisionMemberRequest) -> Result<MemberRef, MobError> {
+    async fn provision_member(
+        &self,
+        req: ProvisionMemberRequest,
+    ) -> Result<MemberSpawnReceipt, MobError> {
         match req.backend {
             MobBackendKind::Session => {
                 self.session
@@ -770,6 +799,14 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .map_err(|error| MobError::WiringError(format!("invalid peer spec: {error}")))
             }
         }
+    }
+
+    async fn operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
+        let session_id = member_ref.session_id()?;
+        self.session
+            .ops_adapter
+            .operation_id_for_session(session_id)
+            .await
     }
 
     async fn cancel_all_checkpointers(&self) {

@@ -20,13 +20,12 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `execution_failure_notifies_control`: `turn_execution`.`RunFailed` -> `runtime_control`.`RunFailed` [Immediate]
 - `execution_cancel_updates_ingress`: `turn_execution`.`RunCancelled` -> `runtime_ingress`.`RunCancelled` [Immediate]
 - `execution_cancel_notifies_control`: `turn_execution`.`RunCancelled` -> `runtime_control`.`RunCancelled` [Immediate]
-- `ops_barrier_satisfied_enters_turn_execution`: `ops_lifecycle`.`WaitAllSatisfied` -> `turn_execution`.`OpsBarrierSatisfied` [Immediate]
 
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
 
 ## Structural Requirements
-- `barrier_satisfaction_handoff_protocol_covered` — OpsLifecycle WaitAllSatisfied effect is covered by the ops_barrier_satisfaction handoff protocol, routing barrier satisfaction to TurnExecution
+- `barrier_satisfaction_handoff_protocol_covered` — OpsLifecycle WaitAllSatisfied effect is covered by the ops_barrier_satisfaction handoff protocol, requiring owner feedback before TurnExecution advances
 
 ## Behavioral Invariants
 - `async_op_events_reenter_runtime_via_operation_input` — async-operation lifecycle events re-enter runtime through the canonical operation-input admission surface

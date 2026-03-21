@@ -6,11 +6,14 @@
 //! snapshot assembly.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use meerkat_core::lifecycle::{RunId, WaitRequestId};
 use meerkat_core::ops_lifecycle::{
     DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationLifecycleSnapshot,
     OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
@@ -40,6 +43,12 @@ struct ShellRecord {
     completed_at: Option<Instant>,
     // Wall-clock anchor captured at creation for epoch millis
     created_at_wall: SystemTime,
+}
+
+#[derive(Debug)]
+struct PendingWaitState {
+    wait_request_id: WaitRequestId,
+    sender: tokio::sync::oneshot::Sender<WaitAllSatisfied>,
 }
 
 impl ShellRecord {
@@ -91,6 +100,7 @@ impl ShellRecord {
 struct ShellState {
     authority: OpsLifecycleAuthority,
     records: HashMap<OperationId, ShellRecord>,
+    pending_wait: Option<PendingWaitState>,
 }
 
 impl ShellState {
@@ -98,6 +108,7 @@ impl ShellState {
         Self {
             authority: OpsLifecycleAuthority::new(max_completed, max_concurrent),
             records: HashMap::new(),
+            pending_wait: None,
         }
     }
 
@@ -174,9 +185,20 @@ impl ShellState {
                 OpsLifecycleEffect::SubmitOpEvent { .. } => {
                     // Future: emit observability events. Currently a no-op.
                 }
-                OpsLifecycleEffect::WaitAllSatisfied { .. } => {
-                    // Cross-machine handoff: routed to TurnExecution by the
-                    // caller (agent loop). No shell-local side effects.
+                OpsLifecycleEffect::WaitAllSatisfied {
+                    wait_request_id,
+                    operation_ids,
+                } => {
+                    if let Some(pending_wait) = self.pending_wait.take() {
+                        if pending_wait.wait_request_id == *wait_request_id {
+                            let _ = pending_wait.sender.send(WaitAllSatisfied {
+                                wait_request_id: wait_request_id.clone(),
+                                operation_ids: operation_ids.clone(),
+                            });
+                        } else {
+                            self.pending_wait = Some(pending_wait);
+                        }
+                    }
                 }
             }
         }
@@ -189,6 +211,27 @@ impl ShellState {
         self.records
             .get_mut(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))
+    }
+
+    fn collect_wait_outcomes(
+        &self,
+        operation_ids: &[OperationId],
+    ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
+        operation_ids
+            .iter()
+            .map(|operation_id| {
+                let outcome = self
+                    .authority
+                    .operation(operation_id)
+                    .and_then(|op| op.terminal_outcome().cloned())
+                    .ok_or_else(|| {
+                        OpsLifecycleError::Internal(format!(
+                            "wait_all completed without terminal outcome for {operation_id}"
+                        ))
+                    })?;
+                Ok((operation_id.clone(), outcome))
+            })
+            .collect()
     }
 }
 
@@ -259,6 +302,90 @@ impl RuntimeOpsLifecycleRegistry {
         self.state
             .write()
             .map_err(|_| OpsLifecycleError::Internal("ops lifecycle registry poisoned".into()))
+    }
+
+    fn cancel_wait_all_internal(
+        &self,
+        wait_request_id: &WaitRequestId,
+    ) -> Result<(), OpsLifecycleError> {
+        let mut state = self.write_state()?;
+        match state.authority.apply(OpsLifecycleInput::CancelWaitAll {
+            wait_request_id: wait_request_id.clone(),
+        }) {
+            Ok(_) => {
+                state.pending_wait = None;
+                Ok(())
+            }
+            Err(OpsLifecycleError::WaitNotActive(_)) => {
+                state.pending_wait = None;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+enum WaitAllFutureState {
+    Ready(Option<Result<WaitAllResult, OpsLifecycleError>>),
+    Waiting(tokio::sync::oneshot::Receiver<WaitAllSatisfied>),
+    Done,
+}
+
+struct WaitAllFuture<'a> {
+    registry: &'a RuntimeOpsLifecycleRegistry,
+    wait_request_id: WaitRequestId,
+    operation_ids: Vec<OperationId>,
+    state: WaitAllFutureState,
+}
+
+impl Future for WaitAllFuture<'_> {
+    type Output = Result<WaitAllResult, OpsLifecycleError>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.state {
+            WaitAllFutureState::Ready(result) => {
+                let ready = result.take().unwrap_or_else(|| {
+                    Err(OpsLifecycleError::Internal(
+                        "wait_all future polled after completion".into(),
+                    ))
+                });
+                self.state = WaitAllFutureState::Done;
+                Poll::Ready(ready)
+            }
+            WaitAllFutureState::Waiting(receiver) => match std::pin::Pin::new(receiver).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(satisfied)) => {
+                    let outcomes = match self.registry.read_state() {
+                        Ok(state) => state.collect_wait_outcomes(&self.operation_ids),
+                        Err(err) => Err(err),
+                    };
+                    self.state = WaitAllFutureState::Done;
+                    Poll::Ready(outcomes.map(|outcomes| WaitAllResult {
+                        outcomes,
+                        satisfied,
+                    }))
+                }
+                Poll::Ready(Err(_)) => {
+                    self.state = WaitAllFutureState::Done;
+                    Poll::Ready(Err(OpsLifecycleError::Internal(
+                        "wait_all completion channel dropped".into(),
+                    )))
+                }
+            },
+            WaitAllFutureState::Done => Poll::Ready(Err(OpsLifecycleError::Internal(
+                "wait_all future polled after completion".into(),
+            ))),
+        }
+    }
+}
+
+impl Drop for WaitAllFuture<'_> {
+    fn drop(&mut self) {
+        if matches!(self.state, WaitAllFutureState::Waiting(_)) {
+            let _ = self
+                .registry
+                .cancel_wait_all_internal(&self.wait_request_id);
+        }
     }
 }
 
@@ -531,80 +658,81 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
     fn wait_all(
         &self,
+        _run_id: &RunId,
         ids: &[OperationId],
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<WaitAllResult, OpsLifecycleError>> + Send + '_>,
     > {
-        // Register watchers synchronously under the lock, then await them.
-        // This avoids borrowing `ids` across the await point.
-        let watches: Result<Vec<(OperationId, OperationCompletionWatch)>, OpsLifecycleError> = {
-            let mut state = match self.write_state() {
-                Ok(s) => s,
-                Err(e) => return Box::pin(std::future::ready(Err(e))),
-            };
-            ids.iter()
-                .map(|id| {
-                    let canonical = state
-                        .authority
-                        .operation(id)
-                        .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-
-                    if let Some(outcome) = canonical.terminal_outcome() {
-                        Ok((
-                            id.clone(),
-                            OperationCompletionWatch::already_resolved(outcome.clone()),
-                        ))
-                    } else {
-                        state.authority.apply(OpsLifecycleInput::RegisterWatcher {
-                            operation_id: id.clone(),
-                        })?;
-                        let shell = state.shell_record_mut(id)?;
-                        let (tx, watch) = OperationCompletionWatch::channel();
-                        shell.watchers.push(tx);
-                        Ok((id.clone(), watch))
-                    }
-                })
-                .collect()
-        };
-
-        // Capture owned ids before moving into the future (ids is borrowed).
+        let wait_request_id = WaitRequestId::new();
         let owned_ids = ids.to_vec();
 
-        Box::pin(async move {
-            let watches = watches?;
-            let mut outcomes = Vec::with_capacity(watches.len());
-            for (id, watch) in watches {
-                let outcome = watch.wait().await;
-                outcomes.push((id, outcome));
+        let state = match self.write_state() {
+            Ok(mut state) => {
+                let transition = match state.authority.apply(OpsLifecycleInput::BeginWaitAll {
+                    wait_request_id: wait_request_id.clone(),
+                    operation_ids: owned_ids.clone(),
+                }) {
+                    Ok(transition) => transition,
+                    Err(err) => {
+                        return Box::pin(WaitAllFuture {
+                            registry: self,
+                            wait_request_id,
+                            operation_ids: owned_ids,
+                            state: WaitAllFutureState::Ready(Some(Err(err))),
+                        });
+                    }
+                };
+
+                let satisfied = transition.effects.iter().find_map(|effect| match effect {
+                    OpsLifecycleEffect::WaitAllSatisfied {
+                        wait_request_id,
+                        operation_ids,
+                    } => Some(WaitAllSatisfied {
+                        wait_request_id: wait_request_id.clone(),
+                        operation_ids: operation_ids.clone(),
+                    }),
+                    _ => None,
+                });
+
+                state.execute_effects(&transition.effects);
+
+                if let Some(satisfied) = satisfied {
+                    WaitAllFutureState::Ready(Some(state.collect_wait_outcomes(&owned_ids).map(
+                        |outcomes| WaitAllResult {
+                            outcomes,
+                            satisfied,
+                        },
+                    )))
+                } else {
+                    if state.pending_wait.is_some() {
+                        return Box::pin(WaitAllFuture {
+                            registry: self,
+                            wait_request_id,
+                            operation_ids: owned_ids,
+                            state: WaitAllFutureState::Ready(Some(Err(
+                                OpsLifecycleError::Internal(
+                                    "wait_all started while a pending wait sender already existed"
+                                        .into(),
+                                ),
+                            ))),
+                        });
+                    }
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    state.pending_wait = Some(PendingWaitState {
+                        wait_request_id: wait_request_id.clone(),
+                        sender,
+                    });
+                    WaitAllFutureState::Waiting(receiver)
+                }
             }
+            Err(err) => WaitAllFutureState::Ready(Some(Err(err))),
+        };
 
-            // Feed WaitAll through the authority so it validates all ops are
-            // terminal and emits WaitAllSatisfied for cross-machine handoff.
-            // The authority rejects if any operation is non-terminal.
-            let satisfied_ids = {
-                let mut state = self.write_state()?;
-                let transition = state.authority.apply(OpsLifecycleInput::WaitAll {
-                    operation_ids: owned_ids,
-                })?;
-                // Extract the validated operation_ids from the WaitAllSatisfied effect.
-                transition
-                    .effects
-                    .into_iter()
-                    .find_map(|e| match e {
-                        OpsLifecycleEffect::WaitAllSatisfied { operation_ids } => {
-                            Some(operation_ids)
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-            };
-
-            Ok(WaitAllResult {
-                outcomes,
-                satisfied: WaitAllSatisfied {
-                    operation_ids: satisfied_ids,
-                },
-            })
+        Box::pin(WaitAllFuture {
+            registry: self,
+            wait_request_id,
+            operation_ids: owned_ids,
+            state,
         })
     }
 }
@@ -614,8 +742,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 mod tests {
     use super::*;
     use meerkat_core::comms::TrustedPeerSpec;
+    use meerkat_core::lifecycle::RunId;
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
     use meerkat_core::types::SessionId;
+    use uuid::Uuid;
+
+    fn test_run_id() -> RunId {
+        RunId(Uuid::from_u128(1))
+    }
 
     fn background_spec(name: &str) -> OperationSpec {
         OperationSpec {
@@ -738,7 +872,7 @@ mod tests {
         registry.fail_operation(&id_b, "b-error".into()).unwrap();
 
         let wait_result = registry
-            .wait_all(&[id_a.clone(), id_b.clone()])
+            .wait_all(&test_run_id(), &[id_a.clone(), id_b.clone()])
             .await
             .unwrap();
         assert_eq!(wait_result.outcomes.len(), 2);
@@ -754,6 +888,7 @@ mod tests {
         ));
         // Authority-derived obligation carries the awaited IDs
         assert_eq!(wait_result.satisfied.operation_ids.len(), 2);
+        assert_ne!(wait_result.satisfied.wait_request_id.to_string(), "");
     }
 
     /// Exercises the trait `wait_all` path (via `dyn OpsLifecycleRegistry`)
@@ -780,7 +915,10 @@ mod tests {
 
         // Call through trait object to exercise the trait impl, not the inherent method.
         let trait_ref: &dyn OpsLifecycleRegistry = &registry;
-        let wait_result = trait_ref.wait_all(&[op_id.clone()]).await.unwrap();
+        let wait_result = trait_ref
+            .wait_all(&test_run_id(), &[op_id.clone()])
+            .await
+            .unwrap();
         assert_eq!(wait_result.outcomes.len(), 1);
         assert!(matches!(
             wait_result.outcomes[0].1,
@@ -788,6 +926,87 @@ mod tests {
         ));
         // Obligation carries the validated ID
         assert_eq!(wait_result.satisfied.operation_ids, vec![op_id]);
+        assert_ne!(wait_result.satisfied.wait_request_id.to_string(), "");
+    }
+
+    #[tokio::test]
+    async fn wait_all_resolves_from_authority_owned_wait_request() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let run_id = test_run_id();
+
+        let spec = background_spec("pending");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let wait_fut = registry.wait_all(&run_id, std::slice::from_ref(&op_id));
+        tokio::pin!(wait_fut);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait_fut)
+                .await
+                .is_err()
+        );
+
+        let active_wait_request_id = {
+            let state = registry.read_state().unwrap();
+            let wait_request_id = state
+                .authority
+                .wait_request_id()
+                .cloned()
+                .expect("wait request should be active");
+            assert_eq!(state.authority.wait_operation_ids(), &[op_id.clone()]);
+            wait_request_id
+        };
+
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "done".into(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            )
+            .unwrap();
+
+        let wait_result = wait_fut.await.unwrap();
+        assert_eq!(
+            wait_result.satisfied.wait_request_id,
+            active_wait_request_id
+        );
+        assert_eq!(wait_result.satisfied.operation_ids, vec![op_id.clone()]);
+        assert!(matches!(
+            wait_result.outcomes.as_slice(),
+            [(returned_id, OperationTerminalOutcome::Completed(_))] if *returned_id == op_id
+        ));
+        assert!(
+            registry
+                .read_state()
+                .unwrap()
+                .authority
+                .wait_request_id()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_wait_all_future_cancels_active_wait_request() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let run_id = test_run_id();
+
+        let spec = background_spec("cancelled-wait");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        let wait_fut = registry.wait_all(&run_id, std::slice::from_ref(&op_id));
+        drop(wait_fut);
+
+        let state = registry.read_state().unwrap();
+        assert!(state.authority.wait_request_id().is_none());
+        assert!(state.authority.wait_operation_ids().is_empty());
     }
 
     #[test]

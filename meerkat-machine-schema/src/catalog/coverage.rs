@@ -100,9 +100,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "runtime lifecycle state precursor",
                 ),
                 anchor(
-                    "runtime_state_machine",
-                    "meerkat-runtime/src/state_machine.rs",
-                    "runtime control reducer precursor",
+                    "runtime_control_authority",
+                    "meerkat-runtime/src/runtime_control_authority.rs",
+                    "canonical runtime control authority and transition reducer",
                 ),
                 anchor(
                     "runtime_loop",

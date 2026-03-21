@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use meerkat_core::comms::TrustedPeerSpec;
-use meerkat_core::lifecycle::InputId;
+use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
@@ -17,6 +17,11 @@ use meerkat_runtime::{
     OpsLifecycleConfig, RuntimeOpsLifecycleRegistry, RuntimeSessionAdapter,
     SessionServiceRuntimeExt,
 };
+use uuid::Uuid;
+
+fn test_run_id() -> RunId {
+    RunId(Uuid::from_u128(1))
+}
 
 fn background_spec(name: &str) -> OperationSpec {
     OperationSpec {
@@ -446,7 +451,7 @@ async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
         .unwrap();
 
     let wait_result = registry
-        .wait_all(&[id_a.clone(), id_b.clone(), id_c.clone()])
+        .wait_all(&test_run_id(), &[id_a.clone(), id_b.clone(), id_c.clone()])
         .await
         .unwrap();
 
@@ -468,6 +473,7 @@ async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
     ));
     // Authority-validated obligation carries all awaited IDs
     assert_eq!(wait_result.satisfied.operation_ids.len(), 3);
+    assert_ne!(wait_result.satisfied.wait_request_id.to_string(), "");
 }
 
 #[tokio::test]
@@ -475,7 +481,7 @@ async fn ops_lifecycle_contract_wait_all_returns_all_outcomes() {
 async fn ops_lifecycle_contract_wait_all_unknown_id_returns_not_found() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let unknown = OperationId::new();
-    let result = registry.wait_all(&[unknown]).await;
+    let result = registry.wait_all(&test_run_id(), &[unknown]).await;
     assert!(matches!(result, Err(OpsLifecycleError::NotFound(_))));
 }
 

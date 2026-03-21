@@ -679,18 +679,16 @@ where
 
     /// Cancel the current run
     pub fn cancel(&mut self) {
-        if !self.state.is_terminal() {
-            use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
+        use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
 
-            // Route through the authority when an active run exists.
-            let input = if let Some(run_id) = self.turn_authority.active_run().cloned() {
-                TurnExecutionInput::CancelNow { run_id }
-            } else {
-                TurnExecutionInput::ForceCancelNoRun
-            };
-            if let Ok(transition) = self.turn_authority.apply(input) {
-                self.state = transition.next_phase.to_loop_state();
-            }
+        // Route through the authority whenever cancellation is requested.
+        let input = if let Some(run_id) = self.turn_authority.active_run().cloned() {
+            TurnExecutionInput::CancelNow { run_id }
+        } else {
+            TurnExecutionInput::ForceCancelNoRun
+        };
+        if let Ok(transition) = self.turn_authority.apply(input) {
+            self.state = transition.next_phase.to_loop_state();
         }
     }
 

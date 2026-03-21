@@ -8,6 +8,7 @@ use crate::tokio::sync::oneshot;
 use tokio::sync::oneshot;
 
 use crate::comms::TrustedPeerSpec;
+use crate::lifecycle::{RunId, WaitRequestId};
 pub use crate::ops::{OperationId, OperationResult};
 use crate::types::SessionId;
 
@@ -177,15 +178,22 @@ pub enum OpsLifecycleError {
     MaxConcurrentExceeded { limit: usize, active: usize },
     #[error("operation not supported: {0}")]
     Unsupported(String),
+    #[error("wait_all already active")]
+    WaitAlreadyActive,
+    #[error("wait_all not active for request: {0}")]
+    WaitNotActive(WaitRequestId),
+    #[error("wait_all contains duplicate operation id: {0}")]
+    DuplicateWaitOperation(OperationId),
     #[error("internal lifecycle registry error: {0}")]
     Internal(String),
 }
 
-/// Authority-validated result of `wait_all()`.
+/// Authority-owned result of `wait_all()`.
 ///
 /// Carries the per-operation outcomes alongside an authority-derived
-/// obligation token (`satisfied`). The obligation proves the authority
-/// validated every operation as terminal before emitting `WaitAllSatisfied`.
+/// obligation token (`satisfied`). The obligation proves the authority owned
+/// the wait request lifecycle and emitted `WaitAllSatisfied` when the tracked
+/// barrier set became terminal.
 #[derive(Debug)]
 pub struct WaitAllResult {
     /// Per-operation terminal outcomes.
@@ -194,14 +202,16 @@ pub struct WaitAllResult {
     pub satisfied: WaitAllSatisfied,
 }
 
-/// Authority-validated obligation token emitted by the `WaitAllSatisfied` effect.
+/// Authority-owned obligation token emitted by the `WaitAllSatisfied` effect.
 ///
 /// Created only by the `OpsLifecycleRegistry::wait_all()` implementation after
-/// the authority validates all operations are terminal. Core-owned so it can be
+/// the authority resolves an outstanding wait request. Core-owned so it can be
 /// consumed by the `protocol_ops_barrier_satisfaction` helper without crossing
 /// crate boundaries.
 #[derive(Debug)]
 pub struct WaitAllSatisfied {
+    /// The authority-owned wait request that reached satisfaction.
+    pub wait_request_id: WaitRequestId,
     /// The operation IDs validated as terminal by the authority.
     pub operation_ids: Vec<OperationId>,
 }
@@ -250,13 +260,15 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         Err(OpsLifecycleError::Unsupported("collect_completed".into()))
     }
 
-    /// Register a completion watcher for each ID and await all of them.
+    /// Register an authority-owned barrier wait and await its completion.
     ///
     /// Returns a [`WaitAllResult`] containing per-operation outcomes and an
-    /// authority-validated obligation token. The authority validates that every
-    /// operation is terminal before emitting `WaitAllSatisfied`.
+    /// authority-owned obligation token. The runtime may host the async future,
+    /// but wait completion truth comes from the registry authority emitting
+    /// `WaitAllSatisfied`, not from shell watcher timing alone.
     fn wait_all(
         &self,
+        _run_id: &RunId,
         _ids: &[OperationId],
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<WaitAllResult, OpsLifecycleError>> + Send + '_>,

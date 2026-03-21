@@ -149,6 +149,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                     fields: vec![
                         field("surface_id", named("SurfaceId")),
                         field("operation", named("SurfaceDeltaOperation")),
+                        field("applied_at_turn", named("TurnNumber")),
                     ],
                 },
                 variant("RefreshVisibleSurfaceSet"),

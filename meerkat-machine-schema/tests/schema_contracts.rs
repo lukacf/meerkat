@@ -7,10 +7,47 @@ use meerkat_machine_schema::catalog::{
     runtime_pipeline_composition, turn_execution_machine,
 };
 use meerkat_machine_schema::{
-    CompositionSchemaError, EffectDisposition, Route, RouteBindingSource, RouteDelivery,
-    RouteFieldBinding, RouteTarget, canonical_composition_schemas, canonical_machine_schemas,
-    input_lifecycle_machine,
+    CompositionSchemaError, EffectDisposition, FeedbackFieldBinding, FeedbackFieldSource,
+    FeedbackInputRef, ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding,
+    Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget,
+    canonical_composition_schemas, canonical_machine_schemas, input_lifecycle_machine,
 };
+
+fn test_protocol_rust(mode: ProtocolGenerationMode) -> ProtocolRustBinding {
+    ProtocolRustBinding {
+        module_path: "meerkat-core/src/generated/protocol_test.rs".into(),
+        generation_mode: mode.clone(),
+        required_imports: vec![],
+        authority_type_path: Some("crate::test::Authority".into()),
+        mutator_trait_path: Some("crate::test::Mutator".into()),
+        input_enum_path: Some("crate::test::Input".into()),
+        effect_enum_path: Some("crate::test::Effect".into()),
+        transition_type_path: Some("crate::test::Transition".into()),
+        error_type_path: Some("crate::test::Error".into()),
+        executor_trigger_input_variant: if matches!(mode, ProtocolGenerationMode::Executor) {
+            Some("Trigger".into())
+        } else {
+            None
+        },
+        bridge_source_type_path: if matches!(mode, ProtocolGenerationMode::ShellBridge) {
+            Some("crate::test::BridgeToken".into())
+        } else {
+            None
+        },
+        helper_return_shape: ProtocolHelperReturnShape::EffectsAndObligation,
+    }
+}
+
+fn feedback_input(machine_instance: &str, input_variant: &str) -> FeedbackInputRef {
+    FeedbackInputRef {
+        machine_instance: machine_instance.into(),
+        input_variant: input_variant.into(),
+        field_bindings: vec![FeedbackFieldBinding {
+            input_field: "op_id".into(),
+            source: FeedbackFieldSource::ObligationField("op_id".into()),
+        }],
+    }
+}
 
 #[test]
 fn validates_mob_orchestrator_style_machine() {
@@ -470,7 +507,10 @@ fn handoff_protocol_accepted_on_local_effect() {
         },
         inputs: EnumSchema {
             name: "Input".into(),
-            variants: vec![],
+            variants: vec![VariantSchema {
+                name: "Trigger".into(),
+                fields: vec![],
+            }],
         },
         effects: EnumSchema {
             name: "Effect".into(),
@@ -524,7 +564,10 @@ fn handoff_protocol_accepted_on_external_effect() {
         },
         inputs: EnumSchema {
             name: "Input".into(),
-            variants: vec![],
+            variants: vec![VariantSchema {
+                name: "Trigger".into(),
+                fields: vec![],
+            }],
         },
         effects: EnumSchema {
             name: "Effect".into(),
@@ -732,7 +775,7 @@ fn handoff_protocol_valid_round_trip() {
             name: "ProducerInput".into(),
             variants: vec![
                 VariantSchema {
-                    name: "Go".into(),
+                    name: "Trigger".into(),
                     fields: vec![],
                 },
                 VariantSchema {
@@ -788,14 +831,11 @@ fn handoff_protocol_valid_round_trip() {
             effect_variant: "RequestWork".into(),
             realizing_actor: "host".into(),
             correlation_fields: vec!["op_id".into()],
-            allowed_feedback_inputs: vec![FeedbackInputRef {
-                machine_instance: "producer".into(),
-                input_variant: "Ack".into(),
-            }],
+            obligation_fields: vec!["op_id".into()],
+            allowed_feedback_inputs: vec![feedback_input("producer", "Ack")],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -846,11 +886,11 @@ fn handoff_protocol_unknown_producer() {
             effect_variant: "E".into(),
             realizing_actor: "host".into(),
             correlation_fields: vec![],
+            obligation_fields: vec![],
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -905,11 +945,11 @@ fn handoff_protocol_actor_not_owner() {
             effect_variant: "E".into(),
             realizing_actor: "also_machine".into(),
             correlation_fields: vec![],
+            obligation_fields: vec![],
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -964,14 +1004,11 @@ fn handoff_protocol_unknown_feedback_machine() {
             effect_variant: "E".into(),
             realizing_actor: "host".into(),
             correlation_fields: vec![],
-            allowed_feedback_inputs: vec![FeedbackInputRef {
-                machine_instance: "nonexistent".into(),
-                input_variant: "Ack".into(),
-            }],
+            obligation_fields: vec![],
+            allowed_feedback_inputs: vec![feedback_input("nonexistent", "Ack")],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -1028,7 +1065,10 @@ fn handoff_protocol_unknown_effect_cross_schema() {
         },
         inputs: EnumSchema {
             name: "Input".into(),
-            variants: vec![],
+            variants: vec![VariantSchema {
+                name: "Trigger".into(),
+                fields: vec![],
+            }],
         },
         effects: EnumSchema {
             name: "Effect".into(),
@@ -1071,11 +1111,11 @@ fn handoff_protocol_unknown_effect_cross_schema() {
             effect_variant: "NonexistentEffect".into(),
             realizing_actor: "host".into(),
             correlation_fields: vec![],
+            obligation_fields: vec![],
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -1133,7 +1173,10 @@ fn handoff_protocol_terminal_closure_requires_terminal_phases() {
         },
         inputs: EnumSchema {
             name: "Input".into(),
-            variants: vec![],
+            variants: vec![VariantSchema {
+                name: "Trigger".into(),
+                fields: vec![],
+            }],
         },
         effects: EnumSchema {
             name: "Effect".into(),
@@ -1179,11 +1222,11 @@ fn handoff_protocol_terminal_closure_requires_terminal_phases() {
             effect_variant: "Work".into(),
             realizing_actor: "host".into(),
             correlation_fields: vec!["id".into()],
+            obligation_fields: vec!["id".into()],
             allowed_feedback_inputs: vec![],
             closure_policy: ClosurePolicy::TerminalClosure,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],
@@ -1337,13 +1380,19 @@ fn closed_world_accepts_handoff_protocol_present() {
         },
         inputs: EnumSchema {
             name: "Input".into(),
-            variants: vec![VariantSchema {
-                name: "Ack".into(),
-                fields: vec![FieldSchema {
-                    name: "op_id".into(),
-                    ty: TypeRef::String,
-                }],
-            }],
+            variants: vec![
+                VariantSchema {
+                    name: "Trigger".into(),
+                    fields: vec![],
+                },
+                VariantSchema {
+                    name: "Ack".into(),
+                    fields: vec![FieldSchema {
+                        name: "op_id".into(),
+                        ty: TypeRef::String,
+                    }],
+                },
+            ],
         },
         effects: EnumSchema {
             name: "Effect".into(),
@@ -1389,14 +1438,11 @@ fn closed_world_accepts_handoff_protocol_present() {
             effect_variant: "Work".into(),
             realizing_actor: "host".into(),
             correlation_fields: vec!["op_id".into()],
-            allowed_feedback_inputs: vec![meerkat_machine_schema::FeedbackInputRef {
-                machine_instance: "producer".into(),
-                input_variant: "Ack".into(),
-            }],
+            obligation_fields: vec!["op_id".into()],
+            allowed_feedback_inputs: vec![feedback_input("producer", "Ack")],
             closure_policy: ClosurePolicy::AckRequired,
             liveness_annotation: None,
-            generation_mode: ProtocolGenerationMode::Executor,
-            target_crate: None,
+            rust: test_protocol_rust(ProtocolGenerationMode::Executor),
         }],
         entry_inputs: vec![],
         routes: vec![],

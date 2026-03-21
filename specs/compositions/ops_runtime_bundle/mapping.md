@@ -51,9 +51,6 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `execution_cancel_notifies_control`
   - anchors: `ops_vocab`, `runtime_loop`, `shell_job_manager`
   - scenarios: `operation-event-reentry`
-- `ops_barrier_satisfied_enters_turn_execution`
-  - anchors: `ops_vocab`, `runtime_loop`, `shell_job_manager`
-  - scenarios: `operation-event-reentry`
 
 ### Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`

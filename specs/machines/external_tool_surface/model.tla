@@ -21,13 +21,13 @@ VARIABLES phase, model_step_count, known_surfaces, visible_surfaces, base_state,
 
 vars == << phase, model_step_count, known_surfaces, visible_surfaces, base_state, pending_op, staged_op, inflight_calls, last_delta_operation, last_delta_phase >>
 
-SurfaceBase(surface_id) == (IF ~((surface_id \in DOMAIN base_state)) THEN "Absent" ELSE (IF surface_id \in DOMAIN base_state THEN base_state[surface_id] ELSE "None"))
-PendingOp(surface_id) == (IF ~((surface_id \in DOMAIN pending_op)) THEN "None" ELSE (IF surface_id \in DOMAIN pending_op THEN pending_op[surface_id] ELSE "None"))
-StagedOp(surface_id) == (IF ~((surface_id \in DOMAIN staged_op)) THEN "None" ELSE (IF surface_id \in DOMAIN staged_op THEN staged_op[surface_id] ELSE "None"))
-InflightCallCount(surface_id) == (IF ~((surface_id \in DOMAIN inflight_calls)) THEN 0 ELSE (IF surface_id \in DOMAIN inflight_calls THEN inflight_calls[surface_id] ELSE 0))
-LastDeltaOperation(surface_id) == (IF ~((surface_id \in DOMAIN last_delta_operation)) THEN "None" ELSE (IF surface_id \in DOMAIN last_delta_operation THEN last_delta_operation[surface_id] ELSE "None"))
-LastDeltaPhase(surface_id) == (IF ~((surface_id \in DOMAIN last_delta_phase)) THEN "None" ELSE (IF surface_id \in DOMAIN last_delta_phase THEN last_delta_phase[surface_id] ELSE "None"))
 IsVisible(surface_id) == (surface_id \in visible_surfaces)
+LastDeltaPhase(surface_id) == (IF ~((surface_id \in DOMAIN last_delta_phase)) THEN "None" ELSE (IF surface_id \in DOMAIN last_delta_phase THEN last_delta_phase[surface_id] ELSE "None"))
+LastDeltaOperation(surface_id) == (IF ~((surface_id \in DOMAIN last_delta_operation)) THEN "None" ELSE (IF surface_id \in DOMAIN last_delta_operation THEN last_delta_operation[surface_id] ELSE "None"))
+InflightCallCount(surface_id) == (IF ~((surface_id \in DOMAIN inflight_calls)) THEN 0 ELSE (IF surface_id \in DOMAIN inflight_calls THEN inflight_calls[surface_id] ELSE 0))
+StagedOp(surface_id) == (IF ~((surface_id \in DOMAIN staged_op)) THEN "None" ELSE (IF surface_id \in DOMAIN staged_op THEN staged_op[surface_id] ELSE "None"))
+PendingOp(surface_id) == (IF ~((surface_id \in DOMAIN pending_op)) THEN "None" ELSE (IF surface_id \in DOMAIN pending_op THEN pending_op[surface_id] ELSE "None"))
+SurfaceBase(surface_id) == (IF ~((surface_id \in DOMAIN base_state)) THEN "Absent" ELSE (IF surface_id \in DOMAIN base_state THEN base_state[surface_id] ELSE "None"))
 
 Init ==
     /\ phase = "Operating"

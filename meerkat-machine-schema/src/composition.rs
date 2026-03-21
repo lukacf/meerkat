@@ -54,17 +54,18 @@ pub struct EffectHandoffProtocol {
     pub realizing_actor: String,
     /// Fields from the effect variant that correlate the obligation to feedback.
     pub correlation_fields: Vec<String>,
+    /// Fields from the effect variant captured in the outstanding obligation record.
+    ///
+    /// `correlation_fields` must be a subset of these fields.
+    pub obligation_fields: Vec<String>,
     /// Machine inputs the owner may submit as feedback.
     pub allowed_feedback_inputs: Vec<FeedbackInputRef>,
     /// When and how the obligation must be closed.
     pub closure_policy: ClosurePolicy,
     /// Optional fairness annotation for TLA+ liveness claims.
     pub liveness_annotation: Option<String>,
-    /// Code generation mode for the protocol helper.
-    pub generation_mode: ProtocolGenerationMode,
-    /// Target crate for the generated helper (relative path from repo root).
-    /// When `None`, defaults to `meerkat-core/src/generated/`.
-    pub target_crate: Option<String>,
+    /// Explicit Rust code generation metadata for the checked-in helper module.
+    pub rust: ProtocolRustBinding,
 }
 
 /// Determines the shape of generated protocol helper code.
@@ -89,6 +90,64 @@ pub struct FeedbackInputRef {
     pub machine_instance: String,
     /// The input variant on that machine.
     pub input_variant: String,
+    /// Exhaustive field bindings used to construct the feedback input.
+    pub field_bindings: Vec<FeedbackFieldBinding>,
+}
+
+/// Binds one feedback input field to an obligation-carried value or owner context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackFieldBinding {
+    /// Target field on the feedback input variant.
+    pub input_field: String,
+    /// Source of the value used to populate the target field.
+    pub source: FeedbackFieldSource,
+}
+
+/// Source of a feedback field value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedbackFieldSource {
+    /// Value must come from the outstanding obligation record.
+    ObligationField(String),
+    /// Value is supplied by the realizing owner at feedback time.
+    OwnerContext(String),
+}
+
+/// Explicit Rust binding metadata for generated protocol helper modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolRustBinding {
+    /// Output file path relative to the repo root.
+    pub module_path: String,
+    /// How the helper is generated.
+    pub generation_mode: ProtocolGenerationMode,
+    /// `use ...;` lines inserted at the top of the helper module.
+    pub required_imports: Vec<String>,
+    /// Concrete authority type used by generated helpers.
+    pub authority_type_path: Option<String>,
+    /// Sealed mutator trait path used to call `apply`.
+    pub mutator_trait_path: Option<String>,
+    /// Typed input enum path for feedback/executor helpers.
+    pub input_enum_path: Option<String>,
+    /// Typed effect enum path for executor/effect-extractor helpers.
+    pub effect_enum_path: Option<String>,
+    /// Concrete transition type returned by `authority.apply(...)`.
+    pub transition_type_path: Option<String>,
+    /// Concrete error type returned by `authority.apply(...)`.
+    pub error_type_path: Option<String>,
+    /// Triggering producer input variant for `Executor` helpers.
+    pub executor_trigger_input_variant: Option<String>,
+    /// Authority-owned source token type for `ShellBridge` helpers.
+    pub bridge_source_type_path: Option<String>,
+    /// Shape of the primary generated helper return value.
+    pub helper_return_shape: ProtocolHelperReturnShape,
+}
+
+/// Declares the primary generated helper return contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolHelperReturnShape {
+    Effects,
+    Transition,
+    EffectsAndObligation,
+    Obligations,
 }
 
 /// Determines when a handoff obligation is considered closed.
@@ -243,6 +302,24 @@ impl CompositionSchema {
             "handoff protocol",
         )?;
         for protocol in &self.handoff_protocols {
+            let _ = unique_names(
+                protocol.correlation_fields.iter().map(String::as_str),
+                "handoff correlation field",
+            )?;
+            let _ = unique_names(
+                protocol.obligation_fields.iter().map(String::as_str),
+                "handoff obligation field",
+            )?;
+            for field in &protocol.correlation_fields {
+                if !protocol.obligation_fields.contains(field) {
+                    return Err(
+                        CompositionSchemaError::HandoffCorrelationFieldNotInObligation {
+                            protocol: protocol.name.clone(),
+                            field: field.clone(),
+                        },
+                    );
+                }
+            }
             if !machine_ids.contains(protocol.producer_instance.as_str()) {
                 return Err(CompositionSchemaError::UnknownHandoffProducer {
                     protocol: protocol.name.clone(),
@@ -265,6 +342,63 @@ impl CompositionSchema {
                     protocol: protocol.name.clone(),
                     actor: protocol.realizing_actor.clone(),
                 });
+            }
+            if protocol.rust.module_path.is_empty() {
+                return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                    protocol: protocol.name.clone(),
+                    detail: "module_path must not be empty".into(),
+                });
+            }
+            match protocol.rust.generation_mode {
+                ProtocolGenerationMode::Executor => {
+                    if protocol.rust.authority_type_path.is_none()
+                        || protocol.rust.mutator_trait_path.is_none()
+                        || protocol.rust.input_enum_path.is_none()
+                        || protocol.rust.effect_enum_path.is_none()
+                        || protocol.rust.transition_type_path.is_none()
+                        || protocol.rust.error_type_path.is_none()
+                        || protocol.rust.executor_trigger_input_variant.is_none()
+                    {
+                        return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                            protocol: protocol.name.clone(),
+                            detail:
+                                "Executor protocols require authority_type_path, mutator_trait_path, input_enum_path, effect_enum_path, transition_type_path, error_type_path, and executor_trigger_input_variant"
+                                    .into(),
+                        });
+                    }
+                }
+                ProtocolGenerationMode::EffectExtractor => {
+                    if protocol.rust.authority_type_path.is_none()
+                        || protocol.rust.mutator_trait_path.is_none()
+                        || protocol.rust.input_enum_path.is_none()
+                        || protocol.rust.effect_enum_path.is_none()
+                        || protocol.rust.transition_type_path.is_none()
+                        || protocol.rust.error_type_path.is_none()
+                    {
+                        return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                            protocol: protocol.name.clone(),
+                            detail:
+                                "EffectExtractor protocols require authority_type_path, mutator_trait_path, input_enum_path, effect_enum_path, transition_type_path, and error_type_path"
+                                    .into(),
+                        });
+                    }
+                }
+                ProtocolGenerationMode::ShellBridge => {
+                    if protocol.rust.authority_type_path.is_none()
+                        || protocol.rust.mutator_trait_path.is_none()
+                        || protocol.rust.input_enum_path.is_none()
+                        || protocol.rust.transition_type_path.is_none()
+                        || protocol.rust.error_type_path.is_none()
+                        || protocol.rust.bridge_source_type_path.is_none()
+                    {
+                        return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                            protocol: protocol.name.clone(),
+                            detail:
+                                "ShellBridge protocols require authority_type_path, mutator_trait_path, input_enum_path, transition_type_path, error_type_path, and bridge_source_type_path"
+                                    .into(),
+                        });
+                    }
+                }
             }
             for feedback in &protocol.allowed_feedback_inputs {
                 if !machine_ids.contains(feedback.machine_instance.as_str()) {
@@ -912,6 +1046,14 @@ impl CompositionSchema {
                     }
                 })?;
             }
+            for field in &protocol.obligation_fields {
+                effect_variant_schema.field_named(field).map_err(|_| {
+                    CompositionSchemaError::UnknownHandoffObligationField {
+                        protocol: protocol.name.clone(),
+                        field: field.clone(),
+                    }
+                })?;
+            }
 
             // Feedback inputs must exist on their target machines.
             for feedback in &protocol.allowed_feedback_inputs {
@@ -932,6 +1074,102 @@ impl CompositionSchema {
                     .map_err(CompositionSchemaError::MachineSchema)?;
                 if !input_variants.contains(&feedback.input_variant) {
                     return Err(CompositionSchemaError::UnknownHandoffFeedbackInput {
+                        protocol: protocol.name.clone(),
+                        machine: feedback.machine_instance.clone(),
+                        input: feedback.input_variant.clone(),
+                    });
+                }
+                let _ = unique_names(
+                    feedback
+                        .field_bindings
+                        .iter()
+                        .map(|binding| binding.input_field.as_str()),
+                    "handoff feedback binding target",
+                )?;
+                let input_variant_schema = target_schema
+                    .inputs
+                    .variant_named(&feedback.input_variant)
+                    .map_err(CompositionSchemaError::MachineSchema)?;
+                for field in &input_variant_schema.fields {
+                    if !feedback
+                        .field_bindings
+                        .iter()
+                        .any(|binding| binding.input_field == field.name)
+                    {
+                        return Err(CompositionSchemaError::MissingHandoffFeedbackBinding {
+                            protocol: protocol.name.clone(),
+                            machine: feedback.machine_instance.clone(),
+                            input: feedback.input_variant.clone(),
+                            field: field.name.clone(),
+                        });
+                    }
+                }
+                for binding in &feedback.field_bindings {
+                    input_variant_schema
+                        .field_named(&binding.input_field)
+                        .map_err(
+                            |_| CompositionSchemaError::UnknownHandoffFeedbackInputField {
+                                protocol: protocol.name.clone(),
+                                machine: feedback.machine_instance.clone(),
+                                input: feedback.input_variant.clone(),
+                                field: binding.input_field.clone(),
+                            },
+                        )?;
+                    if let FeedbackFieldSource::ObligationField(field) = &binding.source
+                        && !protocol.obligation_fields.contains(field)
+                    {
+                        return Err(
+                            CompositionSchemaError::UnknownHandoffBindingObligationField {
+                                protocol: protocol.name.clone(),
+                                field: field.clone(),
+                            },
+                        );
+                    }
+                }
+                for correlation_field in &protocol.correlation_fields {
+                    if !feedback.field_bindings.iter().any(|binding| {
+                        matches!(
+                            &binding.source,
+                            FeedbackFieldSource::ObligationField(field) if field == correlation_field
+                        )
+                    }) {
+                        return Err(CompositionSchemaError::MissingCorrelationBinding {
+                            protocol: protocol.name.clone(),
+                            machine: feedback.machine_instance.clone(),
+                            input: feedback.input_variant.clone(),
+                            obligation_field: correlation_field.clone(),
+                        });
+                    }
+                }
+            }
+
+            if matches!(
+                protocol.rust.generation_mode,
+                ProtocolGenerationMode::Executor
+            ) {
+                let trigger = protocol
+                    .rust
+                    .executor_trigger_input_variant
+                    .as_ref()
+                    .expect("validated above");
+                producer_schema.inputs.variant_named(trigger).map_err(|_| {
+                    CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail: format!(
+                            "executor_trigger_input_variant `{trigger}` does not exist on producer"
+                        ),
+                    }
+                })?;
+            }
+
+            for feedback in &protocol.allowed_feedback_inputs {
+                if self.routes.iter().any(|route| {
+                    route.from_machine == protocol.producer_instance
+                        && route.effect_variant == protocol.effect_variant
+                        && route.to.machine == feedback.machine_instance
+                        && route.to.input_variant == feedback.input_variant
+                }) {
+                    return Err(CompositionSchemaError::DirectRouteBypassesHandoffProtocol {
                         protocol: protocol.name.clone(),
                         machine: feedback.machine_instance.clone(),
                         input: feedback.input_variant.clone(),
@@ -1375,6 +1613,45 @@ pub enum CompositionSchemaError {
         protocol: String,
         field: String,
     },
+    UnknownHandoffObligationField {
+        protocol: String,
+        field: String,
+    },
+    HandoffCorrelationFieldNotInObligation {
+        protocol: String,
+        field: String,
+    },
+    UnknownHandoffFeedbackInputField {
+        protocol: String,
+        machine: String,
+        input: String,
+        field: String,
+    },
+    UnknownHandoffBindingObligationField {
+        protocol: String,
+        field: String,
+    },
+    MissingHandoffFeedbackBinding {
+        protocol: String,
+        machine: String,
+        input: String,
+        field: String,
+    },
+    MissingCorrelationBinding {
+        protocol: String,
+        machine: String,
+        input: String,
+        obligation_field: String,
+    },
+    InvalidHandoffRustBinding {
+        protocol: String,
+        detail: String,
+    },
+    DirectRouteBypassesHandoffProtocol {
+        protocol: String,
+        machine: String,
+        input: String,
+    },
     TerminalClosureRequiresTerminalPhases {
         protocol: String,
         producer_instance: String,
@@ -1635,6 +1912,57 @@ impl fmt::Display for CompositionSchemaError {
             Self::UnknownHandoffCorrelationField { protocol, field } => write!(
                 f,
                 "handoff protocol `{protocol}` references unknown correlation field `{field}`"
+            ),
+            Self::UnknownHandoffObligationField { protocol, field } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown obligation field `{field}`"
+            ),
+            Self::HandoffCorrelationFieldNotInObligation { protocol, field } => write!(
+                f,
+                "handoff protocol `{protocol}` uses correlation field `{field}` that is not present in obligation_fields"
+            ),
+            Self::UnknownHandoffFeedbackInputField {
+                protocol,
+                machine,
+                input,
+                field,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` references unknown feedback field `{field}` on {machine}.{input}"
+            ),
+            Self::UnknownHandoffBindingObligationField { protocol, field } => write!(
+                f,
+                "handoff protocol `{protocol}` binds feedback from unknown obligation field `{field}`"
+            ),
+            Self::MissingHandoffFeedbackBinding {
+                protocol,
+                machine,
+                input,
+                field,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` is missing a feedback field binding for {machine}.{input}.{field}"
+            ),
+            Self::MissingCorrelationBinding {
+                protocol,
+                machine,
+                input,
+                obligation_field,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` does not bind correlation obligation field `{obligation_field}` into {machine}.{input}"
+            ),
+            Self::InvalidHandoffRustBinding { protocol, detail } => write!(
+                f,
+                "handoff protocol `{protocol}` has invalid Rust binding metadata: {detail}"
+            ),
+            Self::DirectRouteBypassesHandoffProtocol {
+                protocol,
+                machine,
+                input,
+            } => write!(
+                f,
+                "handoff protocol `{protocol}` is bypassed by a direct route to {machine}.{input}"
             ),
             Self::TerminalClosureRequiresTerminalPhases {
                 protocol,

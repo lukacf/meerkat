@@ -526,8 +526,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             });
             if should_requeue && !self.inner.has_queued_input(&input_id) {
                 return Err(RuntimeDriverError::Internal(format!(
-                    "persistent recover left queued input '{}' out of the runtime queue projection",
-                    input_id
+                    "persistent recover left queued input '{input_id}' out of the runtime queue projection"
                 )));
             }
         }

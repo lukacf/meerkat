@@ -124,6 +124,7 @@ fn latest_snapshot_alignment(
 
 #[derive(Debug, Clone)]
 struct RouterProjectionSnapshot {
+    #[allow(dead_code)]
     epoch: u64,
     tool_to_server: HashMap<String, String>,
     visible_tools: Arc<[Arc<ToolDef>]>,
@@ -526,7 +527,7 @@ impl McpRouter {
     fn spawn_pending(&mut self, config: McpServerConfig, obligation: SurfaceCompletionObligation) {
         let server_name = config.name.clone();
         self.pending_obligations
-            .insert(server_name.clone(), obligation.clone());
+            .insert(server_name, obligation.clone());
 
         let tx = self.pending_tx.clone();
         tokio::spawn(async move {
@@ -696,7 +697,7 @@ impl McpRouter {
                             )
                             .with_tool_count(Some(tool_count)),
                         });
-                        return snapshot_alignment;
+                        snapshot_alignment
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -714,7 +715,7 @@ impl McpRouter {
                                 );
                             }
                         });
-                        return None;
+                        None
                     }
                 }
             }
@@ -757,7 +758,7 @@ impl McpRouter {
                     )
                     .with_detail(Some(err.to_string())),
                 });
-                return snapshot_alignment;
+                snapshot_alignment
             }
         }
     }
@@ -1098,7 +1099,6 @@ impl McpRouter {
     /// Call a tool by name, returning multimodal content blocks.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let snapshot = Arc::clone(&self.projection);
-        let _projection_epoch = snapshot.epoch;
         let server_name = snapshot
             .tool_to_server
             .get(name)

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::interaction::{ClassifiedInboxInteraction, PeerInputClass};
+use meerkat_core::interaction::{
+    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, PeerInputClass,
+};
 use meerkat_core::lifecycle::RunControlCommand;
 use meerkat_core::types::SessionId;
 
@@ -26,6 +28,42 @@ use crate::tokio::sync::mpsc;
 
 /// Default idle timeout for the comms drain loop (5 minutes).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn classify_legacy_interaction(interaction: InboxInteraction) -> ClassifiedInboxInteraction {
+    let (class, lifecycle_peer) = match &interaction.content {
+        InteractionContent::Request { intent, params } if intent == "mob.peer_added" => (
+            PeerInputClass::PeerLifecycleAdded,
+            Some(
+                params
+                    .get("peer")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|peer| !peer.is_empty())
+                    .unwrap_or(interaction.from.as_str())
+                    .to_string(),
+            ),
+        ),
+        InteractionContent::Request { intent, params } if intent == "mob.peer_retired" => (
+            PeerInputClass::PeerLifecycleRetired,
+            Some(
+                params
+                    .get("peer")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|peer| !peer.is_empty())
+                    .unwrap_or(interaction.from.as_str())
+                    .to_string(),
+            ),
+        ),
+        InteractionContent::Response { .. } => (PeerInputClass::Response, None),
+        InteractionContent::Request { .. } => (PeerInputClass::ActionableRequest, None),
+        InteractionContent::Message { .. } => (PeerInputClass::ActionableMessage, None),
+    };
+
+    ClassifiedInboxInteraction {
+        class,
+        interaction,
+        lifecycle_peer,
+    }
+}
 
 /// Spawn a background task that drains the comms inbox and routes
 /// classified interactions through the runtime adapter.
@@ -118,14 +156,9 @@ pub fn spawn_comms_drain(
                         }
                         continue;
                     }
-                    // Wrap as ActionableMessage for routing.
                     interactions
                         .into_iter()
-                        .map(|interaction| ClassifiedInboxInteraction {
-                            class: PeerInputClass::ActionableMessage,
-                            interaction,
-                            lifecycle_peer: None,
-                        })
+                        .map(classify_legacy_interaction)
                         .collect()
                 }
             };
@@ -243,6 +276,62 @@ pub fn spawn_comms_drain(
             }
         }
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::interaction::{InteractionId, ResponseStatus};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn legacy_interaction(content: InteractionContent) -> InboxInteraction {
+        InboxInteraction {
+            id: InteractionId(Uuid::new_v4()),
+            from: "peer-a".to_string(),
+            content,
+            rendered_text: "rendered".to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_response_preserves_response_class() {
+        let classified =
+            classify_legacy_interaction(legacy_interaction(InteractionContent::Response {
+                in_reply_to: InteractionId(Uuid::new_v4()),
+                status: ResponseStatus::Completed,
+                result: json!({"ok": true}),
+            }));
+
+        assert_eq!(classified.class, PeerInputClass::Response);
+        assert!(classified.lifecycle_peer.is_none());
+    }
+
+    #[test]
+    fn legacy_peer_added_preserves_lifecycle_class_and_peer() {
+        let classified =
+            classify_legacy_interaction(legacy_interaction(InteractionContent::Request {
+                intent: "mob.peer_added".to_string(),
+                params: json!({"peer": "peer-b"}),
+            }));
+
+        assert_eq!(classified.class, PeerInputClass::PeerLifecycleAdded);
+        assert_eq!(classified.lifecycle_peer.as_deref(), Some("peer-b"));
+    }
+
+    #[test]
+    fn legacy_peer_retired_falls_back_to_sender_for_peer_name() {
+        let classified =
+            classify_legacy_interaction(legacy_interaction(InteractionContent::Request {
+                intent: "mob.peer_retired".to_string(),
+                params: json!({}),
+            }));
+
+        assert_eq!(classified.class, PeerInputClass::PeerLifecycleRetired);
+        assert_eq!(classified.lifecycle_peer.as_deref(), Some("peer-a"));
+    }
 }
 
 /// Bridge between a completion handle and the comms interaction lifecycle.

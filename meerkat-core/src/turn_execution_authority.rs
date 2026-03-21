@@ -31,7 +31,7 @@ use std::collections::HashSet;
 
 use crate::error::AgentError;
 use crate::lifecycle::RunId;
-use crate::ops::{AsyncOpRef, OperationId, WaitPolicy};
+use crate::ops::{AsyncOpRef, OperationId};
 
 // ---------------------------------------------------------------------------
 // Phase enum — mirrors the machine schema's state variants
@@ -1159,6 +1159,7 @@ impl TurnPhase {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::ops::WaitPolicy;
     use uuid::Uuid;
 
     fn test_run_id() -> RunId {

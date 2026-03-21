@@ -61,6 +61,14 @@ pub(crate) enum OpsLifecycleInput {
     /// Retire completed (Retiring -> Retired).
     RetireCompleted { operation_id: OperationId },
     /// Collect a terminal operation's buffered outcome.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "schema-aligned authority input retained even when current shell paths do not construct it"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     CollectTerminal { operation_id: OperationId },
     /// Terminate all non-terminal operations.
     OwnerTerminated,
@@ -126,6 +134,14 @@ pub(crate) enum OpEventKind {
     Failed,
     Cancelled,
     Retired,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "schema-aligned operation event retained for future authority wiring"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     Terminated,
 }
 
@@ -188,6 +204,14 @@ impl OperationCanonicalState {
     }
 
     /// Number of active watchers.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority inspection helper retained for future waiter wiring"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn watcher_count(&self) -> u32 {
         self.watcher_count
     }
@@ -198,6 +222,14 @@ impl OperationCanonicalState {
     }
 
     /// Whether the terminal outcome is buffered for collection.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority inspection helper retained for future buffered terminal collection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn terminal_buffered(&self) -> bool {
         self.terminal_buffered
     }
@@ -297,26 +329,66 @@ impl OpsLifecycleAuthority {
     }
 
     /// Check if an operation exists.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority helper retained for schema-aligned registry inspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn contains(&self, id: &OperationId) -> bool {
         self.state.operations.contains_key(id)
     }
 
     /// Number of tracked operations (including terminal).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority helper retained for schema-aligned registry inspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn operation_count(&self) -> usize {
         self.state.operations.len()
     }
 
     /// Number of non-terminal operations.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority helper retained for schema-aligned registry inspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn active_count(&self) -> usize {
         self.state.active_count
     }
 
     /// Currently active barrier wait request, if any.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority helper retained for schema-aligned registry inspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn wait_request_id(&self) -> Option<&WaitRequestId> {
         self.state.wait_request_id.as_ref()
     }
 
     /// Operation IDs tracked by the currently active barrier wait.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority helper retained for schema-aligned registry inspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn wait_operation_ids(&self) -> &[OperationId] {
         &self.state.wait_operation_ids
     }
@@ -419,6 +491,14 @@ impl OpsLifecycleAuthority {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority helper retained for schema-aligned registry inspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     fn wait_tracks_operation(&self, operation_id: &OperationId) -> bool {
         self.state.wait_operation_ids.contains(operation_id)
     }
@@ -428,11 +508,9 @@ impl OpsLifecycleAuthority {
             return;
         }
 
-        let wait_request_id = self
-            .state
-            .wait_request_id
-            .take()
-            .expect("wait_active implies wait_request_id is set");
+        let Some(wait_request_id) = self.state.wait_request_id.take() else {
+            return;
+        };
         let operation_ids = std::mem::take(&mut self.state.wait_operation_ids);
         effects.push(OpsLifecycleEffect::WaitAllSatisfied {
             wait_request_id,
@@ -1729,7 +1807,7 @@ mod tests {
             .unwrap();
         assert!(start.effects.is_empty());
         assert_eq!(auth.wait_request_id(), Some(&wait_request_id));
-        assert_eq!(auth.wait_operation_ids(), &[id.clone()]);
+        assert_eq!(auth.wait_operation_ids(), std::slice::from_ref(&id));
 
         let completion = auth
             .apply(OpsLifecycleInput::CompleteOperation {

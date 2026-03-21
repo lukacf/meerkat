@@ -30,7 +30,7 @@ pub fn submit_ops_barrier_satisfied(
     run_id: RunId,
 ) -> Result<TurnExecutionTransition, AgentError> {
     let transition = authority.apply(TurnExecutionInput::OpsBarrierSatisfied {
-        run_id: run_id,
+        run_id,
         operation_ids: obligation.operation_ids,
     })?;
     Ok(transition)

@@ -250,8 +250,7 @@ impl Roster {
             let inconsistencies = self.wiring_projection_inconsistencies();
             debug_assert!(
                 inconsistencies.is_empty(),
-                "roster wiring projection is inconsistent: {:?}",
-                inconsistencies
+                "roster wiring projection is inconsistent: {inconsistencies:?}"
             );
         }
     }

@@ -268,10 +268,10 @@ impl MobOpsAdapter {
         let operation_id = match active_ids.len() {
             1 => active_ids[0].clone(),
             0 => {
-                if let Some(latest) = Self::newest_operation_snapshot(&snapshots) {
-                    if latest.status == OperationStatus::Retired {
-                        return Ok(());
-                    }
+                if let Some(latest) = Self::newest_operation_snapshot(&snapshots)
+                    && latest.status == OperationStatus::Retired
+                {
+                    return Ok(());
                 }
                 let display_name = format!("mob_member/{session_id}");
                 self.ensure_operation(&session_id, &display_name).await?

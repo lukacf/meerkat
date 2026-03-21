@@ -19,7 +19,7 @@ use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::SystemTime;
 use tokio::sync::{Notify, mpsc};
 
@@ -69,6 +69,8 @@ struct HostModeAgent {
     message_count: usize,
     comms_runtime: Arc<TestHostCommsRuntime>,
     host_polls: Arc<AtomicUsize>,
+    checkpoint_count: Arc<AtomicUsize>,
+    fail_next_poll: Arc<AtomicBool>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
 }
 
@@ -148,11 +150,22 @@ impl SessionAgent for HostModeAgent {
 
     async fn poll_host_mode(
         &mut self,
-        _event_tx: mpsc::Sender<AgentEvent>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<HostModePollOutcome, meerkat_core::error::AgentError> {
         let drained = self.comms_runtime.drain_messages().await;
         if drained.is_empty() {
             return Ok(HostModePollOutcome::Idle);
+        }
+        if self.fail_next_poll.swap(false, Ordering::AcqRel) {
+            let _ = event_tx
+                .send(AgentEvent::RunFailed {
+                    session_id: self.session_id.clone(),
+                    error: "simulated host-mode poll failure".to_string(),
+                })
+                .await;
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "simulated host-mode poll failure".to_string(),
+            ));
         }
         self.host_polls.fetch_add(drained.len(), Ordering::AcqRel);
         self.message_count += drained.len() * 2;
@@ -166,6 +179,10 @@ impl SessionAgent for HostModeAgent {
             schema_warnings: None,
             skill_diagnostics: None,
         }))
+    }
+
+    async fn checkpoint_current_session(&mut self) {
+        self.checkpoint_count.fetch_add(1, Ordering::AcqRel);
     }
 
     fn comms_runtime(&self) -> Option<Arc<dyn CommsRuntime>> {
@@ -374,6 +391,8 @@ impl SessionAgentBuilder for FailingMockAgentBuilder {
 struct HostModeAgentBuilder {
     comms_runtime: Arc<TestHostCommsRuntime>,
     host_polls: Arc<AtomicUsize>,
+    checkpoint_count: Arc<AtomicUsize>,
+    fail_next_poll: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -390,6 +409,8 @@ impl SessionAgentBuilder for HostModeAgentBuilder {
             message_count: 0,
             comms_runtime: Arc::clone(&self.comms_runtime),
             host_polls: Arc::clone(&self.host_polls),
+            checkpoint_count: Arc::clone(&self.checkpoint_count),
+            fail_next_poll: Arc::clone(&self.fail_next_poll),
             system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
         })
     }
@@ -683,10 +704,13 @@ async fn interrupt_host_mode_returns_without_blocking() {
 async fn direct_host_mode_session_continues_draining_after_first_turn() {
     let comms_runtime = Arc::new(TestHostCommsRuntime::default());
     let host_polls = Arc::new(AtomicUsize::new(0));
+    let checkpoint_count = Arc::new(AtomicUsize::new(0));
     let service = Arc::new(EphemeralSessionService::new(
         HostModeAgentBuilder {
             comms_runtime: Arc::clone(&comms_runtime),
             host_polls: Arc::clone(&host_polls),
+            checkpoint_count: Arc::clone(&checkpoint_count),
+            fail_next_poll: Arc::new(AtomicBool::new(false)),
         },
         10,
     ));
@@ -732,6 +756,76 @@ async fn direct_host_mode_session_continues_draining_after_first_turn() {
     })
     .await
     .expect("second host-mode pump should run");
+
+    assert_eq!(
+        checkpoint_count.load(Ordering::Acquire),
+        2,
+        "each successful host-mode poll should checkpoint once",
+    );
+}
+
+#[tokio::test]
+async fn direct_host_mode_poll_failure_is_broadcast_and_stops_drain() {
+    let comms_runtime = Arc::new(TestHostCommsRuntime::default());
+    let host_polls = Arc::new(AtomicUsize::new(0));
+    let checkpoint_count = Arc::new(AtomicUsize::new(0));
+    let fail_next_poll = Arc::new(AtomicBool::new(true));
+    let service = Arc::new(EphemeralSessionService::new(
+        HostModeAgentBuilder {
+            comms_runtime: Arc::clone(&comms_runtime),
+            host_polls: Arc::clone(&host_polls),
+            checkpoint_count,
+            fail_next_poll: Arc::clone(&fail_next_poll),
+        },
+        10,
+    ));
+
+    let created = service
+        .create_session(create_req_deferred("host"))
+        .await
+        .unwrap();
+    let sid = created.session_id;
+
+    let mut stream = service
+        .subscribe_session_events(&sid)
+        .await
+        .expect("should subscribe to session events");
+
+    service
+        .start_turn(
+            &sid,
+            StartTurnRequest {
+                host_mode: true,
+                host_mode_owner: HostModeOwner::SessionService,
+                ..turn_req("Host mode turn")
+            },
+        )
+        .await
+        .unwrap();
+
+    comms_runtime.push_message("peer failure");
+
+    let mut saw_run_failed = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    while let Ok(Some(envelope)) = tokio::time::timeout_at(deadline, stream.next()).await {
+        if matches!(envelope.payload, AgentEvent::RunFailed { .. }) {
+            saw_run_failed = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_run_failed,
+        "host-mode poll failures should surface on the session event stream",
+    );
+
+    comms_runtime.push_message("peer after failure");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        host_polls.load(Ordering::Acquire),
+        0,
+        "host-mode drain should stop after a poll failure",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -32,10 +32,10 @@ pub fn extract_obligations(
                 applied_at_turn,
             } => Some(SurfaceCompletionObligation {
                 surface_id: surface_id.clone(),
-                operation: operation.clone(),
-                pending_task_sequence: pending_task_sequence.clone(),
-                staged_intent_sequence: staged_intent_sequence.clone(),
-                applied_at_turn: applied_at_turn.clone(),
+                operation: *operation,
+                pending_task_sequence: *pending_task_sequence,
+                staged_intent_sequence: *staged_intent_sequence,
+                applied_at_turn: *applied_at_turn,
             }),
             _ => None,
         })

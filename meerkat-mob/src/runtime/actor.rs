@@ -342,6 +342,7 @@ impl MobActor {
         }
     }
 
+    #[allow(dead_code)]
     fn pending_spawn_tickets(&self) -> std::collections::BTreeSet<u64> {
         self.pending_spawns.tickets()
     }
@@ -1161,14 +1162,13 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_ok() {
-                                if let Some(ref mut orch) = self.orchestrator {
-                                    if let Err(error) =
+                                if let Some(ref mut orch) = self.orchestrator
+                                    && let Err(error) =
                                         orch.apply(MobOrchestratorInput::StopOrchestrator)
-                                    {
-                                        stop_result = Err(MobError::Internal(format!(
-                                            "orchestrator StopOrchestrator transition failed during stop: {error}"
-                                        )));
-                                    }
+                                {
+                                    stop_result = Err(MobError::Internal(format!(
+                                        "orchestrator StopOrchestrator transition failed during stop: {error}"
+                                    )));
                                 }
                                 if stop_result.is_ok()
                                     && let Err(error) =
@@ -1224,14 +1224,13 @@ impl MobActor {
                                 Err(error)
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
-                                if let Some(ref mut orch) = self.orchestrator {
-                                    if let Err(error) =
+                                if let Some(ref mut orch) = self.orchestrator
+                                    && let Err(error) =
                                         orch.apply(MobOrchestratorInput::ResumeOrchestrator)
-                                    {
-                                        resume_result = Err(MobError::Internal(format!(
-                                            "orchestrator ResumeOrchestrator transition failed during resume: {error}"
-                                        )));
-                                    }
+                                {
+                                    resume_result = Err(MobError::Internal(format!(
+                                        "orchestrator ResumeOrchestrator transition failed during resume: {error}"
+                                    )));
                                 }
                                 if resume_result.is_ok()
                                     && let Err(error) =
@@ -1362,15 +1361,14 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    if self.state() == MobState::Running {
-                        if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::Stop)
-                        {
-                            tracing::warn!(error = %error, "authority rejected Stop");
-                            if result.is_ok() {
-                                result = Err(MobError::Internal(format!(
-                                    "lifecycle Stop transition failed during shutdown: {error}"
-                                )));
-                            }
+                    if self.state() == MobState::Running
+                        && let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::Stop)
+                    {
+                        tracing::warn!(error = %error, "authority rejected Stop");
+                        if result.is_ok() {
+                            result = Err(MobError::Internal(format!(
+                                "lifecycle Stop transition failed during shutdown: {error}"
+                            )));
                         }
                     }
                     let _ = reply_tx.send(result);
@@ -1442,7 +1440,7 @@ impl MobActor {
 
         for slot in slots {
             let spawn_ticket = slot.ticket;
-            slot.fail(&format!("spawn canceled for '{}': {}", meerkat_id, reason));
+            slot.fail(&format!("spawn canceled for '{meerkat_id}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
                 meerkat_id = %meerkat_id,
@@ -2470,14 +2468,13 @@ impl MobActor {
                     member_id: meerkat_id.clone(),
                 }
             })?;
-            let snapshot = RespawnSnapshot {
+            RespawnSnapshot {
                 profile_name: entry.profile.clone(),
                 runtime_mode: entry.runtime_mode,
                 labels: entry.labels.clone(),
                 old_session_id,
                 wired_peers: entry.wired_to.iter().cloned().collect(),
-            };
-            snapshot
+            }
         };
 
         // 2. Retire the existing member (archives the session, removes from roster).

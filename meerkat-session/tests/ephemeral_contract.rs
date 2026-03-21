@@ -609,7 +609,7 @@ impl Compactor for TrackingCompactor {
         self.compact_on_boundary == Some(ctx.session_boundary_index)
     }
 
-    fn compaction_prompt(&self) -> &str {
+    fn compaction_prompt(&self) -> &'static str {
         "COMPACT NOW"
     }
 

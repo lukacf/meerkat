@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -579,7 +579,7 @@ pub fn collect_ownership_findings(
         }
     }
 
-    let mut parsed_files = BTreeMap::<String, syn::File>::new();
+    let mut parsed_files = BTreeMap::new();
     for state in &registry.state_cells {
         if state.canonical_anchor.trim().is_empty() {
             findings.push(error_finding(
@@ -607,12 +607,10 @@ pub fn collect_ownership_findings(
             ));
             continue;
         };
-        if !parsed_files.contains_key(&state.path) {
-            parsed_files.insert(state.path.clone(), parse_repo_file(root, &state.path)?);
-        }
-        let parsed = parsed_files
-            .get(&state.path)
-            .expect("parsed file present after insert");
+        let parsed = match parsed_files.entry(state.path.clone()) {
+            Entry::Vacant(entry) => entry.insert(parse_repo_file(root, &state.path)?),
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
         if !struct_has_named_field(parsed, type_name, field_name) {
             findings.push(error_finding(
                 "OwnershipStateSymbolMissing",
@@ -738,7 +736,7 @@ pub fn collect_ownership_findings(
         if invariant.status == EntryStatus::Open {
             findings.push(error_finding(
                 "OwnershipInvariantOpen",
-                &format!("<{}>", invariant.subsystem),
+                format!("<{}>", invariant.subsystem),
                 &invariant.name,
                 format!(
                     "coupling invariant `{}` remains open against anchor `{}`",
@@ -1585,10 +1583,102 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         ],
     }
 }
+struct StateEntryArgs<'a> {
+    path: &'a str,
+    symbol: &'a str,
+    subsystem: Subsystem,
+    class: StateClass,
+    canonical_anchor: &'a str,
+    projection: Option<ProjectionContract>,
+    status: EntryStatus,
+    closure_action: &'a str,
+}
+
+fn state(args: StateEntryArgs<'_>) -> StateCellEntry {
+    StateCellEntry {
+        path: args.path.into(),
+        symbol: args.symbol.into(),
+        subsystem: args.subsystem,
+        class: args.class,
+        canonical_anchor: args.canonical_anchor.into(),
+        projection: args.projection,
+        status: args.status,
+        closure_action: args.closure_action.into(),
+    }
+}
+
+macro_rules! state_entry {
+    ($path:expr, $symbol:expr, $subsystem:expr, $class:expr, $canonical_anchor:expr, $projection:expr, $status:expr, $closure_action:expr $(,)?) => {
+        state(StateEntryArgs {
+            path: $path,
+            symbol: $symbol,
+            subsystem: $subsystem,
+            class: $class,
+            canonical_anchor: $canonical_anchor,
+            projection: $projection,
+            status: $status,
+            closure_action: $closure_action,
+        })
+    };
+}
+
+struct SemanticOperationArgs<'a> {
+    path: &'a str,
+    symbol: &'a str,
+    boundary_kind: BoundaryKind,
+    owner_shell: &'a str,
+    writeset: &'a [&'a str],
+    anchor: &'a str,
+    required_postconditions: &'a [&'a str],
+    preserved_invariants: &'a [&'a str],
+    status: EntryStatus,
+}
+
+fn op(args: SemanticOperationArgs<'_>) -> SemanticOperationEntry {
+    SemanticOperationEntry {
+        path: args.path.into(),
+        symbol: args.symbol.into(),
+        boundary_kind: args.boundary_kind,
+        owner_shell: args.owner_shell.into(),
+        writeset: args
+            .writeset
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+        anchor: args.anchor.into(),
+        required_postconditions: args
+            .required_postconditions
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+        preserved_invariants: args
+            .preserved_invariants
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+        status: args.status,
+    }
+}
+
+macro_rules! semantic_operation_entry {
+    ($path:expr, $symbol:expr, $boundary_kind:expr, $owner_shell:expr, $writeset:expr, $anchor:expr, $required_postconditions:expr, $preserved_invariants:expr, $status:expr $(,)?) => {
+        op(SemanticOperationArgs {
+            path: $path,
+            symbol: $symbol,
+            boundary_kind: $boundary_kind,
+            owner_shell: $owner_shell,
+            writeset: $writeset,
+            anchor: $anchor,
+            required_postconditions: $required_postconditions,
+            preserved_invariants: $preserved_invariants,
+            status: $status,
+        })
+    };
+}
 
 fn state_cells() -> Vec<StateCellEntry> {
     vec![
-        state(
+        state_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "RuntimeSessionAdapter.sessions",
             Subsystem::Runtime,
@@ -1602,7 +1692,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "session map is identity-to-runtime-capability reachability only; registration, stale attachment normalization, and teardown are enforced by adapter publication rules rather than ad hoc shell pre-checks",
         ),
-        state(
+        state_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "RuntimeSessionAdapter.comms_drain_slots",
             Subsystem::Runtime,
@@ -1616,7 +1706,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "drain slots are capability reachability only; unregister aborts and removes slots before dropping session binding, and spawn/control updates ignore unregistered sessions",
         ),
-        state(
+        state_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "RuntimeSessionEntry.driver",
             Subsystem::Runtime,
@@ -1626,7 +1716,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "driver is an opaque capability handle; semantic state transitions are mediated through driver authorities and adapter publication rules rather than raw handle identity",
         ),
-        state(
+        state_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "RuntimeSessionEntry.attachment",
             Subsystem::Runtime,
@@ -1636,7 +1726,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "attachment publication is liveness-gated by loop channels; stop paths do not pre-clear attachment ahead of canonical driver control transitions, and stale attached-driver states are repaired before re-publication",
         ),
-        state(
+        state_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "RuntimeSessionEntry.completions",
             Subsystem::Runtime,
@@ -1646,7 +1736,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "completion registry is crate-private waiter plumbing; runtime surfaces expose only completion handles/outcomes and do not branch on waiter presence/count",
         ),
-        state(
+        state_entry!(
             "meerkat-runtime/src/driver/ephemeral.rs",
             "EphemeralRuntimeDriver.queue",
             Subsystem::Runtime,
@@ -1660,7 +1750,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "physical queue is rebuilt from canonical ingress queue entries after every queue mutation, and persistent recovery now fails closed instead of shell-repairing projection drift",
         ),
-        state(
+        state_entry!(
             "meerkat-runtime/src/driver/ephemeral.rs",
             "EphemeralRuntimeDriver.steer_queue",
             Subsystem::Runtime,
@@ -1674,7 +1764,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "physical steer queue is rebuilt from canonical ingress steer entries after every queue mutation, and persistent recovery now fails closed instead of shell-repairing projection drift",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.servers",
             Subsystem::Mcp,
@@ -1688,7 +1778,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "used strictly for identity-to-handle reachability after projection-based routing selection",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.projection",
             Subsystem::Mcp,
@@ -1702,7 +1792,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "atomically publish projection snapshot after every authority-driven visibility mutation",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "RouterProjectionSnapshot.tool_to_server",
             Subsystem::Mcp,
@@ -1716,7 +1806,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "routing map is rebuilt from the same snapshot publication path used by tool visibility",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "RouterProjectionSnapshot.visible_tools",
             Subsystem::Mcp,
@@ -1730,7 +1820,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "tool listing uses only atomically published snapshot-visible tool set",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "RouterProjectionSnapshot.epoch",
             Subsystem::Mcp,
@@ -1744,7 +1834,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "projection epoch lineage is machine-derived directly from authority snapshot_epoch",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.pending_obligations",
             Subsystem::Mcp,
@@ -1758,7 +1848,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "obligation tokens are capability handles consumed only through generated protocol feedback paths",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.pending_snapshot_alignment",
             Subsystem::Mcp,
@@ -1772,7 +1862,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "snapshot-alignment token is an opaque capability consumed only through generated bridge helpers",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.pending_tx",
             Subsystem::Mcp,
@@ -1782,7 +1872,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "background pending-result sender is an opaque transport capability with no independent semantic truth",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.pending_rx",
             Subsystem::Mcp,
@@ -1792,7 +1882,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "pending-result receiver queue is transport-only buffering for obligation completion delivery",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.completed_updates",
             Subsystem::Mcp,
@@ -1802,7 +1892,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "queued lifecycle actions are transport-only buffers sourced from authority transitions",
         ),
-        state(
+        state_entry!(
             "meerkat-mcp/src/router.rs",
             "McpRouter.staged_payloads",
             Subsystem::Mcp,
@@ -1812,7 +1902,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "treat staged config payloads as transport-only buffers keyed by machine-owned staged intent, not as authoritative staged-order truth",
         ),
-        state(
+        state_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "MobActor.roster",
             Subsystem::Mob,
@@ -1826,7 +1916,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "sealed RosterAuthority is now the sole mutator for the roster projection and helper/runtime reads consume authority snapshots only",
         ),
-        state(
+        state_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "MobActor.pending_spawns",
             Subsystem::Mob,
@@ -1840,7 +1930,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "PendingSpawnLineage now owns metadata/task coupling and all pending-spawn semantics go through its sealed helpers plus orchestrator-count alignment",
         ),
-        state(
+        state_entry!(
             "meerkat-mob/src/runtime/pending_spawn_lineage.rs",
             "PendingSpawnLineage.tasks",
             Subsystem::Mob,
@@ -1854,7 +1944,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "ticket-to-task-handle reachability only; insertion/removal is coupled to pending spawn lineage helpers and never carries spawn semantics independently",
         ),
-        state(
+        state_entry!(
             "meerkat-mob/src/runtime/provisioner.rs",
             "SessionBackend.runtime_sessions",
             Subsystem::Mob,
@@ -1868,7 +1958,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "reduced to identity-to-bridge-sidecar reachability; runtime adapter remains canonical for registration lifecycle",
         ),
-        state(
+        state_entry!(
             "meerkat-mob/src/runtime/provisioner.rs",
             "RuntimeSessionState.queued_turns",
             Subsystem::Mob,
@@ -1882,7 +1972,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             EntryStatus::Closed,
             "transport-only turn context buffering; no lifecycle truth or independent sequencing semantics",
         ),
-        state(
+        state_entry!(
             "meerkat-mob/src/runtime/ops_adapter.rs",
             "MobOpsAdapter.registry",
             Subsystem::Mob,
@@ -1897,7 +1987,7 @@ fn state_cells() -> Vec<StateCellEntry> {
 
 fn semantic_operations() -> Vec<SemanticOperationEntry> {
     vec![
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "set_comms_drain_control",
             BoundaryKind::PublicInherent,
@@ -1910,7 +2000,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["drain slot control linkage cannot outlive registered session"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "register_session",
             BoundaryKind::PublicInherent,
@@ -1925,7 +2015,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "set_session_silent_intents",
             BoundaryKind::PublicInherent,
@@ -1938,7 +2028,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["session-scoped policy overrides cannot outlive session registration truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "register_session_with_executor",
             BoundaryKind::PublicInherent,
@@ -1951,7 +2041,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["attachment publication and registered-session truth cannot drift"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "ensure_session_with_executor",
             BoundaryKind::PublicInherent,
@@ -1964,7 +2054,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["attachment state and loop handle liveness do not drift across ensure/publish paths"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "unregister_session",
             BoundaryKind::PublicInherent,
@@ -1975,7 +2065,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["drain slots subset session registrations"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "interrupt_current_run",
             BoundaryKind::PublicInherent,
@@ -1990,7 +2080,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "stop_runtime_executor",
             BoundaryKind::PublicInherent,
@@ -2001,7 +2091,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["attachment and completion waiter surfaces remain aligned with runtime state"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "accept_input_and_run",
             BoundaryKind::PublicInherent,
@@ -2016,7 +2106,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "accept_input_with_completion",
             BoundaryKind::PublicInherent,
@@ -2031,7 +2121,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "maybe_spawn_comms_drain",
             BoundaryKind::PublicInherent,
@@ -2042,7 +2132,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["no live drain without registered session"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "notify_comms_drain_exited",
             BoundaryKind::ManualCallback,
@@ -2053,7 +2143,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["drain protocol closure and liveness remain satisfied"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "abort_comms_drains",
             BoundaryKind::PublicInherent,
@@ -2064,7 +2154,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["no slot remains suppressing turn-boundary drain after abort completion"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "abort_comms_drain",
             BoundaryKind::PublicInherent,
@@ -2075,7 +2165,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["aborted drain slot cannot retain stale running/suppression state"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "wait_comms_drain",
             BoundaryKind::PublicInherent,
@@ -2086,7 +2176,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["drain phase cannot remain Running after joined completion path"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "publish_event",
             BoundaryKind::TraitImpl,
@@ -2099,7 +2189,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["event publication cannot bypass authority-owned transition guards"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "retire",
             BoundaryKind::TraitImpl,
@@ -2110,7 +2200,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["retire report and completion closure remain aligned with runtime truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "recycle",
             BoundaryKind::TraitImpl,
@@ -2121,7 +2211,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["recycle contract matches pre-recycle truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "reset",
             BoundaryKind::TraitImpl,
@@ -2132,7 +2222,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["completion registry remains waiter-only"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "recover",
             BoundaryKind::TraitImpl,
@@ -2143,7 +2233,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["recovered runtime state and attachment wake signaling remain aligned"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "destroy",
             BoundaryKind::TraitImpl,
@@ -2156,7 +2246,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["destroyed runtime cannot leak active input/completion truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
             "ingest",
             BoundaryKind::TraitImpl,
@@ -2167,7 +2257,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["driver queues are projections of ingress truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "set_removal_timeout",
             BoundaryKind::PublicInherent,
@@ -2182,7 +2272,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "add_server",
             BoundaryKind::PublicInherent,
@@ -2193,7 +2283,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["compatibility surface cannot diverge from canonical staged/boundary semantics"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "stage_add",
             BoundaryKind::PublicInherent,
@@ -2206,7 +2296,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["staged payload bookkeeping cannot invent staged operation order"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "stage_remove",
             BoundaryKind::PublicInherent,
@@ -2217,7 +2307,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["remove staging cannot bypass authority ordering semantics"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "stage_reload",
             BoundaryKind::PublicInherent,
@@ -2230,7 +2320,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["reload staging cannot create lineage drift against authority staged sequences"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "apply_staged",
             BoundaryKind::PublicInherent,
@@ -2248,7 +2338,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["routing/listing come only from published snapshot"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "process_pending_result",
             BoundaryKind::ManualCallback,
@@ -2264,7 +2354,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["pending lineage and snapshot freshness remain canonical"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "take_lifecycle_actions",
             BoundaryKind::PublicInherent,
@@ -2275,7 +2365,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["drained updates do not mutate canonical lifecycle truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "take_external_updates",
             BoundaryKind::PublicInherent,
@@ -2288,7 +2378,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["external update draining cannot read semantic routing state from raw server table"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "progress_removals",
             BoundaryKind::PublicInherent,
@@ -2301,7 +2391,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["no semantic read from raw servers"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "call_tool",
             BoundaryKind::PublicInherent,
@@ -2312,7 +2402,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["visibility/routing do not read raw servers directly"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
             "shutdown",
             BoundaryKind::PublicInherent,
@@ -2328,7 +2418,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["no pending completion obligations survive terminal shutdown"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "refresh_tools",
             BoundaryKind::PublicInherent,
@@ -2341,7 +2431,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["refresh path cannot invent independent adapter tool visibility truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "stage_add",
             BoundaryKind::PublicInherent,
@@ -2354,7 +2444,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter state remains projection-only"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "stage_remove",
             BoundaryKind::PublicInherent,
@@ -2367,7 +2457,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter state remains projection-only"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "stage_reload",
             BoundaryKind::PublicInherent,
@@ -2380,7 +2470,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter state remains projection-only"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "apply_staged",
             BoundaryKind::PublicInherent,
@@ -2391,7 +2481,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter carries no independent lifecycle truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "poll_lifecycle_actions",
             BoundaryKind::PublicInherent,
@@ -2402,7 +2492,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter pending flag must mirror router pending/notices truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "progress_removals",
             BoundaryKind::PublicInherent,
@@ -2415,7 +2505,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter pending flag must mirror router pending/notices truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "wait_until_ready",
             BoundaryKind::PublicInherent,
@@ -2428,7 +2518,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mcp/src/adapter.rs",
             "shutdown",
             BoundaryKind::PublicInherent,
@@ -2439,7 +2529,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["adapter cannot report pending work after router shutdown"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn",
             BoundaryKind::PublicInherent,
@@ -2452,7 +2542,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["spawn convenience surface cannot diverge from canonical spawn lineage"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_with_backend",
             BoundaryKind::PublicInherent,
@@ -2463,7 +2553,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["backend convenience surface cannot diverge from canonical spawn lineage"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_with_options",
             BoundaryKind::PublicInherent,
@@ -2476,7 +2566,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "attach_existing_session",
             BoundaryKind::PublicInherent,
@@ -2489,7 +2579,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["attach convenience path cannot bypass canonical member/runtime bridge ownership"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "attach_existing_session_as_orchestrator",
             BoundaryKind::PublicInherent,
@@ -2500,7 +2590,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["orchestrator attach convenience surface cannot fork bridge truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "attach_existing_session_as_member",
             BoundaryKind::PublicInherent,
@@ -2511,7 +2601,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["member attach convenience surface cannot fork bridge truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_spec",
             BoundaryKind::PublicInherent,
@@ -2522,7 +2612,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["spawn-spec wrapper cannot diverge from canonical spawn lineage"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_spec_receipt",
             BoundaryKind::PublicInherent,
@@ -2533,7 +2623,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["pending spawn lineage cannot drift from canonical roster truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_many",
             BoundaryKind::PublicInherent,
@@ -2546,7 +2636,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["batch convenience path cannot classify spawn success outside canonical receipts"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_many_receipts",
             BoundaryKind::PublicInherent,
@@ -2561,7 +2651,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "retire",
             BoundaryKind::PublicInherent,
@@ -2572,7 +2662,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["member/session removal follows lifecycle invariants"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "respawn",
             BoundaryKind::PublicInherent,
@@ -2583,7 +2673,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["helper does not invent lifecycle truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "retire_all",
             BoundaryKind::PublicInherent,
@@ -2594,7 +2684,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["bulk retire cannot leave member lifecycle truth partially applied"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "wire",
             BoundaryKind::PublicInherent,
@@ -2605,7 +2695,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["wiring projection and trust edge mutation remain aligned"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "unwire",
             BoundaryKind::PublicInherent,
@@ -2616,7 +2706,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["wiring projection and trust edge mutation remain aligned"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "internal_turn",
             BoundaryKind::PublicInherent,
@@ -2629,7 +2719,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["internal-turn convenience surface cannot invent session routing truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "run_flow",
             BoundaryKind::PublicInherent,
@@ -2642,7 +2732,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["flow wrapper cannot fabricate run lifecycle state outside canonical tracker"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "run_flow_with_stream",
             BoundaryKind::PublicInherent,
@@ -2655,7 +2745,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "cancel_flow",
             BoundaryKind::PublicInherent,
@@ -2666,7 +2756,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["cancel surface cannot mark runs canceled outside canonical cleanup path"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "stop",
             BoundaryKind::PublicInherent,
@@ -2679,7 +2769,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["stop convenience surface cannot leave helper-owned lifecycle truth behind"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "resume",
             BoundaryKind::PublicInherent,
@@ -2690,7 +2780,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["resume convenience surface cannot bypass canonical lifecycle guards"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "complete",
             BoundaryKind::PublicInherent,
@@ -2705,7 +2795,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "reset",
             BoundaryKind::PublicInherent,
@@ -2716,7 +2806,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["reset convenience surface cannot preserve stale helper-owned member/runtime truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "destroy",
             BoundaryKind::PublicInherent,
@@ -2729,7 +2819,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["destroy convenience surface cannot leak active member/runtime truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "task_create",
             BoundaryKind::PublicInherent,
@@ -2740,7 +2830,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["task helper surface cannot invent independent task truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "task_update",
             BoundaryKind::PublicInherent,
@@ -2751,7 +2841,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["task helper surface cannot invent independent task truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "set_spawn_policy",
             BoundaryKind::PublicInherent,
@@ -2762,7 +2852,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["spawn policy convenience surface cannot create side-owned auto-spawn semantics"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "shutdown",
             BoundaryKind::PublicInherent,
@@ -2777,7 +2867,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "force_cancel_member",
             BoundaryKind::PublicInherent,
@@ -2788,7 +2878,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["cancel path cannot retire or rewire members implicitly"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "spawn_helper",
             BoundaryKind::PublicInherent,
@@ -2799,7 +2889,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["helper does not classify from snapshots"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "fork_helper",
             BoundaryKind::PublicInherent,
@@ -2810,7 +2900,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["helper does not classify from snapshots"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "wait_one",
             BoundaryKind::PublicInherent,
@@ -2821,7 +2911,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["wait helper does not infer completion from side maps"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
             "wait_all",
             BoundaryKind::PublicInherent,
@@ -2832,7 +2922,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["wait helper does not infer completion from side maps"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_spawn_provisioned_batch",
             BoundaryKind::ManualCallback,
@@ -2847,7 +2937,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "enqueue_spawn",
             BoundaryKind::EnumDispatch,
@@ -2862,7 +2952,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_force_cancel",
             BoundaryKind::EnumDispatch,
@@ -2875,7 +2965,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["force-cancel cannot mutate member lifecycle or wiring truth"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_retire",
             BoundaryKind::EnumDispatch,
@@ -2888,7 +2978,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["member removal, wiring cleanup, archive, and bridge teardown remain aligned"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_respawn",
             BoundaryKind::EnumDispatch,
@@ -2903,7 +2993,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_wire",
             BoundaryKind::EnumDispatch,
@@ -2916,7 +3006,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["wiring projection, trust-edge mutation, and edge-lock discipline remain coupled"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_unwire",
             BoundaryKind::EnumDispatch,
@@ -2929,7 +3019,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["wiring projection, trust-edge mutation, and edge-lock discipline remain coupled"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_external_turn",
             BoundaryKind::EnumDispatch,
@@ -2944,7 +3034,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_internal_turn",
             BoundaryKind::EnumDispatch,
@@ -2955,7 +3045,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["delivery semantics cannot branch on shell-only side maps"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "retire_all_members",
             BoundaryKind::EnumDispatch,
@@ -2970,7 +3060,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_task_create",
             BoundaryKind::EnumDispatch,
@@ -2981,7 +3071,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["task-create command cannot bypass canonical task-board validation"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_task_update",
             BoundaryKind::EnumDispatch,
@@ -2992,7 +3082,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["task-update command cannot bypass canonical task-board validation"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_run_flow",
             BoundaryKind::EnumDispatch,
@@ -3010,7 +3100,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_cancel_flow",
             BoundaryKind::EnumDispatch,
@@ -3023,7 +3113,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_flow_cleanup",
             BoundaryKind::EnumDispatch,
@@ -3036,7 +3126,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_complete",
             BoundaryKind::EnumDispatch,
@@ -3051,7 +3141,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             ],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_destroy",
             BoundaryKind::EnumDispatch,
@@ -3064,7 +3154,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["destroy command cannot leak active member/runtime truth after terminalization"],
             EntryStatus::Closed,
         ),
-        op(
+        semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
             "handle_reset",
             BoundaryKind::EnumDispatch,
@@ -3190,58 +3280,6 @@ fn contract(
     }
 }
 
-fn state(
-    path: &str,
-    symbol: &str,
-    subsystem: Subsystem,
-    class: StateClass,
-    canonical_anchor: &str,
-    projection: Option<ProjectionContract>,
-    status: EntryStatus,
-    closure_action: &str,
-) -> StateCellEntry {
-    StateCellEntry {
-        path: path.into(),
-        symbol: symbol.into(),
-        subsystem,
-        class,
-        canonical_anchor: canonical_anchor.into(),
-        projection,
-        status,
-        closure_action: closure_action.into(),
-    }
-}
-
-fn op(
-    path: &str,
-    symbol: &str,
-    boundary_kind: BoundaryKind,
-    owner_shell: &str,
-    writeset: &[&str],
-    anchor: &str,
-    required_postconditions: &[&str],
-    preserved_invariants: &[&str],
-    status: EntryStatus,
-) -> SemanticOperationEntry {
-    SemanticOperationEntry {
-        path: path.into(),
-        symbol: symbol.into(),
-        boundary_kind,
-        owner_shell: owner_shell.into(),
-        writeset: writeset.iter().map(|item| (*item).to_string()).collect(),
-        anchor: anchor.into(),
-        required_postconditions: required_postconditions
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
-        preserved_invariants: preserved_invariants
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
-        status,
-    }
-}
-
 fn invariant(
     name: &str,
     subsystem: Subsystem,
@@ -3286,9 +3324,16 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn manifest_boundaries_match_operation_entries() {
-        let root = repo_root().expect("repo root");
-        let findings = collect_current_findings(&root).expect("ownership findings");
+        let root = match repo_root() {
+            Ok(root) => root,
+            Err(err) => panic!("repo root: {err}"),
+        };
+        let findings = match collect_current_findings(&root) {
+            Ok(findings) => findings,
+            Err(err) => panic!("ownership findings: {err}"),
+        };
         let structural = findings
             .iter()
             .filter(|finding| {

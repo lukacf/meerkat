@@ -37,6 +37,14 @@ use crate::runtime::MobState;
 pub(crate) enum MobOrchestratorInput {
     InitializeOrchestrator,
     BindCoordinator,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "schema-aligned authority input retained even when current shell paths do not construct it"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     UnbindCoordinator,
     StageSpawn,
     CompleteSpawn,
@@ -46,6 +54,14 @@ pub(crate) enum MobOrchestratorInput {
     ResumeOrchestrator,
     MarkCompleted,
     DestroyOrchestrator,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "schema-aligned authority input retained even when current shell paths do not construct it"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     ForceCancelMember,
 }
 
@@ -73,6 +89,14 @@ pub(crate) enum MobOrchestratorEffect {
 // ---------------------------------------------------------------------------
 
 /// Successful transition outcome from the MobOrchestrator authority.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "transition snapshot retained for schema-aligned authority surface and tests"
+    )
+)]
+#[cfg_attr(test, allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct MobOrchestratorTransition {
     /// The phase after the transition.
@@ -193,6 +217,14 @@ impl MobOrchestratorAuthority {
     }
 
     /// Current phase (read from canonical state).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "authority inspection helper retained for schema-aligned orchestrator introspection"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn phase(&self) -> MobState {
         self.phase
     }

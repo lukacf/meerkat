@@ -253,6 +253,10 @@ pub trait SessionAgent: Send {
         Ok(HostModePollOutcome::Idle)
     }
 
+    /// Persist the current session snapshot after a host-mode interaction.
+    #[doc(hidden)]
+    async fn checkpoint_current_session(&mut self) {}
+
     /// Get the comms runtime used by this agent, if any.
     ///
     /// Called once before the agent moves into its dedicated task. The returned
@@ -1068,6 +1072,23 @@ fn apply_comms_drain_effects<A: SessionAgent>(
     }
 }
 
+fn flush_pending_agent_events(
+    control: &SessionTaskControl,
+    agent_event_rx: &mut mpsc::Receiver<AgentEvent>,
+    next_seq: &mut u64,
+    source_id: &str,
+) -> bool {
+    let mut saw_run_failed = false;
+    while let Ok(event) = agent_event_rx.try_recv() {
+        if matches!(event, AgentEvent::RunFailed { .. }) {
+            saw_run_failed = true;
+        }
+        let envelope = stamp_event_envelope(next_seq, source_id, event);
+        let _ = control.session_event_tx.send(envelope);
+    }
+    saw_run_failed
+}
+
 async fn session_task<A: SessionAgent>(
     mut agent: A,
     agent_event_tx: mpsc::Sender<AgentEvent>,
@@ -1132,13 +1153,19 @@ async fn session_task<A: SessionAgent>(
                         ) {
                             Ok(result) => {
                                 apply_comms_drain_effects(&mut agent, &result.effects);
+                                let Some(obligation) = result.obligation else {
+                                    tracing::warn!(
+                                        "host-mode drain transition emitted no spawn obligation"
+                                    );
+                                    continue;
+                                };
                                 // The session-service host spawns the drain
                                 // task synchronously (as a poll loop inside
                                 // session_task), so we immediately submit
                                 // TaskSpawned feedback to close the obligation.
                                 match protocol_comms_drain_spawn::submit_task_spawned(
                                     &mut host_mode_drain,
-                                    result.obligation,
+                                    obligation,
                                 ) {
                                     Ok(effects) => {
                                         apply_comms_drain_effects(&mut agent, &effects);
@@ -1287,12 +1314,21 @@ async fn session_task<A: SessionAgent>(
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
                 });
+                let saw_run_failed = flush_pending_agent_events(
+                    &control,
+                    &mut agent_event_rx,
+                    &mut next_seq,
+                    &source_id,
+                );
                 control.state_tx.send_replace(SessionState::Idle);
                 control.turn_lock.store(false, Ordering::Release);
                 control.interrupt_requested.store(false, Ordering::Release);
 
                 match pump_result {
-                    Ok(HostModePollOutcome::Idle | HostModePollOutcome::Ran(_)) => {}
+                    Ok(HostModePollOutcome::Idle) => {}
+                    Ok(HostModePollOutcome::Ran(_)) => {
+                        agent.checkpoint_current_session().await;
+                    }
                     Ok(HostModePollOutcome::Dismissed) => {
                         if let Ok(effects) = protocol_comms_drain_spawn::notify_task_exited(
                             &mut host_mode_drain,
@@ -1303,7 +1339,25 @@ async fn session_task<A: SessionAgent>(
                         host_mode_owner = None;
                     }
                     Err(error) => {
+                        if !saw_run_failed {
+                            let envelope = stamp_event_envelope(
+                                &mut next_seq,
+                                &source_id,
+                                AgentEvent::RunFailed {
+                                    session_id: agent.session_id(),
+                                    error: error.to_string(),
+                                },
+                            );
+                            let _ = control.session_event_tx.send(envelope);
+                        }
                         tracing::warn!(error = %error, "host-mode drain poll failed");
+                        if let Ok(effects) = protocol_comms_drain_spawn::notify_task_exited(
+                            &mut host_mode_drain,
+                            meerkat_core::DrainExitReason::Failed,
+                        ) {
+                            apply_comms_drain_effects(&mut agent, &effects);
+                        }
+                        host_mode_owner = None;
                     }
                 }
             }
@@ -1324,18 +1378,17 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(());
             }
             SessionCommand::Shutdown => {
-                if host_mode_owner == Some(HostModeOwner::SessionService) {
-                    if let Ok(result) =
+                if host_mode_owner == Some(HostModeOwner::SessionService)
+                    && let Ok(result) =
                         protocol_comms_drain_abort::execute_stop_requested(&mut host_mode_drain)
-                    {
-                        apply_comms_drain_effects(&mut agent, &result.effects);
-                        // The abort obligation is implicitly closed under
-                        // TerminalClosure policy when the machine reaches
-                        // Stopped phase (which StopRequested transitions to).
-                        // No explicit AbortObserved feedback is needed here
-                        // because the session is shutting down.
-                        drop(result.obligation);
-                    }
+                {
+                    apply_comms_drain_effects(&mut agent, &result.effects);
+                    // The abort obligation is implicitly closed under
+                    // TerminalClosure policy when the machine reaches
+                    // Stopped phase (which StopRequested transitions to).
+                    // No explicit AbortObserved feedback is needed here
+                    // because the session is shutting down.
+                    let _ = result.obligation;
                 }
                 control.state_tx.send_replace(SessionState::ShuttingDown);
                 break;

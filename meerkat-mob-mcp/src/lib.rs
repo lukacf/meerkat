@@ -1614,7 +1614,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         json!({
                             "status": "topology_restore_failed",
                             "receipt": receipt,
-                            "failed_peer_ids": failed_peer_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                            "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
                         }),
                     ),
                     Err(e) => return Err(map_mob_err(call, MobError::Internal(e.to_string()))),

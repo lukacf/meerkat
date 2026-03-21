@@ -228,6 +228,10 @@ impl JobManager {
         job: &BackgroundJob,
         snapshot: Option<&OperationLifecycleSnapshot>,
     ) -> &'static str {
+        if matches!(job.status, JobStatus::TimedOut { .. }) {
+            return "timed_out";
+        }
+
         match snapshot.map(|value| value.status) {
             Some(OperationStatus::Provisioning | OperationStatus::Running) => "running",
             Some(OperationStatus::Completed) => "completed",
@@ -1006,6 +1010,52 @@ mod tests {
 
         // Now should have event sender
         assert!(manager.event_tx.is_some());
+    }
+
+    #[tokio::test]
+    async fn timed_out_job_summary_preserves_timed_out_status_over_failed_snapshot() {
+        let manager = JobManager::new(ShellConfig::default());
+        let operation_id = OperationId::new();
+        manager
+            .ops_registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::BackgroundToolOp,
+                owner_session_id: manager.owner_session_id.clone(),
+                display_name: "shell:sleep".to_string(),
+                source_label: "shell_job".to_string(),
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .unwrap();
+        manager
+            .ops_registry
+            .provisioning_succeeded(&operation_id)
+            .unwrap();
+        manager
+            .ops_registry
+            .fail_operation(&operation_id, "background job timed out".into())
+            .unwrap();
+
+        let job = BackgroundJob {
+            id: JobId::new(),
+            operation_id: Some(operation_id),
+            command: "sleep 30".to_string(),
+            working_dir: None,
+            timeout_secs: 30,
+            started_at_unix: 123,
+            status: JobStatus::TimedOut {
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_secs: 30.0,
+            },
+        };
+
+        let snapshot = manager.snapshot_for_job(&job);
+        assert_eq!(
+            manager.lifecycle_status_string(&job, snapshot.as_ref()),
+            "timed_out"
+        );
     }
 
     // ==================== Spawn Job Tests ====================

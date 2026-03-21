@@ -4,7 +4,7 @@
 
 use crate::comms_drain_lifecycle_authority::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
-    CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainPhase,
+    CommsDrainLifecycleInput, CommsDrainLifecycleMutator,
 };
 
 #[derive(Debug, Clone)]
@@ -36,7 +36,7 @@ pub fn execute_stop_requested(
 
 pub fn submit_abort_observed(
     authority: &mut CommsDrainLifecycleAuthority,
-    obligation: CommsDrainAbortObligation,
+    _obligation: CommsDrainAbortObligation,
 ) -> Result<Vec<CommsDrainLifecycleEffect>, CommsDrainLifecycleError> {
     let transition = authority.apply(CommsDrainLifecycleInput::AbortObserved)?;
     Ok(transition.effects)

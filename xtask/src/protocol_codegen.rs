@@ -1,8 +1,10 @@
 use std::fmt::Write;
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use meerkat_machine_schema::{
     ClosurePolicy, CompositionSchema, EffectHandoffProtocol, FeedbackFieldSource, MachineSchema,
     ProtocolGenerationMode, TypeRef, canonical_composition_schemas, canonical_machine_schemas,
@@ -39,6 +41,7 @@ pub fn run_protocol_codegen() -> Result<()> {
                 composition,
                 &machine_by_name,
             )?;
+            let code = rustfmt_source(&code)?;
             let output_path = protocol_output_path(&root, protocol);
 
             if let Some(parent) = output_path.parent() {
@@ -56,7 +59,8 @@ pub fn run_protocol_codegen() -> Result<()> {
     // Generate terminal surface mapping for TurnExecutionMachine
     let turn_machine = machine_by_name.get("TurnExecutionMachine");
     if let Some(machine) = turn_machine {
-        let code = generate_terminal_surface_mapping(machine);
+        let code = generate_terminal_surface_mapping(machine)?;
+        let code = rustfmt_source(&code)?;
         let output_path = root.join("meerkat-core/src/generated/terminal_surface_mapping.rs");
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)
@@ -75,6 +79,38 @@ pub fn run_protocol_codegen() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn rustfmt_source(source: &str) -> Result<String> {
+    let mut child = Command::new("rustfmt")
+        .args(["--edition", "2024", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn rustfmt for protocol codegen")?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("open rustfmt stdin for protocol codegen")?;
+        stdin
+            .write_all(source.as_bytes())
+            .context("write generated source to rustfmt")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("wait for rustfmt during protocol codegen")?;
+    if !output.status.success() {
+        bail!(
+            "rustfmt failed for generated protocol code: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    String::from_utf8(output.stdout).context("decode rustfmt output as utf-8")
 }
 
 fn protocol_output_path(root: &Path, protocol: &EffectHandoffProtocol) -> std::path::PathBuf {
@@ -121,7 +157,7 @@ fn generate_protocol_helpers(
 
     match protocol.rust.generation_mode {
         ProtocolGenerationMode::Executor => {
-            generate_executor_helpers(&mut out, protocol, producer_machine, &obligation_type)?
+            generate_executor_helpers(&mut out, protocol, producer_machine, &obligation_type)?;
         }
         ProtocolGenerationMode::EffectExtractor => generate_effect_extractor_helpers(
             &mut out,
@@ -221,14 +257,7 @@ fn generate_executor_helpers(
     writeln!(out, "#[derive(Debug)]")?;
     writeln!(out, "pub struct {result_type} {{")?;
     writeln!(out, "    pub effects: Vec<{effect_enum}>,")?;
-    match protocol.closure_policy {
-        ClosurePolicy::TerminalClosure => {
-            writeln!(out, "    pub obligation: Option<{obligation_type}>,")?;
-        }
-        _ => {
-            writeln!(out, "    pub obligation: {obligation_type},")?;
-        }
-    }
+    writeln!(out, "    pub obligation: Option<{obligation_type}>,")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
 
@@ -246,9 +275,8 @@ fn generate_executor_helpers(
     )?;
     writeln!(
         out,
-        "    let transition = authority.apply({}{}{})?;",
+        "    let transition = authority.apply({}::{})?;",
         input_enum,
-        "::",
         ctor_field_list(trigger_variant)
     )?;
     writeln!(
@@ -260,25 +288,14 @@ fn generate_executor_helpers(
         "        {}{} => Some({}),",
         effect_enum,
         match_pattern_for_variant(producer_effect),
-        obligation_ctor_expr(protocol, obligation_type)
+        obligation_ctor_expr(protocol, obligation_type, producer_effect)?
     )?;
     writeln!(out, "        _ => None,")?;
     writeln!(out, "    }});")?;
-    match protocol.closure_policy {
-        ClosurePolicy::TerminalClosure => {
-            writeln!(
-                out,
-                "    Ok({result_type} {{ effects: transition.effects, obligation }})"
-            )?;
-        }
-        _ => {
-            writeln!(
-                out,
-                "    Ok({result_type} {{ effects: transition.effects, obligation: obligation.expect(\"protocol effect `{}` must be emitted\") }})",
-                protocol.effect_variant
-            )?;
-        }
-    }
+    writeln!(
+        out,
+        "    Ok({result_type} {{ effects: transition.effects, obligation }})"
+    )?;
     writeln!(out, "}}")?;
     writeln!(out)?;
 
@@ -344,7 +361,7 @@ fn generate_effect_extractor_helpers(
         "            {}{} => Some({}),",
         effect_enum,
         match_pattern_for_variant(producer_effect),
-        obligation_ctor_expr(protocol, obligation_type)
+        obligation_ctor_expr(protocol, obligation_type, producer_effect)?
     )?;
     writeln!(out, "            _ => None,")?;
     writeln!(out, "        }})")?;
@@ -451,7 +468,16 @@ fn generate_feedback_submitter(
             .as_deref()
             .context("feedback error type missing")?,
     );
-    let owner_params = owner_context_params(target_variant, feedback);
+    let owner_params = owner_context_params(target_variant, feedback)?;
+    let obligation_param = if feedback
+        .field_bindings
+        .iter()
+        .any(|binding| matches!(binding.source, FeedbackFieldSource::ObligationField(_)))
+    {
+        "obligation"
+    } else {
+        "_obligation"
+    };
     let fn_name = format!("submit_{}", to_snake_case(&feedback.input_variant));
     let return_type = match return_kind {
         FeedbackReturnKind::Effects => format!(
@@ -467,16 +493,15 @@ fn generate_feedback_submitter(
     };
     writeln!(
         out,
-        "pub fn {fn_name}(authority: &mut {authority_type}, obligation: {obligation_type}{}{}) -> {return_type} {{",
+        "pub fn {fn_name}(authority: &mut {authority_type}, {obligation_param}: {obligation_type}{}{}) -> {return_type} {{",
         if owner_params.is_empty() { "" } else { ", " },
         owner_params.join(", ")
     )?;
     writeln!(
         out,
-        "    let transition = authority.apply({}{}{})?;",
+        "    let transition = authority.apply({}::{})?;",
         input_enum,
-        "::",
-        ctor_field_list_from_bindings(target_variant, feedback)
+        ctor_field_list_from_bindings(target_variant, feedback)?
     )?;
     match return_kind {
         FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
@@ -512,7 +537,7 @@ fn generate_notify_helper(
             .as_deref()
             .context("notify error type missing")?,
     );
-    let owner_params = owner_context_params(target_variant, feedback);
+    let owner_params = owner_context_params(target_variant, feedback)?;
     let fn_name = format!("notify_{}", to_snake_case(&feedback.input_variant));
     let return_type = match return_kind {
         FeedbackReturnKind::Effects => format!(
@@ -541,10 +566,9 @@ fn generate_notify_helper(
     )?;
     writeln!(
         out,
-        "    let transition = authority.apply({}{}{})?;",
+        "    let transition = authority.apply({}::{})?;",
         input_enum,
-        "::",
-        ctor_field_list_from_bindings_without_obligation(target_variant, feedback)
+        ctor_field_list_from_bindings_without_obligation(target_variant, feedback)?
     )?;
     match return_kind {
         FeedbackReturnKind::Effects => writeln!(out, "    Ok(transition.effects)")?,
@@ -598,7 +622,7 @@ fn rust_type(ty: &TypeRef) -> String {
 fn owner_context_params(
     target_variant: &meerkat_machine_schema::VariantSchema,
     feedback: &meerkat_machine_schema::FeedbackInputRef,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let mut params = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for binding in &feedback.field_bindings {
@@ -607,11 +631,16 @@ fn owner_context_params(
         {
             let field = target_variant
                 .field_named(&binding.input_field)
-                .expect("validated feedback binding field");
+                .with_context(|| {
+                    format!(
+                        "missing validated feedback binding field `{}`",
+                        binding.input_field
+                    )
+                })?;
             params.push(format!("{}: {}", to_snake_case(name), rust_type(&field.ty)));
         }
     }
-    params
+    Ok(params)
 }
 
 fn ctor_field_list(variant: &meerkat_machine_schema::VariantSchema) -> String {
@@ -623,7 +652,11 @@ fn ctor_field_list(variant: &meerkat_machine_schema::VariantSchema) -> String {
             .iter()
             .map(|field| {
                 let name = to_snake_case(&field.name);
-                format!("{}: {}", field.name, name)
+                if field.name == name {
+                    name
+                } else {
+                    format!("{}: {}", field.name, name)
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -634,61 +667,74 @@ fn ctor_field_list(variant: &meerkat_machine_schema::VariantSchema) -> String {
 fn ctor_field_list_from_bindings(
     target_variant: &meerkat_machine_schema::VariantSchema,
     feedback: &meerkat_machine_schema::FeedbackInputRef,
-) -> String {
+) -> Result<String> {
     if target_variant.fields.is_empty() {
-        return target_variant.name.clone();
+        return Ok(target_variant.name.clone());
     }
 
     let fields = target_variant
         .fields
         .iter()
-        .map(|field| {
+        .map(|field| -> Result<String> {
             let binding = feedback
                 .field_bindings
                 .iter()
                 .find(|binding| binding.input_field == field.name)
-                .expect("validated feedback binding");
+                .with_context(|| {
+                    format!("missing validated feedback binding for `{}`", field.name)
+                })?;
             let value = match &binding.source {
                 FeedbackFieldSource::ObligationField(source) => {
                     format!("obligation.{}", to_snake_case(source))
                 }
                 FeedbackFieldSource::OwnerContext(name) => to_snake_case(name),
             };
-            format!("{}: {}", field.name, value)
+            if field.name == value {
+                Ok(value)
+            } else {
+                Ok(format!("{}: {}", field.name, value))
+            }
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>>>()?
         .join(", ");
-    format!("{} {{ {} }}", target_variant.name, fields)
+    Ok(format!("{} {{ {} }}", target_variant.name, fields))
 }
 
 fn ctor_field_list_from_bindings_without_obligation(
     target_variant: &meerkat_machine_schema::VariantSchema,
     feedback: &meerkat_machine_schema::FeedbackInputRef,
-) -> String {
+) -> Result<String> {
     if target_variant.fields.is_empty() {
-        return target_variant.name.clone();
+        return Ok(target_variant.name.clone());
     }
 
     let fields = target_variant
         .fields
         .iter()
-        .map(|field| {
+        .map(|field| -> Result<String> {
             let binding = feedback
                 .field_bindings
                 .iter()
                 .find(|binding| binding.input_field == field.name)
-                .expect("validated feedback binding");
+                .with_context(|| {
+                    format!("missing validated feedback binding for `{}`", field.name)
+                })?;
             let value = match &binding.source {
                 FeedbackFieldSource::OwnerContext(name) => to_snake_case(name),
-                FeedbackFieldSource::ObligationField(source) => {
-                    panic!("notify helper cannot synthesize obligation field `{source}`")
-                }
+                FeedbackFieldSource::ObligationField(source) => bail!(
+                    "notify helper cannot synthesize obligation field `{source}` for `{}`",
+                    field.name
+                ),
             };
-            format!("{}: {}", field.name, value)
+            if field.name == value {
+                Ok(value)
+            } else {
+                Ok(format!("{}: {}", field.name, value))
+            }
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>>>()?
         .join(", ");
-    format!("{} {{ {} }}", target_variant.name, fields)
+    Ok(format!("{} {{ {} }}", target_variant.name, fields))
 }
 
 fn match_pattern_for_variant(variant: &meerkat_machine_schema::VariantSchema) -> String {
@@ -705,183 +751,123 @@ fn match_pattern_for_variant(variant: &meerkat_machine_schema::VariantSchema) ->
     }
 }
 
-fn obligation_ctor_expr(protocol: &EffectHandoffProtocol, obligation_type: &str) -> String {
+fn obligation_ctor_expr(
+    protocol: &EffectHandoffProtocol,
+    obligation_type: &str,
+    producer_effect: &meerkat_machine_schema::VariantSchema,
+) -> Result<String> {
     if protocol.obligation_fields.is_empty() {
-        return format!("{obligation_type} {{ _private: () }}");
+        return Ok(format!("{obligation_type} {{ _private: () }}"));
     }
 
     let fields = protocol
         .obligation_fields
         .iter()
-        .map(|field| {
+        .map(|field| -> Result<String> {
             let rust_name = to_snake_case(field);
-            format!("{rust_name}: {rust_name}.clone()")
+            let effect_field = producer_effect.field_named(field).with_context(|| {
+                format!("obligation field `{field}` missing from producer effect")
+            })?;
+            Ok(format!(
+                "{rust_name}: {}",
+                clone_expr_for_type(&effect_field.ty, &rust_name)
+            ))
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>>>()?
         .join(", ");
-    format!("{obligation_type} {{ {fields} }}")
+    Ok(format!("{obligation_type} {{ {fields} }}"))
+}
+
+fn clone_expr_for_type(ty: &TypeRef, rust_name: &str) -> String {
+    match ty {
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::Enum(_) => format!("*{rust_name}"),
+        TypeRef::Named(name) if is_known_copy_named_type(name) => format!("*{rust_name}"),
+        _ => format!("{rust_name}.clone()"),
+    }
+}
+
+fn is_known_copy_named_type(name: &str) -> bool {
+    matches!(name, "TurnNumber" | "SurfaceDeltaOperation")
 }
 
 /// Generate a standalone terminal surface mapping module for TurnExecutionMachine.
-///
-/// This produces `classify_terminal(outcome: &TurnTerminalOutcome) -> SurfaceResultClass`
-/// with an exhaustive match over all `TurnTerminalOutcome` variants. No default arm —
-/// adding a new variant forces a compile-time update.
-fn generate_terminal_surface_mapping(machine: &MachineSchema) -> String {
+fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> {
     let mut out = String::new();
 
     writeln!(
         &mut out,
         "// @generated — terminal surface mapping for `{}`",
         machine.machine
-    )
-    .expect("write");
-    writeln!(&mut out, "// Generated by `xtask protocol-codegen`").expect("write");
+    )?;
+    writeln!(&mut out, "// Generated by `xtask protocol-codegen`")?;
     writeln!(
         &mut out,
         "// Exhaustive match — adding a new TurnTerminalOutcome variant forces a compile-time update."
-    )
-    .expect("write");
-    writeln!(&mut out).expect("write");
+    )?;
+    writeln!(&mut out)?;
 
     writeln!(
         &mut out,
         "use crate::turn_execution_authority::TurnTerminalOutcome;"
-    )
-    .expect("write");
-    writeln!(&mut out).expect("write");
+    )?;
+    writeln!(&mut out)?;
 
     // SurfaceResultClass enum
     writeln!(
         &mut out,
         "/// Surface result classification for turn execution terminal outcomes."
-    )
-    .expect("write");
-    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]").expect("write");
-    writeln!(&mut out, "pub enum SurfaceResultClass {{").expect("write");
-    writeln!(&mut out, "    Success,").expect("write");
-    writeln!(&mut out, "    HardFailure,").expect("write");
-    writeln!(&mut out, "    Cancelled,").expect("write");
-    writeln!(&mut out, "}}").expect("write");
-    writeln!(&mut out).expect("write");
+    )?;
+    writeln!(&mut out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]")?;
+    writeln!(&mut out, "pub enum SurfaceResultClass {{")?;
+    writeln!(&mut out, "    Success,")?;
+    writeln!(&mut out, "    HardFailure,")?;
+    writeln!(&mut out, "    Cancelled,")?;
+    writeln!(&mut out, "}}")?;
+    writeln!(&mut out)?;
 
-    // classify_terminal function
     writeln!(
         &mut out,
         "/// Exhaustive terminal outcome classification for `{}`.",
         machine.machine
-    )
-    .expect("write");
+    )?;
     writeln!(
         &mut out,
         "/// No default arm — adding a new `TurnTerminalOutcome` variant forces a compile-time update."
-    )
-    .expect("write");
+    )?;
     writeln!(
         &mut out,
-        "///\n/// # Panics\n/// Panics if called with `TurnTerminalOutcome::None` (no terminal outcome yet)."
-    )
-    .expect("write");
+        "/// Returns `None` when no terminal outcome has been recorded yet."
+    )?;
     writeln!(
         &mut out,
-        "pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> SurfaceResultClass {{"
-    )
-    .expect("write");
-    writeln!(&mut out, "    match outcome {{").expect("write");
+        "pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> Option<SurfaceResultClass> {{"
+    )?;
+    writeln!(&mut out, "    match outcome {{")?;
+    writeln!(&mut out, "        TurnTerminalOutcome::None => None,")?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::None => panic!(\"classify_terminal called with TurnTerminalOutcome::None\"),"
-    )
-    .expect("write");
+        "        TurnTerminalOutcome::Completed => Some(SurfaceResultClass::Success),"
+    )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::Completed => SurfaceResultClass::Success,"
-    )
-    .expect("write");
+        "        TurnTerminalOutcome::Failed => Some(SurfaceResultClass::HardFailure),"
+    )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::Failed => SurfaceResultClass::HardFailure,"
-    )
-    .expect("write");
+        "        TurnTerminalOutcome::Cancelled => Some(SurfaceResultClass::Cancelled),"
+    )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::Cancelled => SurfaceResultClass::Cancelled,"
-    )
-    .expect("write");
+        "        TurnTerminalOutcome::BudgetExhausted => Some(SurfaceResultClass::Success),"
+    )?;
     writeln!(
         &mut out,
-        "        TurnTerminalOutcome::BudgetExhausted => SurfaceResultClass::Success,"
-    )
-    .expect("write");
-    writeln!(
-        &mut out,
-        "        TurnTerminalOutcome::StructuredOutputValidationFailed => SurfaceResultClass::HardFailure,"
-    )
-    .expect("write");
-    writeln!(&mut out, "    }}").expect("write");
-    writeln!(&mut out, "}}").expect("write");
+        "        TurnTerminalOutcome::StructuredOutputValidationFailed => Some(SurfaceResultClass::HardFailure),"
+    )?;
+    writeln!(&mut out, "    }}")?;
+    writeln!(&mut out, "}}")?;
 
-    out
-}
-
-fn generate_terminal_classifier(out: &mut String, machine: &MachineSchema) {
-    writeln!(
-        out,
-        "/// Surface result classification for `{}` terminal outcomes.",
-        machine.machine
-    )
-    .expect("write");
-    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]").expect("write");
-    writeln!(out, "pub enum SurfaceResultClass {{").expect("write");
-    writeln!(out, "    Success,").expect("write");
-    writeln!(out, "    HardFailure,").expect("write");
-    writeln!(out, "    Cancelled,").expect("write");
-    writeln!(out, "}}").expect("write");
-    writeln!(out).expect("write");
-
-    writeln!(
-        out,
-        "/// Exhaustive terminal phase classification for `{}`.",
-        machine.machine
-    )
-    .expect("write");
-    writeln!(
-        out,
-        "/// No default arm — adding a new terminal phase forces a compile-time update."
-    )
-    .expect("write");
-
-    writeln!(
-        out,
-        "pub fn classify_terminal(terminal_phase: &str) -> SurfaceResultClass {{"
-    )
-    .expect("write");
-    writeln!(out, "    match terminal_phase {{").expect("write");
-
-    for phase in &machine.state.terminal_phases {
-        let class = classify_terminal_phase(phase);
-        writeln!(out, "        \"{phase}\" => SurfaceResultClass::{class},").expect("write");
-    }
-
-    writeln!(
-        out,
-        "        other => panic!(\"unclassified terminal phase: {{other}}\"),"
-    )
-    .expect("write");
-    writeln!(out, "    }}").expect("write");
-    writeln!(out, "}}").expect("write");
-}
-
-fn classify_terminal_phase(phase: &str) -> &'static str {
-    match phase {
-        "Completed" => "Success",
-        "Failed" => "HardFailure",
-        "Cancelled" => "Cancelled",
-        "Stopped" => "Success",
-        "Delivered" => "Success",
-        "Exhausted" => "HardFailure",
-        _ => "Success",
-    }
+    Ok(out)
 }
 
 fn closure_policy_label(policy: &ClosurePolicy) -> &'static str {

@@ -88,7 +88,8 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
     combined_findings.dedup_by(|a, b| a.key == b.key);
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&combined_findings)?);
+        let combined_findings_json = serde_json::to_string_pretty(&combined_findings)?;
+        println!("{combined_findings_json}");
     } else {
         print_findings(&combined_findings);
     }
@@ -104,8 +105,10 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
     if args.update_baseline {
         write_baseline(&baseline_path, &findings)?;
         ownership_ledger::write_baseline(&ownership_baseline_path, &ownership_findings)?;
-        println!("updated {}", baseline_path.display());
-        println!("updated {}", ownership_baseline_path.display());
+        let baseline_display = baseline_path.display();
+        let ownership_baseline_display = ownership_baseline_path.display();
+        println!("updated {baseline_display}");
+        println!("updated {ownership_baseline_display}");
         return Ok(());
     }
 
@@ -123,7 +126,7 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
 
     let stale_baseline: Vec<_> = baseline_set
         .iter()
-        .filter(|key| !findings.iter().any(|f| &f.key == *key))
+        .filter(|key| !findings.iter().any(|finding| &finding.key == *key))
         .collect();
     let (new_ownership_findings, stale_ownership_baseline) =
         ownership_ledger::diff_against_baseline(&ownership_baseline_path, &ownership_findings)?;
@@ -132,34 +135,32 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
         format_ownership_diff_messages(&new_ownership_findings, &stale_ownership_baseline)
     {
         bail!(
-            "ownership audit diff detected (run `xtask ownership-ledger` and update the baseline):\n{}",
-            details
+            "ownership audit diff detected (run `xtask ownership-ledger` and update the baseline):\n{details}"
         );
     }
 
     if args.strict && (!new_findings.is_empty() || !stale_baseline.is_empty()) {
         let mut messages = Vec::new();
         if !new_findings.is_empty() {
-            messages.push(format!(
-                "new RMAT findings:\n{}",
-                new_findings
-                    .into_iter()
-                    .map(|finding| format_finding(finding))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
+            let new_findings_body = new_findings
+                .into_iter()
+                .map(|finding| format_finding(finding))
+                .collect::<Vec<_>>()
+                .join("\n");
+            messages.push(format!("new RMAT findings:\n{new_findings_body}"));
         }
         if !stale_baseline.is_empty() {
+            let stale_rmat_baseline = stale_baseline
+                .into_iter()
+                .map(|finding| format!("- {} {} {}", finding.rule, finding.path, finding.symbol))
+                .collect::<Vec<_>>()
+                .join("\n");
             messages.push(format!(
-                "stale RMAT baseline entries:\n{}",
-                stale_baseline
-                    .into_iter()
-                    .map(|f| format!("- {} {} {}", f.rule, f.path, f.symbol))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                "stale RMAT baseline entries:\n{stale_rmat_baseline}"
             ));
         }
-        bail!("{}", messages.join("\n\n"));
+        let joined_messages = messages.join("\n\n");
+        bail!("{joined_messages}");
     }
 
     Ok(())
@@ -242,7 +243,8 @@ fn print_findings(findings: &[Finding]) {
     }
     println!("RMAT audit findings:");
     for finding in findings {
-        println!("{}", format_finding(finding));
+        let formatted_finding = format_finding(finding);
+        println!("{formatted_finding}");
     }
 }
 
@@ -252,10 +254,11 @@ fn format_finding(finding: &Finding) -> String {
     } else {
         ""
     };
-    format!(
-        "- [{}] {} {} :: {}{}",
-        finding.severity, finding.key.rule, finding.key.path, finding.message, suppression
-    )
+    let severity = &finding.severity;
+    let rule = &finding.key.rule;
+    let path = &finding.key.path;
+    let message = &finding.message;
+    format!("- [{severity}] {rule} {path} :: {message}{suppression}")
 }
 
 fn format_ownership_diff_messages(
@@ -267,10 +270,10 @@ fn format_ownership_diff_messages(
     if !new_findings.is_empty() {
         let body = new_findings
             .iter()
-            .map(|finding| format_ownership_finding(finding))
+            .map(format_ownership_finding)
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!("new ownership findings:\n{}", body));
+        sections.push(format!("new ownership findings:\n{body}"));
     }
 
     if !stale_baseline.is_empty() {
@@ -279,7 +282,7 @@ fn format_ownership_diff_messages(
             .map(|key| format!("- {} {} {}", key.rule, key.path, key.symbol))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!("stale ownership baseline entries:\n{}", body));
+        sections.push(format!("stale ownership baseline entries:\n{body}"));
     }
 
     (!sections.is_empty()).then_some(sections.join("\n\n"))
@@ -342,14 +345,12 @@ fn collect_dead_authority_wiring_findings(
     for symbol in &policy.required_live_symbols {
         let ref_count = source.matches(symbol.symbol).count();
         if ref_count == 0 {
+            let symbol_name = symbol.symbol;
             findings.push(error_finding(
                 "NoDeadAuthorityWiring",
                 relative,
                 symbol.symbol,
-                format!(
-                    "required live symbol `{}` has zero production references in this file set",
-                    symbol.symbol
-                ),
+                format!("required live symbol `{symbol_name}` has zero production references in this file set"),
                 false,
             ));
         }
@@ -671,25 +672,23 @@ impl<'ast> Visit<'ast> for SuspicionVisitor<'_> {
             }
             Item::Struct(item_struct) => {
                 for field in &item_struct.fields {
-                    if let Some(ident) = &field.ident {
-                        let suspicious =
-                            ["active", "attached", "pending", "running", "interrupted"]
-                                .iter()
-                                .any(|needle| ident.to_string().contains(needle));
-                        if suspicious {
-                            let suppressed = has_rmat_allow(
-                                self.source,
-                                item_struct.span(),
-                                "LifecycleSuspicionReport",
-                            );
-                            self.findings.push(warn_finding(
-                                "LifecycleSuspicionReport",
-                                self.relative,
-                                &format!("{}::{}", item_struct.ident, ident),
-                                "field name looks lifecycle-significant; verify this is legitimate shell state".to_string(),
-                                suppressed,
-                            ));
-                        }
+                    if let Some(ident) = &field.ident
+                        && ["active", "attached", "pending", "running", "interrupted"]
+                            .iter()
+                            .any(|needle| ident.to_string().contains(needle))
+                    {
+                        let suppressed = has_rmat_allow(
+                            self.source,
+                            item_struct.span(),
+                            "LifecycleSuspicionReport",
+                        );
+                        self.findings.push(warn_finding(
+                            "LifecycleSuspicionReport",
+                            self.relative,
+                            &format!("{}::{}", item_struct.ident, ident),
+                            "field name looks lifecycle-significant; verify this is legitimate shell state".to_string(),
+                            suppressed,
+                        ));
                     }
                 }
             }
@@ -840,7 +839,7 @@ fn collect_protocol_realization_site_findings(root: &Path, policy: &AuditPolicy)
             let paths_display = rule.candidate_paths.join(", ");
             findings.push(error_finding(
                 "ProtocolRealizationSiteCoverage",
-                rule.candidate_paths.first().map(|s| s.as_str()).unwrap_or(""),
+                rule.candidate_paths.first().map(String::as_str).unwrap_or(""),
                 &rule.protocol_name,
                 format!(
                     "protocol `{}` has no generated helper file at any of [{}]; run `xtask protocol-codegen`",
@@ -903,7 +902,7 @@ fn collect_protocol_feedback_constraint_findings(
 
             // Look for construction of the feedback variant (e.g., `Input::VariantName`)
             // in non-generated, non-authority code.
-            let construction_pattern = format!("::{}", variant_pattern);
+            let construction_pattern = format!("::{variant_pattern}");
             if source.contains(&construction_pattern) {
                 findings.push(error_finding(
                     "ProtocolFeedbackThroughGeneratedHelpers",

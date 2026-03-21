@@ -18,7 +18,7 @@ class Member:
         *,
         handling_mode: str = "queue",
         render_metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> str:
         return await self._mob._client.send_mob_member_content(
             self._mob.id,
             self.meerkat_id,

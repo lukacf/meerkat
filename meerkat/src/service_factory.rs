@@ -164,6 +164,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.poll_host_mode_with_events(event_tx).await
     }
 
+    async fn checkpoint_current_session(&mut self) {
+        self.agent.checkpoint_current_session().await;
+    }
+
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.agent.comms_arc()
     }

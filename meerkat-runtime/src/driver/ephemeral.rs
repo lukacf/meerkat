@@ -132,8 +132,7 @@ impl EphemeralRuntimeDriver {
                     );
                     debug_assert!(
                         false,
-                        "ingress queue projection missing persisted payload for {:?} in {}",
-                        input_id, lane
+                        "ingress queue projection missing persisted payload for {input_id:?} in {lane}"
                     );
                 }
             }
@@ -489,7 +488,7 @@ impl EphemeralRuntimeDriver {
     ) -> Option<(InputId, crate::coalescing::CoalescingResult)> {
         self.ingress
             .queue()
-            .into_iter()
+            .iter()
             .chain(self.ingress.steer_queue().iter())
             .find_map(|queued_id| {
                 let existing = self.ledger.get(queued_id)?.persisted_input.as_ref()?;
@@ -636,8 +635,10 @@ impl EphemeralRuntimeDriver {
                                 },
                             )));
                     }
-                    Err(InputLifecycleError::InvalidTransition { .. })
-                    | Err(InputLifecycleError::TerminalState { .. }) => {}
+                    Err(
+                        InputLifecycleError::InvalidTransition { .. }
+                        | InputLifecycleError::TerminalState { .. },
+                    ) => {}
                     Err(err) => return Err(err),
                 }
             }
@@ -658,8 +659,10 @@ impl EphemeralRuntimeDriver {
                             .and_then(super::super::input::Input::handling_mode)
                             == Some(HandlingMode::Steer);
                     }
-                    Err(InputLifecycleError::InvalidTransition { .. })
-                    | Err(InputLifecycleError::TerminalState { .. }) => {}
+                    Err(
+                        InputLifecycleError::InvalidTransition { .. }
+                        | InputLifecycleError::TerminalState { .. },
+                    ) => {}
                     Err(err) => return Err(err),
                 }
             }

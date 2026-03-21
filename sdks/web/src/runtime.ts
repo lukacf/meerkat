@@ -99,7 +99,7 @@ export interface WasmModule {
     requestJson: string,
   ) => Promise<string>;
   mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
-  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
+  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;

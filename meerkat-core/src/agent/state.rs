@@ -1168,7 +1168,7 @@ where
         let classification = classify_terminal(&outcome);
 
         match classification {
-            SurfaceResultClass::HardFailure => Err(AgentError::TerminalFailure {
+            Some(SurfaceResultClass::HardFailure) => Err(AgentError::TerminalFailure {
                 outcome: format!("{outcome:?}"),
             }),
             _ => {
@@ -1594,7 +1594,7 @@ mod tests {
             self.compact_on_boundary == Some(ctx.session_boundary_index)
         }
 
-        fn compaction_prompt(&self) -> &str {
+        fn compaction_prompt(&self) -> &'static str {
             "COMPACT NOW"
         }
 

@@ -104,7 +104,7 @@ impl Drop for PendingProvision {
                 member_ref = ?member_ref,
                 "PendingProvision dropped without commit or rollback — resource leak"
             );
-            panic!("PendingProvision dropped without commit or rollback");
+            debug_assert!(false, "PendingProvision dropped without commit or rollback");
         }
     }
 }

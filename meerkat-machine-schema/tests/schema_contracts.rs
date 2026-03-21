@@ -727,9 +727,9 @@ fn machine_instance_with_owner_actor_rejected() {
 fn handoff_protocol_valid_round_trip() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectDisposition,
-        EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FeedbackInputRef, FieldSchema,
-        InitSchema, MachineInstance, MachineSchema, ProtocolGenerationMode, RustBinding,
-        StateSchema, TypeRef, VariantSchema,
+        EffectDispositionRule, EffectHandoffProtocol, EnumSchema, FieldSchema, InitSchema,
+        MachineInstance, MachineSchema, ProtocolGenerationMode, RustBinding, StateSchema, TypeRef,
+        VariantSchema,
     };
     use std::collections::BTreeMap;
 
@@ -840,9 +840,11 @@ fn handoff_protocol_valid_round_trip() {
         closed_world: false,
     };
 
-    composition
-        .validate_against(&[&producer_machine])
-        .expect("valid handoff protocol should pass");
+    let result = composition.validate_against(&[&producer_machine]);
+    assert!(
+        result.is_ok(),
+        "valid handoff protocol should pass: {result:?}"
+    );
 }
 
 #[test]
@@ -967,7 +969,7 @@ fn handoff_protocol_actor_not_owner() {
 fn handoff_protocol_unknown_feedback_machine() {
     use meerkat_machine_schema::{
         ActorKind, ActorSchema, ClosurePolicy, CompositionSchema, EffectHandoffProtocol,
-        FeedbackInputRef, MachineInstance, ProtocolGenerationMode,
+        MachineInstance, ProtocolGenerationMode,
     };
     use std::collections::BTreeMap;
 
@@ -1447,7 +1449,9 @@ fn closed_world_accepts_handoff_protocol_present() {
         closed_world: true,
     };
 
-    composition
-        .validate_against(&[&producer_machine])
-        .expect("closed-world with matching handoff protocol should pass");
+    let result = composition.validate_against(&[&producer_machine]);
+    assert!(
+        result.is_ok(),
+        "closed-world with matching handoff protocol should pass: {result:?}"
+    );
 }

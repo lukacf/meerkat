@@ -916,7 +916,7 @@ mod tests {
         // Call through trait object to exercise the trait impl, not the inherent method.
         let trait_ref: &dyn OpsLifecycleRegistry = &registry;
         let wait_result = trait_ref
-            .wait_all(&test_run_id(), &[op_id.clone()])
+            .wait_all(&test_run_id(), std::slice::from_ref(&op_id))
             .await
             .unwrap();
         assert_eq!(wait_result.outcomes.len(), 1);
@@ -949,12 +949,14 @@ mod tests {
 
         let active_wait_request_id = {
             let state = registry.read_state().unwrap();
-            let wait_request_id = state
-                .authority
-                .wait_request_id()
-                .cloned()
-                .expect("wait request should be active");
-            assert_eq!(state.authority.wait_operation_ids(), &[op_id.clone()]);
+            let wait_request_id = match state.authority.wait_request_id().cloned() {
+                Some(wait_request_id) => wait_request_id,
+                None => panic!("wait request should be active"),
+            };
+            assert_eq!(
+                state.authority.wait_operation_ids(),
+                std::slice::from_ref(&op_id)
+            );
             wait_request_id
         };
 

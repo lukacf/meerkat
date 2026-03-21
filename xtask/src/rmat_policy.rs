@@ -331,28 +331,29 @@ fn default_protocol_realization_sites() -> Vec<ProtocolRealizationSiteRule> {
                     .machines
                     .iter()
                     .find(|m| m.instance_id == protocol.producer_instance)
+                    && let Some(ms) = machines.iter().find(|m| m.machine == inst.machine_name)
                 {
-                    if let Some(ms) = machines.iter().find(|m| m.machine == inst.machine_name) {
-                        candidate_crates.push(&ms.rust.crate_name);
-                    }
+                    candidate_crates.push(&ms.rust.crate_name);
                 }
                 for feedback in &protocol.allowed_feedback_inputs {
                     if let Some(inst) = composition
                         .machines
                         .iter()
                         .find(|m| m.instance_id == feedback.machine_instance)
+                        && let Some(ms) = machines.iter().find(|m| m.machine == inst.machine_name)
                     {
-                        if let Some(ms) = machines.iter().find(|m| m.machine == inst.machine_name) {
-                            candidate_crates.push(&ms.rust.crate_name);
-                        }
+                        candidate_crates.push(&ms.rust.crate_name);
                     }
                 }
                 candidate_crates.dedup();
+                let protocol_name = protocol.name.clone();
                 rules.push(ProtocolRealizationSiteRule {
-                    protocol_name: protocol.name.clone(),
+                    protocol_name: protocol_name.clone(),
                     candidate_paths: candidate_crates
                         .into_iter()
-                        .map(|c| format!("{}/src/generated/protocol_{}.rs", c, protocol.name))
+                        .map(|crate_name| {
+                            format!("{crate_name}/src/generated/protocol_{protocol_name}.rs")
+                        })
                         .collect(),
                 });
             }
@@ -401,10 +402,9 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
                 .iter()
                 .find(|m| m.instance_id == protocol.producer_instance)
                 .map(|m| m.machine_name.as_str());
-            if let Some(machine_name) = producer_machine_name {
-                if machine_name != "TurnExecutionMachine" {
-                    continue;
-                }
+            if let Some(machine_name) = producer_machine_name
+                && machine_name == "TurnExecutionMachine"
+            {
                 let has_terminals = machines
                     .iter()
                     .find(|m| m.machine == machine_name)

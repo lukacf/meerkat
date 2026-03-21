@@ -32,7 +32,7 @@
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
 //! - `mob_member_send(mob_id, meerkat_id, request_json)` → session id
-//! - `mob_respawn(mob_id, meerkat_id, initial_message?)` — retire + re-spawn same profile
+//! - `mob_respawn(mob_id, meerkat_id, initial_message?)` → JSON result envelope
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
 //! - `mob_cancel_flow(mob_id, run_id)`
@@ -1971,7 +1971,7 @@ pub async fn mob_member_send(
         )
         .await
         .map_err(err_mob)?;
-    Ok(serde_json::json!(receipt).to_string())
+    Ok(receipt.session_id.to_string())
 }
 
 /// Retire and re-spawn a meerkat with the same profile.
@@ -2001,7 +2001,7 @@ pub async fn mob_respawn(
             let result = serde_json::json!({
                 "status": "topology_restore_failed",
                 "receipt": receipt,
-                "failed_peer_ids": failed_peer_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
             });
             Ok(JsValue::from_str(&result.to_string()))
         }

@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 fn can_transition(from: &RuntimeState, next: &RuntimeState) -> bool {
     use RuntimeState::{
         Attached, Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped,

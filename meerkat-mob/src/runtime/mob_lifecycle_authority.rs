@@ -32,6 +32,14 @@ use crate::runtime::MobState;
 /// [`MobLifecycleAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MobLifecycleInput {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "schema-aligned authority input retained even when current shell paths do not construct it"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     Start,
     Stop,
     Resume,
@@ -63,6 +71,14 @@ pub(crate) enum MobLifecycleEffect {
 // ---------------------------------------------------------------------------
 
 /// Successful transition outcome from the MobLifecycle authority.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "transition snapshot retained for schema-aligned authority surface and tests"
+    )
+)]
+#[cfg_attr(test, allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct MobLifecycleTransition {
     /// The phase after the transition.

@@ -14,18 +14,16 @@ pub enum SurfaceResultClass {
 
 /// Exhaustive terminal outcome classification for `TurnExecutionMachine`.
 /// No default arm — adding a new `TurnTerminalOutcome` variant forces a compile-time update.
-///
-/// # Panics
-/// Panics if called with `TurnTerminalOutcome::None` (no terminal outcome yet).
-pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> SurfaceResultClass {
+/// Returns `None` when no terminal outcome has been recorded yet.
+pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> Option<SurfaceResultClass> {
     match outcome {
-        TurnTerminalOutcome::None => {
-            panic!("classify_terminal called with TurnTerminalOutcome::None")
+        TurnTerminalOutcome::None => None,
+        TurnTerminalOutcome::Completed => Some(SurfaceResultClass::Success),
+        TurnTerminalOutcome::Failed => Some(SurfaceResultClass::HardFailure),
+        TurnTerminalOutcome::Cancelled => Some(SurfaceResultClass::Cancelled),
+        TurnTerminalOutcome::BudgetExhausted => Some(SurfaceResultClass::Success),
+        TurnTerminalOutcome::StructuredOutputValidationFailed => {
+            Some(SurfaceResultClass::HardFailure)
         }
-        TurnTerminalOutcome::Completed => SurfaceResultClass::Success,
-        TurnTerminalOutcome::Failed => SurfaceResultClass::HardFailure,
-        TurnTerminalOutcome::Cancelled => SurfaceResultClass::Cancelled,
-        TurnTerminalOutcome::BudgetExhausted => SurfaceResultClass::Success,
-        TurnTerminalOutcome::StructuredOutputValidationFailed => SurfaceResultClass::HardFailure,
     }
 }

@@ -6,7 +6,6 @@
 use crate::external_tool_surface_authority::{
     ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError,
     ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition,
-    SurfaceDeltaOperation, SurfaceId, TurnNumber,
 };
 
 #[derive(Debug, Clone)]
@@ -22,7 +21,7 @@ pub fn extract_obligations(
         .filter_map(|effect| match effect {
             ExternalToolSurfaceEffect::RefreshVisibleSurfaceSet { snapshot_epoch } => {
                 Some(SurfaceSnapshotAlignmentObligation {
-                    snapshot_epoch: snapshot_epoch.clone(),
+                    snapshot_epoch: *snapshot_epoch,
                 })
             }
             _ => None,

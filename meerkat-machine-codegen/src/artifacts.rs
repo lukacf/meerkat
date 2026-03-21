@@ -122,7 +122,8 @@ fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
         .collect::<Vec<_>>();
     let known = defs
         .iter()
-        .map(|helper| helper.name.clone())
+        .map(|helper| &helper.name)
+        .cloned()
         .collect::<BTreeSet<_>>();
     let mut remaining = defs;
     let mut ordered = Vec::new();
@@ -130,7 +131,8 @@ fn helper_dependency_order(schema: &MachineSchema) -> Vec<&HelperSchema> {
     while !remaining.is_empty() {
         let remaining_names = remaining
             .iter()
-            .map(|helper| helper.name.clone())
+            .map(|helper| &helper.name)
+            .cloned()
             .collect::<BTreeSet<_>>();
         let mut ready_indices = Vec::new();
 
@@ -755,7 +757,7 @@ fn composition_witness_state_constraint_name(name: &str) -> String {
 pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
     let machine_catalog = canonical_machine_schemas();
     match CompositionTlaCompiler::new(schema, &machine_catalog) {
-        Ok(compiler) => compiler.render(),
+        Ok(compiler) => compiler.render().unwrap_or_default(),
         Err(_) => String::new(),
     }
 }
@@ -2028,7 +2030,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         })
     }
 
-    fn render(&self) -> String {
+    fn render(&self) -> std::result::Result<String, String> {
         let mut out = String::new();
         let constants = self.collect_binding_domains();
         let machine_vars = self.machine_vars();
@@ -2054,7 +2056,8 @@ impl<'a> CompositionTlaCompiler<'a> {
                     TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
                 )
             })
-            .map(|(name, _)| name.clone())
+            .map(|(name, _)| name)
+            .cloned()
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
             writeln!(&mut out, "CONSTANTS {}", model_constants.join(", "))
@@ -2145,7 +2148,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         self.render_static_sets(&mut out);
 
         let all_vars = {
-            let mut v = machine_vars.clone();
+            let mut v = machine_vars;
             v.extend(obligation_vars.clone());
             v.push("model_step_count".into());
             v.push("pending_inputs".into());
@@ -2396,8 +2399,8 @@ impl<'a> CompositionTlaCompiler<'a> {
             pushln!(&mut out);
         }
 
-        self.render_obligation_invariants(&mut out, &mut machine_invariant_names);
-        self.render_owner_actor_processes(&mut out);
+        self.render_obligation_invariants(&mut out, &mut machine_invariant_names)?;
+        self.render_owner_actor_processes(&mut out)?;
 
         self.render_coverage_instrumentation(&mut out);
 
@@ -2525,7 +2528,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         )
         .expect("write to string");
 
-        out
+        Ok(out)
     }
 
     fn collect_binding_domains(&self) -> BTreeMap<String, TypeRef> {
@@ -2661,11 +2664,19 @@ impl<'a> CompositionTlaCompiler<'a> {
             .collect()
     }
 
-    fn feedback_variant(&self, feedback: &FeedbackInputRef) -> &VariantSchema {
+    fn feedback_variant(
+        &self,
+        feedback: &FeedbackInputRef,
+    ) -> std::result::Result<&VariantSchema, String> {
         self.machine(&feedback.machine_instance)
             .inputs
             .variant_named(&feedback.input_variant)
-            .expect("validated feedback input variant")
+            .map_err(|_| {
+                format!(
+                    "feedback variant `{}` not found for machine `{}`",
+                    feedback.input_variant, feedback.machine_instance
+                )
+            })
     }
 
     fn correlation_match_expr(
@@ -2674,9 +2685,9 @@ impl<'a> CompositionTlaCompiler<'a> {
         feedback: &FeedbackInputRef,
         obligation_var: &str,
         input_packet_var: &str,
-    ) -> String {
+    ) -> std::result::Result<String, String> {
         if protocol.correlation_fields.is_empty() {
-            return format!("{obligation_var} /= {{}}");
+            return Ok(format!("{obligation_var} /= {{}}"));
         }
 
         let clauses = protocol
@@ -2693,29 +2704,34 @@ impl<'a> CompositionTlaCompiler<'a> {
                                 if name == correlation_field
                         )
                     })
-                    .expect("validated correlation binding");
-                format!(
+                    .ok_or_else(|| {
+                        format!(
+                            "correlation binding for field `{}` not found",
+                            correlation_field
+                        )
+                    })?;
+                Ok::<String, String>(format!(
                     "record.{} = {}.payload.{}",
                     tla_ident(correlation_field),
                     input_packet_var,
                     tla_ident(&binding.input_field)
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        format!(
+        Ok(format!(
             "(\\E record \\in {} : ({}))",
             obligation_var,
             clauses.join(" /\\ ")
-        )
+        ))
     }
 
     fn feedback_payload_expr(
         &self,
         feedback: &FeedbackInputRef,
         token_var: &str,
-    ) -> (String, Vec<String>) {
-        let variant = self.feedback_variant(feedback);
+    ) -> std::result::Result<(String, Vec<String>), String> {
+        let variant = self.feedback_variant(feedback)?;
         let mut owner_context_quantifiers = Vec::new();
         let mut payload_fields = Vec::new();
 
@@ -2724,7 +2740,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .field_bindings
                 .iter()
                 .find(|binding| binding.input_field == field.name)
-                .expect("validated feedback binding");
+                .ok_or_else(|| format!("feedback binding for field `{}` not found", field.name))?;
             let expr = match &binding.source {
                 FeedbackFieldSource::ObligationField(source_field) => {
                     format!("{token_var}.{}", tla_ident(source_field))
@@ -2745,7 +2761,7 @@ impl<'a> CompositionTlaCompiler<'a> {
             format!("[{}]", payload_fields.join(", "))
         };
 
-        (payload_expr, owner_context_quantifiers)
+        Ok((payload_expr, owner_context_quantifiers))
     }
 
     /// Renders obligation closure invariants into the TLA+ output.
@@ -2755,7 +2771,11 @@ impl<'a> CompositionTlaCompiler<'a> {
     ///   in a terminal phase, the obligation set must be empty.
     /// - `NoFeedbackWithoutObligation_<protocol>`: a feedback input can only be
     ///   observed if there's a corresponding outstanding obligation.
-    fn render_obligation_invariants(&self, out: &mut String, invariant_names: &mut Vec<String>) {
+    fn render_obligation_invariants(
+        &self,
+        out: &mut String,
+        invariant_names: &mut Vec<String>,
+    ) -> std::result::Result<(), String> {
         for protocol in &self.schema.handoff_protocols {
             let var = format!("obligation_{}", tla_ident(&protocol.name));
             let phase_var = self.phase_var(&protocol.producer_instance);
@@ -2800,10 +2820,10 @@ impl<'a> CompositionTlaCompiler<'a> {
                             tla_string(&feedback.input_variant)
                         );
                         let obligation_check =
-                            self.correlation_match_expr(protocol, feedback, &var, "input_packet");
-                        format!("(({packet_match}) => ({obligation_check}))")
+                            self.correlation_match_expr(protocol, feedback, &var, "input_packet")?;
+                        Ok::<String, String>(format!("(({packet_match}) => ({obligation_check}))"))
                     })
-                    .collect();
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 writeln!(
                     out,
                     "{} == \\A input_packet \\in observed_inputs : ({})",
@@ -2818,6 +2838,7 @@ impl<'a> CompositionTlaCompiler<'a> {
         if !self.schema.handoff_protocols.is_empty() {
             pushln!(out);
         }
+        Ok(())
     }
 
     /// Renders owner-actor process definitions: nondeterministic actions that
@@ -2831,7 +2852,7 @@ impl<'a> CompositionTlaCompiler<'a> {
     /// - Injects the feedback as a pending input
     ///
     /// If any protocols have `liveness_annotation`, fairness comments are added.
-    fn render_owner_actor_processes(&self, out: &mut String) {
+    fn render_owner_actor_processes(&self, out: &mut String) -> std::result::Result<(), String> {
         for protocol in &self.schema.handoff_protocols {
             let var = format!("obligation_{}", tla_ident(&protocol.name));
             let action_name = format!("OwnerFeedback_{}", tla_ident(&protocol.name));
@@ -2852,7 +2873,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                 .iter()
                 .map(|feedback| {
                     let (payload_expr, owner_context_quantifiers) =
-                        self.feedback_payload_expr(feedback, "token");
+                        self.feedback_payload_expr(feedback, "token")?;
                     let input_expr = format!(
                         "[machine |-> {}, variant |-> {}, source_kind |-> \"owner\", source_machine |-> {}, source_effect |-> {}, source_route |-> \"none\", effect_id |-> token, payload |-> {}]",
                         tla_string(&feedback.machine_instance),
@@ -2866,15 +2887,15 @@ impl<'a> CompositionTlaCompiler<'a> {
                     } else {
                         format!("\\E {} : ", owner_context_quantifiers.join(", "))
                     };
-                    format!(
+                    Ok::<String, String>(format!(
                         "{}(/\\ pending_inputs' = Append(pending_inputs, {}) /\\ {}' = {} \\ {{token}})",
                         quantifier_prefix,
                         input_expr,
                         var,
                         var
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             writeln!(out, "        /\\ ({})", feedback_branches.join(" \\/ "))
                 .expect("write to string");
@@ -2896,13 +2917,14 @@ impl<'a> CompositionTlaCompiler<'a> {
                         "witness_remaining_script_inputs",
                     ]
                     .iter()
-                    .map(|s| s.to_string()),
+                    .map(std::string::ToString::to_string),
                 )
                 .collect();
             writeln!(out, "    /\\ UNCHANGED << {} >>", unchanged_vars.join(", "))
                 .expect("write to string");
             pushln!(out);
         }
+        Ok(())
     }
 
     fn render_coverage_instrumentation(&self, out: &mut String) {
@@ -3878,14 +3900,16 @@ impl<'a> CompositionTlaCompiler<'a> {
             format!("SeqRemove(pending_inputs, packet)"),
             &immediate_route_packets
                 .iter()
-                .map(|(_route_packet, input_packet)| input_packet.clone())
+                .map(|(_, input_packet)| input_packet)
+                .cloned()
                 .collect::<Vec<_>>(),
         );
         let pending_routes_next = self.append_if_missing_chain(
             "pending_routes".into(),
             &queued_route_packets
                 .iter()
-                .map(|(route_packet, _target_payload)| route_packet.clone())
+                .map(|(route_packet, _)| route_packet)
+                .cloned()
                 .collect::<Vec<_>>(),
         );
         let delivered_routes_next = if immediate_route_packets.is_empty() {
@@ -3895,7 +3919,8 @@ impl<'a> CompositionTlaCompiler<'a> {
                 "delivered_routes \\cup {{ {} }}",
                 immediate_route_packets
                     .iter()
-                    .map(|(route_packet, _)| route_packet.clone())
+                    .map(|(route_packet, _)| route_packet)
+                    .cloned()
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -3903,7 +3928,8 @@ impl<'a> CompositionTlaCompiler<'a> {
         let observed_inputs_next = {
             let immediate_inputs = immediate_route_packets
                 .iter()
-                .map(|(_route_packet, input_packet)| input_packet.clone())
+                .map(|(_, input_packet)| input_packet)
+                .cloned()
                 .collect::<Vec<_>>();
             self.union_set_items("observed_inputs".into(), &immediate_inputs)
         };
@@ -3914,7 +3940,8 @@ impl<'a> CompositionTlaCompiler<'a> {
                 "emitted_effects \\cup {{ {} }}",
                 effect_packets
                     .iter()
-                    .map(|(_variant, effect_packet, _)| effect_packet.clone())
+                    .map(|(_, effect_packet, _)| effect_packet)
+                    .cloned()
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -4156,7 +4183,8 @@ impl<'a> MachineTlaCompiler<'a> {
                     TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
                 )
             })
-            .map(|(name, _)| name.clone())
+            .map(|(name, _)| name)
+            .cloned()
             .collect::<Vec<_>>();
         if !model_constants.is_empty() {
             let constant_list = model_constants.join(", ");
@@ -4247,7 +4275,8 @@ impl<'a> MachineTlaCompiler<'a> {
                     .state
                     .fields
                     .iter()
-                    .map(|field| field.name.clone()),
+                    .map(|field| &field.name)
+                    .cloned(),
             )
             .collect::<Vec<_>>()
             .join(", ");
@@ -4260,7 +4289,8 @@ impl<'a> MachineTlaCompiler<'a> {
                     .state
                     .fields
                     .iter()
-                    .map(|field| field.name.clone()),
+                    .map(|field| &field.name)
+                    .cloned(),
             )
             .collect::<Vec<_>>();
         pushln!(&mut out, "vars == << {} >>", vars.join(", "));
@@ -4555,7 +4585,8 @@ impl<'a> MachineTlaCompiler<'a> {
             .fields
             .iter()
             .filter(|field| !touched.iter().any(|(name, _)| *name == field.name))
-            .map(|field| field.name.clone())
+            .map(|field| &field.name)
+            .cloned()
             .collect::<Vec<_>>();
         if !unchanged.is_empty() {
             pushln!(out, "    /\\ UNCHANGED << {} >>", unchanged.join(", "));
@@ -5279,7 +5310,8 @@ impl<'a> MachineTlaCompiler<'a> {
                 .fields
                 .iter()
                 .find(|field| field.name == *name)
-                .map(|field| field.ty.clone()),
+                .map(|field| &field.ty)
+                .cloned(),
             Expr::Binding(name) => binding_types.get(name).cloned(),
             _ => None,
         }

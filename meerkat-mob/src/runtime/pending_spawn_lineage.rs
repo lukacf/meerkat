@@ -30,6 +30,7 @@ impl PendingSpawnLineage {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn len(&self) -> usize {
         self.metadata.len()
     }
@@ -38,6 +39,7 @@ impl PendingSpawnLineage {
         self.metadata.is_empty()
     }
 
+    #[allow(dead_code)]
     pub(super) fn tickets(&self) -> BTreeSet<u64> {
         self.metadata
             .keys()
@@ -96,6 +98,7 @@ impl PendingSpawnLineage {
         })
     }
 
+    #[allow(dead_code)]
     pub(super) fn complete_slot(&mut self, spawn_ticket: u64) -> Option<PendingSpawnSlot> {
         let slot = self.take_slot(spawn_ticket)?;
         self.debug_assert_alignment();

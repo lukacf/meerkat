@@ -282,11 +282,11 @@ impl CompositionSchema {
                     actor: machine.actor.clone(),
                 });
             }
-            let actor_schema = self
-                .actors
-                .iter()
-                .find(|a| a.name == machine.actor)
-                .expect("actor exists — just checked");
+            let Some(actor_schema) = self.actors.iter().find(|a| a.name == machine.actor) else {
+                return Err(CompositionSchemaError::UnknownActor {
+                    actor: machine.actor.clone(),
+                });
+            };
             if actor_schema.kind != ActorKind::Machine {
                 return Err(CompositionSchemaError::ActorKindMismatch {
                     actor: machine.actor.clone(),
@@ -332,11 +332,16 @@ impl CompositionSchema {
                     actor: protocol.realizing_actor.clone(),
                 });
             }
-            let realizing = self
+            let Some(realizing) = self
                 .actors
                 .iter()
                 .find(|a| a.name == protocol.realizing_actor)
-                .expect("actor exists — just checked");
+            else {
+                return Err(CompositionSchemaError::UnknownHandoffActor {
+                    protocol: protocol.name.clone(),
+                    actor: protocol.realizing_actor.clone(),
+                });
+            };
             if realizing.kind != ActorKind::Owner {
                 return Err(CompositionSchemaError::HandoffActorNotOwner {
                     protocol: protocol.name.clone(),
@@ -1147,11 +1152,13 @@ impl CompositionSchema {
                 protocol.rust.generation_mode,
                 ProtocolGenerationMode::Executor
             ) {
-                let trigger = protocol
-                    .rust
-                    .executor_trigger_input_variant
-                    .as_ref()
-                    .expect("validated above");
+                let Some(trigger) = protocol.rust.executor_trigger_input_variant.as_ref() else {
+                    return Err(CompositionSchemaError::InvalidHandoffRustBinding {
+                        protocol: protocol.name.clone(),
+                        detail: "executor_trigger_input_variant missing after executor validation"
+                            .into(),
+                    });
+                };
                 producer_schema.inputs.variant_named(trigger).map_err(|_| {
                     CompositionSchemaError::InvalidHandoffRustBinding {
                         protocol: protocol.name.clone(),

@@ -1971,7 +1971,7 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                     None,
                     ProtocolHelperReturnShape::Obligations,
                     &[
-                        "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition, SurfaceDeltaOperation, SurfaceId, TurnNumber};",
+                        "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition};",
                     ],
                 ),
             },
@@ -9330,7 +9330,7 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
                     None,
                     ProtocolHelperReturnShape::EffectsAndObligation,
                     &[
-                        "use crate::comms_drain_lifecycle_authority::{CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError, CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainPhase};",
+                        "use crate::comms_drain_lifecycle_authority::{CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError, CommsDrainLifecycleInput, CommsDrainLifecycleMutator};",
                     ],
                 ),
             },

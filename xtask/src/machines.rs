@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    io::Write as _,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1692,10 +1693,12 @@ fn write_generated(path: &Path, contents: &str) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("create output dir {}", parent.display()))?;
     }
+    let contents = normalize_generated_contents(path, contents)?;
     fs::write(path, contents).with_context(|| format!("write {}", path.display()))
 }
 
 fn compare_generated(path: &Path, expected: &str, mismatches: &mut Vec<String>) -> Result<()> {
+    let expected = normalize_generated_contents(path, expected)?;
     match fs::read_to_string(path) {
         Ok(actual) if actual == expected => Ok(()),
         Ok(_) => {
@@ -1708,6 +1711,46 @@ fn compare_generated(path: &Path, expected: &str, mismatches: &mut Vec<String>) 
         }
         Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
+}
+
+fn normalize_generated_contents(path: &Path, contents: &str) -> Result<String> {
+    if path.extension().is_some_and(|ext| ext == "rs") {
+        rustfmt_source(contents)
+    } else {
+        Ok(contents.to_owned())
+    }
+}
+
+fn rustfmt_source(source: &str) -> Result<String> {
+    let mut child = Command::new("rustfmt")
+        .args(["--edition", "2024", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn rustfmt for machine codegen")?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("open rustfmt stdin for machine codegen")?;
+        stdin
+            .write_all(source.as_bytes())
+            .context("write generated machine source to rustfmt")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("wait for rustfmt during machine codegen")?;
+    if !output.status.success() {
+        bail!(
+            "rustfmt failed for generated machine code: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    String::from_utf8(output.stdout).context("decode rustfmt output as utf-8")
 }
 
 fn collect_legacy_authority_mismatch(path: &Path, mismatches: &mut Vec<String>) {

@@ -271,8 +271,9 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
-    #[allow(dead_code)] // Used by persistent session service; call-site wiring pending
-    pub(crate) async fn checkpoint_current_session(&mut self) {
+    #[allow(dead_code)] // Used by session-service host mode and persistent session service.
+    #[doc(hidden)]
+    pub async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
         if let Some(ref cp) = self.checkpointer {
             cp.checkpoint(&self.session).await;

@@ -581,10 +581,10 @@ impl ExternalToolSurfaceAuthority {
     /// Return all surface IDs that are currently waiting on async completion.
     pub fn pending_surfaces(&self) -> impl Iterator<Item = &SurfaceId> {
         self.fields.pending_op.iter().filter_map(|(id, op)| {
-            if *op != PendingSurfaceOp::None {
-                Some(id)
-            } else {
+            if *op == PendingSurfaceOp::None {
                 None
+            } else {
+                Some(id)
             }
         })
     }
@@ -1234,7 +1234,14 @@ impl ExternalToolSurfaceAuthority {
                 let transition_name = match base {
                     SurfaceBaseState::Active => "CallFinishedActive",
                     SurfaceBaseState::Removing => "CallFinishedRemoving",
-                    _ => unreachable!(),
+                    other => {
+                        return Err(ExternalToolSurfaceError {
+                            input_name: "CallFinished".into(),
+                            reason: format!(
+                                "surface '{surface_id}' entered invalid base state during CallFinished ({other:?})"
+                            ),
+                        });
+                    }
                 };
                 Ok((
                     ExternalToolSurfacePhase::Operating,

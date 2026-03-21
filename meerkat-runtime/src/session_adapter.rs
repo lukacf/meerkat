@@ -306,13 +306,12 @@ fn apply_runtime_drain_effects(slot: &CommsDrainSlot, effects: &[CommsDrainLifec
         if matches!(
             effect,
             CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { .. }
-        ) {
-            if let Some(control) = &slot.control {
-                control.store(
-                    slot.authority.suppresses_turn_boundary_drain(),
-                    Ordering::Release,
-                );
-            }
+        ) && let Some(control) = &slot.control
+        {
+            control.store(
+                slot.authority.suppresses_turn_boundary_drain(),
+                Ordering::Release,
+            );
         }
     }
 }
@@ -340,7 +339,7 @@ fn abort_slot(slot: &mut CommsDrainSlot) {
             }
             // Under TerminalClosure policy, the abort obligation is implicitly
             // satisfied when the machine reaches Stopped phase. Drop it.
-            drop(result.obligation);
+            let _ = result.obligation;
         }
         Err(_) => {
             // Already stopped or inactive — just clean up the handle
@@ -1105,12 +1104,17 @@ impl RuntimeSessionAdapter {
             }
         }
 
+        let Some(obligation) = result.obligation else {
+            tracing::warn!(
+                %session_id,
+                "comms drain spawn transition emitted no obligation"
+            );
+            return false;
+        };
+
         // The runtime spawns the drain task synchronously (as a tokio task
         // above), so we immediately close the spawn obligation.
-        match protocol_comms_drain_spawn::submit_task_spawned(
-            &mut slot.authority,
-            result.obligation,
-        ) {
+        match protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, obligation) {
             Ok(effects) => {
                 apply_runtime_drain_effects(slot, &effects);
             }
@@ -1187,24 +1191,23 @@ impl RuntimeSessionAdapter {
         // the task panicked without notifying. Submit Failed to prevent the
         // authority from being stuck in Running forever.
         let mut slots = self.comms_drain_slots.write().await;
-        if let Some(slot) = slots.get_mut(session_id) {
-            if slot.authority.phase()
+        if let Some(slot) = slots.get_mut(session_id)
+            && slot.authority.phase()
                 == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
-            {
-                tracing::warn!(
-                    "comms_drain: task exited without notifying authority (likely panicked), \
-                     submitting Failed safety net"
-                );
-                match protocol_comms_drain_spawn::notify_task_exited(
-                    &mut slot.authority,
-                    DrainExitReason::Failed,
-                ) {
-                    Ok(effects) => {
-                        apply_runtime_drain_effects(slot, &effects);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "comms drain authority rejected safety-net TaskExited");
-                    }
+        {
+            tracing::warn!(
+                "comms_drain: task exited without notifying authority (likely panicked), \
+                 submitting Failed safety net"
+            );
+            match protocol_comms_drain_spawn::notify_task_exited(
+                &mut slot.authority,
+                DrainExitReason::Failed,
+            ) {
+                Ok(effects) => {
+                    apply_runtime_drain_effects(slot, &effects);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "comms drain authority rejected safety-net TaskExited");
                 }
             }
         }
@@ -1742,6 +1745,9 @@ mod tests {
             .or_insert_with(CommsDrainSlot::new);
         let result = protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode)
             .expect("ensure running");
+        let obligation = result
+            .obligation
+            .expect("spawn obligation should be present");
 
         apply_runtime_drain_effects(slot, &result.effects);
         for effect in &result.effects {
@@ -1756,7 +1762,7 @@ mod tests {
         }
 
         let feedback_effects =
-            protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, result.obligation)
+            protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, obligation)
                 .expect("task spawned");
         apply_runtime_drain_effects(slot, &feedback_effects);
     }

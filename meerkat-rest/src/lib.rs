@@ -1466,7 +1466,7 @@ async fn mob_member_respawn(
         }) => Ok(Json(json!({
             "status": "topology_restore_failed",
             "receipt": receipt,
-            "failed_peer_ids": failed_peer_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
         }))),
         Err(e) => Err(ApiError::BadRequest(e.to_string())),
     }

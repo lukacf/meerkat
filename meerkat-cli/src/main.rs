@@ -2232,6 +2232,8 @@ struct CliRuntimeExecutor {
         Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    /// Streaming event sender, moved into the first turn via `.take()`.
+    event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
 fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
@@ -2280,7 +2282,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
             prompt: prompt.into(),
-            event_tx: None,
+            event_tx: self.event_tx.take(),
             host_mode: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.host_mode)
@@ -3209,6 +3211,7 @@ async fn run_agent(
         persistent_service: None,
         session_id: session_id.clone(),
         runtime_adapter: runtime_adapter.clone(),
+        event_tx: event_tx.clone(),
     });
     runtime_adapter
         .register_session_with_executor(session_id.clone(), executor)
@@ -3684,6 +3687,7 @@ async fn resume_session_with_llm_override(
         persistent_service: Some(service.clone()),
         session_id: session_id.clone(),
         runtime_adapter: resume_adapter.clone(),
+        event_tx: event_tx.clone(),
     });
     resume_adapter
         .register_session_with_executor(session_id.clone(), executor)

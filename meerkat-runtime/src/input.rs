@@ -1,4 +1,4 @@
-//! §8 Input types — the 6 input variants accepted by the runtime layer.
+//! §8 Input types — the 7 input variants accepted by the runtime layer.
 //!
 //! Core never sees these. The runtime's policy table resolves each Input
 //! to a PolicyDecision, then the runtime translates accepted Inputs into
@@ -91,7 +91,7 @@ impl Default for InputVisibility {
     }
 }
 
-/// The 6 input variants accepted by the runtime layer.
+/// The 7 input variants accepted by the runtime layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "input_type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -106,6 +106,9 @@ pub enum Input {
     ExternalEvent(ExternalEventInput),
     /// Explicit runtime continuation work.
     Continuation(ContinuationInput),
+    /// Terminal peer response — carries response content AND continuation
+    /// semantics in a single input (no two-input bundle needed).
+    TerminalPeerResponse(TerminalPeerResponseInput),
     /// Explicit non-content operation/lifecycle input.
     Operation(OperationInput),
 }
@@ -119,6 +122,7 @@ impl Input {
             Input::FlowStep(i) => &i.header,
             Input::ExternalEvent(i) => &i.header,
             Input::Continuation(i) => &i.header,
+            Input::TerminalPeerResponse(i) => &i.header,
             Input::Operation(i) => &i.header,
         }
     }
@@ -146,6 +150,7 @@ impl Input {
             Input::FlowStep(_) => KindId::new("flow_step"),
             Input::ExternalEvent(_) => KindId::new("external_event"),
             Input::Continuation(_) => KindId::new("continuation"),
+            Input::TerminalPeerResponse(_) => KindId::new("terminal_peer_response"),
             Input::Operation(_) => KindId::new("operation"),
         }
     }
@@ -156,6 +161,7 @@ impl Input {
             Input::Prompt(prompt) => prompt.turn_metadata.as_ref()?.handling_mode,
             Input::FlowStep(flow_step) => flow_step.turn_metadata.as_ref()?.handling_mode,
             Input::Continuation(continuation) => Some(continuation.handling_mode),
+            Input::TerminalPeerResponse(_) => Some(HandlingMode::Steer),
             _ => None,
         }
     }
@@ -307,6 +313,32 @@ pub struct ExternalEventInput {
     /// Event payload. Uses `Value` because the runtime layer may inspect/merge
     /// payloads during coalescing and projection — not a pure pass-through.
     pub payload: serde_json::Value,
+    /// Optional multimodal content blocks. When present, `payload` serves as
+    /// the text projection and `blocks` carries the full content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+}
+
+/// Terminal peer response input — a single semantic event carrying both
+/// the peer's response content (rendered to LLM) and continuation
+/// semantics (signals runtime to proceed after injection).
+///
+/// This replaces the old two-input pattern where a Peer(ResponseTerminal)
+/// was followed by a separate Continuation input. Having one input ensures
+/// atomic admission without transactional rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalPeerResponseInput {
+    pub header: InputHeader,
+    /// The peer's response body text.
+    pub body: String,
+    /// Optional multimodal content blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// The peer convention metadata (ResponseTerminal with status + request_id).
+    pub convention: PeerConvention,
+    /// Correlated request ID for the response, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Explicit continuation request that asks the runtime to keep draining
@@ -489,6 +521,7 @@ mod tests {
             header: make_header(),
             event_type: "webhook.received".into(),
             payload: serde_json::json!({"url": "https://example.com"}),
+            blocks: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "external_event");
@@ -513,6 +546,71 @@ mod tests {
             }
             other => panic!("Expected Continuation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_peer_response_input_serde() {
+        let input = Input::TerminalPeerResponse(TerminalPeerResponseInput {
+            header: make_header(),
+            body: "Done".into(),
+            blocks: None,
+            convention: PeerConvention::ResponseTerminal {
+                request_id: "req-1".into(),
+                status: ResponseTerminalStatus::Completed,
+            },
+            request_id: Some("req-1".into()),
+        });
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json["input_type"], "terminal_peer_response");
+        assert_eq!(json["request_id"], "req-1");
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        match parsed {
+            Input::TerminalPeerResponse(tpr) => {
+                assert_eq!(tpr.body, "Done");
+                assert_eq!(tpr.request_id.as_deref(), Some("req-1"));
+                assert!(matches!(
+                    tpr.convention,
+                    PeerConvention::ResponseTerminal {
+                        status: ResponseTerminalStatus::Completed,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected TerminalPeerResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_peer_response_kind_id() {
+        let input = Input::TerminalPeerResponse(TerminalPeerResponseInput {
+            header: make_header(),
+            body: "Done".into(),
+            blocks: None,
+            convention: PeerConvention::ResponseTerminal {
+                request_id: "req-1".into(),
+                status: ResponseTerminalStatus::Completed,
+            },
+            request_id: Some("req-1".into()),
+        });
+        assert_eq!(input.kind_id().0, "terminal_peer_response");
+    }
+
+    #[test]
+    fn terminal_peer_response_handling_mode_is_steer() {
+        let input = Input::TerminalPeerResponse(TerminalPeerResponseInput {
+            header: make_header(),
+            body: "Done".into(),
+            blocks: None,
+            convention: PeerConvention::ResponseTerminal {
+                request_id: "req-1".into(),
+                status: ResponseTerminalStatus::Completed,
+            },
+            request_id: None,
+        });
+        assert_eq!(
+            input.handling_mode(),
+            Some(meerkat_core::types::HandlingMode::Steer),
+        );
     }
 
     #[test]

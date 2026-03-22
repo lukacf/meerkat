@@ -1618,6 +1618,7 @@ async fn handle_meerkat_interrupt(
     })))
 }
 
+#[allow(deprecated)]
 async fn handle_meerkat_sessions(
     state: &MeerkatMcpState,
     input: MeerkatSessionListInput,
@@ -1645,6 +1646,7 @@ async fn handle_meerkat_sessions(
     Ok(wrap_tool_payload(payload))
 }
 
+#[allow(deprecated)]
 async fn handle_meerkat_history(
     state: &MeerkatMcpState,
     input: MeerkatSessionHistoryInput,

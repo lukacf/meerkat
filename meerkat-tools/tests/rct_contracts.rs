@@ -33,7 +33,7 @@ async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true, None)?;
 
     let tools = dispatcher.tools();
     assert!(!tools.is_empty());
@@ -58,7 +58,7 @@ async fn test_rct_contracts_task_store_persistence_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
-    let tool = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let tool = CompositeDispatcher::new(store, &config, None, None, None, None, true, None)?;
 
     let result = dispatch_tool(
         &tool,
@@ -85,6 +85,7 @@ async fn test_rct_contracts_inv_004_task_tools_session_id() -> Result<(), Box<dy
         None,
         Some("test-session-123".into()),
         true,
+        None,
     )?;
 
     let result = dispatch_tool(
@@ -107,7 +108,7 @@ fn test_rct_contracts_all_builtin_schemas_have_required_field()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true, None)?;
 
     for tool in dispatcher.tools().iter() {
         let schema = &tool.input_schema;
@@ -125,7 +126,7 @@ fn test_rct_contracts_inv_007_builtin_task_persistence_strategy()
     let store = Arc::new(MemoryTaskStore::new());
     let config = BuiltinToolConfig::default();
 
-    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(store, &config, None, None, None, None, true, None)?;
 
     // Verify task_create is available as a tool
     let tools = dispatcher.tools();
@@ -285,8 +286,16 @@ async fn test_regression_shell_job_tool_names() -> Result<(), Box<dyn std::error
     };
 
     let store = Arc::new(MemoryTaskStore::new());
-    let dispatcher =
-        CompositeDispatcher::new(store, &config, None, Some(shell_config), None, None, true)?;
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        None,
+        Some(shell_config),
+        None,
+        None,
+        true,
+        None,
+    )?;
 
     let tools = dispatcher.tools();
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -503,7 +512,7 @@ async fn test_regression_composite_deduplicates_external_tools()
     let external = Arc::new(DuplicatingDispatcher) as Arc<dyn AgentToolDispatcher>;
 
     let dispatcher =
-        CompositeDispatcher::new(store, &config, None, None, Some(external), None, true)?;
+        CompositeDispatcher::new(store, &config, None, None, Some(external), None, true, None)?;
     let tools = dispatcher.tools();
 
     // Count occurrences of task_list

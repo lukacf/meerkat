@@ -119,6 +119,7 @@ impl ToolDispatcherBuilder {
                 comp.external,
                 comp.session_id,
                 comp.image_tool_results,
+                None,
             )?),
         };
 
@@ -159,5 +160,6 @@ pub fn build_builtin_dispatcher(
         config.external,
         config.session_id,
         config.image_tool_results,
+        None,
     )?))
 }

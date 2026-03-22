@@ -493,6 +493,7 @@ impl MethodRouter {
     }
 
     #[cfg(feature = "mob")]
+    #[allow(deprecated)]
     async fn try_read_mob_session_history(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -852,6 +853,7 @@ impl MethodRouter {
         &self.runtime
     }
 
+    #[allow(deprecated)]
     async fn handle_session_read(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -910,6 +912,7 @@ impl MethodRouter {
         }
     }
 
+    #[allow(deprecated)]
     async fn handle_session_history(
         &self,
         id: Option<crate::protocol::RpcId>,

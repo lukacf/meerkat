@@ -164,6 +164,128 @@ pub struct CouplingInvariantEntry {
     pub status: EntryStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackPolicy {
+    HardError,
+    ObservableBestEffort,
+    IntentionalSurfaceDifference,
+    TestOnlyLegacy,
+}
+
+impl fmt::Display for FallbackPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HardError => write!(f, "hard-error"),
+            Self::ObservableBestEffort => write!(f, "observable-best-effort"),
+            Self::IntentionalSurfaceDifference => write!(f, "intentional-surface-difference"),
+            Self::TestOnlyLegacy => write!(f, "test-only-legacy"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackVisibility {
+    TypedEvent,
+    TracingOnly,
+    None,
+}
+
+impl fmt::Display for FallbackVisibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TypedEvent => write!(f, "typed-event"),
+            Self::TracingOnly => write!(f, "tracing-only"),
+            Self::None => write!(f, "none"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceConformance {
+    Canonical,
+    IntentionalDivergence,
+    DeprecatedLegacy,
+}
+
+impl fmt::Display for SurfaceConformance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Canonical => write!(f, "canonical"),
+            Self::IntentionalDivergence => write!(f, "intentional-divergence"),
+            Self::DeprecatedLegacy => write!(f, "deprecated-legacy"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionContractEntry {
+    pub canonical_source: String,
+    pub canonical_type: String,
+    pub sink_boundary: String,
+    pub sink_type: String,
+    pub preserved_fields: Vec<String>,
+    pub reclassification_forbidden: bool,
+    pub bundle_name: Option<String>,
+    pub status: EntryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FallbackContractEntry {
+    pub boundary: String,
+    pub authoritative_source: String,
+    pub fallback_policy: FallbackPolicy,
+    pub visibility_policy: FallbackVisibility,
+    pub status: EntryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceMember {
+    pub surface: String,
+    pub conformance: SurfaceConformance,
+    pub divergence_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceFamilyEntry {
+    pub family: String,
+    pub canonical_contract: String,
+    pub surfaces: Vec<SurfaceMember>,
+    pub status: EntryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedFieldEntry {
+    pub field_path: String,
+    pub canonical_source: String,
+    pub derivation_rule: String,
+    pub dead_field: bool,
+    pub status: EntryStatus,
+}
+
+/// A step in an atomic bundle with a semantic anchor pattern for verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicBundleStep {
+    pub name: String,
+    /// Stable semantic anchor (type name, canonical helper) to search for in
+    /// the canonical path file. NOT a local variable name.
+    pub anchor_pattern: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicBundleEntry {
+    pub bundle_name: String,
+    pub steps: Vec<AtomicBundleStep>,
+    pub canonical_path: String,
+    /// Precise pattern marking the scope block where all steps must co-locate.
+    /// Example: `"if is_terminal {"` — the exact branch head.
+    pub scope_anchor: String,
+    pub rollback_contract: String,
+    pub status: EntryStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraitImplBoundary {
     pub family_name: String,
@@ -214,6 +336,11 @@ pub struct OwnershipRegistry {
     pub state_cells: Vec<StateCellEntry>,
     pub semantic_operations: Vec<SemanticOperationEntry>,
     pub coupling_invariants: Vec<CouplingInvariantEntry>,
+    pub projection_contracts: Vec<ProjectionContractEntry>,
+    pub fallback_contracts: Vec<FallbackContractEntry>,
+    pub surface_families: Vec<SurfaceFamilyEntry>,
+    pub derived_fields: Vec<DerivedFieldEntry>,
+    pub atomic_bundles: Vec<AtomicBundleEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -260,6 +387,11 @@ struct OwnershipReport {
     state_cells: Vec<StateCellEntry>,
     semantic_operations: Vec<SemanticOperationEntry>,
     coupling_invariants: Vec<CouplingInvariantEntry>,
+    projection_contracts: Vec<ProjectionContractEntry>,
+    fallback_contracts: Vec<FallbackContractEntry>,
+    surface_families: Vec<SurfaceFamilyEntry>,
+    derived_fields: Vec<DerivedFieldEntry>,
+    atomic_bundles: Vec<AtomicBundleEntry>,
     findings: Vec<OwnershipFinding>,
     summaries: Vec<SubsystemSummary>,
 }
@@ -933,6 +1065,11 @@ fn build_report(registry: &OwnershipRegistry, findings: Vec<OwnershipFinding>) -
         state_cells: registry.state_cells.clone(),
         semantic_operations: registry.semantic_operations.clone(),
         coupling_invariants: registry.coupling_invariants.clone(),
+        projection_contracts: registry.projection_contracts.clone(),
+        fallback_contracts: registry.fallback_contracts.clone(),
+        surface_families: registry.surface_families.clone(),
+        derived_fields: registry.derived_fields.clone(),
+        atomic_bundles: registry.atomic_bundles.clone(),
         findings,
         summaries,
     }
@@ -1360,7 +1497,229 @@ fn ownership_registry() -> OwnershipRegistry {
         state_cells: state_cells(),
         semantic_operations: semantic_operations(),
         coupling_invariants: coupling_invariants(),
+        projection_contracts: projection_contracts(),
+        fallback_contracts: fallback_contracts(),
+        surface_families: surface_families(),
+        derived_fields: derived_fields(),
+        atomic_bundles: atomic_bundles(),
     }
+}
+
+fn projection_contracts() -> Vec<ProjectionContractEntry> {
+    vec![
+        ProjectionContractEntry {
+            canonical_source: "CommsRuntime drain (comms_runtime.rs)".into(),
+            canonical_type: "ClassifiedInboxInteraction".into(),
+            sink_boundary:
+                "comms_bridge interaction_to_runtime_input / interaction_to_terminal_peer_response"
+                    .into(),
+            sink_type: "Input::Peer / Input::ExternalEvent / Input::TerminalPeerResponse".into(),
+            preserved_fields: vec!["body".into(), "blocks".into(), "rendered_text".into()],
+            reclassification_forbidden: true,
+            bundle_name: None,
+            status: EntryStatus::Open,
+        },
+        ProjectionContractEntry {
+            canonical_source: "comms_bridge map_convention".into(),
+            canonical_type: "InteractionContent".into(),
+            sink_boundary: "PeerInput assembly".into(),
+            sink_type: "PeerInput".into(),
+            preserved_fields: vec!["body".into(), "blocks".into(), "convention".into()],
+            reclassification_forbidden: true,
+            bundle_name: None,
+            status: EntryStatus::Open,
+        },
+        ProjectionContractEntry {
+            canonical_source: "MobActor turn submission".into(),
+            canonical_type: "ContentInput".into(),
+            sink_boundary: "SessionService::start_turn".into(),
+            sink_type: "ContentInput".into(),
+            preserved_fields: vec!["text".into(), "blocks".into()],
+            reclassification_forbidden: false,
+            bundle_name: None,
+            status: EntryStatus::Open,
+        },
+    ]
+}
+
+fn fallback_contracts() -> Vec<FallbackContractEntry> {
+    vec![
+        FallbackContractEntry {
+            boundary: "FactoryAgentBuilder::resolve_config".into(),
+            authoritative_source: "Config layering (file -> env -> per-request)".into(),
+            fallback_policy: FallbackPolicy::ObservableBestEffort,
+            visibility_policy: FallbackVisibility::TracingOnly,
+            status: EntryStatus::Open,
+        },
+        FallbackContractEntry {
+            boundary: "McpRouter::add_server_for_testing (test-only path)".into(),
+            authoritative_source: "McpRouter staged lifecycle (stage_add/apply_staged)".into(),
+            fallback_policy: FallbackPolicy::TestOnlyLegacy,
+            visibility_policy: FallbackVisibility::None,
+            status: EntryStatus::Closed,
+        },
+        FallbackContractEntry {
+            boundary: "PersistentSessionService recovery".into(),
+            authoritative_source: "EventStore replay + SessionProjector".into(),
+            fallback_policy: FallbackPolicy::ObservableBestEffort,
+            visibility_policy: FallbackVisibility::TracingOnly,
+            status: EntryStatus::Open,
+        },
+        FallbackContractEntry {
+            boundary: "Override/config decode".into(),
+            authoritative_source: "Typed Config struct".into(),
+            fallback_policy: FallbackPolicy::HardError,
+            visibility_policy: FallbackVisibility::None,
+            status: EntryStatus::Closed,
+        },
+    ]
+}
+
+fn surface_families() -> Vec<SurfaceFamilyEntry> {
+    vec![
+        SurfaceFamilyEntry {
+            family: "external_event_ingestion".into(),
+            canonical_contract: "SessionService::turn with ExternalEvent content".into(),
+            surfaces: vec![
+                SurfaceMember {
+                    surface: "CLI".into(),
+                    conformance: SurfaceConformance::IntentionalDivergence,
+                    divergence_reason: Some("text-mode human input".into()),
+                },
+                SurfaceMember {
+                    surface: "REST".into(),
+                    conformance: SurfaceConformance::Canonical,
+                    divergence_reason: None,
+                },
+                SurfaceMember {
+                    surface: "RPC".into(),
+                    conformance: SurfaceConformance::Canonical,
+                    divergence_reason: None,
+                },
+            ],
+            status: EntryStatus::Open,
+        },
+        SurfaceFamilyEntry {
+            family: "mob_send".into(),
+            canonical_contract: "MobHandle::internal_turn with comms payload".into(),
+            surfaces: vec![
+                SurfaceMember {
+                    surface: "RPC".into(),
+                    conformance: SurfaceConformance::Canonical,
+                    divergence_reason: None,
+                },
+                SurfaceMember {
+                    surface: "TypeScript SDK".into(),
+                    conformance: SurfaceConformance::IntentionalDivergence,
+                    divergence_reason: Some("void return, session_id hidden".into()),
+                },
+                SurfaceMember {
+                    surface: "Python SDK".into(),
+                    conformance: SurfaceConformance::IntentionalDivergence,
+                    divergence_reason: Some("void return, session_id hidden".into()),
+                },
+                SurfaceMember {
+                    surface: "Web SDK".into(),
+                    conformance: SurfaceConformance::IntentionalDivergence,
+                    divergence_reason: Some("void return, session_id hidden".into()),
+                },
+                SurfaceMember {
+                    surface: "REST".into(),
+                    conformance: SurfaceConformance::IntentionalDivergence,
+                    divergence_reason: Some("tool-based via mob/call".into()),
+                },
+            ],
+            status: EntryStatus::Open,
+        },
+        SurfaceFamilyEntry {
+            family: "mob_control".into(),
+            canonical_contract: "MobHandle lifecycle methods".into(),
+            surfaces: vec![
+                SurfaceMember {
+                    surface: "RPC".into(),
+                    conformance: SurfaceConformance::Canonical,
+                    divergence_reason: None,
+                },
+                SurfaceMember {
+                    surface: "REST".into(),
+                    conformance: SurfaceConformance::IntentionalDivergence,
+                    divergence_reason: Some("tool-oriented subset only".into()),
+                },
+            ],
+            status: EntryStatus::Open,
+        },
+    ]
+}
+
+fn derived_fields() -> Vec<DerivedFieldEntry> {
+    vec![
+        DerivedFieldEntry {
+            field_path: "SubAgentStatusResponse::is_final".into(),
+            canonical_source: "SubAgentStatusResponse::state".into(),
+            derivation_rule: "is_final = state != Running".into(),
+            dead_field: false,
+            status: EntryStatus::Open,
+        },
+        DerivedFieldEntry {
+            field_path: "WireRunResult::session_ref".into(),
+            canonical_source: "N/A".into(),
+            derivation_rule: "always None".into(),
+            dead_field: true,
+            status: EntryStatus::Open,
+        },
+        DerivedFieldEntry {
+            field_path: "WireSessionInfo::session_ref".into(),
+            canonical_source: "N/A".into(),
+            derivation_rule: "always None".into(),
+            dead_field: true,
+            status: EntryStatus::Open,
+        },
+        DerivedFieldEntry {
+            field_path: "WireSessionSummary::session_ref".into(),
+            canonical_source: "N/A".into(),
+            derivation_rule: "always None".into(),
+            dead_field: true,
+            status: EntryStatus::Open,
+        },
+    ]
+}
+
+fn atomic_bundles() -> Vec<AtomicBundleEntry> {
+    vec![AtomicBundleEntry {
+        bundle_name: "terminal_peer_response".into(),
+        steps: vec![
+            AtomicBundleStep {
+                name: "single_input".into(),
+                anchor_pattern: "Input::TerminalPeerResponse(TerminalPeerResponseInput".into(),
+            },
+        ],
+        canonical_path: "meerkat-runtime/src/comms_drain.rs".into(),
+        scope_anchor: "interaction_to_terminal_peer_response(".into(),
+        rollback_contract:
+            "Closed: no bundle needed. TerminalPeerResponse is a single canonical input variant carrying both content and continuation semantics. Admitted via accept_input() — no transactional rollback required."
+                .into(),
+        status: EntryStatus::Closed,
+    }]
+}
+
+pub fn projection_contracts_snapshot() -> Vec<ProjectionContractEntry> {
+    projection_contracts()
+}
+
+pub fn fallback_contracts_snapshot() -> Vec<FallbackContractEntry> {
+    fallback_contracts()
+}
+
+pub fn derived_fields_snapshot() -> Vec<DerivedFieldEntry> {
+    derived_fields()
+}
+
+pub fn surface_families_snapshot() -> Vec<SurfaceFamilyEntry> {
+    surface_families()
+}
+
+pub fn atomic_bundles_snapshot() -> Vec<AtomicBundleEntry> {
+    atomic_bundles()
 }
 
 pub fn collect_current_findings(root: &Path) -> Result<Vec<OwnershipFinding>> {
@@ -1439,7 +1798,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 type_name: "McpRouter".into(),
                 method_names: vec![
                     "set_removal_timeout",
-                    "add_server",
+                    "add_server_for_testing",
                     "stage_add",
                     "stage_remove",
                     "stage_reload",
@@ -2274,13 +2633,15 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
-            "add_server",
+            "add_server_for_testing",
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["servers", "projection", "pending_obligations"],
             "ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract",
-            &["compatibility add path still drives authority and publishes projection snapshot"],
-            &["compatibility surface cannot diverge from canonical staged/boundary semantics"],
+            &["test-only add path still drives authority and publishes projection snapshot"],
+            &[
+                "test convenience surface cannot diverge from canonical staged/boundary semantics; gated behind cfg(test) or test-support feature"
+            ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

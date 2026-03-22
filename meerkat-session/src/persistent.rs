@@ -55,6 +55,29 @@ fn write_system_context_state(
     })
 }
 
+/// Strictly load [`SessionMetadata`] from a persisted session, rejecting
+/// sessions whose metadata is missing or incompatible with the current format.
+///
+/// This is used in the recovery path — unlike the permissive
+/// `Session::session_metadata()` accessor (which returns `None` on failure),
+/// this returns `SessionError::IncompatibleFormat` so that legacy rows are
+/// hard-rejected rather than silently resumed with missing fields.
+fn load_strict_session_metadata(
+    session: &meerkat_core::Session,
+) -> Result<meerkat_core::SessionMetadata, SessionError> {
+    let meta_value = session
+        .metadata()
+        .get(meerkat_core::session::SESSION_METADATA_KEY)
+        .ok_or_else(|| SessionError::IncompatibleFormat {
+            reason: "session metadata missing entirely".into(),
+        })?;
+    serde_json::from_value::<meerkat_core::SessionMetadata>(meta_value.clone()).map_err(|e| {
+        SessionError::IncompatibleFormat {
+            reason: format!("session metadata incompatible with current format: {e}"),
+        }
+    })
+}
+
 /// Shared gate between the checkpointer and archive.
 ///
 /// The `Mutex` provides mutual exclusion so that `checkpoint()` cannot
@@ -541,56 +564,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .load_persisted(id)
                 .await?
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            let stored_metadata = stored.session_metadata();
-            let tooling = stored_metadata
-                .as_ref()
-                .map(|meta| meta.tooling.clone())
-                .unwrap_or_default();
+            let meta = load_strict_session_metadata(&stored)?;
             let build = SessionBuildOptions {
-                provider: stored_metadata.as_ref().map(|meta| meta.provider),
-                comms_name: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.comms_name.clone()),
-                peer_meta: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.peer_meta.clone()),
+                provider: Some(meta.provider),
+                comms_name: meta.comms_name.clone(),
+                peer_meta: meta.peer_meta.clone(),
                 resume_session: Some(stored),
-                override_builtins: Some(tooling.builtins),
-                override_shell: Some(tooling.shell),
-                override_memory: Some(tooling.memory),
-                override_mob: Some(tooling.mob),
-                realm_id: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.realm_id.clone()),
-                instance_id: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.instance_id.clone()),
-                backend: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.backend.clone()),
-                config_generation: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.config_generation),
+                override_builtins: Some(meta.tooling.builtins),
+                override_shell: Some(meta.tooling.shell),
+                override_memory: Some(meta.tooling.memory),
+                override_mob: Some(meta.tooling.mob),
+                realm_id: meta.realm_id.clone(),
+                instance_id: meta.instance_id.clone(),
+                backend: meta.backend.clone(),
+                config_generation: meta.config_generation,
                 ..SessionBuildOptions::default()
             };
 
             self.create_session(CreateSessionRequest {
-                model: stored_metadata
-                    .as_ref()
-                    .map(|meta| meta.model.clone())
-                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?,
+                model: meta.model.clone(),
                 prompt: String::new().into(),
                 render_metadata: None,
                 system_prompt: None,
-                max_tokens: Some(
-                    stored_metadata
-                        .as_ref()
-                        .map(|meta| meta.max_tokens)
-                        .unwrap_or_default(),
-                ),
+                max_tokens: Some(meta.max_tokens),
                 event_tx: None,
-                host_mode: stored_metadata.as_ref().is_some_and(|meta| meta.host_mode),
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode: meta.host_mode,
+                host_mode_owner: meta.host_mode_owner,
                 skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 build: Some(build),
@@ -2226,6 +2225,7 @@ mod tests {
                     active_skills: None,
                 },
                 host_mode: false,
+                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
                 comms_name: None,
                 peer_meta: None,
                 realm_id: Some("realm-test".to_string()),
@@ -2284,5 +2284,69 @@ mod tests {
             })
             .expect("persisted session should contain a system prompt");
         assert!(persisted_prompt.contains("recover me"));
+    }
+
+    #[test]
+    fn test_strict_loader_rejects_missing_metadata() {
+        let session = Session::new();
+        let result = load_strict_session_metadata(&session);
+        assert!(
+            matches!(result, Err(SessionError::IncompatibleFormat { .. })),
+            "session with no metadata should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_strict_loader_rejects_legacy_metadata_missing_host_mode_owner() {
+        let mut session = Session::new();
+        // Simulate a legacy row: valid metadata but missing host_mode_owner.
+        let legacy = serde_json::json!({
+            "model": "claude-test",
+            "max_tokens": 1024,
+            "provider": "anthropic",
+            "tooling": { "builtins": false, "shell": false, "comms": false },
+            "host_mode": false,
+            "comms_name": null,
+            "peer_meta": null,
+            "realm_id": null,
+            "instance_id": null,
+            "backend": null,
+            "config_generation": null
+        });
+        session.set_metadata(meerkat_core::session::SESSION_METADATA_KEY, legacy);
+        let result = load_strict_session_metadata(&session);
+        assert!(
+            matches!(result, Err(SessionError::IncompatibleFormat { .. })),
+            "legacy metadata without host_mode_owner must be rejected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_strict_loader_accepts_current_format() {
+        let mut session = Session::new();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model: "test-model".to_string(),
+                max_tokens: 1024,
+                provider: meerkat_core::Provider::Anthropic,
+                tooling: meerkat_core::SessionTooling::default(),
+                host_mode: true,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+            })
+            .expect("metadata should serialize");
+
+        let meta =
+            load_strict_session_metadata(&session).expect("current format should be accepted");
+        assert_eq!(meta.model, "test-model");
+        assert_eq!(
+            meta.host_mode_owner,
+            meerkat_core::service::HostModeOwner::ExternalRuntime
+        );
     }
 }

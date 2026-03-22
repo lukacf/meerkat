@@ -156,7 +156,10 @@ impl McpRouterAdapter {
         let router = router
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
-        let delta = router.progress_removals().await;
+        let delta = router
+            .progress_removals()
+            .await
+            .map_err(|e| e.to_string())?;
         self.sync_router_projection(router);
         Ok(delta)
     }

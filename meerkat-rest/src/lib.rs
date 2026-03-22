@@ -1698,6 +1698,7 @@ fn make_runtime_external_event_input(
         },
         event_type: event_type.to_string(),
         payload,
+        blocks: None,
     })
 }
 
@@ -2002,6 +2003,7 @@ async fn drain_event_forwarder(session_id: &SessionId, forwarder: tokio::task::J
 }
 
 /// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
+#[allow(deprecated)]
 fn run_result_to_response(
     result: meerkat_core::types::RunResult,
     realm_id: &str,
@@ -2245,6 +2247,7 @@ fn parse_label_filters(
 }
 
 /// List sessions in the active realm.
+#[allow(deprecated)]
 async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
@@ -2305,6 +2308,7 @@ async fn get_session(
 }
 
 /// Get full session history.
+#[allow(deprecated)]
 async fn get_session_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3740,6 +3744,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_run_result_to_response_carries_skill_diagnostics() {
         let session_id = SessionId::new();
         let result = meerkat_core::RunResult {

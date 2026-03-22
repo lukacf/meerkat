@@ -29,6 +29,11 @@ use meerkat_client::LlmClient;
 /// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
 pub struct FactoryAgent {
     agent: DynAgent,
+    /// Canonical ops lifecycle registry shared with the agent's tool dispatcher.
+    /// Pass this to `register_session_with_ops_registry` so the session runtime
+    /// and the tool dispatcher share the same registry instance.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub ops_registry: Option<Arc<meerkat_tools::RuntimeOpsLifecycleRegistry>>,
 }
 
 impl FactoryAgent {
@@ -227,17 +232,19 @@ impl FactoryAgentBuilder {
         }
     }
 
-    async fn resolve_config(&self) -> Config {
+    async fn resolve_config(&self) -> (Config, Option<String>) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(store) = &self.config_store {
             match store.get().await {
-                Ok(config) => return config,
+                Ok(config) => return (config, None),
                 Err(err) => {
-                    tracing::warn!("Failed to read latest config from store: {err}");
+                    let msg = format!("Failed to read latest config from store: {err}");
+                    tracing::warn!("{msg}");
+                    return (self.config_snapshot.clone(), Some(msg));
                 }
             }
         }
-        self.config_snapshot.clone()
+        (self.config_snapshot.clone(), None)
     }
 
     /// Get a reference to the factory.
@@ -261,7 +268,13 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
-        let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
+        let fallback_tx = event_tx.clone();
+        let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx)
+            .map_err(|e| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    e.to_string(),
+                ))
+            })?;
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none()
@@ -284,7 +297,26 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             build_config.session_store_override = Some(store.clone());
         }
 
-        let config = self.resolve_config().await;
+        // Create the canonical ops lifecycle registry and inject it into the
+        // build config so the tool dispatcher (JobManager) can use it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let ops_registry = {
+            let registry = std::sync::Arc::new(meerkat_tools::RuntimeOpsLifecycleRegistry::new());
+            build_config.ops_registry = Some(registry.clone());
+            Some(registry)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let ops_registry: Option<()> = None;
+
+        let (config, config_error) = self.resolve_config().await;
+        if let Some(error) = config_error {
+            let _ = fallback_tx
+                .send(AgentEvent::ConfigSnapshotFallback {
+                    error,
+                    config_generation: None,
+                })
+                .await;
+        }
 
         let agent = self
             .factory
@@ -296,7 +328,11 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
                 ))
             })?;
 
-        Ok(FactoryAgent { agent })
+        Ok(FactoryAgent {
+            agent,
+            #[cfg(not(target_arch = "wasm32"))]
+            ops_registry,
+        })
     }
 }
 
@@ -387,7 +423,11 @@ mod tests {
             .build_agent(build_config, &Config::default())
             .await
             .map_err(|err| format!("{err}"))?;
-        Ok(FactoryAgent { agent })
+        Ok(FactoryAgent {
+            agent,
+            #[cfg(not(target_arch = "wasm32"))]
+            ops_registry: None,
+        })
     }
 
     fn mock_input_cmd(session_id: &SessionId, stream: InputStreamMode) -> CommsCommand {

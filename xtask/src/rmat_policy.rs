@@ -13,6 +13,8 @@ pub struct AuditPolicy {
     pub protocol_realization_sites: Vec<ProtocolRealizationSiteRule>,
     pub protocol_feedback_constraints: Vec<ProtocolFeedbackConstraintRule>,
     pub terminal_mapping_constraints: Vec<TerminalMappingConstraintRule>,
+    pub fallback_policy_rules: Vec<FallbackPolicyRule>,
+    pub surface_conformance_rules: Vec<SurfaceConformanceRule>,
 }
 
 impl AuditPolicy {
@@ -73,6 +75,8 @@ impl AuditPolicy {
             protocol_realization_sites: default_protocol_realization_sites(),
             protocol_feedback_constraints: default_protocol_feedback_constraints(),
             terminal_mapping_constraints: default_terminal_mapping_constraints(),
+            fallback_policy_rules: default_fallback_policy_rules(),
+            surface_conformance_rules: default_surface_conformance_rules(),
         }
     }
 
@@ -294,6 +298,25 @@ pub struct TerminalMappingConstraintRule {
     pub helper_path: &'static str,
 }
 
+/// Rule: boundaries with a declared fallback policy must match their contract.
+/// For `HardError` boundaries, warn/fallback patterns indicate a violation.
+/// For `TestOnlyLegacy` boundaries, the function should only be called from tests.
+#[derive(Debug, Clone)]
+pub struct FallbackPolicyRule {
+    pub boundary_path: String,
+    pub symbol: String,
+    pub policy: String,
+}
+
+/// Rule: surfaces declared canonical for a family must structurally conform
+/// to the canonical surface contract.
+#[derive(Debug, Clone)]
+pub struct SurfaceConformanceRule {
+    pub family: String,
+    pub canonical_surface: String,
+    pub check_surfaces: Vec<String>,
+}
+
 /// Build handoff protocol coverage rules from canonical machine schemas.
 /// Every effect with `handoff_protocol: Some(name)` generates a rule.
 fn default_handoff_protocol_coverage() -> Vec<HandoffProtocolCoverageRule> {
@@ -418,6 +441,89 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
                 }
             }
         }
+    }
+    rules
+}
+
+/// Build fallback policy rules from the ownership registry.
+fn default_fallback_policy_rules() -> Vec<FallbackPolicyRule> {
+    use crate::ownership_ledger;
+    let entries = ownership_ledger::fallback_contracts_snapshot();
+    let mut rules = Vec::new();
+    for entry in &entries {
+        let policy_str = match entry.fallback_policy {
+            ownership_ledger::FallbackPolicy::HardError => "hard_error",
+            ownership_ledger::FallbackPolicy::ObservableBestEffort => "observable_best_effort",
+            ownership_ledger::FallbackPolicy::IntentionalSurfaceDifference => {
+                "intentional_surface_difference"
+            }
+            ownership_ledger::FallbackPolicy::TestOnlyLegacy => "test_only_legacy",
+        };
+        let (path, symbol) = resolve_boundary_location(&entry.boundary);
+        rules.push(FallbackPolicyRule {
+            boundary_path: path,
+            symbol,
+            policy: policy_str.to_string(),
+        });
+    }
+    rules
+}
+
+/// Map well-known boundary descriptions to file paths and symbols.
+fn resolve_boundary_location(boundary: &str) -> (String, String) {
+    if boundary.contains("FactoryAgentBuilder::resolve_config") {
+        (
+            "meerkat/src/service_factory.rs".to_string(),
+            "resolve_config".to_string(),
+        )
+    } else if boundary.contains("McpRouter::add_server") {
+        (
+            "meerkat-mcp/src/router.rs".to_string(),
+            "add_server".to_string(),
+        )
+    } else if boundary.contains("PersistentSessionService") {
+        (
+            "meerkat-session/src/persistent.rs".to_string(),
+            "recover".to_string(),
+        )
+    } else if boundary.contains("Override/config decode") {
+        (
+            "meerkat-core/src/config.rs".to_string(),
+            "decode".to_string(),
+        )
+    } else {
+        (boundary.to_string(), boundary.to_string())
+    }
+}
+
+/// Build surface conformance rules from the ownership registry.
+fn default_surface_conformance_rules() -> Vec<SurfaceConformanceRule> {
+    use crate::ownership_ledger;
+    let entries = ownership_ledger::surface_families_snapshot();
+    let mut rules = Vec::new();
+    for entry in &entries {
+        let canonical_surfaces: Vec<_> = entry
+            .surfaces
+            .iter()
+            .filter(|s| s.conformance == ownership_ledger::SurfaceConformance::Canonical)
+            .map(|s| s.surface.clone())
+            .collect();
+        if canonical_surfaces.is_empty() {
+            continue;
+        }
+        let canonical_surface = canonical_surfaces.first().cloned().unwrap_or_default();
+        let check_surfaces: Vec<_> = entry
+            .surfaces
+            .iter()
+            .filter(|s| s.conformance == ownership_ledger::SurfaceConformance::Canonical)
+            .filter(|s| s.surface != canonical_surface)
+            .map(|s| s.surface.clone())
+            .collect();
+        rules.push(SurfaceConformanceRule {
+            family: entry.family.clone(),
+            canonical_surface,
+            check_surfaces,
+        });
     }
     rules
 }

@@ -15,7 +15,10 @@ use meerkat_core::{
 pub struct WireSessionInfo {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub session_id: SessionId,
+    /// Dead field — always None. Retained for wire backwards compatibility.
+    /// See `DerivedFieldEntry` in ownership ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[deprecated(note = "dead field: always None, retained for wire compat")]
     pub session_ref: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -27,6 +30,7 @@ pub struct WireSessionInfo {
     pub labels: BTreeMap<String, String>,
 }
 
+#[allow(deprecated)]
 impl From<SessionInfo> for WireSessionInfo {
     fn from(info: SessionInfo) -> Self {
         Self {
@@ -56,7 +60,10 @@ impl From<SessionInfo> for WireSessionInfo {
 pub struct WireSessionSummary {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub session_id: SessionId,
+    /// Dead field — always None. Retained for wire backwards compatibility.
+    /// See `DerivedFieldEntry` in ownership ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[deprecated(note = "dead field: always None, retained for wire compat")]
     pub session_ref: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -67,6 +74,7 @@ pub struct WireSessionSummary {
     pub labels: BTreeMap<String, String>,
 }
 
+#[allow(deprecated)]
 impl From<SessionSummary> for WireSessionSummary {
     fn from(summary: SessionSummary) -> Self {
         Self {
@@ -383,7 +391,10 @@ impl From<Message> for WireSessionMessage {
 pub struct WireSessionHistory {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub session_id: SessionId,
+    /// Dead field — always None. Retained for wire backwards compatibility.
+    /// See `DerivedFieldEntry` in ownership ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[deprecated(note = "dead field: always None, retained for wire compat")]
     pub session_ref: Option<String>,
     pub message_count: usize,
     pub offset: usize,
@@ -393,6 +404,7 @@ pub struct WireSessionHistory {
     pub messages: Vec<WireSessionMessage>,
 }
 
+#[allow(deprecated)]
 impl From<SessionHistoryPage> for WireSessionHistory {
     fn from(page: SessionHistoryPage) -> Self {
         Self {
@@ -408,7 +420,7 @@ impl From<SessionHistoryPage> for WireSessionHistory {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, deprecated)]
 mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;

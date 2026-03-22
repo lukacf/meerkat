@@ -19,7 +19,7 @@
 //! ensure_rkat_dir(&project_root).unwrap();
 //! let store = Arc::new(FileTaskStore::in_project(&project_root));
 //! let dispatcher =
-//!     CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None, true)?;
+//!     CompositeDispatcher::new(store, &BuiltinToolConfig::default(), None, None, None, None, true, None)?;
 //! ```
 
 // On wasm32, use tokio_with_wasm as a drop-in replacement for tokio.
@@ -62,6 +62,10 @@ pub use meerkat_comms::agent::{
 };
 pub use registry::ToolRegistry;
 pub use schema::{empty_object_schema, schema_for};
+
+/// Re-export for callers that need to inject the canonical ops registry
+/// into tool dispatchers without a direct `meerkat-runtime` dependency.
+pub use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 
 // Capability registrations
 inventory::submit! {

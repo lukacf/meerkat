@@ -18,7 +18,8 @@ pub struct MobMemberSnapshot {
     pub error: Option<String>,
     /// Cumulative token usage.
     pub tokens_used: u64,
-    /// Whether the member has reached a terminal state.
+    /// Derived convenience field: `true` when `status` is terminal (not `Active`/`Retiring`).
+    /// Canonical truth: `status` field. See `DerivedFieldEntry` in ownership ledger.
     pub is_final: bool,
     /// Current session ID (if a session bridge exists).
     pub current_session_id: Option<SessionId>,

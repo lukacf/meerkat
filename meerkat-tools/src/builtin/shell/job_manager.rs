@@ -167,6 +167,9 @@ pub struct JobManager {
     ops_registry: Arc<RuntimeOpsLifecycleRegistry>,
     /// Session-scoped owner identity for shared lifecycle records.
     owner_session_id: SessionId,
+    /// Whether this instance was constructed with a canonical registry.
+    /// When false, `spawn_job()` returns an error.
+    canonical_bound: bool,
     /// Map of job ID to task handle (for cancellation)
     handles: Arc<Mutex<HashMap<JobId, JoinHandle<()>>>>,
     /// Map of job ID to cancellation notifier (for killing)
@@ -178,8 +181,34 @@ pub struct JobManager {
 }
 
 impl JobManager {
-    /// Create a new JobManager with the given configuration
-    pub fn new(config: ShellConfig) -> Self {
+    /// Production path for background-capable shell. Registry is REQUIRED.
+    ///
+    /// The canonical registry is shared with the session's lifecycle tracking,
+    /// so background operations are visible to the session's ops dashboard.
+    pub fn new_canonical(
+        config: ShellConfig,
+        ops_registry: Arc<RuntimeOpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Self {
+        Self {
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            config,
+            resolved_shell_path: Arc::new(Mutex::new(None)),
+            event_tx: None,
+            ops_registry,
+            owner_session_id,
+            canonical_bound: true,
+            handles: Arc::new(Mutex::new(HashMap::new())),
+            cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
+            completed_at: Arc::new(Mutex::new(HashMap::new())),
+            sync_slots: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Production path for foreground-only shell (sync execution, no background ops).
+    ///
+    /// Uses a local registry. `spawn_job()` is NOT available on this instance.
+    pub fn new_foreground(config: ShellConfig) -> Self {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             config,
@@ -187,6 +216,28 @@ impl JobManager {
             event_tx: None,
             ops_registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
             owner_session_id: SessionId::new(),
+            canonical_bound: false,
+            handles: Arc::new(Mutex::new(HashMap::new())),
+            cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
+            completed_at: Arc::new(Mutex::new(HashMap::new())),
+            sync_slots: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Test constructor with a local registry.
+    ///
+    /// Permits `spawn_job()` unlike `new_foreground()`, but the registry is
+    /// local and not shared with any session. Use in tests only.
+    #[cfg(test)]
+    pub fn new_local(config: ShellConfig) -> Self {
+        Self {
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            config,
+            resolved_shell_path: Arc::new(Mutex::new(None)),
+            event_tx: None,
+            ops_registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
+            owner_session_id: SessionId::new(),
+            canonical_bound: true, // tests can exercise spawn_job
             handles: Arc::new(Mutex::new(HashMap::new())),
             cancel_notifiers: Arc::new(Mutex::new(HashMap::new())),
             completed_at: Arc::new(Mutex::new(HashMap::new())),
@@ -200,12 +251,6 @@ impl JobManager {
     /// will be sent through this channel.
     pub fn with_event_sender(mut self, tx: mpsc::Sender<Value>) -> Self {
         self.event_tx = Some(tx);
-        self
-    }
-
-    /// Override the owner session ID used in shared lifecycle records.
-    pub fn with_owner_session_id(mut self, session_id: SessionId) -> Self {
-        self.owner_session_id = session_id;
         self
     }
 
@@ -377,19 +422,12 @@ impl JobManager {
         working_dir: Option<&Path>,
         timeout_secs: u64,
     ) -> Result<JobId, ShellError> {
-        info!("Spawning background job");
-
-        // Check concurrency limit (0 means unlimited)
-        let limit = self.config.max_concurrent_processes;
-        if limit > 0 {
-            let current = self.running_job_count().await;
-            if current >= limit {
-                warn!(current = %current, limit = %limit, "Concurrency limit exceeded");
-                return Err(ShellError::Io(std::io::Error::other(format!(
-                    "Concurrency limit exceeded: {current} running jobs, limit is {limit}"
-                ))));
-            }
+        if !self.canonical_bound {
+            return Err(ShellError::Io(std::io::Error::other(
+                "spawn_job requires canonical registry binding (use new_canonical)",
+            )));
         }
+        info!("Spawning background job");
 
         // Run cleanup before spawning new job
         self.cleanup_old_jobs().await;
@@ -426,17 +464,6 @@ impl JobManager {
             })
             .map_err(|error| ShellError::Io(std::io::Error::other(error.to_string())))?;
 
-        // Create the job with Running status
-        let job = BackgroundJob {
-            id: job_id.clone(),
-            operation_id: Some(operation_id.clone()),
-            command: command.to_string(),
-            working_dir: resolved_dir.as_ref().map(|p| p.display().to_string()),
-            timeout_secs,
-            started_at_unix,
-            status: JobStatus::Running { started_at_unix },
-        };
-
         // Build and spawn the command
         let mut cmd = Command::new(&shell_path);
         cmd.arg("-c").arg(command);
@@ -459,7 +486,7 @@ impl JobManager {
         cmd.process_group(0);
 
         // Spawn the child process
-        let child = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {
                 let _ = self
@@ -471,7 +498,51 @@ impl JobManager {
         let _ = self.ops_registry.provisioning_succeeded(&operation_id);
         debug!("Spawned child process");
 
-        // Store the job and cancellation notifier
+        // Create the job with Running status
+        let job = BackgroundJob {
+            id: job_id.clone(),
+            operation_id: Some(operation_id.clone()),
+            command: command.to_string(),
+            working_dir: resolved_dir.as_ref().map(|p| p.display().to_string()),
+            timeout_secs,
+            started_at_unix,
+            status: JobStatus::Running { started_at_unix },
+        };
+
+        // Atomic check-and-insert: acquire lock, verify limit, insert job.
+        // This eliminates the TOCTOU race where concurrent callers could all
+        // pass a limit check before any of them inserts.
+        {
+            let mut jobs = self.jobs.lock().await;
+            let limit = self.config.max_concurrent_processes;
+            if limit > 0 {
+                let bg = jobs
+                    .values()
+                    .filter(|job| matches!(job.status, JobStatus::Running { .. }))
+                    .count();
+                let sync = self.sync_slots.load(std::sync::atomic::Ordering::Acquire);
+                if bg + sync >= limit {
+                    warn!(current = %(bg + sync), limit = %limit, "Concurrency limit exceeded");
+                    // Kill the just-spawned process — this is the rare over-limit race path
+                    let _ = child.kill().await;
+                    // Cancel the canonical operation so it doesn't leak in the registry
+                    let _ = self.ops_registry.provisioning_failed(
+                        &operation_id,
+                        format!(
+                            "concurrency limit exceeded: {} running processes, limit is {limit}",
+                            bg + sync
+                        ),
+                    );
+                    return Err(ShellError::Io(std::io::Error::other(format!(
+                        "Concurrency limit exceeded: {} running processes, limit is {limit}",
+                        bg + sync
+                    ))));
+                }
+            }
+            jobs.insert(job_id.clone(), job);
+        }
+
+        // Store references for the async monitoring task
         let jobs = Arc::clone(&self.jobs);
         let handles = Arc::clone(&self.handles);
         let cancel_notifiers = Arc::clone(&self.cancel_notifiers);
@@ -485,8 +556,7 @@ impl JobManager {
         let job_id_for_cancel = job_id.clone();
         let cancel_notify = Arc::new(Notify::new());
 
-        // Insert job and notifier into maps
-        jobs.lock().await.insert(job_id.clone(), job);
+        // Insert cancellation notifier
         cancel_notifiers
             .lock()
             .await
@@ -856,7 +926,7 @@ impl JobManager {
             .values()
             .filter(|job| matches!(job.status, JobStatus::Running { .. }))
             .count();
-        let sync = self.sync_slots.load(std::sync::atomic::Ordering::Relaxed);
+        let sync = self.sync_slots.load(std::sync::atomic::Ordering::Acquire);
         background + sync
     }
 
@@ -952,7 +1022,7 @@ mod tests {
     fn test_job_manager_struct() {
         // Verify JobManager has the required fields
         let config = ShellConfig::default();
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Check that it has the expected structure by using it
         assert!(manager.event_tx.is_none());
@@ -976,7 +1046,7 @@ mod tests {
             env_vars: std::collections::HashMap::new(),
         };
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Verify config is stored
         assert!(manager.config.enabled);
@@ -995,7 +1065,7 @@ mod tests {
     #[test]
     fn test_job_manager_has_event_sender() {
         let config = ShellConfig::default();
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Default: no event sender
         assert!(manager.event_tx.is_none());
@@ -1006,7 +1076,7 @@ mod tests {
         let config = ShellConfig::default();
         let (tx, _rx) = mpsc::channel::<Value>(10);
 
-        let manager = JobManager::new(config).with_event_sender(tx);
+        let manager = JobManager::new_local(config).with_event_sender(tx);
 
         // Now should have event sender
         assert!(manager.event_tx.is_some());
@@ -1014,7 +1084,7 @@ mod tests {
 
     #[tokio::test]
     async fn timed_out_job_summary_preserves_timed_out_status_over_failed_snapshot() {
-        let manager = JobManager::new(ShellConfig::default());
+        let manager = JobManager::new_local(ShellConfig::default());
         let operation_id = OperationId::new();
         manager
             .ops_registry
@@ -1071,7 +1141,7 @@ mod tests {
         let mut config = config;
         config.shell = "sh".to_string(); // Use sh which is universally available
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a job
         let result = manager.spawn_job("echo test", None, 30).await;
@@ -1089,7 +1159,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn should return immediately without waiting for execution
         let start = Instant::now();
@@ -1115,7 +1185,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         let job_id = manager.spawn_job("sleep 10", None, 30).await.unwrap();
 
@@ -1150,7 +1220,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Non-existent job
         let fake_id = JobId::from_string("job_nonexistent");
@@ -1178,7 +1248,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Initially empty
         let jobs = manager.list_jobs().await;
@@ -1202,7 +1272,7 @@ mod tests {
     async fn test_job_summary_preserves_started_at_unit() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         let job_id = JobId::new();
         let started_at_unix = SystemTime::now()
@@ -1245,7 +1315,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a long-running job
         let job_id = manager.spawn_job("sleep 60", None, 120).await.unwrap();
@@ -1274,7 +1344,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a job
         let job_id = manager.spawn_job("sleep 60", None, 120).await.unwrap();
@@ -1302,7 +1372,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a simple job
         let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
@@ -1327,7 +1397,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         let job_id = manager
             .spawn_job("echo 'test output'", None, 30)
@@ -1361,7 +1431,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Command that exits with error
         let job_id = manager.spawn_job("exit 1", None, 30).await.unwrap();
@@ -1390,7 +1460,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Job that will timeout
         let job_id = manager.spawn_job("sleep 30", None, 1).await.unwrap();
@@ -1418,7 +1488,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         let job_id = manager.spawn_job("sleep 60", None, 120).await.unwrap();
 
@@ -1452,7 +1522,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<Value>(10);
 
-        let manager = JobManager::new(config).with_event_sender(tx);
+        let manager = JobManager::new_local(config).with_event_sender(tx);
 
         // Spawn a quick job
         let _job_id = manager.spawn_job("echo done", None, 30).await.unwrap();
@@ -1480,7 +1550,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<Value>(10);
 
-        let manager = JobManager::new(config).with_event_sender(tx);
+        let manager = JobManager::new_local(config).with_event_sender(tx);
 
         let job_id = manager
             .spawn_job("echo 'hello world'", None, 30)
@@ -1517,7 +1587,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn multiple long-running jobs concurrently
         let start = Instant::now();
@@ -1561,7 +1631,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a job that sleeps longer than the timeout
         let job_id = manager.spawn_job("sleep 10", None, 1).await.unwrap();
@@ -1598,7 +1668,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a long-running job
         let job_id = manager.spawn_job("sleep 60", None, 120).await.unwrap();
@@ -1647,7 +1717,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
 
         // Spawn 10 jobs concurrently using tokio::join
         let mut handles = Vec::new();
@@ -1702,7 +1772,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn and wait for a job to complete
         let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
@@ -1733,7 +1803,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         assert_eq!(manager.job_count().await, 0);
 
@@ -1758,7 +1828,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Initially no completed jobs
         assert_eq!(manager.completed_job_count().await, 0);
@@ -1786,7 +1856,7 @@ mod tests {
         config.max_completed_jobs = 3;
         config.completed_job_ttl_secs = 3600; // Long TTL so we test count-based cleanup
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn 5 jobs and wait for them to complete
         for i in 0..5 {
@@ -1824,7 +1894,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_nonexistent_job() {
         let config = ShellConfig::default();
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         let fake_id = JobId::from_string("job_nonexistent");
         let removed = manager.remove_job(&fake_id).await;
@@ -1845,7 +1915,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Command that outputs various multi-byte UTF-8 characters:
         // - Chinese: 世界 (2 chars, 6 bytes)
@@ -1890,7 +1960,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a long-running process
         let job_id = manager.spawn_job("sleep 60", None, 120).await.unwrap();
@@ -1940,7 +2010,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a quick command that outputs text
         let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
@@ -2073,7 +2143,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
 
         // Spawn a long-running job
         let job_id = manager.spawn_job("sleep 30", None, 60).await.unwrap();
@@ -2158,7 +2228,7 @@ mod tests {
         config.max_completed_jobs = 2;
         config.completed_job_ttl_secs = 0; // Immediate expiry for testing
 
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
 
         // Spawn and complete several jobs
         for i in 0..5 {
@@ -2223,7 +2293,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_context_job_not_found() {
         let config = ShellConfig::default();
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Try to cancel a non-existent job
         let fake_id = JobId::from_string("job_nonexistent_12345");
@@ -2247,7 +2317,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn and wait for job to complete
         let job_id = manager.spawn_job("echo done", None, 30).await.unwrap();
@@ -2302,7 +2372,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Initially no running jobs
         assert_eq!(manager.running_job_count().await, 0);
@@ -2329,7 +2399,7 @@ mod tests {
         config.shell = "sh".to_string();
         config.max_concurrent_processes = 2; // Set a low limit for testing
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn up to the limit
         let job1 = manager.spawn_job("sleep 60", None, 120).await.unwrap();
@@ -2362,7 +2432,7 @@ mod tests {
         config.shell = "sh".to_string();
         config.max_concurrent_processes = 0; // Unlimited
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Should be able to spawn many jobs
         let mut jobs = Vec::new();
@@ -2392,7 +2462,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         // Spawn a quick job
         let job_id = manager.spawn_job("echo hello", None, 30).await.unwrap();
@@ -2453,7 +2523,7 @@ mod tests {
         config.shell = "sh".to_string();
         config.max_concurrent_processes = 2; // Low limit to make race easier to trigger
 
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
 
         // Track concurrent active slots and max observed
         let active_slots = Arc::new(AtomicUsize::new(0));
@@ -2547,7 +2617,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.max_concurrent_processes = 1;
 
-        let manager = JobManager::new(config);
+        let manager = JobManager::new_local(config);
 
         let _guard = manager
             .acquire_sync_slot()
@@ -2577,7 +2647,7 @@ mod tests {
             config.shell = "sh".to_string();
             config.max_concurrent_processes = 2;
 
-            let manager = Arc::new(JobManager::new(config));
+            let manager = Arc::new(JobManager::new_local(config));
             let max_observed = Arc::new(AtomicUsize::new(0));
             let active_slots = Arc::new(AtomicUsize::new(0));
 

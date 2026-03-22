@@ -223,6 +223,7 @@ pub struct InjectSystemContextResult {
 // ---------------------------------------------------------------------------
 
 /// Handle `session/create`.
+#[allow(deprecated)]
 pub async fn handle_create(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -489,6 +490,7 @@ async fn await_comms_runtime_ready(
 }
 
 /// Handle `session/list`.
+#[allow(deprecated)]
 pub async fn handle_list(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -540,6 +542,7 @@ pub async fn handle_list(
 }
 
 /// Handle `session/read`.
+#[allow(deprecated)]
 pub async fn handle_read(
     id: Option<RpcId>,
     params: Option<&RawValue>,

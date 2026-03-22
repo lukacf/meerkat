@@ -128,6 +128,7 @@ impl TurnOverrides {
 }
 
 /// Handle `turn/start`.
+#[allow(deprecated)]
 pub async fn handle_start(
     id: Option<RpcId>,
     params: Option<&RawValue>,

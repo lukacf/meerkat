@@ -535,6 +535,9 @@ fn err_session(e: meerkat_core::SessionError) -> JsValue {
         }
         meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
         meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
+        meerkat_core::SessionError::IncompatibleFormat { reason } => {
+            err_js("SESSION_INCOMPATIBLE_FORMAT", &reason)
+        }
         meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
     }
 }

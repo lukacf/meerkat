@@ -38,6 +38,9 @@ sse-stream = "0.2"
 meerkat-machine-kernels = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 
+[features]
+test-support = []
+
 [package.metadata.cargo-machete]
 ignored = ["serde"]  # proc macro (derive)
 

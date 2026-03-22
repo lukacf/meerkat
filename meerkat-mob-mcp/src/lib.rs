@@ -2388,6 +2388,7 @@ mod tests {
                 ..SessionTooling::default()
             },
             host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -2420,6 +2421,7 @@ mod tests {
                 ..SessionTooling::default()
             },
             host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -2457,6 +2459,7 @@ mod tests {
                 ..SessionTooling::default()
             },
             host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()

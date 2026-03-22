@@ -153,6 +153,7 @@ mod tests {
             header: make_header_with_supersession(None),
             event_type: "webhook".into(),
             payload: serde_json::json!({}),
+            blocks: None,
         });
         assert!(is_coalescing_eligible(&input));
     }
@@ -200,11 +201,13 @@ mod tests {
             header: make_header_with_supersession(Some("status")),
             event_type: "status_update".into(),
             payload: serde_json::json!({"v": 1}),
+            blocks: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
             header: make_header_with_supersession(Some("status")),
             event_type: "status_update".into(),
             payload: serde_json::json!({"v": 2}),
+            blocks: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         assert!(matches!(result, CoalescingResult::Supersedes { .. }));
@@ -217,11 +220,13 @@ mod tests {
             header: make_header_with_supersession(Some("status-a")),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
+            blocks: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
             header: make_header_with_supersession(Some("status-b")),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
+            blocks: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         assert!(matches!(result, CoalescingResult::Standalone));
@@ -234,11 +239,13 @@ mod tests {
             header: make_header_with_supersession(None),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
+            blocks: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
             header: make_header_with_supersession(None),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
+            blocks: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         assert!(matches!(result, CoalescingResult::Standalone));
@@ -251,6 +258,7 @@ mod tests {
             header: make_header_with_supersession(Some("same-key")),
             event_type: "type-a".into(),
             payload: serde_json::json!({}),
+            blocks: None,
         });
         // Different kind (Prompt vs ExternalEvent) but same supersession key
         let input2 = Input::Prompt(PromptInput {
@@ -308,6 +316,7 @@ mod tests {
                     header: make_header_with_supersession(None),
                     event_type: "test".into(),
                     payload: serde_json::json!({}),
+                    blocks: None,
                 })
             })
             .collect();

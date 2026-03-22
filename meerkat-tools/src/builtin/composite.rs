@@ -12,6 +12,8 @@ use meerkat_core::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use serde_json::Value;
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,6 +62,7 @@ impl CompositeDispatcher {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
         _image_tool_results: bool,
+        ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let shell_session_id = session_id.clone();
@@ -94,13 +97,15 @@ impl CompositeDispatcher {
         // Add shell tools if enabled
         let job_manager = if let Some(cfg) = shell_config {
             if cfg.enabled {
-                let mut manager = JobManager::new(cfg.clone());
-                if let Some(session_id) = shell_session_id
+                let owner_session_id = shell_session_id
                     .as_deref()
                     .and_then(|id| meerkat_core::types::SessionId::parse(id).ok())
-                {
-                    manager = manager.with_owner_session_id(session_id);
-                }
+                    .unwrap_or_else(meerkat_core::types::SessionId::new);
+                let manager = if let Some(registry) = ops_registry {
+                    JobManager::new_canonical(cfg.clone(), registry, owner_session_id)
+                } else {
+                    JobManager::new_foreground(cfg.clone())
+                };
                 let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
                     ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
@@ -457,6 +462,7 @@ mod tests {
             Some(external),
             None,
             true,
+            None,
         )
         .expect("composite dispatcher should build");
 
@@ -483,6 +489,7 @@ mod tests {
                 None,
                 None,
                 true,
+                None,
             )
             .expect("composite dispatcher should build"),
         );
@@ -537,6 +544,7 @@ mod tests {
                 None,
                 None,
                 true,
+                None,
             )
             .expect("composite dispatcher should build"),
         );
@@ -562,6 +570,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         )
         .expect("composite dispatcher should build");
 
@@ -596,6 +605,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         )
         .expect("composite dispatcher should build");
 
@@ -647,6 +657,7 @@ mod tests {
                 None,
                 None,
                 image_tool_results,
+                None,
             )
             .expect("composite dispatcher should build");
 

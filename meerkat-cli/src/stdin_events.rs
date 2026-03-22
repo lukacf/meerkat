@@ -41,13 +41,11 @@ fn make_stdin_external_event_input(body: String) -> meerkat_runtime::Input {
             correlation_id: None,
         },
         event_type: "stdin".to_string(),
-        // Preserve structured JSON: if the body is valid JSON, embed the parsed
-        // value directly so downstream consumers see the original object/array
-        // instead of escaped JSON text.
-        payload: match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(parsed) => serde_json::json!({ "body": parsed }),
-            Err(_) => serde_json::json!({ "body": body }),
-        },
+        // Preserve the body as literal text. Do NOT reparse valid JSON into
+        // structured payload — text-mode stdin lines should remain literal
+        // through the pipeline. The runtime renders payload["text"] for LLM.
+        payload: serde_json::json!({ "text": body }),
+        blocks: None,
     })
 }
 
@@ -146,7 +144,7 @@ mod tests {
             panic!("expected external event input");
         };
         assert_eq!(event.event_type, "stdin");
-        assert_eq!(event.payload["body"], "hello");
+        assert_eq!(event.payload["text"], "hello");
         assert!(matches!(
             event.header.source,
             meerkat_runtime::InputOrigin::External { ref source_name } if source_name == "stdin"

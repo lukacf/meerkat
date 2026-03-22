@@ -59,7 +59,7 @@ nix = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini"]
-integration-real-tests = []
+integration-real-tests = ["mcp", "meerkat-mcp/test-support"]
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic"]

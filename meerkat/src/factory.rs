@@ -48,10 +48,13 @@ use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
 use meerkat_store::{SessionStore, StoreAdapter};
+
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::BuiltinDispatcherConfig;
 use meerkat_tools::CompositeDispatcherError;
 use meerkat_tools::EmptyToolDispatcher;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_tools::RuntimeOpsLifecycleRegistry;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::FileTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
@@ -163,13 +166,22 @@ pub fn encode_llm_client_override_for_service(
 ///
 /// Accepts the current typed wrapper and the legacy `Arc<dyn LlmClient>` payload
 /// to preserve compatibility with older callers.
+///
+/// Returns `Err` if the value is present but cannot be downcast to a known type —
+/// this indicates a malformed override that must not be silently ignored.
 pub fn decode_llm_client_override_from_service(
     value: &Arc<dyn std::any::Any + Send + Sync>,
-) -> Option<Arc<dyn LlmClient>> {
+) -> Result<Arc<dyn LlmClient>, BuildAgentError> {
     if let Some(typed) = value.as_ref().downcast_ref::<ErasedLlmClientOverride>() {
-        return Some(typed.0.clone());
+        return Ok(typed.0.clone());
     }
-    value.as_ref().downcast_ref::<Arc<dyn LlmClient>>().cloned()
+    if let Some(legacy) = value.as_ref().downcast_ref::<Arc<dyn LlmClient>>() {
+        return Ok(legacy.clone());
+    }
+    Err(BuildAgentError::MalformedOverride {
+        field: "llm_client_override".into(),
+        detail: "value is not a recognized LlmClient wrapper type".into(),
+    })
 }
 
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
@@ -190,6 +202,8 @@ pub struct AgentBuildConfig {
     pub hooks_override: HookRunOverrides,
     /// Whether to enable comms host mode.
     pub host_mode: bool,
+    /// Which layer owns the background host-mode drain lifecycle.
+    pub host_mode_owner: meerkat_core::service::HostModeOwner,
     /// Name for the comms participant (required when `host_mode` is `true`).
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (flows to `InprocRegistry` and `peers()` output).
@@ -275,6 +289,11 @@ pub struct AgentBuildConfig {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Optional session checkpointer for host-mode persistence.
     pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
+    /// Canonical ops lifecycle registry for this session. When provided,
+    /// background shell tools use this registry for operation tracking
+    /// instead of a local throwaway registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -345,6 +364,7 @@ impl AgentBuildConfig {
             structured_output_retries: 2,
             hooks_override: HookRunOverrides::default(),
             host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: None,
             peer_meta: None,
             resume_session: None,
@@ -373,27 +393,38 @@ impl AgentBuildConfig {
             wait_for_mcp: false,
             shell_env: None,
             checkpointer: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            ops_registry: None,
         }
     }
 
     /// Build config from a service `CreateSessionRequest` + event channel.
+    ///
+    /// Returns `Err` if embedded build options contain malformed overrides.
     pub fn from_create_session_request(
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Self {
+    ) -> Result<Self, BuildAgentError> {
         let mut build = Self::new(req.model.clone());
         build.system_prompt = req.system_prompt.clone();
         build.max_tokens = req.max_tokens;
         build.host_mode = req.host_mode;
+        build.host_mode_owner = req.host_mode_owner;
         if let Some(options) = &req.build {
-            build.apply_session_build_options(options);
+            build.apply_session_build_options(options)?;
         }
         build.event_tx = Some(event_tx);
-        build
+        Ok(build)
     }
 
     /// Merge `SessionBuildOptions` into this build config.
-    pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
+    ///
+    /// Returns `Err` if any override field fails to decode from its transport
+    /// representation — malformed overrides are not silently dropped.
+    pub fn apply_session_build_options(
+        &mut self,
+        build: &SessionBuildOptions,
+    ) -> Result<(), BuildAgentError> {
         self.provider = build.provider;
         self.output_schema = build.output_schema.clone();
         self.structured_output_retries = build.structured_output_retries;
@@ -407,7 +438,8 @@ impl AgentBuildConfig {
         self.llm_client_override = build
             .llm_client_override
             .as_ref()
-            .and_then(decode_llm_client_override_from_service);
+            .map(decode_llm_client_override_from_service)
+            .transpose()?;
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
@@ -424,6 +456,7 @@ impl AgentBuildConfig {
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
+        Ok(())
     }
 
     /// Convert build options to the service transport representation.
@@ -485,6 +518,10 @@ pub enum BuildAgentError {
     #[error("Comms runtime failed: {0}")]
     #[cfg(feature = "comms")]
     Comms(String),
+
+    /// A session build override could not be decoded from the transport representation.
+    #[error("Malformed override for '{field}': {detail}")]
+    MalformedOverride { field: String, detail: String },
 
     /// Configuration error.
     #[error("Config error: {0}")]
@@ -867,6 +904,7 @@ impl AgentFactory {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
         image_tool_results: bool,
+        ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
         CompositeDispatcher::new(
             store,
@@ -876,6 +914,7 @@ impl AgentFactory {
             external,
             session_id,
             image_tool_results,
+            ops_registry,
         )
     }
 
@@ -927,6 +966,7 @@ impl AgentFactory {
             skill_engine,
             // Public API defaults to true (all tools visible).
             true,
+            None,
         )
         .await
     }
@@ -946,6 +986,7 @@ impl AgentFactory {
             Arc<meerkat_core::skills::SkillRuntime>,
         >,
         image_tool_results: bool,
+        #[cfg(not(target_arch = "wasm32"))] ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -975,6 +1016,7 @@ impl AgentFactory {
                 external,
                 session_id,
                 image_tool_results,
+                ops_registry,
             )
             .await?;
 
@@ -1205,6 +1247,7 @@ impl AgentFactory {
                         skill_engine.clone(),
                         build_config.shell_env.take(),
                         image_tool_results,
+                        build_config.ops_registry,
                     )
                     .await?
                 }
@@ -1708,6 +1751,7 @@ impl AgentFactory {
                 active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,
+            host_mode_owner: build_config.host_mode_owner,
             comms_name: build_config.comms_name,
             peer_meta: build_config.peer_meta,
             realm_id: build_config.realm_id,
@@ -1739,6 +1783,7 @@ impl AgentFactory {
         skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
         shell_env: Option<std::collections::HashMap<String, String>>,
         image_tool_results: bool,
+        ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -1797,6 +1842,7 @@ impl AgentFactory {
                 None,
                 skill_engine,
                 image_tool_results,
+                ops_registry,
             )
             .await?;
 

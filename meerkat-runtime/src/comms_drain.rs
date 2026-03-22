@@ -18,10 +18,9 @@ use meerkat_core::types::SessionId;
 
 use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 
-use crate::comms_bridge::interaction_to_runtime_input;
+use crate::comms_bridge::{interaction_to_runtime_input, interaction_to_terminal_peer_response};
 use crate::completion::CompletionOutcome;
 use crate::identifiers::LogicalRuntimeId;
-use crate::input::{ContinuationInput, Input};
 use crate::service_ext::SessionServiceRuntimeExt as _;
 use crate::session_adapter::RuntimeSessionAdapter;
 use crate::tokio::sync::mpsc;
@@ -174,7 +173,17 @@ pub fn spawn_comms_drain(
                         // so the LLM knows when peers connect/disconnect. The
                         // inner agent loop's drain_comms_inbox is suppressed in
                         // host mode, so comms_drain owns this injection.
-                        let input = interaction_to_runtime_input(&ci.interaction, &runtime_id);
+                        let input = match interaction_to_runtime_input(
+                            &ci.interaction,
+                            &runtime_id,
+                            ci.class,
+                        ) {
+                            Ok(input) => input,
+                            Err(err) => {
+                                tracing::error!(error = %err, "comms_drain: bridge error");
+                                continue;
+                            }
+                        };
                         if let Err(err) = adapter.accept_input(&session_id, input).await {
                             tracing::warn!(
                                 error = %err,
@@ -201,35 +210,33 @@ pub fn spawn_comms_drain(
                         };
 
                         if is_terminal {
-                            // Terminal response — first inject the response
-                            // content so the LLM can reason over the peer's
-                            // result, then inject a continuation to advance
-                            // the runtime.
-                            let content_input =
-                                interaction_to_runtime_input(&ci.interaction, &runtime_id);
-                            if let Err(err) = adapter.accept_input(&session_id, content_input).await
-                            {
-                                tracing::warn!(
-                                    error = %err,
-                                    "comms_drain: failed to inject terminal response content"
-                                );
-                            }
-                            let continuation = Input::Continuation(
-                                ContinuationInput::terminal_peer_response_for_request(
-                                    "terminal peer response injected into session state",
-                                    request_id,
-                                ),
+                            // Terminal response — single TerminalPeerResponse
+                            // input carries both content and continuation
+                            // semantics. No two-input bundle needed.
+                            let input = interaction_to_terminal_peer_response(
+                                &ci.interaction,
+                                &runtime_id,
+                                request_id,
                             );
-                            if let Err(err) = adapter.accept_input(&session_id, continuation).await
-                            {
+                            if let Err(err) = adapter.accept_input(&session_id, input).await {
                                 tracing::warn!(
                                     error = %err,
-                                    "comms_drain: failed to inject terminal response continuation"
+                                    "comms_drain: failed to inject terminal peer response"
                                 );
                             }
                         } else {
                             // Progress response — route as peer input for checkpoint-style handling.
-                            let input = interaction_to_runtime_input(&ci.interaction, &runtime_id);
+                            let input = match interaction_to_runtime_input(
+                                &ci.interaction,
+                                &runtime_id,
+                                ci.class,
+                            ) {
+                                Ok(input) => input,
+                                Err(err) => {
+                                    tracing::error!(error = %err, "comms_drain: bridge error");
+                                    continue;
+                                }
+                            };
                             if let Err(err) = adapter.accept_input(&session_id, input).await {
                                 tracing::warn!(
                                     error = %err,
@@ -245,7 +252,17 @@ pub fn spawn_comms_drain(
                         // Route through the adapter as a peer input.
                         let interaction_id = ci.interaction.id;
                         let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
-                        let input = interaction_to_runtime_input(&ci.interaction, &runtime_id);
+                        let input = match interaction_to_runtime_input(
+                            &ci.interaction,
+                            &runtime_id,
+                            ci.class,
+                        ) {
+                            Ok(input) => input,
+                            Err(err) => {
+                                tracing::error!(error = %err, "comms_drain: bridge error");
+                                continue;
+                            }
+                        };
                         let result = adapter
                             .accept_input_with_completion(&session_id, input)
                             .await;

@@ -116,6 +116,14 @@ pub struct DestroyReport {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeDriver: Send + Sync {
+    /// Validate that an input can be admitted without mutating driver state.
+    ///
+    /// Checks runtime phase and input durability constraints. Returns `Ok(())`
+    /// if admission would proceed, or an error/rejection reason if not.
+    /// This is used by atomic bundle admission to pre-validate all inputs
+    /// before committing any of them.
+    fn validate_pre_admission(&self, input: &Input) -> Result<(), RuntimeDriverError>;
+
     /// Accept an input into the runtime.
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError>;
 

@@ -746,6 +746,7 @@ impl SessionRuntime {
             },
             event_type: source_name,
             payload,
+            blocks: None,
         });
 
         self.runtime_adapter
@@ -2015,6 +2016,7 @@ impl SessionRuntime {
     }
 
     /// List all active sessions as canonical wire summaries, including pending sessions.
+    #[allow(deprecated)]
     pub async fn list_sessions_rich(
         &self,
         query: SessionQuery,
@@ -2057,6 +2059,7 @@ impl SessionRuntime {
     }
 
     /// Read a session as a canonical wire info object, checking pending and materialized.
+    #[allow(deprecated)]
     pub async fn read_session_rich(
         &self,
         session_id: &SessionId,
@@ -2115,6 +2118,7 @@ impl SessionRuntime {
     }
 
     /// Read a session transcript as canonical wire history, including pending sessions.
+    #[allow(deprecated)]
     pub async fn read_session_history_rich(
         &self,
         session_id: &SessionId,

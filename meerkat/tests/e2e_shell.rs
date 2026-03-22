@@ -6,6 +6,8 @@
 //!
 //! Tests use `/bin/sh` for portability and hermetic execution.
 
+use meerkat::SessionId;
+use meerkat_tools::RuntimeOpsLifecycleRegistry;
 use meerkat_tools::builtin::BuiltinTool;
 use meerkat_tools::builtin::shell::{
     JobId, JobManager, JobStatus, ShellConfig, ShellError, ShellOutput, ShellTool, ShellToolSet,
@@ -17,6 +19,7 @@ use nix::sys::signal::kill;
 #[cfg(unix)]
 use nix::unistd::Pid;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -40,6 +43,17 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         security_patterns: vec![],
         env_vars: std::collections::HashMap::new(),
     }
+}
+
+/// Create a background-capable JobManager for tests using a canonical constructor
+/// with a throwaway registry. This is the correct way to get `spawn_job()` access
+/// in integration tests — `new_local()` is `#[cfg(test)]` on meerkat-tools only.
+fn create_test_job_manager(config: ShellConfig) -> JobManager {
+    JobManager::new_canonical(
+        config,
+        Arc::new(RuntimeOpsLifecycleRegistry::new()),
+        SessionId::new(),
+    )
 }
 
 // ============================================================================
@@ -170,7 +184,7 @@ async fn integration_real_shell_stderr() {
 async fn integration_real_shell_background_spawn() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn a background job
     let job_id = job_manager
@@ -234,7 +248,7 @@ async fn integration_real_shell_background_completion() {
 async fn integration_real_shell_background_cancel() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn a long-running job
     let job_id = job_manager
@@ -273,7 +287,7 @@ async fn integration_real_shell_background_cancel() {
 async fn integration_real_shell_multiple_jobs() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn multiple jobs
     let id1 = job_manager
@@ -409,7 +423,7 @@ async fn integration_real_shell_job_not_found() {
     let temp_dir = TempDir::new().unwrap();
     // Use sh for this test - doesn't need nu-specific features
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Try to get status of non-existent job
     let fake_id = JobId::from_string("job_nonexistent123");
@@ -538,7 +552,7 @@ async fn integration_real_shell_basic_sh_execution() {
 async fn integration_real_job_manager_basic_sh() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn a quick job
     let job_id = job_manager
@@ -603,7 +617,7 @@ async fn integration_real_regression_async_execution_nonblocking() {
 
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     let start = Instant::now();
 
@@ -651,7 +665,7 @@ async fn integration_real_regression_async_execution_nonblocking() {
 async fn integration_real_regression_timeout_enforced() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn a job that sleeps longer than the timeout
     let job_id = job_manager
@@ -692,7 +706,7 @@ async fn integration_real_regression_timeout_enforced() {
 async fn integration_real_regression_kill_terminates_process() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn a long-running job
     let job_id = job_manager
@@ -848,11 +862,9 @@ async fn integration_real_regression_truncation_keeps_tail() {
 #[tokio::test]
 #[ignore = "integration-real: spawns shell processes"]
 async fn integration_real_regression_concurrent_job_spawning() {
-    use std::sync::Arc;
-
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = Arc::new(JobManager::new(config));
+    let job_manager = Arc::new(create_test_job_manager(config));
 
     // Spawn 20 jobs concurrently
     let mut handles = Vec::new();
@@ -911,7 +923,7 @@ async fn integration_real_regression_concurrent_job_spawning() {
 async fn integration_real_regression_job_cleanup_prevents_leak() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
-    let job_manager = JobManager::new(config);
+    let job_manager = create_test_job_manager(config);
 
     // Spawn many jobs that complete quickly
     let mut all_ids = Vec::new();

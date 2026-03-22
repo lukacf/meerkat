@@ -172,9 +172,15 @@ pub struct ShellTool {
 }
 
 impl ShellTool {
-    /// Create a new ShellTool with the given configuration
+    /// Create a new ShellTool with a foreground-only job manager.
+    ///
+    /// Background `spawn_job()` is NOT available on this instance.
+    /// For background-capable shell, use [`with_job_manager`](Self::with_job_manager)
+    /// with a canonically-bound [`JobManager`](super::job_manager::JobManager).
     pub fn new(config: ShellConfig) -> Self {
-        let job_manager = Arc::new(super::job_manager::JobManager::new(config.clone()));
+        let job_manager = Arc::new(super::job_manager::JobManager::new_foreground(
+            config.clone(),
+        ));
         Self {
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
@@ -865,7 +871,8 @@ mod tests {
     async fn integration_real_shell_tool_call_background_success() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let tool = ShellTool::new(config);
+        let job_manager = Arc::new(crate::builtin::shell::JobManager::new_local(config.clone()));
+        let tool = ShellTool::with_job_manager(config, job_manager);
 
         // Try background execution
         let result = tool
@@ -886,7 +893,8 @@ mod tests {
     async fn background_shell_output_produces_detached_async_op() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let tool = ShellTool::new(config);
+        let job_manager = Arc::new(crate::builtin::shell::JobManager::new_local(config.clone()));
+        let tool = ShellTool::with_job_manager(config, job_manager);
 
         let output = tool
             .call(json!({

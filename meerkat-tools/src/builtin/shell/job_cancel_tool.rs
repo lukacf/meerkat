@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn test_shell_job_cancel_tool_struct() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let _tool = ShellJobCancelTool::new(Arc::clone(&manager));
 
         // Tool should hold Arc<JobManager>
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_shell_job_cancel_tool_name() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let tool = ShellJobCancelTool::new(manager);
 
         assert_eq!(tool.name(), "shell_job_cancel");
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn test_shell_job_cancel_tool_schema() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let tool = ShellJobCancelTool::new(manager);
 
         let def = tool.def();
@@ -151,7 +151,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let tool = ShellJobCancelTool::new(Arc::clone(&manager));
 
         // Spawn a long-running job
@@ -179,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_job_cancel_tool_not_found() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let tool = ShellJobCancelTool::new(manager);
 
         // Try to cancel non-existent job
@@ -204,7 +204,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let tool = ShellJobCancelTool::new(Arc::clone(&manager));
 
         // Spawn a quick job that will complete fast
@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_job_cancel_tool_invalid_args() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new(config));
+        let manager = Arc::new(JobManager::new_local(config));
         let tool = ShellJobCancelTool::new(manager);
 
         // Missing job_id

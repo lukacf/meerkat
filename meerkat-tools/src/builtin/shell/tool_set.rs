@@ -38,7 +38,7 @@ impl ShellToolSet {
     ///
     /// All tools share the same [`JobManager`] instance.
     pub fn new(config: ShellConfig) -> Self {
-        let job_manager = Arc::new(JobManager::new(config.clone()));
+        let job_manager = Arc::new(JobManager::new_foreground(config.clone()));
 
         Self {
             shell: ShellTool::with_job_manager(config, Arc::clone(&job_manager)),
@@ -49,15 +49,21 @@ impl ShellToolSet {
         }
     }
 
-    /// Create a new ShellToolSet with an event channel
+    /// Create a new ShellToolSet with a foreground-only manager and an event channel.
     ///
-    /// This method creates an mpsc channel and wires the sender to the JobManager.
-    /// Returns the ShellToolSet and the receiver for shell job completion events.
+    /// This method creates an mpsc channel and wires the sender to a
+    /// foreground-only [`JobManager`]. Background job spawning (`spawn_job`) is
+    /// **not** available on this instance — use [`CompositeDispatcher`] with a
+    /// canonical registry for background-capable shell execution.
     ///
-    /// Use this when you need to receive background job completion events.
+    /// The event channel can still receive notifications from synchronous
+    /// execution events emitted by the manager.
+    ///
+    /// [`CompositeDispatcher`]: crate::builtin::CompositeDispatcher
     pub fn with_event_channel(config: ShellConfig) -> (Self, mpsc::Receiver<Value>) {
         let (tx, rx) = mpsc::channel(32);
-        let job_manager = Arc::new(JobManager::new(config.clone()).with_event_sender(tx));
+        let job_manager =
+            Arc::new(JobManager::new_foreground(config.clone()).with_event_sender(tx));
 
         let tool_set = Self {
             shell: ShellTool::with_job_manager(config, Arc::clone(&job_manager)),

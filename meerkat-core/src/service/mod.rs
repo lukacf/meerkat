@@ -68,6 +68,10 @@ pub enum SessionError {
     /// The requested operation is not supported by this session service.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// Persisted session data is from an incompatible format version.
+    #[error("incompatible session format: {reason}")]
+    IncompatibleFormat { reason: String },
 }
 
 impl SessionError {
@@ -81,6 +85,7 @@ impl SessionError {
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
+            Self::IncompatibleFormat { .. } => "SESSION_INCOMPATIBLE_FORMAT",
             Self::Agent(_) => "AGENT_ERROR",
         }
     }
@@ -347,7 +352,8 @@ pub struct TurnToolOverlay {
 }
 
 /// Owner of the background host-mode comms drain lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HostModeOwner {
     /// SessionService owns host-mode draining directly.
     #[default]

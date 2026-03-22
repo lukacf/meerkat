@@ -938,6 +938,26 @@ impl EphemeralRuntimeDriver {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
+    fn validate_pre_admission(&self, input: &Input) -> Result<(), RuntimeDriverError> {
+        let control_phase = self.control.phase();
+        if !control_phase.can_accept_input() {
+            return Err(RuntimeDriverError::NotReady {
+                state: control_phase,
+            });
+        }
+        if let Err(e) = validate_durability(input) {
+            match e {
+                DurabilityError::DerivedForbidden { .. }
+                | DurabilityError::ExternalDerivedForbidden => {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
         let control_phase = self.control.phase();
         match control_phase.can_accept_input() {

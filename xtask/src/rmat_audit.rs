@@ -211,6 +211,13 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
     findings.extend(collect_protocol_feedback_constraint_findings(root, policy));
     findings.extend(collect_terminal_mapping_constraint_findings(root, policy));
 
+    // Contract-driven findings from ownership registry
+    findings.extend(collect_fallback_contract_findings(root, policy)?);
+    findings.extend(collect_projection_contract_findings(root)?);
+    findings.extend(collect_derived_field_findings(root)?);
+    findings.extend(collect_surface_conformance_findings(root, policy));
+    findings.extend(collect_atomic_bundle_findings(root));
+
     findings.sort_by(|a, b| a.key.cmp(&b.key));
     findings.dedup_by(|a, b| a.key == b.key);
     Ok(findings)
@@ -949,6 +956,309 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
     findings
 }
 
+/// Contract-driven audit: fallback policy violations.
+///
+/// For `HardError` boundaries, the declared function must not contain `warn!` followed
+/// by a fallback return pattern -- it should propagate the error instead.
+///
+/// For `TestOnlyLegacy` boundaries, the declared function should only be called from
+/// test modules or should be gated with `#[cfg(test)]`.
+fn collect_fallback_contract_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding>> {
+    let mut findings = Vec::new();
+
+    for rule in &policy.fallback_policy_rules {
+        let file_path = root.join(&rule.boundary_path);
+        let source = match fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        match rule.policy.as_str() {
+            "hard_error" => {
+                // For HardError boundaries, check that the function does not contain
+                // `warn!` or `tracing::warn!` followed by a default/fallback return.
+                if let Some(fn_body) = extract_fn_body(&source, &rule.symbol) {
+                    let has_warn = fn_body.contains("warn!") || fn_body.contains("tracing::warn!");
+                    let has_fallback_return = fn_body.contains("return")
+                        && (fn_body.contains("default()")
+                            || fn_body.contains("Default::default")
+                            || fn_body.contains("unwrap_or"));
+                    if has_warn && has_fallback_return {
+                        findings.push(error_finding(
+                            "FallbackPolicyViolation",
+                            &rule.boundary_path,
+                            &rule.symbol,
+                            format!(
+                                "boundary `{}::{}` has fallback_policy=hard_error but contains \
+                                 warn+fallback pattern; should propagate error via Result instead",
+                                rule.boundary_path, rule.symbol
+                            ),
+                            false,
+                        ));
+                    }
+                }
+            }
+            "test_only_legacy" => {
+                // For TestOnlyLegacy, check if the function is used outside test modules.
+                let repo_files = collect_repo_rs_files(root)?;
+                for file in &repo_files {
+                    let relative = file
+                        .strip_prefix(root)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if relative == rule.boundary_path {
+                        continue;
+                    }
+                    let file_source = match fs::read_to_string(file) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let call_pattern = format!(".{}(", rule.symbol);
+                    if file_source.contains(&call_pattern) {
+                        let in_test_module = is_call_in_test_context(&file_source, &call_pattern);
+                        if !in_test_module {
+                            findings.push(warn_finding(
+                                "FallbackPolicyViolation",
+                                &relative,
+                                &rule.symbol,
+                                format!(
+                                    "test_only_legacy function `{}` is called from non-test \
+                                     code in `{}`; migrate to the canonical API",
+                                    rule.symbol, relative
+                                ),
+                                false,
+                            ));
+                        }
+                    }
+                }
+            }
+            "observable_best_effort" => {
+                // For ObservableBestEffort, check that the function has observability
+                // (warn!/info!/tracing) at the fallback point.
+                if let Some(fn_body) = extract_fn_body(&source, &rule.symbol) {
+                    let has_observability = fn_body.contains("warn!")
+                        || fn_body.contains("info!")
+                        || fn_body.contains("tracing::");
+                    if !has_observability {
+                        findings.push(warn_finding(
+                            "FallbackPolicyViolation",
+                            &rule.boundary_path,
+                            &rule.symbol,
+                            format!(
+                                "boundary `{}::{}` has fallback_policy=observable_best_effort \
+                                 but contains no observability (warn!/info!/tracing) at \
+                                 fallback point",
+                                rule.boundary_path, rule.symbol
+                            ),
+                            false,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(findings)
+}
+
+/// Contract-driven audit: projection reclassification violations.
+///
+/// For each `ProjectionContractEntry` where `reclassification_forbidden: true`,
+/// check the sink files for raw string pattern matching that bypasses the typed
+/// canonical source.
+fn collect_projection_contract_findings(root: &Path) -> Result<Vec<Finding>> {
+    let entries = ownership_ledger::projection_contracts_snapshot();
+    let mut findings = Vec::new();
+
+    let reclassification_patterns = [
+        ".starts_with(",
+        ".ends_with(",
+        ".contains(\":",
+        "as_str() {",
+        ".as_str(),",
+        "kind_str",
+        "type_str",
+        "event_type ==",
+    ];
+
+    let repo_files = collect_repo_rs_files(root)?;
+
+    for entry in &entries {
+        if !entry.reclassification_forbidden {
+            continue;
+        }
+
+        for file in &repo_files {
+            let relative = file
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let source = match fs::read_to_string(file) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            if !source.contains(&entry.sink_type) {
+                continue;
+            }
+
+            if relative.contains("/src/generated/") || relative.starts_with("xtask/") {
+                continue;
+            }
+
+            for pattern in &reclassification_patterns {
+                if source.contains(pattern) {
+                    let canonical_nearby = entry
+                        .preserved_fields
+                        .iter()
+                        .any(|field| source.contains(field));
+                    if canonical_nearby {
+                        findings.push(warn_finding(
+                            "ProjectionReclassificationBypass",
+                            &relative,
+                            &entry.sink_type,
+                            format!(
+                                "file references sink type `{}` and contains raw string \
+                                 classification pattern `{}`; reclassification is forbidden \
+                                 -- consume the typed canonical source `{}` instead",
+                                entry.sink_type, pattern, entry.canonical_type
+                            ),
+                            false,
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+/// Contract-driven audit: dead field spread detection.
+///
+/// For each `DerivedFieldEntry` where `dead_field: true`, check that the field
+/// does not appear in any NEW code outside of its original declaration.
+fn collect_derived_field_findings(root: &Path) -> Result<Vec<Finding>> {
+    let entries = ownership_ledger::derived_fields_snapshot();
+    let mut findings = Vec::new();
+
+    let repo_files = collect_repo_rs_files(root)?;
+
+    for entry in &entries {
+        if !entry.dead_field {
+            continue;
+        }
+
+        let field_name = entry
+            .field_path
+            .rsplit("::")
+            .next()
+            .unwrap_or(&entry.field_path);
+
+        let declaring_type = entry
+            .field_path
+            .split("::")
+            .next()
+            .unwrap_or(&entry.field_path);
+
+        for file in &repo_files {
+            let relative = file
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            if relative.contains("/src/generated/") || relative.starts_with("xtask/") {
+                continue;
+            }
+
+            let source = match fs::read_to_string(file) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            if source.contains(&format!("struct {declaring_type}")) {
+                continue;
+            }
+
+            let construction_pattern = format!("{field_name}:");
+            let access_pattern = format!(".{field_name}");
+
+            let has_construction = source.lines().any(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with(&construction_pattern) && !trimmed.starts_with("//")
+            });
+            let has_access = source.contains(&access_pattern);
+
+            if has_construction || has_access {
+                findings.push(warn_finding(
+                    "DeadFieldSpread",
+                    &relative,
+                    &entry.field_path,
+                    format!(
+                        "dead field `{}` (always {}) is referenced in `{}`; \
+                         avoid spreading dead fields to new code",
+                        entry.field_path, entry.derivation_rule, relative
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+/// Extract the body of a function with the given name from source code.
+/// Returns `None` if the function is not found. Uses a simple brace-counting
+/// heuristic rather than full syn parsing for efficiency.
+fn extract_fn_body(source: &str, fn_name: &str) -> Option<String> {
+    let pattern = format!("fn {fn_name}");
+    let start = source.find(&pattern)?;
+    let rest = &source[start..];
+    let brace_start = rest.find('{')?;
+    let body_start = start + brace_start;
+
+    let mut depth = 0u32;
+    let mut end = body_start;
+    for (i, ch) in source[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = body_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(source[body_start..end].to_string())
+}
+
+/// Check if a call pattern appears exclusively within `#[cfg(test)]` or `mod tests` blocks.
+/// Returns `true` if ALL occurrences of the pattern are in test context.
+fn is_call_in_test_context(source: &str, call_pattern: &str) -> bool {
+    let mut in_test_region = false;
+    let mut all_in_test = true;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#[cfg(test)]" {
+            in_test_region = true;
+        }
+        if line.contains(call_pattern) && !trimmed.starts_with("//") && !in_test_region {
+            all_in_test = false;
+        }
+    }
+
+    all_in_test
+}
+
 fn error_finding(
     rule: &str,
     path: &str,
@@ -985,6 +1295,218 @@ fn warn_finding(
         message,
         suppressed,
     }
+}
+
+/// Validate surface family metadata integrity.
+///
+/// This checks that registry entries are well-formed: policy rules reference
+/// real families, IntentionalDivergence entries have reasons, and Open
+/// families have at least one Canonical surface.
+///
+/// This does NOT verify live code conformance across surfaces — the
+/// canonical_contract field is a description string, not a machine-readable
+/// schema. Cross-surface conformance verification requires a manifest-backed
+/// snapshot/diff system, which is a future mechanism.
+fn collect_surface_conformance_findings(_root: &Path, policy: &AuditPolicy) -> Vec<Finding> {
+    let families = ownership_ledger::surface_families_snapshot();
+    let mut findings = Vec::new();
+
+    // Cross-check: every rule in policy must reference a declared family
+    for rule in &policy.surface_conformance_rules {
+        let family_exists = families.iter().any(|f| f.family == rule.family);
+        if !family_exists {
+            findings.push(error_finding(
+                "SurfaceConformanceOrphanRule",
+                "<policy>",
+                &rule.family,
+                format!(
+                    "surface conformance rule references family `{}` which has no SurfaceFamilyEntry",
+                    rule.family
+                ),
+                false,
+            ));
+        }
+    }
+
+    // Validate family entries: IntentionalDivergence must have a reason,
+    // and every Open family must have at least one Canonical surface.
+    for family in &families {
+        if family.status == ownership_ledger::EntryStatus::Open {
+            let has_canonical = family
+                .surfaces
+                .iter()
+                .any(|s| s.conformance == ownership_ledger::SurfaceConformance::Canonical);
+            if !has_canonical {
+                findings.push(warn_finding(
+                    "SurfaceConformanceNoCanonical",
+                    "<surface-families>",
+                    &family.family,
+                    format!(
+                        "surface family `{}` has no Canonical surface — cannot verify conformance",
+                        family.family
+                    ),
+                    false,
+                ));
+            }
+
+            for member in &family.surfaces {
+                if member.conformance == ownership_ledger::SurfaceConformance::IntentionalDivergence
+                    && member
+                        .divergence_reason
+                        .as_ref()
+                        .map_or(true, |r| r.is_empty())
+                {
+                    findings.push(error_finding(
+                        "SurfaceConformanceMissingReason",
+                        "<surface-families>",
+                        &format!("{}::{}", family.family, member.surface),
+                        format!(
+                            "surface `{}` in family `{}` is IntentionalDivergence but has no reason",
+                            member.surface, family.family
+                        ),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+
+    findings
+}
+
+/// Verify that declared atomic bundles have canonical paths that exist.
+///
+/// For each AtomicBundleEntry, check that the declared canonical_path file
+/// exists and contains a function or type related to the bundle.
+/// Verify declared atomic bundles against live code.
+///
+/// For each bundle: reads the canonical path file, extracts the scope block
+/// identified by `scope_anchor`, and verifies every step's `anchor_pattern`
+/// appears inside that scope. This is manifest-driven — the patterns come
+/// from the registry, not hardcoded here.
+fn collect_atomic_bundle_findings(root: &Path) -> Vec<Finding> {
+    let bundles = ownership_ledger::atomic_bundles_snapshot();
+    let mut findings = Vec::new();
+
+    for bundle in &bundles {
+        if bundle.status != ownership_ledger::EntryStatus::Open {
+            continue;
+        }
+
+        // Metadata checks
+        if bundle.steps.len() < 2 {
+            findings.push(warn_finding(
+                "AtomicBundleTrivial",
+                &bundle.canonical_path,
+                &bundle.bundle_name,
+                format!(
+                    "atomic bundle `{}` has fewer than 2 steps",
+                    bundle.bundle_name
+                ),
+                false,
+            ));
+        }
+        if bundle.rollback_contract.trim().is_empty() {
+            findings.push(error_finding(
+                "AtomicBundleNoRollback",
+                &bundle.canonical_path,
+                &bundle.bundle_name,
+                format!(
+                    "atomic bundle `{}` has no rollback contract declared",
+                    bundle.bundle_name
+                ),
+                false,
+            ));
+        }
+
+        // Live code verification
+        let canonical_file = root.join(&bundle.canonical_path);
+        let source = match fs::read_to_string(&canonical_file) {
+            Ok(s) => s,
+            Err(_) => {
+                findings.push(error_finding(
+                    "AtomicBundleCanonicalPathMissing",
+                    &bundle.canonical_path,
+                    &bundle.bundle_name,
+                    format!(
+                        "atomic bundle `{}` declares canonical path `{}` which does not exist",
+                        bundle.bundle_name, bundle.canonical_path
+                    ),
+                    false,
+                ));
+                continue;
+            }
+        };
+
+        // Extract the scope block using brace-counting from the scope_anchor
+        let scope_block = if bundle.scope_anchor.is_empty() {
+            // No scope anchor — use entire file
+            source.clone()
+        } else {
+            match extract_scope_block(&source, &bundle.scope_anchor) {
+                Some(block) => block,
+                None => {
+                    findings.push(error_finding(
+                        "AtomicBundleScopeNotFound",
+                        &bundle.canonical_path,
+                        &bundle.bundle_name,
+                        format!(
+                            "atomic bundle `{}` scope anchor `{}` not found in `{}`",
+                            bundle.bundle_name, bundle.scope_anchor, bundle.canonical_path
+                        ),
+                        false,
+                    ));
+                    continue;
+                }
+            }
+        };
+
+        // Verify every step's anchor pattern appears inside the scope block
+        for step in &bundle.steps {
+            if !scope_block.contains(&step.anchor_pattern) {
+                findings.push(error_finding(
+                    "AtomicBundleStepMissing",
+                    &bundle.canonical_path,
+                    &format!("{}::{}", bundle.bundle_name, step.name),
+                    format!(
+                        "atomic bundle `{}` step `{}` anchor `{}` not found inside scope `{}`",
+                        bundle.bundle_name, step.name, step.anchor_pattern, bundle.scope_anchor
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
+
+    findings
+}
+
+/// Extract a brace-delimited block starting at the given anchor pattern.
+/// Returns the content between the opening `{` after the anchor and its
+/// matching closing `}`.
+fn extract_scope_block(source: &str, anchor: &str) -> Option<String> {
+    let anchor_pos = source.find(anchor)?;
+    let rest = &source[anchor_pos..];
+    let brace_start = rest.find('{')?;
+    let block_start = anchor_pos + brace_start;
+
+    let mut depth = 0u32;
+    let mut end = block_start;
+    for (i, ch) in source[block_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = block_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(source[block_start..end].to_string())
 }
 
 #[cfg(test)]

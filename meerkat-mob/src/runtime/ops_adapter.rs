@@ -8,13 +8,20 @@ use meerkat_core::ops_lifecycle::{
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct MobOpsAdapter {
     registry: Arc<RuntimeOpsLifecycleRegistry>,
 }
 
 impl MobOpsAdapter {
-    pub(crate) fn new() -> Self {
+    /// Production path: canonical registry is injected from the session/runtime.
+    pub(crate) fn new_canonical(registry: Arc<RuntimeOpsLifecycleRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Test-only constructor with a local registry.
+    #[cfg(test)]
+    pub(crate) fn new_local() -> Self {
         Self {
             registry: Arc::new(RuntimeOpsLifecycleRegistry::new()),
         }
@@ -312,7 +319,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "Phase 4 shared lifecycle suite"]
     async fn ops_registry_integration_red_ok_member_adapter_tracks_peer_ready_and_retire() {
-        let adapter = MobOpsAdapter::new();
+        let adapter = MobOpsAdapter::new_local();
         let session_id = SessionId::new();
         let member_ref = MemberRef::from_session_id(session_id.clone());
 

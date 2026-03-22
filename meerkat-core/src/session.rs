@@ -510,6 +510,7 @@ pub struct SessionMetadata {
     pub provider: Provider,
     pub tooling: SessionTooling,
     pub host_mode: bool,
+    pub host_mode_owner: crate::service::HostModeOwner,
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (populated when comms is enabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]

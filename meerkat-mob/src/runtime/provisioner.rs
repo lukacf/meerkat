@@ -98,7 +98,9 @@ impl SessionBackend {
         Self {
             session_service,
             runtime_adapter,
-            ops_adapter: Arc::new(super::ops_adapter::MobOpsAdapter::new()),
+            ops_adapter: Arc::new(super::ops_adapter::MobOpsAdapter::new_canonical(Arc::new(
+                meerkat_runtime::RuntimeOpsLifecycleRegistry::new(),
+            ))),
             runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }

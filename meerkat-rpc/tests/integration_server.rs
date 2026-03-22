@@ -162,7 +162,11 @@ async fn initialize_roundtrip() {
     let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
     assert!(method_names.contains(&"session/create"));
     assert!(method_names.contains(&"session/external_event"));
+    assert!(method_names.contains(&"session/inject_context"));
     assert!(method_names.contains(&"turn/start"));
+    assert!(method_names.contains(&"runtime/state"));
+    assert!(method_names.contains(&"runtime/accept"));
+    assert!(method_names.contains(&"input/state"));
     assert!(method_names.contains(&"config/get"));
     #[cfg(feature = "mcp")]
     {
@@ -175,6 +179,13 @@ async fn initialize_roundtrip() {
         assert!(!method_names.contains(&"mcp/add"));
         assert!(!method_names.contains(&"mcp/remove"));
         assert!(!method_names.contains(&"mcp/reload"));
+    }
+    #[cfg(feature = "mob")]
+    {
+        assert!(method_names.contains(&"mob/spawn_helper"));
+        assert!(method_names.contains(&"mob/fork_helper"));
+        assert!(method_names.contains(&"mob/force_cancel"));
+        assert!(method_names.contains(&"mob/member_status"));
     }
 
     // Close to trigger EOF

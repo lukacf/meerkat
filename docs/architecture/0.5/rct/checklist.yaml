@@ -36,7 +36,7 @@ phases:
   build_test_overrides:
     build_command: cargo test -p xtask -p meerkat-core -p meerkat-store -p meerkat-runtime
       -p meerkat-mcp -p meerkat-rpc -p meerkat-rest -p meerkat-mcp-server --lib --tests
-      --no-run && cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown
+      --no-run && cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --no-run
       --no-run
     smoke_commands:
     - cargo nextest run -p xtask --lib snake_case_handles_machine_names_and_existing_snake_case
@@ -64,7 +64,7 @@ phases:
   - cargo nextest run -p meerkat-rpc --test runtime_backed_ingress --run-ignored only
   - cargo nextest run -p meerkat-mcp-server --test runtime_backed_ingress --run-ignored
     only
-  - cargo test -p meerkat-web-runtime --test browser_contract --target wasm32-unknown-unknown
+  - cargo test -p meerkat-web-runtime --test browser_contract --target wasm32-unknown-unknown --no-run
     -- --ignored
   - cd sdks/web && npm test
   - cargo fmt --all --check
@@ -237,7 +237,7 @@ phases:
     - sdks/web/src/*
     - meerkat-web-runtime/tests/*
     verification_gate: browser boundary contract suite
-    real_entrypoint: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown
+    real_entrypoint: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --no-run
       -- --ignored && (cd sdks/web && npm test)
     deletion_checkpoint: direct-session browser owner assumptions are no longer implicit
   - id: TASK-009
@@ -289,7 +289,7 @@ phases:
   - cargo nextest run -p meerkat-rpc --test runtime_backed_ingress --run-ignored only
   - cargo nextest run -p meerkat-mcp-server --test runtime_backed_ingress --run-ignored
     only
-  - cargo test -p meerkat-web-runtime --test browser_contract --target wasm32-unknown-unknown
+  - cargo test -p meerkat-web-runtime --test browser_contract --target wasm32-unknown-unknown --no-run
     -- --ignored
   tasks:
   - id: TASK-010
@@ -445,7 +445,7 @@ phases:
     - sdks/typescript/tests/*
     - docs/architecture/0.5/rct/traceability.md
     verification_gate: red-ok browser/SDK/release suite
-    real_entrypoint: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown
+    real_entrypoint: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --no-run
       -- --ignored
     deletion_checkpoint: wrapper/docs/release gaps cannot disappear into the final
       phase
@@ -1289,7 +1289,7 @@ phases:
   verification_commands:
   - cargo nextest run -p meerkat-mcp-server --test runtime_backed_ingress --run-ignored
     only
-  - cargo test -p meerkat-web-runtime --test browser_contract --target wasm32-unknown-unknown
+  - cargo test -p meerkat-web-runtime --test browser_contract --target wasm32-unknown-unknown --no-run
     -- --ignored
   - pnpm --dir sdks/web test
   tasks:
@@ -1325,7 +1325,7 @@ phases:
     - sdks/web/src/runtime.ts
     - sdks/web/src/session.ts
     verification_gate: "browser bootstrap/session fa\xE7ade suite"
-    real_entrypoint: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown
+    real_entrypoint: cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --no-run
     deletion_checkpoint: authoritative direct-session registry is deleted
   - id: TASK-056
     spec_id: REQ-019
@@ -1378,7 +1378,7 @@ phases:
     verdicts: []
   build_test_overrides:
     build_command: cargo test -p meerkat-mcp-server -p meerkat-web-runtime --lib --tests
-      --no-run && cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown
+      --no-run && cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --no-run
       --no-run
     smoke_commands:
     - cargo nextest run -p meerkat-mcp-server --lib tools_list

@@ -29,12 +29,48 @@
       "name": "session/external_event"
     },
     {
+      "description": "Append runtime-backed system context to the next turn",
+      "name": "session/inject_context"
+    },
+    {
+      "description": "Open a standalone session event stream",
+      "name": "session/stream_open"
+    },
+    {
+      "description": "Close a standalone session event stream",
+      "name": "session/stream_close"
+    },
+    {
       "description": "Start a new turn on existing session",
       "name": "turn/start"
     },
     {
       "description": "Cancel in-flight turn",
       "name": "turn/interrupt"
+    },
+    {
+      "description": "Read runtime-backed ingress state",
+      "name": "runtime/state"
+    },
+    {
+      "description": "Admit external work directly into runtime ingress",
+      "name": "runtime/accept"
+    },
+    {
+      "description": "Retire runtime-backed ingress",
+      "name": "runtime/retire"
+    },
+    {
+      "description": "Reset runtime-backed ingress",
+      "name": "runtime/reset"
+    },
+    {
+      "description": "Read runtime input lifecycle state",
+      "name": "input/state"
+    },
+    {
+      "description": "List runtime input lifecycle records",
+      "name": "input/list"
     },
     {
       "description": "Get runtime capabilities",
@@ -56,6 +92,134 @@
     {
       "description": "Merge-patch config",
       "name": "config/patch"
+    },
+    {
+      "description": "List skills with provenance",
+      "name": "skills/list"
+    },
+    {
+      "description": "Inspect a skill's full content",
+      "name": "skills/inspect"
+    },
+    {
+      "description": "Register additional callable tools with the runtime",
+      "name": "tools/register"
+    },
+    {
+      "description": "List mob prefab templates",
+      "name": "mob/prefabs"
+    },
+    {
+      "description": "Create a mob from a prefab or definition",
+      "name": "mob/create"
+    },
+    {
+      "description": "List mobs",
+      "name": "mob/list"
+    },
+    {
+      "description": "Get mob status",
+      "name": "mob/status"
+    },
+    {
+      "description": "Stop, resume, complete, destroy, or reset a mob",
+      "name": "mob/lifecycle"
+    },
+    {
+      "description": "List mob members",
+      "name": "mob/members"
+    },
+    {
+      "description": "Spawn a member into a mob",
+      "name": "mob/spawn"
+    },
+    {
+      "description": "Spawn multiple members into a mob",
+      "name": "mob/spawn_many"
+    },
+    {
+      "description": "Retire a mob member",
+      "name": "mob/retire"
+    },
+    {
+      "description": "Respawn a mob member",
+      "name": "mob/respawn"
+    },
+    {
+      "description": "Wire two mob members for comms",
+      "name": "mob/wire"
+    },
+    {
+      "description": "Remove mob comms wiring",
+      "name": "mob/unwire"
+    },
+    {
+      "description": "Send work to a mob member",
+      "name": "mob/send"
+    },
+    {
+      "description": "Read mob events by cursor",
+      "name": "mob/events"
+    },
+    {
+      "description": "Stage system context for a member session",
+      "name": "mob/append_system_context"
+    },
+    {
+      "description": "List mob flows",
+      "name": "mob/flows"
+    },
+    {
+      "description": "Start a mob flow run",
+      "name": "mob/flow_run"
+    },
+    {
+      "description": "Get flow run status",
+      "name": "mob/flow_status"
+    },
+    {
+      "description": "Cancel a flow run",
+      "name": "mob/flow_cancel"
+    },
+    {
+      "description": "Spawn a helper member and wait for its result",
+      "name": "mob/spawn_helper"
+    },
+    {
+      "description": "Fork a helper from an existing member and wait for its result",
+      "name": "mob/fork_helper"
+    },
+    {
+      "description": "Force-cancel a member's active work",
+      "name": "mob/force_cancel"
+    },
+    {
+      "description": "Read canonical status for a specific member",
+      "name": "mob/member_status"
+    },
+    {
+      "description": "Compatibility mob tool inventory",
+      "name": "mob/tools"
+    },
+    {
+      "description": "Compatibility mob tool call",
+      "name": "mob/call"
+    },
+    {
+      "description": "Open mob or member event stream",
+      "name": "mob/stream_open"
+    },
+    {
+      "description": "Close mob or member event stream",
+      "name": "mob/stream_close"
+    },
+    {
+      "description": "Dispatch a comms command to a session",
+      "name": "comms/send"
+    },
+    {
+      "description": "List discoverable peers",
+      "name": "comms/peers"
     },
     {
       "description": "Stage live MCP server add for a session",

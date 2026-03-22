@@ -2244,6 +2244,10 @@ mod tests {
         #[cfg(feature = "mob")]
         {
             assert!(method_names.contains(&"mob/prefabs"));
+            assert!(method_names.contains(&"mob/spawn_helper"));
+            assert!(method_names.contains(&"mob/fork_helper"));
+            assert!(method_names.contains(&"mob/force_cancel"));
+            assert!(method_names.contains(&"mob/member_status"));
             assert!(method_names.contains(&"mob/tools"));
             assert!(method_names.contains(&"mob/call"));
             assert!(method_names.contains(&"mob/stream_open"));

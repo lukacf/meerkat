@@ -12,8 +12,8 @@ use crate::session_runtime::SessionRuntime;
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
 use meerkat_mob::{
-    FlowId, MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Prefab, RunId,
-    SpawnMemberSpec,
+    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobDefinition, MobId, MobRespawnError,
+    MobRuntimeMode, Prefab, RunId, SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -426,11 +426,35 @@ pub async fn handle_respawn(
         )
         .await
     {
+        Ok(receipt) => respawn_result_response(id, Ok(receipt)),
+        Err(err) => respawn_result_response(id, Err(err)),
+    }
+}
+
+fn respawn_result_response(
+    id: Option<RpcId>,
+    result: Result<MemberRespawnReceipt, MobRespawnError>,
+) -> RpcResponse {
+    match result {
         Ok(receipt) => RpcResponse::success(
             id,
             serde_json::json!({
                 "status": "completed",
                 "receipt": receipt,
+            }),
+        ),
+        Err(MobRespawnError::TopologyRestoreFailed {
+            receipt,
+            failed_peer_ids,
+        }) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "status": "topology_restore_failed",
+                "receipt": receipt,
+                "failed_peer_ids": failed_peer_ids
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
             }),
         ),
         Err(err) => invalid_params(id, err.to_string()),
@@ -961,6 +985,7 @@ pub async fn handle_member_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_core::types::SessionId;
 
     #[tokio::test]
     async fn handle_prefabs_returns_expected_shape() -> Result<(), Box<dyn std::error::Error>> {
@@ -983,6 +1008,39 @@ mod tests {
             prefabs
                 .iter()
                 .all(|entry| entry["toml_template"].is_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn respawn_result_preserves_receipt_on_topology_restore_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = MemberRespawnReceipt {
+            member_id: MeerkatId::from("worker"),
+            old_session_id: Some(SessionId::new()),
+            new_session_id: Some(SessionId::new()),
+        };
+        let response = respawn_result_response(
+            Some(RpcId::Num(42)),
+            Err(MobRespawnError::TopologyRestoreFailed {
+                receipt: receipt.clone(),
+                failed_peer_ids: vec![MeerkatId::from("peer-a"), MeerkatId::from("peer-b")],
+            }),
+        );
+
+        assert!(
+            response.error.is_none(),
+            "partial failure should stay in result envelope"
+        );
+        let Some(raw) = response.result.as_ref() else {
+            panic!("result payload should exist");
+        };
+        let value: serde_json::Value = serde_json::from_str(raw.get())?;
+        assert_eq!(value["status"], "topology_restore_failed");
+        assert_eq!(value["receipt"]["member_id"], receipt.member_id.to_string());
+        assert_eq!(
+            value["failed_peer_ids"],
+            serde_json::json!(["peer-a", "peer-b"])
         );
         Ok(())
     }

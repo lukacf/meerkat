@@ -801,16 +801,25 @@ async fn initialize_methods_list_complete() {
         "session/create",
         "session/list",
         "session/read",
+        "session/history",
         "session/archive",
+        "session/external_event",
         "session/inject_context",
         "session/stream_open",
         "session/stream_close",
         "turn/start",
         "turn/interrupt",
+        "runtime/state",
+        "runtime/accept",
+        "runtime/retire",
+        "runtime/reset",
+        "input/state",
+        "input/list",
         "config/get",
         "config/set",
         "config/patch",
         "capabilities/get",
+        "models/catalog",
         "skills/list",
         "skills/inspect",
         "tools/register",
@@ -820,6 +829,45 @@ async fn initialize_methods_list_complete() {
             method_names.contains(method),
             "Missing method '{method}' in initialize response. Got: {method_names:?}"
         );
+    }
+
+    #[cfg(feature = "mob")]
+    {
+        let expected_mob = [
+            "mob/prefabs",
+            "mob/create",
+            "mob/list",
+            "mob/status",
+            "mob/lifecycle",
+            "mob/spawn",
+            "mob/spawn_many",
+            "mob/retire",
+            "mob/respawn",
+            "mob/wire",
+            "mob/unwire",
+            "mob/members",
+            "mob/send",
+            "mob/events",
+            "mob/append_system_context",
+            "mob/flows",
+            "mob/flow_run",
+            "mob/flow_status",
+            "mob/flow_cancel",
+            "mob/spawn_helper",
+            "mob/fork_helper",
+            "mob/force_cancel",
+            "mob/member_status",
+            "mob/tools",
+            "mob/call",
+            "mob/stream_open",
+            "mob/stream_close",
+        ];
+        for method in &expected_mob {
+            assert!(
+                method_names.contains(method),
+                "Missing mob method '{method}' in initialize response. Got: {method_names:?}"
+            );
+        }
     }
 
     drop(writer);

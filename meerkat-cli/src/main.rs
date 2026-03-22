@@ -123,6 +123,31 @@ fn spawn_scoped_event_handler(
     })
 }
 
+async fn await_cli_output_tasks(
+    primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>>,
+    verbose_task: Option<tokio::task::JoinHandle<()>>,
+    stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>>,
+) -> anyhow::Result<Option<stream_renderer::StreamRenderSummary>> {
+    // These tasks just forward/log events — if they fail, there's nothing to recover.
+    if let Some(task) = primary_to_scoped_bridge_task {
+        let _ = task.await;
+    }
+
+    if let Some(task) = verbose_task {
+        let _ = task.await;
+    }
+
+    let summary = match stream_task {
+        Some(task) => Some(
+            task.await
+                .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?,
+        ),
+        None => None,
+    };
+
+    Ok(summary)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ToolPresetResolution {
     builtins: bool,
@@ -3244,19 +3269,10 @@ async fn run_agent(
     }
 
     // Ensure the primary->scoped bridge is drained before final stream completion checks.
-    if let Some(task) = primary_to_scoped_bridge_task {
-        let _ = task.await;
-    }
-
-    if let Some(task) = verbose_task {
-        let _ = task.await;
-    }
-
     // Wait for scoped stream task (it ends when all scoped senders are dropped).
-    if let Some(task) = stream_task {
-        let summary = task
-            .await
-            .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
+    if let Some(summary) =
+        await_cli_output_tasks(primary_to_scoped_bridge_task, verbose_task, stream_task).await?
+    {
         println!();
         if let Some(focus) = summary.focus_requested
             && !summary.focus_seen
@@ -3709,6 +3725,10 @@ async fn resume_session_with_llm_override(
     };
     log_stage("service.create_session(done)");
 
+    // Drop CLI-held sender clones before shutdown so stream receivers can close.
+    drop(event_tx);
+    drop(scoped_event_tx);
+
     // Shutdown the session service and MCP connections gracefully
     log_stage("service.shutdown");
     service.shutdown().await;
@@ -3718,16 +3738,8 @@ async fn resume_session_with_llm_override(
     if let Some(ref mut mob_ctx) = run_mob_tools {
         mob_ctx.persist(scope).await?;
     }
-    drop(scoped_event_tx);
-    if let Some(task) = primary_to_scoped_bridge_task {
-        let _ = task.await;
-    }
-    if let Some(task) = verbose_task {
-        let _ = task.await;
-    }
-    if let Some(task) = stream_task {
-        let _ = task.await;
-    }
+    let _ =
+        await_cli_output_tasks(primary_to_scoped_bridge_task, verbose_task, stream_task).await?;
 
     // Output the result
     log_stage("print_result");
@@ -6214,6 +6226,18 @@ mod tests {
         captured_system_prompt: Arc<Mutex<Option<String>>>,
     }
 
+    struct StaticLlmClient {
+        response: String,
+    }
+
+    impl StaticLlmClient {
+        fn new(response: &str) -> Self {
+            Self {
+                response: response.to_string(),
+            }
+        }
+    }
+
     impl CapturingLlmClient {
         fn new(
             captured_tool_names: Arc<Mutex<Vec<String>>>,
@@ -6251,6 +6275,34 @@ mod tests {
             Box::pin(stream::iter(vec![
                 Ok(LlmEvent::TextDelta {
                     delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for StaticLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: self.response.clone(),
                     meta: None,
                 }),
                 Ok(LlmEvent::Done {
@@ -6652,6 +6704,54 @@ mod tests {
             }
             _ => unreachable!("expected continue"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_resume_does_not_hang() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let (_manifest, store) = meerkat_store::open_realm_session_store_in(
+            &state_root,
+            "resume-hang",
+            Some(RealmBackend::Redb),
+            Some(RealmOrigin::Explicit),
+        )
+        .await
+        .expect("open store");
+        let session = Session::new();
+        let session_id = session.id().to_string();
+        store.save(&session).await.expect("save session");
+        drop(store);
+        let scope = test_scope(state_root, "resume-hang");
+        let llm: Arc<dyn LlmClient> = Arc::new(StaticLlmClient::new("ok"));
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_session_with_llm_override(
+                &session_id,
+                "",
+                None,
+                HookRunOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                None,
+                true,
+                false,
+                &scope,
+                Some(llm),
+                false,
+                false,
+            ),
+        )
+        .await
+        .expect("streaming resume should complete within timeout")
+        .expect("resume should succeed");
     }
 
     #[test]

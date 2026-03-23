@@ -2978,7 +2978,6 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-mcp",
- "meerkat-models",
  "meerkat-runtime",
  "meerkat-skills",
  "nix 0.29.0",

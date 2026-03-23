@@ -26,6 +26,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ReconcileResolvedDirectory`
 - From: `Tracking`
 - On: `ReconcileResolvedDirectory`(keys, reachability, last_reason)
+- Guards:
+  - `reachability_keys_subset_of_resolved`
+  - `last_reason_keys_subset_of_resolved`
 - To: `Tracking`
 
 ### `RecordSendSucceeded`

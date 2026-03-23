@@ -26,7 +26,6 @@ integration-real-tests = []
 [dependencies]
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-models = { workspace = true }
 meerkat-skills = { workspace = true }
 inventory = { workspace = true }
 meerkat-comms = { workspace = true, optional = true }

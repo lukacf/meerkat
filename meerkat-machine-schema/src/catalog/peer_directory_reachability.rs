@@ -130,7 +130,36 @@ pub fn peer_directory_reachability_machine() -> MachineSchema {
                     variant: "ReconcileResolvedDirectory".into(),
                     bindings: vec!["keys".into(), "reachability".into(), "last_reason".into()],
                 },
-                guards: vec![],
+                guards: vec![
+                    Guard {
+                        name: "reachability_keys_subset_of_resolved".into(),
+                        expr: Expr::Quantified {
+                            quantifier: Quantifier::All,
+                            binding: "k".into(),
+                            over: Box::new(Expr::MapKeys(Box::new(Expr::Binding(
+                                "reachability".into(),
+                            )))),
+                            body: Box::new(Expr::Contains {
+                                collection: Box::new(Expr::Binding("keys".into())),
+                                value: Box::new(Expr::Binding("k".into())),
+                            }),
+                        },
+                    },
+                    Guard {
+                        name: "last_reason_keys_subset_of_resolved".into(),
+                        expr: Expr::Quantified {
+                            quantifier: Quantifier::All,
+                            binding: "k".into(),
+                            over: Box::new(Expr::MapKeys(Box::new(Expr::Binding(
+                                "last_reason".into(),
+                            )))),
+                            body: Box::new(Expr::Contains {
+                                collection: Box::new(Expr::Binding("keys".into())),
+                                value: Box::new(Expr::Binding("k".into())),
+                            }),
+                        },
+                    },
+                ],
                 updates: vec![
                     Update::Assign {
                         field: "resolved_keys".into(),

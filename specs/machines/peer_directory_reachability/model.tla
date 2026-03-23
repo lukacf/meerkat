@@ -34,8 +34,8 @@ Init ==
 
 ReconcileResolvedDirectory(keys, arg_reachability, arg_last_reason) ==
     /\ phase = "Tracking"
-    /\ DOMAIN arg_reachability \subseteq keys
-    /\ DOMAIN arg_last_reason \subseteq keys
+    /\ (\A k \in DOMAIN arg_reachability : (k \in keys))
+    /\ (\A k \in DOMAIN arg_last_reason : (k \in keys))
     /\ phase' = "Tracking"
     /\ model_step_count' = model_step_count + 1
     /\ resolved_keys' = keys

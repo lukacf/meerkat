@@ -3074,6 +3074,15 @@ async fn run_agent(
 
     // Create ephemeral runtime adapter for single-authority execution.
     let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    // Pre-register session so we can obtain the canonical ops lifecycle registry
+    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
+    runtime_adapter.register_session(session.id().clone()).await;
+    let ops_lifecycle: Option<
+        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    > = runtime_adapter
+        .ops_lifecycle_registry(session.id())
+        .await
+        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
 
     if host_mode {
         eprintln!(
@@ -3131,7 +3140,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        ops_lifecycle_override: None,
+        ops_lifecycle_override: ops_lifecycle,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3263,14 +3272,12 @@ async fn run_agent(
         }
     };
 
-    // In host mode, block until the comms drain terminates (DISMISS, budget
-    // exhaustion, or ctrl-c). The drain processes inbound peer interactions
-    // and auto-starts turns via the runtime loop.
+    // The initial turn is complete — abort the comms drain so the CLI can
+    // return. run_agent is a one-shot command; persistent host-mode draining
+    // is only appropriate for interactive sessions (chat).
     #[cfg(feature = "comms")]
-    if host_mode {
-        tracing::info!("host mode: blocking on comms drain");
-        runtime_adapter.wait_comms_drain(&session_id).await;
-        tracing::info!("host mode: comms drain terminated");
+    {
+        runtime_adapter.abort_comms_drain(&session_id).await;
     }
 
     // Abort stdin reader if it was running
@@ -3631,6 +3638,16 @@ async fn resume_session_with_llm_override(
         verbose_task = Some(spawn_verbose_event_handler(rx, true));
     }
 
+    // Pre-register session on the adapter so we can obtain the canonical ops
+    // lifecycle registry for the build options.
+    resume_adapter.register_session(session_id.clone()).await;
+    let resume_ops_lifecycle: Option<
+        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    > = resume_adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
+
     let build = SessionBuildOptions {
         provider: Some(provider_core),
         output_schema: None,
@@ -3667,7 +3684,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        ops_lifecycle_override: None,
+        ops_lifecycle_override: resume_ops_lifecycle,
     };
 
     // Route through SessionService::create_session() with the resumed session
@@ -3764,15 +3781,11 @@ async fn resume_session_with_llm_override(
         }
     };
 
-    // In host mode, block until the comms drain terminates (DISMISS, budget
-    // exhaustion, or ctrl-c). The drain processes inbound peer interactions
-    // and auto-starts turns via the runtime loop.
+    // The resume turn is complete — abort the comms drain so the CLI can
+    // return. Same rationale as run_agent: one-shot commands must not block.
     #[cfg(feature = "comms")]
-    if host_mode {
-        log_stage("host_mode_comms_drain_blocking");
-        tracing::info!("host mode: blocking on comms drain");
-        resume_adapter.wait_comms_drain(&session_id).await;
-        tracing::info!("host mode: comms drain terminated");
+    {
+        resume_adapter.abort_comms_drain(&session_id).await;
     }
 
     log_stage("service.create_session(done)");

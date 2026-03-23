@@ -234,11 +234,12 @@ impl SessionRuntime {
         let (store, runtime_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
-        let service = Arc::new(PersistentSessionService::new(
+        let service = Arc::new(Self::build_persistent_service(
             builder,
             max_sessions,
             store,
             runtime_store.clone(),
+            &runtime_adapter,
         ));
 
         Self {
@@ -281,11 +282,12 @@ impl SessionRuntime {
         let factory_clone = factory.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
-        let service = Arc::new(PersistentSessionService::new(
+        let service = Arc::new(Self::build_persistent_service(
             builder,
             max_sessions,
             store,
             runtime_store.clone(),
+            &runtime_adapter,
         ));
 
         Self {
@@ -312,6 +314,32 @@ impl SessionRuntime {
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
         }
+    }
+
+    /// Build a `PersistentSessionService` with the ops lifecycle provider
+    /// wired to the runtime adapter so lazy session rebuilds use the canonical
+    /// registry instead of an orphaned fallback.
+    fn build_persistent_service(
+        builder: FactoryAgentBuilder,
+        max_sessions: usize,
+        store: Arc<dyn meerkat_store::SessionStore>,
+        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
+        runtime_adapter: &Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    ) -> PersistentSessionService<FactoryAgentBuilder> {
+        let mut service =
+            PersistentSessionService::new(builder, max_sessions, store, runtime_store);
+        let adapter = runtime_adapter.clone();
+        service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+            let adapter = adapter.clone();
+            let session_id = session_id.clone();
+            Box::pin(async move {
+                adapter
+                    .ops_lifecycle_registry(&session_id)
+                    .await
+                    .map(|r| r as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+            })
+        }));
+        service
     }
 
     /// Attach realm context defaults used for session metadata.
@@ -610,7 +638,6 @@ impl SessionRuntime {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::completion::CompletionOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
-
         #[allow(unused_mut)]
         let mut prompt = prompt;
 
@@ -677,7 +704,6 @@ impl SessionRuntime {
                 message: format!("runtime accept failed: {e}"),
                 data: None,
             })?;
-
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())

@@ -125,6 +125,26 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// archived snapshot -- mutual exclusion prevents a concurrent checkpoint
     /// from overwriting the archived row with a live one.
     checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
+    /// Optional provider for ops lifecycle registries used during lazy session
+    /// rebuilds. When set, lazy-rebuilt sessions bind to the canonical registry
+    /// instead of allocating an orphaned fallback.
+    ops_lifecycle_provider: Option<
+        Arc<
+            dyn Fn(
+                    &SessionId,
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Option<
+                                    Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > + Send
+                + Sync,
+        >,
+    >,
 }
 
 /// Extract session labels from a metadata map.
@@ -391,7 +411,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             archived_sessions: Mutex::new(IndexMap::new()),
             archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
+            ops_lifecycle_provider: None,
         }
+    }
+
+    /// Set an ops lifecycle provider for lazy session rebuilds.
+    ///
+    /// When a persisted session is rehydrated lazily (e.g., runtime context
+    /// appends for a session not currently live), this provider supplies the
+    /// canonical ops lifecycle registry so the rebuilt agent's async ops are
+    /// visible to the runtime adapter.
+    pub fn set_ops_lifecycle_provider(
+        &mut self,
+        provider: Arc<
+            dyn Fn(
+                    &SessionId,
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Option<
+                                    Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > + Send
+                + Sync,
+        >,
+    ) {
+        self.ops_lifecycle_provider = Some(provider);
     }
 
     pub fn runtime_mode(&self) -> RuntimeMode {
@@ -555,7 +603,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .as_ref()
                     .and_then(|meta| meta.peer_meta.clone()),
                 resume_session: Some(stored),
-                ops_lifecycle_override: None,
+                ops_lifecycle_override: match &self.ops_lifecycle_provider {
+                    Some(provider) => (provider)(id).await,
+                    None => None,
+                },
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_memory: Some(tooling.memory),

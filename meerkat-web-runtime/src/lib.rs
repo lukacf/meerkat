@@ -23,17 +23,21 @@
 //! - `mob_create(definition_json)` → mob_id
 //! - `mob_status(mob_id)` → JSON
 //! - `mob_list()` → JSON
-//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/destroy
+//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/reset/destroy
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, meerkat_id)`
 //! - `mob_wire_peer(mob_id, member, peer_json)` / `mob_unwire_peer(mob_id, member, peer_json)` — canonical member/peer wiring
-//! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — legacy local-local wiring
-//! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — compatibility aliases
+//! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — low-level local-local wiring
+//! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — low-level aliases
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
 //! - `mob_member_send(mob_id, meerkat_id, request_json)` → JSON delivery receipt
+//! - `mob_member_status(mob_id, meerkat_id)` → JSON member snapshot
 //! - `mob_respawn(mob_id, meerkat_id, initial_message?)` → JSON result envelope
+//! - `mob_force_cancel(mob_id, meerkat_id)`
+//! - `mob_spawn_helper(mob_id, request_json)` → JSON helper result
+//! - `mob_fork_helper(mob_id, request_json)` → JSON helper result
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
 //! - `mob_cancel_flow(mob_id, run_id)`
@@ -61,6 +65,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
+use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
@@ -1662,7 +1667,7 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 
 /// Perform a lifecycle action on a mob.
 ///
-/// `action`: one of "stop", "resume", "complete", "destroy".
+/// `action`: one of "stop", "resume", "complete", "reset", "destroy".
 #[wasm_bindgen]
 pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1671,12 +1676,13 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
         "stop" => mob_state.mob_stop(&id).await.map_err(err_mob)?,
         "resume" => mob_state.mob_resume(&id).await.map_err(err_mob)?,
         "complete" => mob_state.mob_complete(&id).await.map_err(err_mob)?,
+        "reset" => mob_state.mob_reset(&id).await.map_err(err_mob)?,
         "destroy" => mob_state.mob_destroy(&id).await.map_err(err_mob)?,
         _ => {
             return Err(err_js(
                 "invalid_action",
                 &format!(
-                    "unknown lifecycle action: {action} (expected stop/resume/complete/destroy)"
+                    "unknown lifecycle action: {action} (expected stop/resume/complete/reset/destroy)"
                 ),
             ));
         }
@@ -2023,6 +2029,35 @@ struct MobMemberSendOptions {
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct MobSpawnHelperOptions {
+    prompt: String,
+    #[serde(default)]
+    meerkat_id: Option<String>,
+    #[serde(default)]
+    profile_name: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MobForkHelperOptions {
+    source_member_id: String,
+    prompt: String,
+    #[serde(default)]
+    meerkat_id: Option<String>,
+    #[serde(default)]
+    profile_name: Option<String>,
+    #[serde(default)]
+    fork_context: Option<meerkat_mob::ForkContext>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
 /// Send external work to a spawned meerkat through the canonical member path.
 ///
 /// Returns a JSON-encoded delivery receipt.
@@ -2048,6 +2083,20 @@ pub async fn mob_member_send(
         .await
         .map_err(err_mob)?;
     serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))
+}
+
+/// Read the current execution snapshot for a mob member.
+#[wasm_bindgen]
+pub async fn mob_member_status(mob_id: &str, meerkat_id: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    let snapshot = mob_state
+        .mob_member_status(&id, &mid)
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&snapshot).map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Retire and re-spawn a meerkat with the same profile.
@@ -2087,6 +2136,88 @@ pub async fn mob_respawn(
         }
         Err(e) => Err(JsValue::from_str(&e.to_string())),
     }
+}
+
+/// Force-cancel an active mob member turn.
+#[wasm_bindgen]
+pub async fn mob_force_cancel(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    mob_state.mob_force_cancel(&id, mid).await.map_err(err_mob)
+}
+
+/// Spawn a short-lived helper and return its terminal result.
+#[wasm_bindgen]
+pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValue, JsValue> {
+    let request: MobSpawnHelperOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let meerkat_id = MeerkatId::from(
+        request
+            .meerkat_id
+            .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
+    );
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile_name) = request.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile_name));
+    }
+    options.runtime_mode = request.runtime_mode;
+    options.backend = request.backend;
+    let result = mob_state
+        .mob_spawn_helper(&id, meerkat_id, request.prompt, options)
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&serde_json::json!({
+        "output": result.output,
+        "tokens_used": result.tokens_used,
+        "session_id": result.session_id,
+    }))
+    .map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+/// Fork a short-lived helper from an existing member and return its terminal result.
+#[wasm_bindgen]
+pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue, JsValue> {
+    let request: MobForkHelperOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let source_member_id = MeerkatId::from(request.source_member_id.as_str());
+    let meerkat_id = MeerkatId::from(
+        request
+            .meerkat_id
+            .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
+    );
+    let fork_context = request
+        .fork_context
+        .unwrap_or(meerkat_mob::ForkContext::FullHistory);
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile_name) = request.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile_name));
+    }
+    options.runtime_mode = request.runtime_mode;
+    options.backend = request.backend;
+    let result = mob_state
+        .mob_fork_helper(
+            &id,
+            &source_member_id,
+            meerkat_id,
+            request.prompt,
+            fork_context,
+            options,
+        )
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&serde_json::json!({
+        "output": result.output,
+        "tokens_used": result.tokens_used,
+        "session_id": result.session_id,
+    }))
+    .map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Start a configured flow run.

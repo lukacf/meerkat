@@ -37,6 +37,7 @@ meerkat-mob-mcp = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "memory-store", "anthropic", "openai", "gemini"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["sync"] }

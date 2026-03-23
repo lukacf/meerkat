@@ -136,11 +136,11 @@ class Mob:
             fork_context=fork_context,
         )
 
-    async def wire(self, local: str, target: str | dict[str, Any]) -> None:
-        await self._client.wire_mob_members(self.id, local, target)
+    async def wire(self, member: str, peer: str | dict[str, Any]) -> None:
+        await self._client.wire_mob_members(self.id, member, peer)
 
-    async def unwire(self, local: str, target: str | dict[str, Any]) -> None:
-        await self._client.unwire_mob_members(self.id, local, target)
+    async def unwire(self, member: str, peer: str | dict[str, Any]) -> None:
+        await self._client.unwire_mob_members(self.id, member, peer)
 
     async def lifecycle(self, action: str) -> None:
         await self._client.mob_lifecycle(self.id, action)

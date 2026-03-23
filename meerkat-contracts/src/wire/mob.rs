@@ -27,8 +27,10 @@ pub enum MobPeerTarget {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobWireParams {
     pub mob_id: String,
-    pub local: String,
-    pub target: MobPeerTarget,
+    #[serde(alias = "local")]
+    pub member: String,
+    #[serde(alias = "target")]
+    pub peer: MobPeerTarget,
 }
 
 /// Response payload for `mob/wire`.
@@ -43,8 +45,10 @@ pub struct MobWireResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobUnwireParams {
     pub mob_id: String,
-    pub local: String,
-    pub target: MobPeerTarget,
+    #[serde(alias = "local")]
+    pub member: String,
+    #[serde(alias = "target")]
+    pub peer: MobPeerTarget,
 }
 
 /// Response payload for `mob/unwire`.

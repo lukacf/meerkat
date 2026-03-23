@@ -119,15 +119,15 @@ export interface MobSendParams {
 }
 
 export interface MobWireParams {
-  local: string;
+  member: string;
   mob_id: string;
-  target: unknown;
+  peer: unknown;
 }
 
 export interface MobUnwireParams {
-  local: string;
+  member: string;
   mob_id: string;
-  target: unknown;
+  peer: unknown;
 }
 
 export interface RuntimeStateParams {

@@ -465,6 +465,10 @@ fn respawn_result_response(
 pub struct MobWireParams {
     pub mob_id: String,
     #[serde(default)]
+    pub member: Option<String>,
+    #[serde(default)]
+    pub peer: Option<meerkat_mob::PeerTarget>,
+    #[serde(default)]
     pub local: Option<String>,
     #[serde(default)]
     pub target: Option<meerkat_mob::PeerTarget>,
@@ -476,8 +480,10 @@ pub struct MobWireParams {
 
 impl MobWireParams {
     fn resolve(self) -> Result<(MeerkatId, meerkat_mob::PeerTarget), String> {
-        match (self.local, self.target, self.a, self.b) {
-            (Some(local), Some(target), None, None) => Ok((MeerkatId::from(local), target)),
+        let member = self.member.or(self.local);
+        let peer = self.peer.or(self.target);
+        match (member, peer, self.a, self.b) {
+            (Some(member), Some(peer), None, None) => Ok((MeerkatId::from(member), peer)),
             (None, None, Some(a), Some(b)) => Ok((
                 MeerkatId::from(a),
                 meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
@@ -487,9 +493,9 @@ impl MobWireParams {
             | (Some(_), Some(_), None, Some(_))
             | (Some(_), None, Some(_), Some(_))
             | (None, Some(_), Some(_), Some(_)) => {
-                Err("provide either {local, target} or legacy {a, b}, but not both".to_string())
+                Err("provide either {member, peer}, compatibility {local, target}, or legacy {a, b}, but not both".to_string())
             }
-            _ => Err("mob wire requires either {local, target} or legacy {a, b}".to_string()),
+            _ => Err("mob wire requires either {member, peer}, compatibility {local, target}, or legacy {a, b}".to_string()),
         }
     }
 }

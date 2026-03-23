@@ -159,12 +159,12 @@ export class Mob {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
   }
 
-  async wire(local: string, target: MobPeerTarget): Promise<void> {
-    await this.client.wireMobMembers(this.mobId, local, target);
+  async wire(member: string, peer: MobPeerTarget): Promise<void> {
+    await this.client.wireMobMembers(this.mobId, member, peer);
   }
 
-  async unwire(local: string, target: MobPeerTarget): Promise<void> {
-    await this.client.unwireMobMembers(this.mobId, local, target);
+  async unwire(member: string, peer: MobPeerTarget): Promise<void> {
+    await this.client.unwireMobMembers(this.mobId, member, peer);
   }
 
   async listMembers(): Promise<MobMember[]> {

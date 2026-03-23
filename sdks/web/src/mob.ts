@@ -24,8 +24,8 @@ interface MobWasmBindings {
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
-  mob_wire_target?: (mobId: string, local: string, targetJson: string) => Promise<void>;
-  mob_unwire_target?: (mobId: string, local: string, targetJson: string) => Promise<void>;
+  mob_wire_target?: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_target?: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
@@ -120,27 +120,27 @@ export class Mob {
   }
 
   /** Wire two agents for comms trust. */
-  async wire(local: string, target: MobPeerTarget): Promise<void> {
-    if (typeof target === 'string') {
-      await this.bindings.mob_wire(this.mobId, local, target);
+  async wire(member: string, peer: MobPeerTarget): Promise<void> {
+    if (typeof peer === 'string') {
+      await this.bindings.mob_wire(this.mobId, member, peer);
       return;
     }
     if (!this.bindings.mob_wire_target) {
       throw new Error('This runtime does not support external peer wiring');
     }
-    await this.bindings.mob_wire_target(this.mobId, local, JSON.stringify(target));
+    await this.bindings.mob_wire_target(this.mobId, member, JSON.stringify(peer));
   }
 
   /** Remove comms trust between two agents. */
-  async unwire(local: string, target: MobPeerTarget): Promise<void> {
-    if (typeof target === 'string') {
-      await this.bindings.mob_unwire(this.mobId, local, target);
+  async unwire(member: string, peer: MobPeerTarget): Promise<void> {
+    if (typeof peer === 'string') {
+      await this.bindings.mob_unwire(this.mobId, member, peer);
       return;
     }
     if (!this.bindings.mob_unwire_target) {
       throw new Error('This runtime does not support external peer unwiring');
     }
-    await this.bindings.mob_unwire_target(this.mobId, local, JSON.stringify(target));
+    await this.bindings.mob_unwire_target(this.mobId, member, JSON.stringify(peer));
   }
 
   /** List all members in the mob. */

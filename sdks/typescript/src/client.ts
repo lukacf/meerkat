@@ -803,20 +803,20 @@ export class MeerkatClient {
     };
   }
 
-  async wireMobMembers(mobId: string, a: string, b: MobPeerTarget): Promise<void> {
-    const target =
-      typeof b === "string"
-        ? { local: a, target: { local: b } }
-        : { local: a, target: b };
-    await this.request("mob/wire", { mob_id: mobId, ...target });
+  async wireMobMembers(mobId: string, member: string, peer: MobPeerTarget): Promise<void> {
+    const payload =
+      typeof peer === "string"
+        ? { member, peer: { local: peer } }
+        : { member, peer };
+    await this.request("mob/wire", { mob_id: mobId, ...payload });
   }
 
-  async unwireMobMembers(mobId: string, a: string, b: MobPeerTarget): Promise<void> {
-    const target =
-      typeof b === "string"
-        ? { local: a, target: { local: b } }
-        : { local: a, target: b };
-    await this.request("mob/unwire", { mob_id: mobId, ...target });
+  async unwireMobMembers(mobId: string, member: string, peer: MobPeerTarget): Promise<void> {
+    const payload =
+      typeof peer === "string"
+        ? { member, peer: { local: peer } }
+        : { member, peer };
+    await this.request("mob/unwire", { mob_id: mobId, ...payload });
   }
 
   async mobLifecycle(mobId: string, action: 'stop' | 'resume' | 'complete' | 'reset' | 'destroy'): Promise<void> {

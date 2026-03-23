@@ -778,19 +778,19 @@ class MeerkatClient:
             "backend": backend,
         })
 
-    async def wire_mob_members(self, mob_id: str, local: str, target: str | dict[str, Any]) -> None:
+    async def wire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
         payload = (
-            {"mob_id": mob_id, "local": local, "target": {"local": target}}
-            if isinstance(target, str)
-            else {"mob_id": mob_id, "local": local, "target": target}
+            {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
+            if isinstance(peer, str)
+            else {"mob_id": mob_id, "member": member, "peer": peer}
         )
         await self._request("mob/wire", payload)
 
-    async def unwire_mob_members(self, mob_id: str, local: str, target: str | dict[str, Any]) -> None:
+    async def unwire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
         payload = (
-            {"mob_id": mob_id, "local": local, "target": {"local": target}}
-            if isinstance(target, str)
-            else {"mob_id": mob_id, "local": local, "target": target}
+            {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
+            if isinstance(peer, str)
+            else {"mob_id": mob_id, "member": member, "peer": peer}
         )
         await self._request("mob/unwire", payload)
 

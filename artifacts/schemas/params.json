@@ -460,20 +460,20 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `mob/unwire`.",
     "properties": {
-      "local": {
+      "member": {
         "type": "string"
       },
       "mob_id": {
         "type": "string"
       },
-      "target": {
+      "peer": {
         "$ref": "#/$defs/MobPeerTarget"
       }
     },
     "required": [
       "mob_id",
-      "local",
-      "target"
+      "member",
+      "peer"
     ],
     "title": "MobUnwireParams",
     "type": "object"
@@ -533,20 +533,20 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `mob/wire`.",
     "properties": {
-      "local": {
+      "member": {
         "type": "string"
       },
       "mob_id": {
         "type": "string"
       },
-      "target": {
+      "peer": {
         "$ref": "#/$defs/MobPeerTarget"
       }
     },
     "required": [
       "mob_id",
-      "local",
-      "target"
+      "member",
+      "peer"
     ],
     "title": "MobWireParams",
     "type": "object"

@@ -163,17 +163,17 @@ class MobSendParams:
 @dataclass
 class MobWireParams:
     """Request payload for `mob/wire`."""
-    local: str = ''
+    member: str = ''
     mob_id: str = ''
-    target: Any = None
+    peer: Any = None
 
 
 @dataclass
 class MobUnwireParams:
     """Request payload for `mob/unwire`."""
-    local: str = ''
+    member: str = ''
     mob_id: str = ''
-    target: Any = None
+    peer: Any = None
 
 
 @dataclass

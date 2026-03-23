@@ -227,4 +227,3 @@ Best candidates for formal checking:
 - destruction clears all tracked lifecycle-owned resources
 - stopped/completed states do not retain active flow trackers
 - host/MCP activity does not survive destruction or stop
-

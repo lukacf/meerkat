@@ -269,4 +269,3 @@ Best candidates for formal checking:
 - terminal-state stickiness
 - impossibility of terminal runs with dispatched steps still active
 - completed terminalization cannot coexist with failed/canceled steps
-

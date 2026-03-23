@@ -58,4 +58,3 @@ In `0.5`:
 - host-mode routing still exists outside the canonical runtime path
 - `SubagentResult` currently leaks through comms/inbox machinery even though
   `0.5` moves that responsibility into `OpsLifecycleMachine`
-

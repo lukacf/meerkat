@@ -53,4 +53,3 @@ This is intentional:
   than an explicit named orchestration owner
 - `MobActor` still centralizes the orchestration concerns this contract makes
   explicit
-

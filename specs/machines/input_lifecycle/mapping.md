@@ -57,4 +57,3 @@ onto that boundary.
   one explicit lifecycle owner
 - supersede/coalesce queue semantics exist in policy/runtime helpers but are
   not yet uniformly surfaced as first-class lifecycle operations everywhere
-

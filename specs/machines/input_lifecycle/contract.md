@@ -246,4 +246,3 @@ Best candidates for formal checking:
 - terminal states are sticky
 - `AppliedPendingConsumption -> Queued` is impossible
 - boundary metadata never appears before application
-

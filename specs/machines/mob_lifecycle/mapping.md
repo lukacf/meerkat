@@ -50,4 +50,3 @@ That is by design:
 - `MobActor` still centralizes multiple concerns that `0.5` splits apart
 - some cleanup/cancellation behavior is currently intertwined with actor logic
   rather than expressed as a standalone lifecycle owner
-

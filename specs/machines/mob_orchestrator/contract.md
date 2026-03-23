@@ -299,4 +299,3 @@ Best candidates for formal checking:
 - destroyed/quiescent cleanup of orchestration-owned trackers
 - impossibility of active flows or pending spawns while coordinator is absent
 - supervisor activation legality
-

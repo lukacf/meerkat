@@ -265,4 +265,3 @@ Best candidates for formal checking:
 - submission queue/state consistency
 - classification remains stable after submission
 - ack never appears in runtime-facing peer submission
-

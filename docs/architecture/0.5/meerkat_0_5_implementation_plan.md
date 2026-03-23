@@ -1,6 +1,6 @@
 # Meerkat 0.5 Implementation Plan
 
-Status: normative `0.5` implementation backlog  
+Status: normative `0.5` implementation backlog
 Audience: maintainers landing the `0.5` architecture package on this branch
 
 ## Purpose

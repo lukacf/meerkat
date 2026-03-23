@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::types::ToolResult;
+use meerkat_core::types::{ToolCallView, ToolDef};
 use std::collections::HashSet;
 use std::sync::Arc;
 

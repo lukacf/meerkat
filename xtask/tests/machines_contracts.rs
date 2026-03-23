@@ -422,7 +422,7 @@ fn machine_authority_contract_requires_verification_and_companion_docs() {
 fn generated_kernel_boundary_rejects_parallel_owner_module_files() {
     let dir = tempdir().expect("tempdir");
     let generated = generated_kernel_module_path(dir.path(), "runtime_control");
-    let owner_file = owner_module_file(dir.path(), "meerkat-runtime", "machines::runtime_control")
+    let owner_file = owner_module_file(dir.path(), "meerkat-runtime", "generated::runtime_control")
         .expect("owner_module_file");
 
     fs::create_dir_all(generated.parent().expect("generated parent")).expect("generated dir");
@@ -444,8 +444,9 @@ fn generated_kernel_boundary_rejects_parallel_owner_module_files() {
 fn generated_kernel_boundary_rejects_parallel_owner_module_dirs() {
     let dir = tempdir().expect("tempdir");
     let generated = generated_kernel_module_path(dir.path(), "mob_lifecycle");
-    let owner_mod =
-        owner_module_dir(dir.path(), "meerkat-mob", "machines::mob_lifecycle").join("mod.rs");
+    let owner_mod = owner_module_dir(dir.path(), "meerkat-mob", "generated::mob_lifecycle")
+        .join("mob_lifecycle")
+        .join("mod.rs");
 
     fs::create_dir_all(generated.parent().expect("generated parent")).expect("generated dir");
     fs::create_dir_all(owner_mod.parent().expect("owner parent")).expect("owner dir");

@@ -1213,7 +1213,7 @@ impl AgentFactory {
             .is_none_or(|p| p.image_tool_results);
 
         let session = build_config.resume_session.clone().unwrap_or_default();
-        let session_id = session.id().to_string();
+        let _session_id = session.id().to_string();
         let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> = build_config
             .ops_lifecycle_override
             .clone()
@@ -1237,7 +1237,7 @@ impl AgentFactory {
                         effective_shell,
                         skill_engine.clone(),
                         build_config.shell_env.take(),
-                        session_id.clone(),
+                        _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
                         image_tool_results,
                     )

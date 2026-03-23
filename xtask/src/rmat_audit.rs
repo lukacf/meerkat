@@ -903,9 +903,28 @@ fn collect_protocol_feedback_constraint_findings(
             };
 
             // Look for construction of the feedback variant (e.g., `Input::VariantName`)
-            // in non-generated, non-authority code.
+            // in non-generated, non-authority code. Check line-by-line to skip
+            // comments, and require the variant to appear at a word boundary to
+            // avoid false positives from substring matches in longer identifiers.
             let construction_pattern = format!("::{variant_pattern}");
-            if source.contains(&construction_pattern) {
+            let has_non_comment_match = source.lines().any(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with('*')
+                {
+                    return false;
+                }
+                if let Some(pos) = trimmed.find(&construction_pattern) {
+                    // Verify the variant name ends at a word boundary (not a substring
+                    // of a longer identifier like `::VariantNameExtra`).
+                    let end = pos + construction_pattern.len();
+                    end >= trimmed.len() || !trimmed.as_bytes()[end].is_ascii_alphanumeric()
+                } else {
+                    false
+                }
+            });
+            if has_non_comment_match {
                 findings.push(error_finding(
                     "ProtocolFeedbackThroughGeneratedHelpers",
                     &relative,
@@ -934,6 +953,19 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
             Ok(s) => s,
             Err(_) => continue,
         };
+        if !source.contains("// @generated") {
+            findings.push(error_finding(
+                "TerminalMappingThroughGeneratedHelpers",
+                path,
+                &rule.protocol_name,
+                format!(
+                    "terminal mapping file for producer `{}` is missing `// @generated` marker; \
+                     the file must be machine-generated, not handwritten",
+                    rule.producer_machine
+                ),
+                false,
+            ));
+        }
         if !source.contains("classify_terminal") {
             findings.push(error_finding(
                 "TerminalMappingThroughGeneratedHelpers",

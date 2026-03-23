@@ -54,13 +54,17 @@ fn create_dispatcher_with_shell(
     };
 
     let store = Arc::new(MemoryTaskStore::new());
-    let dispatcher = CompositeDispatcher::new(
+    let session_id = meerkat_core::types::SessionId::new();
+    let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+    let dispatcher = CompositeDispatcher::new_with_ops_lifecycle(
         store,
         &config,
         Some(temp_dir.path().to_path_buf()),
         Some(shell_config),
         None,
-        None,
+        Some(session_id.to_string()),
+        Some(ops_registry),
         true,
     )?;
     Ok(dispatcher)

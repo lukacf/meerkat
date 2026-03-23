@@ -345,7 +345,9 @@ fn default_protocol_realization_sites() -> Vec<ProtocolRealizationSiteRule> {
                         candidate_crates.push(&ms.rust.crate_name);
                     }
                 }
-                candidate_crates.dedup();
+                // Order-preserving dedup (Vec::dedup only removes adjacent duplicates)
+                let mut seen_crates = std::collections::BTreeSet::new();
+                candidate_crates.retain(|c| seen_crates.insert(*c));
                 let protocol_name = protocol.name.clone();
                 rules.push(ProtocolRealizationSiteRule {
                     protocol_name: protocol_name.clone(),

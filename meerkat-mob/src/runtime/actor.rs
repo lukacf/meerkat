@@ -3155,7 +3155,9 @@ impl MobActor {
                 };
 
                 if !peer_exists && !looks_external {
-                    return Err(MobError::MeerkatNotFound(peer));
+                    // Peer is not in roster and has no external trace — unwire
+                    // is trivially satisfied (idempotent no-op).
+                    return Ok(());
                 }
 
                 if looks_external {

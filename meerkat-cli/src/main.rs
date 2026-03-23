@@ -3131,6 +3131,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
+        ops_lifecycle_override: None,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3666,6 +3667,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
+        ops_lifecycle_override: None,
     };
 
     // Route through SessionService::create_session() with the resumed session

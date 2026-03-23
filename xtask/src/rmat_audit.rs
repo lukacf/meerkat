@@ -126,7 +126,7 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
 
     let stale_baseline: Vec<_> = baseline_set
         .iter()
-        .filter(|key| !findings.iter().any(|finding| &finding.key == *key))
+        .filter(|key| !hard_unsuppressed.iter().any(|finding| &finding.key == *key))
         .collect();
     let (new_ownership_findings, stale_ownership_baseline) =
         ownership_ledger::diff_against_baseline(&ownership_baseline_path, &ownership_findings)?;

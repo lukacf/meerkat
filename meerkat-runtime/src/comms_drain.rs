@@ -364,8 +364,15 @@ fn spawn_completion_bridge(
                 },
             };
 
-            let _ = crate::tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(event))
-                .await;
+            if crate::tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(event))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    %interaction_id,
+                    "completion bridge dropped terminal event: subscriber send timed out after 5s"
+                );
+            }
         }
 
         if let Some(runtime) = comms_runtime {

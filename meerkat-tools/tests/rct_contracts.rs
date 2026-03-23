@@ -41,15 +41,15 @@ async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn test_rct_contracts_agent_list_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rct_contracts_tool_policy_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
     let config = BuiltinToolConfig {
-        policy: ToolPolicyLayer::new().enable_tool("agent_list"),
+        policy: ToolPolicyLayer::new().enable_tool("shell_jobs"),
         ..Default::default()
     };
 
     let encoded = serde_json::to_value(&config)?;
     let decoded: BuiltinToolConfig = serde_json::from_value(encoded)?;
-    assert!(decoded.policy.enable.contains("agent_list"));
+    assert!(decoded.policy.enable.contains("shell_jobs"));
     Ok(())
 }
 
@@ -556,8 +556,8 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
                     input_schema: json!({"type": "object"}),
                 }),
                 Arc::new(ToolDef {
-                    name: "agent_spawn".to_string(),
-                    description: "Start delegated branches (nesting sensitive)".to_string(),
+                    name: "shell_job_cancel".to_string(),
+                    description: "Cancel background shell jobs (privileged)".to_string(),
                     input_schema: json!({"type": "object"}),
                 }),
                 Arc::new(ToolDef {
@@ -584,18 +584,18 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
     // Test 1: DenyList should block specified tools
     {
         let policy =
-            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "agent_spawn".to_string()]);
+            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "shell_job_cancel".to_string()]);
         let filtered = FilteredDispatcher::new(inner.clone(), &policy);
 
         let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
 
-        // Shell and agent_spawn should be blocked
+        // Shell and shell_job_cancel should be blocked
         assert!(
             !tool_names.contains(&"shell".to_string()),
             "shell should be blocked by deny list but tools are: {tool_names:?}"
         );
         assert!(
-            !tool_names.contains(&"agent_spawn".to_string()),
+            !tool_names.contains(&"shell_job_cancel".to_string()),
             "agent_spawn should be blocked by deny list"
         );
 
@@ -634,7 +634,7 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             "shell should be blocked (not in allow list)"
         );
         assert!(
-            !tool_names.contains(&"agent_spawn".to_string()),
+            !tool_names.contains(&"shell_job_cancel".to_string()),
             "agent_spawn should be blocked (not in allow list)"
         );
         assert!(

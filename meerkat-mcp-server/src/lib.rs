@@ -3,11 +3,13 @@
 //! This crate provides an MCP server that exposes Meerkat agent capabilities
 //! as MCP tools: meerkat_run and meerkat_resume.
 
+#[cfg(feature = "comms")]
+use meerkat::SessionServiceCommsExt;
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::{
-    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService,
-    SessionServiceCommsExt, ToolError, ToolResult,
+    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService, ToolError,
+    ToolResult,
 };
 use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
@@ -460,7 +462,7 @@ impl MeerkatMcpState {
             Arc::clone(&config_store),
             realm_paths.root.join("config_state.json"),
         ));
-        let lease = meerkat_store::start_realm_lease_in(
+        let _lease = meerkat_store::start_realm_lease_in(
             &realms_root,
             &realm_id,
             bootstrap.realm.instance_id.as_deref(),
@@ -505,7 +507,7 @@ impl MeerkatMcpState {
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
             runtime_adapter,
             #[cfg(feature = "comms")]
-            _realm_lease: Some(lease),
+            _realm_lease: Some(_lease),
         })
     }
 

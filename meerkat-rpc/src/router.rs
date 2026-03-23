@@ -26,6 +26,7 @@ use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+#[cfg(feature = "comms")]
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }

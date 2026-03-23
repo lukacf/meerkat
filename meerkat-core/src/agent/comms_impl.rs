@@ -1,8 +1,6 @@
 //! Agent comms helpers (host mode).
 
 use crate::interaction::InteractionContent;
-#[cfg(target_arch = "wasm32")]
-use crate::tokio;
 use crate::types::{Message, UserMessage};
 use std::collections::BTreeMap;
 

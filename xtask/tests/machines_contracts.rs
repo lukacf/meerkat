@@ -224,14 +224,15 @@ fn external_tool_witness_uses_boundary_applied_causal_order() {
             .join("specs/compositions/external_tool_bundle/model.tla"),
     )
     .expect("external tool model");
+    // Causal chain: LlmReturnedTerminal → BoundaryComplete → ApplyBoundaryAdd → ExternalToolDeltaReceivedIdle
     assert!(model.contains(
-        "earlier.machine = \"turn_execution\" /\\ earlier.transition = \"LlmReturnedTerminal\" /\\ later.machine = \"external_tool_surface\" /\\ later.transition = \"ApplyBoundaryAdd\""
+        "earlier.machine = \"turn_execution\" /\\ earlier.transition = \"LlmReturnedTerminal\" /\\ later.machine = \"turn_execution\" /\\ later.transition = \"BoundaryComplete\""
     ));
     assert!(model.contains(
-        "earlier.machine = \"external_tool_surface\" /\\ earlier.transition = \"ApplyBoundaryAdd\" /\\ later.machine = \"turn_execution\" /\\ later.transition = \"BoundaryComplete\""
+        "earlier.machine = \"turn_execution\" /\\ earlier.transition = \"BoundaryComplete\" /\\ later.machine = \"external_tool_surface\" /\\ later.transition = \"ApplyBoundaryAdd\""
     ));
     assert!(model.contains(
-        "earlier.machine = \"runtime_control\" /\\ earlier.transition = \"ExternalToolDeltaReceivedIdle\" /\\ later.machine = \"turn_execution\" /\\ later.transition = \"BoundaryComplete\""
+        "earlier.machine = \"external_tool_surface\" /\\ earlier.transition = \"ApplyBoundaryAdd\" /\\ later.machine = \"runtime_control\" /\\ later.transition = \"ExternalToolDeltaReceivedIdle\""
     ));
     assert!(model.contains(
         "WitnessTransitionObserved_surface_add_notifies_control_turn_execution_LlmReturnedTerminal"

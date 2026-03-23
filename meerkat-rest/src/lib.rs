@@ -29,11 +29,12 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
+#[cfg(feature = "comms")]
+use meerkat::SessionServiceCommsExt;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
-    PersistentSessionService, Session, SessionId, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, encode_llm_client_override_for_service,
-    open_realm_persistence_in,
+    PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
+    SessionServiceHistoryExt, encode_llm_client_override_for_service, open_realm_persistence_in,
 };
 use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;

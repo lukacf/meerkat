@@ -17,9 +17,11 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use indexmap::IndexMap;
+#[cfg(feature = "comms")]
+use meerkat::SessionServiceCommsExt;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, SessionServiceCommsExt, encode_llm_client_override_for_service,
+    PersistentSessionService, encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;

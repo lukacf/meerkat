@@ -1,7 +1,7 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.4.11
+// Contract version: 0.4.13
 
-export const CONTRACT_VERSION = "0.4.11";
+export const CONTRACT_VERSION = "0.4.13";
 
 export interface WireUsage {
   input_tokens: number;
@@ -110,6 +110,44 @@ export interface McpReloadParams {
   session_id: string;
 }
 
+export interface MobWireParams {
+  local: string;
+  mob_id: string;
+  target: unknown;
+}
+
+export interface MobUnwireParams {
+  local: string;
+  mob_id: string;
+  target: unknown;
+}
+
+export interface RuntimeStateParams {
+  session_id: string;
+}
+
+export interface RuntimeAcceptParams {
+  input: unknown;
+  session_id: string;
+}
+
+export interface RuntimeRetireParams {
+  session_id: string;
+}
+
+export interface RuntimeResetParams {
+  session_id: string;
+}
+
+export interface InputStateParams {
+  input_id: string;
+  session_id: string;
+}
+
+export interface InputListParams {
+  session_id: string;
+}
+
 export interface McpLiveOpResponse {
   applied_at_turn?: number;
   operation: "add" | "remove" | "reload";
@@ -117,4 +155,69 @@ export interface McpLiveOpResponse {
   server_name?: string;
   session_id: string;
   status: "staged" | "applied" | "rejected";
+}
+
+export interface WireTrustedPeerSpec {
+  address: string;
+  name: string;
+  peer_id: string;
+}
+
+export interface MobWireResult {
+  wired: boolean;
+}
+
+export interface MobUnwireResult {
+  unwired: boolean;
+}
+
+export interface RuntimeStateResult {
+  state: "initializing" | "idle" | "attached" | "running" | "recovering" | "retired" | "stopped" | "destroyed";
+}
+
+export interface RuntimeAcceptResult {
+  existing_id?: string;
+  input_id?: string;
+  outcome_type: "accepted" | "deduplicated" | "rejected";
+  policy?: unknown;
+  reason?: string;
+  state?: WireInputState;
+}
+
+export interface RuntimeRetireResult {
+  inputs_abandoned: number;
+  inputs_pending_drain?: number;
+}
+
+export interface RuntimeResetResult {
+  inputs_abandoned: number;
+}
+
+export interface WireInputStateHistoryEntry {
+  from: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  reason?: string;
+  timestamp: string;
+  to: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+}
+
+export interface WireInputState {
+  attempt_count?: number;
+  created_at: string;
+  current_state: "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+  durability?: unknown;
+  history?: WireInputStateHistoryEntry[];
+  idempotency_key?: string;
+  input_id: string;
+  last_boundary_sequence?: number;
+  last_run_id?: string;
+  persisted_input?: unknown;
+  policy?: unknown;
+  reconstruction_source?: unknown;
+  recovery_count?: number;
+  terminal_outcome?: unknown;
+  updated_at: string;
+}
+
+export interface InputListResult {
+  input_ids: string[];
 }

@@ -69,10 +69,21 @@ export {
 
 export { CONTRACT_VERSION } from "./generated/types.js";
 export type {
+  InputListParams,
+  InputListResult,
   McpAddParams,
   McpRemoveParams,
   McpReloadParams,
   McpLiveOpResponse,
+  RuntimeAcceptParams,
+  RuntimeAcceptResult,
+  RuntimeResetParams,
+  RuntimeResetResult,
+  RuntimeRetireParams,
+  RuntimeRetireResult,
+  RuntimeStateParams,
+  RuntimeStateResult,
+  WireInputState,
 } from "./generated/types.js";
 
 export type {

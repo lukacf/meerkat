@@ -23,11 +23,16 @@ pub use protocol::Protocol;
 pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
 pub use wire::{
-    CatalogModelEntry, CommsParams, CoreCreateParams, HookParams, McpAddParams, McpLiveOpResponse,
-    McpLiveOpStatus, McpLiveOperation, McpReloadParams, McpRemoveParams, ModelsCatalogResponse,
-    ProviderCatalog, SkillEntry, SkillInspectResponse, SkillListResponse, SkillsParams,
-    StructuredOutputParams, WireAssistantBlock, WireContentBlock, WireContentInput, WireEvent,
-    WireModelProfile, WireModelTier, WireProviderMeta, WireRunResult, WireSessionHistory,
-    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
-    WireToolResult, WireToolResultContent, WireUsage,
+    CatalogModelEntry, CommsParams, CoreCreateParams, HookParams, InputListParams, InputListResult,
+    InputStateParams, McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation,
+    McpReloadParams, McpRemoveParams, MobPeerTarget, MobUnwireParams, MobUnwireResult,
+    MobWireParams, MobWireResult, ModelsCatalogResponse, ProviderCatalog, RuntimeAcceptOutcomeType,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult,
+    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult, SkillEntry,
+    SkillInspectResponse, SkillListResponse, SkillsParams, StructuredOutputParams,
+    WireAssistantBlock, WireContentBlock, WireContentInput, WireEvent, WireInputLifecycleState,
+    WireInputState, WireInputStateHistoryEntry, WireModelProfile, WireModelTier, WireProviderMeta,
+    WireRunResult, WireRuntimeState, WireSessionHistory, WireSessionInfo, WireSessionMessage,
+    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult, WireToolResultContent,
+    WireTrustedPeerSpec, WireUsage,
 };

@@ -11,6 +11,10 @@ use crate::session_runtime::SessionRuntime;
 
 use super::{parse_params, parse_session_id_for_runtime};
 
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
 fn normalize_send_error(
     peer_name: Option<&str>,
     error: &meerkat_core::comms::SendError,
@@ -30,7 +34,9 @@ fn normalize_send_error(
                 "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
             })
         }
-        meerkat_core::comms::SendError::Internal(message) if peer_name.is_some() => {
+        meerkat_core::comms::SendError::Internal(message)
+            if peer_name.is_some() && is_transport_internal(message) =>
+        {
             let peer = peer_name.unwrap_or("<unknown>");
             serde_json::json!({
                 "code": "peer_unreachable",
@@ -112,17 +118,18 @@ pub async fn handle_send(
     let cmd = match build_comms_command(&params, &session_id) {
         Ok(cmd) => cmd,
         Err(details) => {
-            return RpcResponse::error(
+            let normalized = serde_json::json!({
+                "code": "invalid_command",
+                "message": "Command validation failed",
+                "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+                    &details
+                ),
+            });
+            return RpcResponse::error_with_data(
                 id,
                 error::INVALID_PARAMS,
-                serde_json::json!({
-                    "code": "invalid_command",
-                    "message": "Command validation failed",
-                    "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
-                        &details
-                    ),
-                })
-                .to_string(),
+                "Command validation failed",
+                normalized,
             );
         }
     };
@@ -166,11 +173,15 @@ pub async fn handle_send(
             };
             RpcResponse::success(id, result)
         }
-        Err(e) => RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            normalize_send_error(params.to.as_deref(), &e).to_string(),
-        ),
+        Err(e) => {
+            let normalized = normalize_send_error(params.to.as_deref(), &e);
+            let message = normalized
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Comms send failed")
+                .to_string();
+            RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, normalized)
+        }
     }
 }
 

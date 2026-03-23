@@ -274,6 +274,16 @@ export interface MobMember {
   labels?: Record<string, string>;
 }
 
+export interface ExternalPeerTarget {
+  external: {
+    name: string;
+    peer_id: string;
+    address: string;
+  };
+}
+
+export type MobPeerTarget = string | ExternalPeerTarget;
+
 /** Mob status. */
 export interface MobStatus {
   mob_id: string;

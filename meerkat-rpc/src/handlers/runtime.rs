@@ -1,9 +1,14 @@
 //! v9 runtime RPC handlers — runtime/state, runtime/accept, runtime/retire, runtime/reset,
 //! input/state, input/list.
 
-use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use meerkat_contracts::{
+    InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult,
+    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
+    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireRuntimeState,
+};
 use meerkat_core::{InputId, SessionId};
 use meerkat_runtime::RuntimeState;
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
@@ -11,50 +16,124 @@ use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use super::{RpcResponseExt, parse_params};
 use crate::protocol::{RpcId, RpcResponse};
 
-// ---- Param types ----
-
-#[derive(Debug, Deserialize)]
-struct RuntimeStateParams {
-    session_id: String,
+fn to_wire_runtime_state(state: RuntimeState) -> Result<WireRuntimeState, String> {
+    Ok(match state {
+        RuntimeState::Initializing => WireRuntimeState::Initializing,
+        RuntimeState::Idle => WireRuntimeState::Idle,
+        RuntimeState::Attached => WireRuntimeState::Attached,
+        RuntimeState::Running => WireRuntimeState::Running,
+        RuntimeState::Recovering => WireRuntimeState::Recovering,
+        RuntimeState::Retired => WireRuntimeState::Retired,
+        RuntimeState::Stopped => WireRuntimeState::Stopped,
+        RuntimeState::Destroyed => WireRuntimeState::Destroyed,
+        _ => return Err("unsupported runtime state variant".to_string()),
+    })
 }
 
-#[derive(Debug, Deserialize)]
-struct RuntimeAcceptParams {
-    session_id: String,
-    input: meerkat_runtime::Input,
+fn to_wire_input_lifecycle_state(
+    state: meerkat_runtime::InputLifecycleState,
+) -> Result<WireInputLifecycleState, String> {
+    Ok(match state {
+        meerkat_runtime::InputLifecycleState::Accepted => WireInputLifecycleState::Accepted,
+        meerkat_runtime::InputLifecycleState::Queued => WireInputLifecycleState::Queued,
+        meerkat_runtime::InputLifecycleState::Staged => WireInputLifecycleState::Staged,
+        meerkat_runtime::InputLifecycleState::Applied => WireInputLifecycleState::Applied,
+        meerkat_runtime::InputLifecycleState::AppliedPendingConsumption => {
+            WireInputLifecycleState::AppliedPendingConsumption
+        }
+        meerkat_runtime::InputLifecycleState::Consumed => WireInputLifecycleState::Consumed,
+        meerkat_runtime::InputLifecycleState::Superseded => WireInputLifecycleState::Superseded,
+        meerkat_runtime::InputLifecycleState::Coalesced => WireInputLifecycleState::Coalesced,
+        meerkat_runtime::InputLifecycleState::Abandoned => WireInputLifecycleState::Abandoned,
+        _ => return Err("unsupported input lifecycle state variant".to_string()),
+    })
 }
 
-#[derive(Debug, Deserialize)]
-struct RuntimeRetireParams {
-    session_id: String,
+fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputState, String> {
+    let json = serde_json::to_value(&state).map_err(|err| err.to_string())?;
+    let history = state
+        .history()
+        .iter()
+        .map(|entry| {
+            Ok(WireInputStateHistoryEntry {
+                timestamp: entry.timestamp.to_rfc3339(),
+                from: to_wire_input_lifecycle_state(entry.from)?,
+                to: to_wire_input_lifecycle_state(entry.to)?,
+                reason: entry.reason.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(WireInputState {
+        input_id: state.input_id.to_string(),
+        current_state: to_wire_input_lifecycle_state(state.current_state())?,
+        policy: json.get("policy").cloned().filter(|value| !value.is_null()),
+        terminal_outcome: json
+            .get("terminal_outcome")
+            .cloned()
+            .filter(|value| !value.is_null()),
+        durability: json
+            .get("durability")
+            .cloned()
+            .filter(|value| !value.is_null()),
+        idempotency_key: json
+            .get("idempotency_key")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        attempt_count: state.attempt_count,
+        recovery_count: state.recovery_count,
+        history,
+        reconstruction_source: json
+            .get("reconstruction_source")
+            .cloned()
+            .filter(|value| !value.is_null()),
+        persisted_input: json
+            .get("persisted_input")
+            .cloned()
+            .filter(|value| !value.is_null()),
+        last_run_id: state.last_run_id().map(ToString::to_string),
+        last_boundary_sequence: state.last_boundary_sequence(),
+        created_at: state.created_at.to_rfc3339(),
+        updated_at: state.updated_at().to_rfc3339(),
+    })
 }
 
-#[derive(Debug, Deserialize)]
-struct RuntimeResetParams {
-    session_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct InputStateParams {
-    session_id: String,
-    input_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct InputListParams {
-    session_id: String,
-}
-
-// ---- Result types ----
-
-#[derive(Debug, Serialize)]
-struct RuntimeStateResult {
-    state: RuntimeState,
-}
-
-#[derive(Debug, Serialize)]
-struct InputListResult {
-    input_ids: Vec<InputId>,
+fn to_wire_accept_result(
+    outcome: meerkat_runtime::AcceptOutcome,
+) -> Result<RuntimeAcceptResult, String> {
+    Ok(match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted {
+            input_id,
+            policy,
+            state,
+        } => RuntimeAcceptResult {
+            outcome_type: RuntimeAcceptOutcomeType::Accepted,
+            input_id: Some(input_id.to_string()),
+            existing_id: None,
+            reason: None,
+            policy: Some(serde_json::to_value(policy).map_err(|err| err.to_string())?),
+            state: Some(to_wire_input_state(state)?),
+        },
+        meerkat_runtime::AcceptOutcome::Deduplicated {
+            input_id,
+            existing_id,
+        } => RuntimeAcceptResult {
+            outcome_type: RuntimeAcceptOutcomeType::Deduplicated,
+            input_id: Some(input_id.to_string()),
+            existing_id: Some(existing_id.to_string()),
+            reason: None,
+            policy: None,
+            state: None,
+        },
+        meerkat_runtime::AcceptOutcome::Rejected { reason } => RuntimeAcceptResult {
+            outcome_type: RuntimeAcceptOutcomeType::Rejected,
+            input_id: None,
+            existing_id: None,
+            reason: Some(reason),
+            policy: None,
+            state: None,
+        },
+        _ => return Err("unsupported accept outcome variant".to_string()),
+    })
 }
 
 // ---- Handlers ----
@@ -78,7 +157,10 @@ pub async fn handle_runtime_state(
     };
 
     match adapter.runtime_state(&session_id).await {
-        Ok(state) => RpcResponse::success(id, RuntimeStateResult { state }),
+        Ok(state) => match to_wire_runtime_state(state) {
+            Ok(state) => RpcResponse::success(id, RuntimeStateResult { state }),
+            Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
+        },
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -101,14 +183,26 @@ pub async fn handle_runtime_accept(
         }
     };
 
-    match adapter.accept_input(&session_id, params.input).await {
-        Ok(outcome) => RpcResponse::success(id, outcome),
-        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => RpcResponse::success(
-            id,
-            meerkat_runtime::AcceptOutcome::Rejected {
+    let input = match serde_json::from_value::<meerkat_runtime::Input>(params.input) {
+        Ok(input) => input,
+        Err(err) => {
+            return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string());
+        }
+    };
+
+    match adapter.accept_input(&session_id, input).await {
+        Ok(outcome) => match to_wire_accept_result(outcome) {
+            Ok(result) => RpcResponse::success(id, result),
+            Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
+        },
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
+            match to_wire_accept_result(meerkat_runtime::AcceptOutcome::Rejected {
                 reason: format!("runtime not accepting input while in state: {state}"),
-            },
-        ),
+            }) {
+                Ok(result) => RpcResponse::success(id, result),
+                Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
+            }
+        }
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -132,7 +226,13 @@ pub async fn handle_runtime_retire(
     };
 
     match adapter.retire_runtime(&session_id).await {
-        Ok(report) => RpcResponse::success(id, report),
+        Ok(report) => RpcResponse::success(
+            id,
+            RuntimeRetireResult {
+                inputs_abandoned: report.inputs_abandoned,
+                inputs_pending_drain: report.inputs_pending_drain,
+            },
+        ),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -156,7 +256,12 @@ pub async fn handle_runtime_reset(
     };
 
     match adapter.reset_runtime(&session_id).await {
-        Ok(report) => RpcResponse::success(id, report),
+        Ok(report) => RpcResponse::success(
+            id,
+            RuntimeResetResult {
+                inputs_abandoned: report.inputs_abandoned,
+            },
+        ),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -185,7 +290,11 @@ pub async fn handle_input_state(
     };
 
     match adapter.input_state(&session_id, &input_id).await {
-        Ok(state) => RpcResponse::success(id, state),
+        Ok(Some(state)) => match to_wire_input_state(state) {
+            Ok(result) => RpcResponse::success(id, result),
+            Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
+        },
+        Ok(None) => RpcResponse::success(id, Option::<WireInputState>::None),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -209,7 +318,15 @@ pub async fn handle_input_list(
     };
 
     match adapter.list_active_inputs(&session_id).await {
-        Ok(input_ids) => RpcResponse::success(id, InputListResult { input_ids }),
+        Ok(input_ids) => RpcResponse::success(
+            id,
+            InputListResult {
+                input_ids: input_ids
+                    .into_iter()
+                    .map(|input_id| input_id.to_string())
+                    .collect(),
+            },
+        ),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }

@@ -76,6 +76,9 @@ fn init_tracing() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            tracing::error!("wasm panic: {info}");
+        }));
         tracing_wasm::set_as_global_default();
     });
 }
@@ -460,6 +463,34 @@ thread_local! {
     static RUNTIME_STATE: RefCell<Option<RuntimeState>> = const { RefCell::new(None) };
 }
 
+fn clear_subscription_registry() {
+    SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        registry.subscriptions.clear();
+        registry.next_handle = 1;
+    });
+}
+
+fn install_runtime_state(state: RuntimeState) {
+    clear_subscription_registry();
+    RUNTIME_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(state);
+    });
+}
+
+/// Tear down the embedded runtime and release all local handles/subscriptions.
+///
+/// Existing `Session`, `Mob`, and subscription handles become invalid after
+/// this call.
+#[wasm_bindgen]
+pub fn destroy_runtime() -> Result<(), JsValue> {
+    clear_subscription_registry();
+    RUNTIME_STATE.with(|cell| {
+        cell.borrow_mut().take();
+    });
+    Ok(())
+}
+
 fn with_runtime_state<F, R>(f: F) -> Result<R, JsValue>
 where
     F: FnOnce(&RuntimeState) -> Result<R, JsValue>,
@@ -535,9 +566,6 @@ fn err_session(e: meerkat_core::SessionError) -> JsValue {
         }
         meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
         meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
-        meerkat_core::SessionError::IncompatibleFormat { reason } => {
-            err_js("SESSION_INCOMPATIBLE_FORMAT", &reason)
-        }
         meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
     }
 }
@@ -991,7 +1019,7 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
     async fn dispatch(
         &self,
         call: meerkat_core::ToolCallView<'_>,
-    ) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
         // Fire-and-forget tools return immediately. The host watches
         // ToolCallRequested events in the stream to act on the call.
         if Self::is_fire_and_forget(call.name) {
@@ -999,7 +1027,8 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
                 call.id.to_string(),
                 "acknowledged".to_string(),
                 false,
-            ));
+            )
+            .into());
         }
 
         let callback = Self::get_callback(call.name)
@@ -1033,11 +1062,10 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
             ))
         })?;
 
-        Ok(meerkat_core::ToolResult::new(
-            call.id.to_string(),
-            parsed.content,
-            parsed.is_error,
-        ))
+        Ok(
+            meerkat_core::ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error)
+                .into(),
+        )
     }
 }
 
@@ -1108,16 +1136,14 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
     let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
-    RUNTIME_STATE.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeState {
-            mob_state,
-            session_service,
-            sessions: BTreeMap::new(),
-            next_handle: 1,
-            model: model.clone(),
-            #[cfg(target_arch = "wasm32")]
-            js_tools: Vec::new(),
-        });
+    install_runtime_state(RuntimeState {
+        mob_state,
+        session_service,
+        sessions: BTreeMap::new(),
+        next_handle: 1,
+        model: model.clone(),
+        #[cfg(target_arch = "wasm32")]
+        js_tools: Vec::new(),
     });
 
     let result = serde_json::json!({
@@ -1170,16 +1196,14 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
-    RUNTIME_STATE.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeState {
-            mob_state,
-            session_service,
-            sessions: BTreeMap::new(),
-            next_handle: 1,
-            model: model.clone(),
-            #[cfg(target_arch = "wasm32")]
-            js_tools: Vec::new(),
-        });
+    install_runtime_state(RuntimeState {
+        mob_state,
+        session_service,
+        sessions: BTreeMap::new(),
+        next_handle: 1,
+        model: model.clone(),
+        #[cfg(target_arch = "wasm32")]
+        js_tools: Vec::new(),
     });
 
     let result = serde_json::json!({
@@ -1747,7 +1771,7 @@ struct SpawnSpecInput {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
-    initial_message: Option<String>,
+    initial_message: Option<meerkat_core::types::ContentInput>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
@@ -1781,7 +1805,24 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     mob_state
-        .mob_wire(&id, MeerkatId::from(a), MeerkatId::from(b))
+        .mob_wire(
+            &id,
+            MeerkatId::from(a),
+            meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+        )
+        .await
+        .map_err(err_mob)
+}
+
+/// Wire a local meerkat to a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_wire_target(mob_id: &str, local: &str, target_json: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let target: meerkat_mob::PeerTarget =
+        serde_json::from_str(target_json).map_err(|e| err_str("invalid_peer_target", e))?;
+    mob_state
+        .mob_wire(&id, MeerkatId::from(local), target)
         .await
         .map_err(err_mob)
 }
@@ -1792,7 +1833,28 @@ pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     mob_state
-        .mob_unwire(&id, MeerkatId::from(a), MeerkatId::from(b))
+        .mob_unwire(
+            &id,
+            MeerkatId::from(a),
+            meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+        )
+        .await
+        .map_err(err_mob)
+}
+
+/// Unwire a local meerkat from a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_unwire_target(
+    mob_id: &str,
+    local: &str,
+    target_json: &str,
+) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let target: meerkat_mob::PeerTarget =
+        serde_json::from_str(target_json).map_err(|e| err_str("invalid_peer_target", e))?;
+    mob_state
+        .mob_unwire(&id, MeerkatId::from(local), target)
         .await
         .map_err(err_mob)
 }
@@ -1989,6 +2051,10 @@ pub async fn mob_respawn(
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
+    let initial_message = initial_message.map(|message| {
+        serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
+            .unwrap_or_else(|_| message.into())
+    });
     match mob_state.mob_respawn(&id, mid, initial_message).await {
         Ok(receipt) => {
             let result = serde_json::json!({

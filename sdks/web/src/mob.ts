@@ -5,15 +5,17 @@ import type {
   SpawnSpec,
   SpawnResult,
   MobMember,
+  MobPeerTarget,
   MobStatus,
   MobLifecycleAction,
   FlowStatus,
-  EventEnvelope,
-  AttributedEvent,
+  AttributedEventItem,
+  MemberEventItem,
   MobEvent,
   AppendSystemContextOptions,
   MobAppendSystemContextResult,
   RenderMetadata,
+  ContentBlock,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -22,6 +24,8 @@ interface MobWasmBindings {
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_wire_target?: (mobId: string, local: string, targetJson: string) => Promise<void>;
+  mob_unwire_target?: (mobId: string, local: string, targetJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
@@ -58,8 +62,8 @@ export class Member {
     content: ContentInput,
     handlingMode: HandlingMode = 'queue',
     renderMetadata?: RenderMetadata,
-  ): Promise<string> {
-    return this.bindings.mob_member_send(
+  ): Promise<{ member_id: string; session_id: string; handling_mode: HandlingMode }> {
+    const sessionId = await this.bindings.mob_member_send(
       this.mobId,
       this.meerkatId,
       JSON.stringify({
@@ -68,13 +72,21 @@ export class Member {
         render_metadata: renderMetadata,
       }),
     );
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error('Invalid mob/send response: missing session_id');
+    }
+    return {
+      member_id: this.meerkatId,
+      session_id: sessionId,
+      handling_mode: handlingMode,
+    };
   }
 
-  async subscribe(): Promise<EventSubscription<EventEnvelope>> {
+  async subscribe(): Promise<EventSubscription<MemberEventItem>> {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, this.meerkatId);
-    return new EventSubscription<EventEnvelope>(
+    return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) => Array.isArray(raw) ? (raw as EventEnvelope[]) : [],
+      (raw) => Array.isArray(raw) ? (raw as MemberEventItem[]) : [],
       () => this.bindings.close_subscription(handle),
     );
   }
@@ -108,13 +120,27 @@ export class Mob {
   }
 
   /** Wire two agents for comms trust. */
-  async wire(a: string, b: string): Promise<void> {
-    await this.bindings.mob_wire(this.mobId, a, b);
+  async wire(local: string, target: MobPeerTarget): Promise<void> {
+    if (typeof target === 'string') {
+      await this.bindings.mob_wire(this.mobId, local, target);
+      return;
+    }
+    if (!this.bindings.mob_wire_target) {
+      throw new Error('This runtime does not support external peer wiring');
+    }
+    await this.bindings.mob_wire_target(this.mobId, local, JSON.stringify(target));
   }
 
   /** Remove comms trust between two agents. */
-  async unwire(a: string, b: string): Promise<void> {
-    await this.bindings.mob_unwire(this.mobId, a, b);
+  async unwire(local: string, target: MobPeerTarget): Promise<void> {
+    if (typeof target === 'string') {
+      await this.bindings.mob_unwire(this.mobId, local, target);
+      return;
+    }
+    if (!this.bindings.mob_unwire_target) {
+      throw new Error('This runtime does not support external peer unwiring');
+    }
+    await this.bindings.mob_unwire_target(this.mobId, local, JSON.stringify(target));
   }
 
   /** List all members in the mob. */
@@ -145,19 +171,39 @@ export class Mob {
     return new Member(this.mobId, meerkatId, this.bindings);
   }
 
-  /** Send canonical ordinary work to a specific member through the runtime-backed mob path. */
+  /**
+   * Compatibility facade for direct member turns.
+   *
+   * Canonical 0.5 callers should prefer `member(meerkatId).send(...)`. This
+   * method intentionally adds no runtime semantics of its own and preserves the
+   * legacy browser contract of returning the session ID.
+   */
   async sendMessage(
     meerkatId: string,
     content: ContentInput,
     handlingMode: HandlingMode = 'queue',
     renderMetadata?: RenderMetadata,
   ): Promise<string> {
-    return this.member(meerkatId).send(content, handlingMode, renderMetadata);
+    const receipt = await this.member(meerkatId).send(
+      content,
+      handlingMode,
+      renderMetadata,
+    );
+    return receipt.session_id;
   }
 
   /** Retire and re-spawn an agent with the same profile. Returns a result envelope with receipt. */
-  async respawn(meerkatId: string, initialMessage?: string): Promise<Record<string, unknown>> {
-    const json = await this.bindings.mob_respawn(this.mobId, meerkatId, initialMessage);
+  async respawn(
+    meerkatId: string,
+    initialMessage?: string | ContentBlock[],
+  ): Promise<Record<string, unknown>> {
+    const payload =
+      initialMessage != null
+        ? typeof initialMessage === 'string'
+          ? initialMessage
+          : JSON.stringify(initialMessage)
+        : undefined;
+    const json = await this.bindings.mob_respawn(this.mobId, meerkatId, payload);
     return JSON.parse(json) as Record<string, unknown>;
   }
 
@@ -200,21 +246,21 @@ export class Mob {
   }
 
   /** Subscribe to events for a specific member. */
-  async subscribe(meerkatId: string): Promise<EventSubscription<EventEnvelope>> {
+  async subscribe(meerkatId: string): Promise<EventSubscription<MemberEventItem>> {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, meerkatId);
-    return new EventSubscription<EventEnvelope>(
+    return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) => Array.isArray(raw) ? (raw as EventEnvelope[]) : [],
+      (raw) => Array.isArray(raw) ? (raw as MemberEventItem[]) : [],
       () => this.bindings.close_subscription(handle),
     );
   }
 
   /** Subscribe to all mob-wide attributed events. */
-  async subscribeAll(): Promise<EventSubscription<AttributedEvent>> {
+  async subscribeAll(): Promise<EventSubscription<AttributedEventItem>> {
     const handle = await this.bindings.mob_subscribe_events(this.mobId);
-    return new EventSubscription<AttributedEvent>(
+    return new EventSubscription<AttributedEventItem>(
       () => this.bindings.poll_subscription(handle),
-      (raw) => Array.isArray(raw) ? (raw as AttributedEvent[]) : [],
+      (raw) => Array.isArray(raw) ? (raw as AttributedEventItem[]) : [],
       () => this.bindings.close_subscription(handle),
     );
   }

@@ -26,6 +26,10 @@ use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionOwner {
     Runtime,
@@ -1122,11 +1126,17 @@ impl MethodRouter {
         let cmd = match handlers::comms::build_comms_command(&params, &session_id) {
             Ok(cmd) => cmd,
             Err(details) => {
-                return RpcResponse::error(id, error::INVALID_PARAMS, serde_json::json!({
+                let normalized = serde_json::json!({
                     "code": "invalid_command",
                     "message": "Command validation failed",
                     "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&details),
-                }).to_string())
+                });
+                return RpcResponse::error_with_data(
+                    id,
+                    error::INVALID_PARAMS,
+                    "Command validation failed",
+                    normalized,
+                );
             }
         };
         match comms.send(cmd).await {
@@ -1173,7 +1183,9 @@ impl MethodRouter {
                             "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
                         })
                     }
-                    meerkat_core::comms::SendError::Internal(details) if params.to.is_some() => {
+                    meerkat_core::comms::SendError::Internal(details)
+                        if params.to.is_some() && is_transport_internal(details) =>
+                    {
                         let peer = params.to.as_deref().unwrap_or("<unknown>");
                         json!({
                             "code": "peer_unreachable",
@@ -1188,7 +1200,12 @@ impl MethodRouter {
                         "message": e.to_string(),
                     }),
                 };
-                RpcResponse::error(id, error::INTERNAL_ERROR, normalized.to_string())
+                let message = normalized
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Comms send failed")
+                    .to_string();
+                RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, normalized)
             }
         }
     }

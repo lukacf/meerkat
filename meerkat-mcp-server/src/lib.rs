@@ -1618,7 +1618,6 @@ async fn handle_meerkat_interrupt(
     })))
 }
 
-#[allow(deprecated)]
 async fn handle_meerkat_sessions(
     state: &MeerkatMcpState,
     input: MeerkatSessionListInput,
@@ -1646,7 +1645,6 @@ async fn handle_meerkat_sessions(
     Ok(wrap_tool_payload(payload))
 }
 
-#[allow(deprecated)]
 async fn handle_meerkat_history(
     state: &MeerkatMcpState,
     input: MeerkatSessionHistoryInput,
@@ -2130,7 +2128,7 @@ async fn handle_meerkat_comms_send(
     let receipt = comms
         .send(cmd)
         .await
-        .map_err(|e| format!("Failed to send comms command: {e}"))?;
+        .map_err(|e| normalize_mcp_comms_send_error(request.to.as_deref(), &e))?;
     Ok(wrap_tool_payload(
         json!({ "receipt": build_comms_receipt_json(receipt) }),
     ))
@@ -2158,11 +2156,43 @@ async fn handle_meerkat_comms_peers(
                 "source": format!("{:?}", p.source),
                 "sendable_kinds": p.sendable_kinds,
                 "capabilities": p.capabilities,
+                "reachability": p.reachability,
+                "last_unreachable_reason": p.last_unreachable_reason,
                 "meta": p.meta,
             })
         }).collect::<Vec<_>>()
     });
     Ok(wrap_tool_payload(payload))
+}
+
+#[cfg(feature = "comms")]
+fn normalize_mcp_comms_send_error(
+    peer_name: Option<&str>,
+    error: &meerkat_core::comms::SendError,
+) -> String {
+    match error {
+        meerkat_core::comms::SendError::PeerNotFound(peer) => {
+            format!("peer_not_found_or_not_trusted: peer '{peer}' is not found or not trusted")
+        }
+        meerkat_core::comms::SendError::PeerOffline => format!(
+            "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
+            peer_name.unwrap_or("<unknown>")
+        ),
+        meerkat_core::comms::SendError::Internal(details)
+            if peer_name.is_some() && is_transport_internal(details) =>
+        {
+            format!(
+                "peer_unreachable: peer '{}' is unreachable: transport_error ({details})",
+                peer_name.unwrap_or("<unknown>")
+            )
+        }
+        other => other.to_string(),
+    }
+}
+
+#[cfg(feature = "comms")]
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 async fn handle_meerkat_run(
@@ -2224,6 +2254,16 @@ async fn handle_meerkat_run(
     // Pre-create a session to claim a stable session_id
     let session = Session::new();
     let session_id = session.id().clone();
+    state
+        .runtime_adapter
+        .register_session(session_id.clone())
+        .await;
+    let ops_lifecycle = state
+        .runtime_adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))?;
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -2245,6 +2285,7 @@ async fn handle_meerkat_run(
         provider_params: input.provider_params.clone(),
         external_tools,
         llm_client_override: None,
+        ops_lifecycle_override: Some(ops_lifecycle),
         override_builtins: Some(input.enable_builtins),
         override_shell: Some(input.enable_builtins && enable_shell),
         override_memory: input.enable_memory,
@@ -2278,6 +2319,9 @@ async fn handle_meerkat_run(
     };
 
     let result = state.service.create_session(req).await;
+    if result.is_err() {
+        state.runtime_adapter.unregister_session(&session_id).await;
+    }
     drop(event_tx);
     if let Some(task) = event_task
         && let Err(e) = task.await
@@ -2434,6 +2478,16 @@ async fn handle_meerkat_resume(
         ),
         None => None,
     };
+    state
+        .runtime_adapter
+        .register_session(session_id.clone())
+        .await;
+    let ops_lifecycle = state
+        .runtime_adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))?;
     let build = SessionBuildOptions {
         provider,
         output_schema,
@@ -2445,6 +2499,7 @@ async fn handle_meerkat_resume(
         provider_params: input.provider_params.clone(),
         external_tools,
         llm_client_override: None,
+        ops_lifecycle_override: Some(ops_lifecycle),
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_builtins && enable_shell),
         override_memory: enable_memory,
@@ -2533,6 +2588,9 @@ async fn handle_meerkat_resume(
             Err(other) => Err(other),
         }
     };
+    if result.is_err() {
+        state.runtime_adapter.unregister_session(&session_id).await;
+    }
 
     drop(event_tx);
     if let Some(task) = event_task

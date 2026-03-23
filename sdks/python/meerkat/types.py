@@ -12,10 +12,21 @@ from typing import Any, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
+    InputListParams as InputListParams,
+    InputListResult as InputListResult,
     McpAddParams as McpAddParams,
     McpLiveOpResponse as McpLiveOpResponse,
     McpReloadParams as McpReloadParams,
     McpRemoveParams as McpRemoveParams,
+    RuntimeAcceptParams as RuntimeAcceptParams,
+    RuntimeAcceptResult as RuntimeAcceptResult,
+    RuntimeResetParams as RuntimeResetParams,
+    RuntimeResetResult as RuntimeResetResult,
+    RuntimeRetireParams as RuntimeRetireParams,
+    RuntimeRetireResult as RuntimeRetireResult,
+    RuntimeStateParams as RuntimeStateParams,
+    RuntimeStateResult as RuntimeStateResult,
+    WireInputState as WireInputState,
 )
 
 # Re-export Usage from events so there's a single canonical definition.

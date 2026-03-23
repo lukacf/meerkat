@@ -39,6 +39,12 @@ import { createInterface, type Interface as ReadlineInterface } from "node:readl
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
+  type InputListResult,
+  type RuntimeAcceptResult,
+  type RuntimeResetResult,
+  type RuntimeRetireResult,
+  type RuntimeStateResult,
+  type WireInputState,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
@@ -1096,31 +1102,71 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
-  async runtimeState(sessionId: string): Promise<Record<string, unknown>> {
-    return this.request("runtime/state", { session_id: sessionId });
+  async runtimeState(sessionId: string): Promise<RuntimeStateResult> {
+    const result = await this.request("runtime/state", { session_id: sessionId });
+    if (typeof result.state !== "string" || result.state.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid runtime/state response: missing state",
+      );
+    }
+    return result as unknown as RuntimeStateResult;
   }
 
   async runtimeAccept(
     sessionId: string,
     input: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("runtime/accept", { session_id: sessionId, input });
+  ): Promise<RuntimeAcceptResult> {
+    const result = await this.request("runtime/accept", { session_id: sessionId, input });
+    if (typeof result.outcome_type !== "string" || result.outcome_type.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid runtime/accept response: missing outcome_type",
+      );
+    }
+    return result as unknown as RuntimeAcceptResult;
   }
 
-  async runtimeRetire(sessionId: string): Promise<Record<string, unknown>> {
-    return this.request("runtime/retire", { session_id: sessionId });
+  async runtimeRetire(sessionId: string): Promise<RuntimeRetireResult> {
+    const result = await this.request("runtime/retire", { session_id: sessionId });
+    if (typeof result.inputs_abandoned !== "number") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid runtime/retire response: missing inputs_abandoned",
+      );
+    }
+    return result as unknown as RuntimeRetireResult;
   }
 
-  async runtimeReset(sessionId: string): Promise<Record<string, unknown>> {
-    return this.request("runtime/reset", { session_id: sessionId });
+  async runtimeReset(sessionId: string): Promise<RuntimeResetResult> {
+    const result = await this.request("runtime/reset", { session_id: sessionId });
+    if (typeof result.inputs_abandoned !== "number") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid runtime/reset response: missing inputs_abandoned",
+      );
+    }
+    return result as unknown as RuntimeResetResult;
   }
 
-  async inputState(sessionId: string, inputId: string): Promise<Record<string, unknown>> {
-    return this.request("input/state", { session_id: sessionId, input_id: inputId });
+  async inputState(sessionId: string, inputId: string): Promise<WireInputState | null> {
+    const result = await this.request("input/state", { session_id: sessionId, input_id: inputId });
+    if (result === null) {
+      return null;
+    }
+    if (typeof result !== "object" || result === null) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid input/state response: expected object or null",
+      );
+    }
+    return result as unknown as WireInputState;
   }
 
   async inputList(sessionId: string): Promise<string[]> {
-    const result = await this.request("input/list", { session_id: sessionId });
+    const result = (await this.request("input/list", {
+      session_id: sessionId,
+    })) as unknown as InputListResult;
     return Array.isArray(result.input_ids)
       ? result.input_ids.map((inputId) => String(inputId))
       : [];
@@ -1148,10 +1194,12 @@ export class MeerkatClient {
         this.pendingRequests.delete(data.id);
         const error = data.error as Record<string, unknown> | null | undefined;
         if (error) {
+          const normalized = MeerkatClient.parseRpcErrorPayload(error);
           pending.reject(
             new MeerkatError(
-              String(error.code ?? "UNKNOWN"),
-              String(error.message ?? "Unknown error"),
+              normalized.code,
+              normalized.message,
+              normalized.details,
             ),
           );
         } else {
@@ -1207,6 +1255,42 @@ export class MeerkatClient {
         }
       }
     }
+  }
+
+  private static parseRpcErrorPayload(error: Record<string, unknown>): {
+    code: string;
+    message: string;
+    details?: unknown;
+  } {
+    const rawData = error.data;
+    if (typeof rawData === "object" && rawData !== null) {
+      const parsed = rawData as Record<string, unknown>;
+      return {
+        code: String(parsed.code ?? error.code ?? "UNKNOWN"),
+        message: String(parsed.message ?? error.message ?? "Unknown error"),
+        details: parsed.details ?? parsed.reason ?? rawData,
+      };
+    }
+    const rawMessage = error.message;
+    if (typeof rawMessage === "string") {
+      try {
+        const parsed = JSON.parse(rawMessage) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object") {
+          return {
+            code: String(parsed.code ?? error.code ?? "UNKNOWN"),
+            message: String(parsed.message ?? rawMessage),
+            details: parsed.details ?? parsed.reason ?? error.data,
+          };
+        }
+      } catch {
+        // Fall back to the outer JSON-RPC error payload.
+      }
+    }
+    return {
+      code: String(error.code ?? "UNKNOWN"),
+      message: String(rawMessage ?? "Unknown error"),
+      details: error.data,
+    };
   }
 
   private request(method: string, params: unknown): Promise<Record<string, unknown>> {

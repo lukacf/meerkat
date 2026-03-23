@@ -11,7 +11,7 @@ import type {
 } from './types.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
-const EXPECTED_VERSION = '0.4.11';
+const EXPECTED_VERSION = '0.4.13';
 
 /**
  * Convert a camelCase config object to the snake_case expected by WASM.
@@ -75,6 +75,7 @@ export interface WasmModule {
     schemaJson: string,
   ) => void;
   clear_tool_callbacks: () => void;
+  destroy_runtime: () => void;
   create_session_simple: (configJson: string) => number;
   create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
   start_turn: (handle: number, prompt: string, optionsJson: string) => Promise<string>;
@@ -92,6 +93,8 @@ export interface WasmModule {
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_wire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
+  mob_unwire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
@@ -120,6 +123,7 @@ export interface WasmModule {
 /** Entry point for the Meerkat WASM runtime in the browser. */
 export class MeerkatRuntime {
   private wasm: WasmModule;
+  private destroyed = false;
 
   private constructor(wasm: WasmModule) {
     this.wasm = wasm;
@@ -260,6 +264,13 @@ export class MeerkatRuntime {
     wasm.clear_tool_callbacks();
   }
 
+  /** Tear down the embedded runtime and invalidate browser-side handles. */
+  destroy(): void {
+    if (this.destroyed) return;
+    this.wasm.destroy_runtime();
+    this.destroyed = true;
+  }
+
   /** Register a tool callback on this initialized runtime instance. */
   registerTool(
     name: string,
@@ -297,6 +308,8 @@ export class MeerkatRuntime {
       mob_retire: this.wasm.mob_retire,
       mob_wire: this.wasm.mob_wire,
       mob_unwire: this.wasm.mob_unwire,
+      mob_wire_target: this.wasm.mob_wire_target,
+      mob_unwire_target: this.wasm.mob_unwire_target,
       mob_list_members: this.wasm.mob_list_members,
       mob_append_system_context: this.wasm.mob_append_system_context,
       mob_member_send: this.wasm.mob_member_send,

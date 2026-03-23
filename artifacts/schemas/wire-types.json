@@ -27,6 +27,23 @@
     "title": "ContractVersion",
     "type": "object"
   },
+  "InputListResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `input/list`.",
+    "properties": {
+      "input_ids": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "input_ids"
+    ],
+    "title": "InputListResult",
+    "type": "object"
+  },
   "McpLiveOpResponse": {
     "$defs": {
       "McpLiveOpStatus": {
@@ -108,6 +125,328 @@
     ],
     "title": "McpLiveOperation",
     "type": "string"
+  },
+  "MobPeerTarget": {
+    "$defs": {
+      "WireTrustedPeerSpec": {
+        "description": "Minimal trusted peer spec for public mob wiring surfaces.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Target for a mob wire/unwire call.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "local": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "local"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "external": {
+            "$ref": "#/$defs/WireTrustedPeerSpec"
+          }
+        },
+        "required": [
+          "external"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "MobPeerTarget"
+  },
+  "MobUnwireResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/unwire`.",
+    "properties": {
+      "unwired": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "unwired"
+    ],
+    "title": "MobUnwireResult",
+    "type": "object"
+  },
+  "MobWireResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/wire`.",
+    "properties": {
+      "wired": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "wired"
+    ],
+    "title": "MobWireResult",
+    "type": "object"
+  },
+  "RuntimeAcceptOutcomeType": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Discriminator for `runtime/accept` responses.",
+    "enum": [
+      "accepted",
+      "deduplicated",
+      "rejected"
+    ],
+    "title": "RuntimeAcceptOutcomeType",
+    "type": "string"
+  },
+  "RuntimeAcceptResult": {
+    "$defs": {
+      "RuntimeAcceptOutcomeType": {
+        "description": "Discriminator for `runtime/accept` responses.",
+        "enum": [
+          "accepted",
+          "deduplicated",
+          "rejected"
+        ],
+        "type": "string"
+      },
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputState": {
+        "description": "RPC-facing input state snapshot.",
+        "properties": {
+          "attempt_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "current_state": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "durability": true,
+          "history": {
+            "items": {
+              "$ref": "#/$defs/WireInputStateHistoryEntry"
+            },
+            "type": "array"
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "last_boundary_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persisted_input": true,
+          "policy": true,
+          "reconstruction_source": true,
+          "recovery_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_outcome": true,
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input_id",
+          "current_state",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WireInputStateHistoryEntry": {
+        "description": "Input transition history entry for RPC-facing snapshots.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          }
+        },
+        "required": [
+          "timestamp",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/accept`.",
+    "properties": {
+      "existing_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "input_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "outcome_type": {
+        "$ref": "#/$defs/RuntimeAcceptOutcomeType"
+      },
+      "policy": true,
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "state": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInputState"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "outcome_type"
+    ],
+    "title": "RuntimeAcceptResult",
+    "type": "object"
+  },
+  "RuntimeResetResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/reset`.",
+    "properties": {
+      "inputs_abandoned": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "inputs_abandoned"
+    ],
+    "title": "RuntimeResetResult",
+    "type": "object"
+  },
+  "RuntimeRetireResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/retire`.",
+    "properties": {
+      "inputs_abandoned": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "inputs_pending_drain": {
+        "default": 0,
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "inputs_abandoned"
+    ],
+    "title": "RuntimeRetireResult",
+    "type": "object"
+  },
+  "RuntimeStateResult": {
+    "$defs": {
+      "WireRuntimeState": {
+        "description": "Public runtime state projection used by RPC surfaces.",
+        "enum": [
+          "initializing",
+          "idle",
+          "attached",
+          "running",
+          "recovering",
+          "retired",
+          "stopped",
+          "destroyed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `runtime/state`.",
+    "properties": {
+      "state": {
+        "$ref": "#/$defs/WireRuntimeState"
+      }
+    },
+    "required": [
+      "state"
+    ],
+    "title": "RuntimeStateResult",
+    "type": "object"
   },
   "WireAssistantBlock": {
     "$defs": {
@@ -467,6 +806,180 @@
     "description": "Wire-safe content input (mirrors `ContentInput`).",
     "title": "WireContentInput"
   },
+  "WireInputLifecycleState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public input lifecycle state projection used by RPC surfaces.",
+    "enum": [
+      "accepted",
+      "queued",
+      "staged",
+      "applied",
+      "applied_pending_consumption",
+      "consumed",
+      "superseded",
+      "coalesced",
+      "abandoned"
+    ],
+    "title": "WireInputLifecycleState",
+    "type": "string"
+  },
+  "WireInputState": {
+    "$defs": {
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputStateHistoryEntry": {
+        "description": "Input transition history entry for RPC-facing snapshots.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          }
+        },
+        "required": [
+          "timestamp",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "RPC-facing input state snapshot.",
+    "properties": {
+      "attempt_count": {
+        "default": 0,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "created_at": {
+        "type": "string"
+      },
+      "current_state": {
+        "$ref": "#/$defs/WireInputLifecycleState"
+      },
+      "durability": true,
+      "history": {
+        "items": {
+          "$ref": "#/$defs/WireInputStateHistoryEntry"
+        },
+        "type": "array"
+      },
+      "idempotency_key": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "input_id": {
+        "type": "string"
+      },
+      "last_boundary_sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "last_run_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "persisted_input": true,
+      "policy": true,
+      "reconstruction_source": true,
+      "recovery_count": {
+        "default": 0,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "terminal_outcome": true,
+      "updated_at": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "input_id",
+      "current_state",
+      "created_at",
+      "updated_at"
+    ],
+    "title": "WireInputState",
+    "type": "object"
+  },
+  "WireInputStateHistoryEntry": {
+    "$defs": {
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Input transition history entry for RPC-facing snapshots.",
+    "properties": {
+      "from": {
+        "$ref": "#/$defs/WireInputLifecycleState"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "timestamp": {
+        "type": "string"
+      },
+      "to": {
+        "$ref": "#/$defs/WireInputLifecycleState"
+      }
+    },
+    "required": [
+      "timestamp",
+      "from",
+      "to"
+    ],
+    "title": "WireInputStateHistoryEntry",
+    "type": "object"
+  },
   "WireProviderMeta": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Provider continuity metadata for transcript blocks.",
@@ -571,6 +1084,22 @@
       }
     ],
     "title": "WireProviderMeta"
+  },
+  "WireRuntimeState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public runtime state projection used by RPC surfaces.",
+    "enum": [
+      "initializing",
+      "idle",
+      "attached",
+      "running",
+      "recovering",
+      "retired",
+      "stopped",
+      "destroyed"
+    ],
+    "title": "WireRuntimeState",
+    "type": "string"
   },
   "WireSessionHistory": {
     "$defs": {
@@ -1860,6 +2389,28 @@
     ],
     "description": "Wire-safe tool result content that handles both legacy string and array formats.",
     "title": "WireToolResultContent"
+  },
+  "WireTrustedPeerSpec": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Minimal trusted peer spec for public mob wiring surfaces.",
+    "properties": {
+      "address": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "peer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "peer_id",
+      "address"
+    ],
+    "title": "WireTrustedPeerSpec",
+    "type": "object"
   },
   "WireUsage": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -126,11 +126,31 @@ class _StdoutDispatcher:
                 if future and not future.done():
                     if data.get("error"):
                         err = data["error"]
+                        raw_message = err.get("message", "Unknown error")
+                        nested_code = None
+                        nested_message = None
+                        nested_details = err.get("data")
+                        if isinstance(nested_details, dict):
+                            nested_code = nested_details.get("code")
+                            nested_message = nested_details.get("message")
+                            nested_details = nested_details.get(
+                                "details",
+                                nested_details.get("reason", nested_details),
+                            )
+                        if isinstance(raw_message, str):
+                            try:
+                                parsed = json.loads(raw_message)
+                            except json.JSONDecodeError:
+                                parsed = None
+                            if isinstance(parsed, dict):
+                                nested_code = parsed.get("code")
+                                nested_message = parsed.get("message")
+                                nested_details = parsed.get("details", parsed.get("reason", nested_details))
                         future.set_exception(
                             MeerkatError(
-                                str(err.get("code", "UNKNOWN")),
-                                err.get("message", "Unknown error"),
-                                err.get("data"),
+                                str(nested_code or err.get("code", "UNKNOWN")),
+                                str(nested_message or raw_message),
+                                nested_details,
                             )
                         )
                     else:

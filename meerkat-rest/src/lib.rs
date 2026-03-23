@@ -1548,6 +1548,10 @@ pub struct CommsPeersRequest {
     pub session_id: String,
 }
 
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
 #[derive(Debug, Deserialize)]
 struct InspectSkillQuery {
     #[serde(default)]
@@ -1623,7 +1627,9 @@ async fn comms_send(
                     let peer = req.to.as_deref().unwrap_or("<unknown>");
                     format!("peer_unreachable: peer '{peer}' is unreachable: offline_or_no_ack")
                 }
-                meerkat_core::comms::SendError::Internal(details) if req.to.is_some() => {
+                meerkat_core::comms::SendError::Internal(details)
+                    if req.to.is_some() && is_transport_internal(details) =>
+                {
                     let peer = req.to.as_deref().unwrap_or("<unknown>");
                     format!(
                         "peer_unreachable: peer '{peer}' is unreachable: transport_error ({details})"

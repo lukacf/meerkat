@@ -504,10 +504,11 @@ impl MobBuilder {
             let name_a = format!("{}/{}/{}", definition.id, entry.profile, entry.meerkat_id);
 
             for peer_id in &entry.wired_to {
+                if let Some(spec) = entry.external_peer_specs.get(peer_id) {
+                    comms_a.add_trusted_peer(spec.clone()).await?;
+                    continue;
+                }
                 let Some(peer_entry) = roster.get(peer_id).cloned() else {
-                    if let Some(spec) = entry.external_peer_specs.get(peer_id) {
-                        comms_a.add_trusted_peer(spec.clone()).await?;
-                    }
                     continue;
                 };
                 if entry.meerkat_id.as_str() >= peer_id.as_str() {

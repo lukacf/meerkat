@@ -28,13 +28,21 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 from urllib.error import URLError
 import urllib.request
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
+from .generated.types import (
+    RuntimeAcceptResult,
+    RuntimeResetResult,
+    RuntimeRetireResult,
+    RuntimeStateResult,
+    WireInputState,
+    WireInputStateHistoryEntry,
+)
 from .mob import Mob
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
@@ -76,7 +84,10 @@ RenderClass = Literal[
     "ops_progress",
 ]
 RenderSalience = Literal["background", "normal", "important", "urgent"]
-RenderMetadata = TypedDict("RenderMetadata", {"class": RenderClass, "salience": RenderSalience}, total=False)
+RenderMetadata = TypedDict(
+    "RenderMetadata",
+    {"class": RenderClass, "salience": NotRequired[RenderSalience]},
+)
 
 
 def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -1006,24 +1017,35 @@ class MeerkatClient:
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
-    async def runtime_state(self, session_id: str) -> dict[str, Any]:
-        return await self._request("runtime/state", {"session_id": session_id})
+    async def runtime_state(self, session_id: str) -> RuntimeStateResult:
+        raw = await self._request("runtime/state", {"session_id": session_id})
+        return RuntimeStateResult(**raw)
 
     async def runtime_accept(
         self,
         session_id: str,
         input: dict[str, Any],
-    ) -> dict[str, Any]:
-        return await self._request("runtime/accept", {"session_id": session_id, "input": input})
+    ) -> RuntimeAcceptResult:
+        raw = await self._request("runtime/accept", {"session_id": session_id, "input": input})
+        state = raw.get("state")
+        if isinstance(state, dict):
+            raw = dict(raw)
+            raw["state"] = self._parse_wire_input_state(state)
+        return RuntimeAcceptResult(**raw)
 
-    async def runtime_retire(self, session_id: str) -> dict[str, Any]:
-        return await self._request("runtime/retire", {"session_id": session_id})
+    async def runtime_retire(self, session_id: str) -> RuntimeRetireResult:
+        raw = await self._request("runtime/retire", {"session_id": session_id})
+        return RuntimeRetireResult(**raw)
 
-    async def runtime_reset(self, session_id: str) -> dict[str, Any]:
-        return await self._request("runtime/reset", {"session_id": session_id})
+    async def runtime_reset(self, session_id: str) -> RuntimeResetResult:
+        raw = await self._request("runtime/reset", {"session_id": session_id})
+        return RuntimeResetResult(**raw)
 
-    async def input_state(self, session_id: str, input_id: str) -> dict[str, Any]:
-        return await self._request("input/state", {"session_id": session_id, "input_id": input_id})
+    async def input_state(self, session_id: str, input_id: str) -> WireInputState | None:
+        raw = await self._request("input/state", {"session_id": session_id, "input_id": input_id})
+        if raw is None:
+            return None
+        return self._parse_wire_input_state(raw)
 
     async def input_list(self, session_id: str) -> list[str]:
         result = await self._request("input/list", {"session_id": session_id})
@@ -1042,6 +1064,31 @@ class MeerkatClient:
         self._process.stdin.write((json.dumps(request) + "\n").encode())
         await self._process.stdin.drain()
         return await response_future
+
+    @staticmethod
+    def _parse_wire_input_state(raw: dict[str, Any]) -> WireInputState:
+        history_raw = raw.get("history", [])
+        history: list[WireInputStateHistoryEntry] = []
+        if isinstance(history_raw, list):
+            for entry in history_raw:
+                if not isinstance(entry, dict):
+                    continue
+                history.append(
+                    WireInputStateHistoryEntry(
+                        from_=str(entry.get("from", "")),
+                        reason=(
+                            str(entry["reason"])
+                            if entry.get("reason") is not None
+                            else None
+                        ),
+                        timestamp=str(entry.get("timestamp", "")),
+                        to=str(entry.get("to", "")),
+                    )
+                )
+
+        payload = dict(raw)
+        payload["history"] = history
+        return WireInputState(**payload)
 
     # -- Binary resolution (unchanged from original) -----------------------
 

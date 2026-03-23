@@ -144,10 +144,12 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
                 "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
                 request.to.as_deref().unwrap_or("<unknown>")
             ),
-            meerkat_core::comms::SendError::Internal(inner) => format!(
-                "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
-                request.to.as_deref().unwrap_or("<unknown>")
-            ),
+            meerkat_core::comms::SendError::Internal(inner) if is_transport_internal(&inner) => {
+                format!(
+                    "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
+                    request.to.as_deref().unwrap_or("<unknown>")
+                )
+            }
             other => other.to_string(),
         })?;
         return Ok(json!({ "status": "sent", "kind": kind }));
@@ -225,6 +227,10 @@ fn format_router_send_error(peer_name: &str, error: crate::router::SendError) ->
             )
         }
     }
+}
+
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 fn format_comms_command_error(

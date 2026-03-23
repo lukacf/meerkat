@@ -2,9 +2,11 @@
 
 mod event;
 mod mcp_live;
+mod mob;
 mod models;
 mod params;
 mod result;
+mod runtime;
 mod session;
 pub mod skills;
 mod usage;
@@ -14,11 +16,21 @@ pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
     McpRemoveParams,
 };
+pub use mob::{
+    MobPeerTarget, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
+    WireTrustedPeerSpec,
+};
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use result::WireRunResult;
+pub use runtime::{
+    InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult,
+    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
+    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireRuntimeState,
+};
 pub use session::{
     WireAssistantBlock, WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory,
     WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,

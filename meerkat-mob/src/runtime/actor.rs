@@ -1540,6 +1540,14 @@ impl MobActor {
                 if roster.get(&meerkat_id).is_some() {
                     return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
                 }
+                if roster
+                    .list()
+                    .any(|entry| entry.external_peer_specs.contains_key(&meerkat_id))
+                {
+                    return Err(MobError::WiringError(format!(
+                        "meerkat id '{meerkat_id}' collides with an existing external peer name"
+                    )));
+                }
             }
 
             let profile = self
@@ -2042,6 +2050,14 @@ impl MobActor {
             let roster = self.roster.read().await;
             if roster.get(meerkat_id).is_some() {
                 return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+            }
+            if roster
+                .list()
+                .any(|entry| entry.external_peer_specs.contains_key(meerkat_id))
+            {
+                return Err(MobError::WiringError(format!(
+                    "meerkat id '{meerkat_id}' collides with an existing external peer name"
+                )));
             }
         }
 
@@ -3107,7 +3123,11 @@ impl MobActor {
                     (peer_exists, looks_external)
                 };
 
-                if looks_external || !peer_exists {
+                if !peer_exists && !looks_external {
+                    return Err(MobError::MeerkatNotFound(peer));
+                }
+
+                if looks_external {
                     self.do_unwire_external(&local, &peer, None).await?;
                 } else {
                     self.do_unwire_local(&local, &peer).await?;

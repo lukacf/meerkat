@@ -7,6 +7,7 @@ code for Python and TypeScript SDKs.
 
 import argparse
 import json
+import keyword
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,14 +30,39 @@ def _resolve_schema_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
     return defs.get(name, {})
 
 
+def _resolve_schema_ref_name(ref: str) -> str | None:
+    if not ref.startswith("#/$defs/"):
+        return None
+    return ref.removeprefix("#/$defs/")
+
+
+def _python_identifier(name: str) -> str:
+    return f"{name}_" if keyword.iskeyword(name) else name
+
+
 def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
     """Return (python_type, optional)."""
     if field_schema is True:
         return ("Any", False)
     if field_schema is False or not isinstance(field_schema, dict):
         return ("Any", True)
+    for key in ("anyOf", "oneOf"):
+        variants = field_schema.get(key)
+        if isinstance(variants, list) and variants:
+            non_null = [
+                variant
+                for variant in variants
+                if not (isinstance(variant, dict) and variant.get("type") == "null")
+            ]
+            optional = len(non_null) != len(variants)
+            if len(non_null) == 1:
+                inner_type, inner_optional = _python_type_from_schema(root, non_null[0])
+                return (inner_type, optional or inner_optional)
     if "$ref" in field_schema:
+        ref_name = _resolve_schema_ref_name(str(field_schema["$ref"]))
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
+        if resolved.get("type") == "object" and ref_name:
+            return (ref_name, False)
         return _python_type_from_schema(root, resolved)
 
     schema_type = field_schema.get("type")
@@ -56,7 +82,11 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
         case "number":
             return ("float", optional)
         case "array":
-            return ("list[Any]", optional)
+            item_schema = field_schema.get("items")
+            item_type, _ = _python_type_from_schema(root, item_schema)
+            if item_type == "Any":
+                return ("list[Any]", optional)
+            return (f"list[{item_type}]", optional)
         case "object":
             return ("dict[str, Any]", optional)
         case _:
@@ -69,8 +99,23 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
         return ("unknown", False)
     if field_schema is False or not isinstance(field_schema, dict):
         return ("unknown", True)
+    for key in ("anyOf", "oneOf"):
+        variants = field_schema.get(key)
+        if isinstance(variants, list) and variants:
+            non_null = [
+                variant
+                for variant in variants
+                if not (isinstance(variant, dict) and variant.get("type") == "null")
+            ]
+            optional = len(non_null) != len(variants)
+            if len(non_null) == 1:
+                inner_type, inner_optional = _typescript_type_from_schema(root, non_null[0])
+                return (inner_type, optional or inner_optional)
     if "$ref" in field_schema:
+        ref_name = _resolve_schema_ref_name(str(field_schema["$ref"]))
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
+        if resolved.get("type") == "object" and ref_name:
+            return (ref_name, False)
         return _typescript_type_from_schema(root, resolved)
 
     schema_type = field_schema.get("type")
@@ -93,7 +138,11 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
         case "number":
             return ("number", optional)
         case "array":
-            return ("unknown[]", optional)
+            item_schema = field_schema.get("items")
+            item_type, _ = _typescript_type_from_schema(root, item_schema)
+            if item_type == "unknown":
+                return ("unknown[]", optional)
+            return (f"{item_type}[]", optional)
         case "object":
             return ("Record<string, unknown>", optional)
         case _:
@@ -114,7 +163,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     version_info = schemas.get("version", {})
     contract_version = version_info.get("contract_version", "0.2.0")
 
-    types_content = f'"""Generated wire types for Meerkat SDK.\n\nContract version: {contract_version}\n"""\n\n'
+    types_content = "from __future__ import annotations\n\n"
+    types_content += f'"""Generated wire types for Meerkat SDK.\n\nContract version: {contract_version}\n"""\n\n'
     types_content += "from dataclasses import dataclass, field\n"
     types_content += "from typing import Any, Optional\n\n\n"
     types_content += f'CONTRACT_VERSION = "{contract_version}"\n\n\n'
@@ -225,19 +275,51 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += f"\n@dataclass\nclass {name}:\n"
         types_content += f'    """{doc}"""\n'
         for field_name, field_schema in properties.items():
+            python_field_name = _python_identifier(field_name)
             field_type, is_optional_type = _python_type_from_schema(schema, field_schema)
             is_required = field_name in required
             annotation = field_type
             if is_optional_type and not is_required:
                 annotation = f"Optional[{field_type}]"
-            default_value = "None" if (is_optional_type and not is_required) else ("False" if field_type == "bool" else ("''" if field_type == "str" else ("0" if field_type in {"int", "float"} else "None")))
-            types_content += f"    {field_name}: {annotation} = {default_value}\n"
+            if is_optional_type and not is_required:
+                default_expr = "None"
+            elif field_type == "bool":
+                default_expr = "False"
+            elif field_type == "str":
+                default_expr = "''"
+            elif field_type in {"int", "float"}:
+                default_expr = "0"
+            elif field_type == "list[Any]" or field_type.startswith("list["):
+                default_expr = "field(default_factory=list)"
+            elif field_type == "dict[str, Any]":
+                default_expr = "field(default_factory=dict)"
+            else:
+                default_expr = "None"
+            types_content += f"    {python_field_name}: {annotation} = {default_expr}\n"
         types_content += "\n"
 
     append_python_dataclass("McpAddParams", params_schema, "Request payload for mcp/add.")
     append_python_dataclass("McpRemoveParams", params_schema, "Request payload for mcp/remove.")
     append_python_dataclass("McpReloadParams", params_schema, "Request payload for mcp/reload.")
+    append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
+    append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
+    append_python_dataclass("RuntimeStateParams", params_schema, "Request payload for runtime/state.")
+    append_python_dataclass("RuntimeAcceptParams", params_schema, "Request payload for runtime/accept.")
+    append_python_dataclass("RuntimeRetireParams", params_schema, "Request payload for runtime/retire.")
+    append_python_dataclass("RuntimeResetParams", params_schema, "Request payload for runtime/reset.")
+    append_python_dataclass("InputStateParams", params_schema, "Request payload for input/state.")
+    append_python_dataclass("InputListParams", params_schema, "Request payload for input/list.")
     append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
+    append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
+    append_python_dataclass("MobWireResult", wire_schema, "Response payload for mob/wire.")
+    append_python_dataclass("MobUnwireResult", wire_schema, "Response payload for mob/unwire.")
+    append_python_dataclass("RuntimeStateResult", wire_schema, "Response payload for runtime/state.")
+    append_python_dataclass("RuntimeAcceptResult", wire_schema, "Response payload for runtime/accept.")
+    append_python_dataclass("RuntimeRetireResult", wire_schema, "Response payload for runtime/retire.")
+    append_python_dataclass("RuntimeResetResult", wire_schema, "Response payload for runtime/reset.")
+    append_python_dataclass("WireInputStateHistoryEntry", wire_schema, "Input transition history entry.")
+    append_python_dataclass("WireInputState", wire_schema, "Runtime input state snapshot.")
+    append_python_dataclass("InputListResult", wire_schema, "Response payload for input/list.")
 
     (output_dir / "types.py").write_text(types_content)
 
@@ -387,7 +469,25 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("McpAddParams", params_schema)
     append_typescript_interface("McpRemoveParams", params_schema)
     append_typescript_interface("McpReloadParams", params_schema)
+    append_typescript_interface("MobWireParams", params_schema)
+    append_typescript_interface("MobUnwireParams", params_schema)
+    append_typescript_interface("RuntimeStateParams", params_schema)
+    append_typescript_interface("RuntimeAcceptParams", params_schema)
+    append_typescript_interface("RuntimeRetireParams", params_schema)
+    append_typescript_interface("RuntimeResetParams", params_schema)
+    append_typescript_interface("InputStateParams", params_schema)
+    append_typescript_interface("InputListParams", params_schema)
     append_typescript_interface("McpLiveOpResponse", wire_schema)
+    append_typescript_interface("WireTrustedPeerSpec", wire_schema)
+    append_typescript_interface("MobWireResult", wire_schema)
+    append_typescript_interface("MobUnwireResult", wire_schema)
+    append_typescript_interface("RuntimeStateResult", wire_schema)
+    append_typescript_interface("RuntimeAcceptResult", wire_schema)
+    append_typescript_interface("RuntimeRetireResult", wire_schema)
+    append_typescript_interface("RuntimeResetResult", wire_schema)
+    append_typescript_interface("WireInputStateHistoryEntry", wire_schema)
+    append_typescript_interface("WireInputState", wire_schema)
+    append_typescript_interface("InputListResult", wire_schema)
 
     (output_dir / "types.ts").write_text(types_content)
 

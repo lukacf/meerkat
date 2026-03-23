@@ -226,9 +226,7 @@ fn validate_stream_render_summary(
             summary.discovered_scopes.join(", ")
         };
         anyhow::bail!(
-            "stream focus '{}' did not match any emitted scope (discovered scopes: {})",
-            focus,
-            discovered
+            "stream focus '{focus}' did not match any emitted scope (discovered scopes: {discovered})"
         );
     }
     Ok(())
@@ -1241,7 +1239,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             stdin,
             line_format,
         } => {
-            handle_run_command(
+            Box::pin(handle_run_command(
                 prompt,
                 system_prompt,
                 model,
@@ -1271,7 +1269,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 stdin,
                 line_format,
                 &cli_scope,
-            )
+            ))
             .await
         }
         Commands::Resume {

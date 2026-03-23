@@ -993,9 +993,7 @@ impl JsToolDispatcher {
     fn get_callback(name: &str) -> Option<js_sys::Function> {
         RUNTIME_STATE.with(|cell| {
             let borrow = cell.borrow();
-            let Some(state) = borrow.as_ref() else {
-                return None;
-            };
+            let state = borrow.as_ref()?;
             state.js_tools.iter().find_map(|e| {
                 if e.def.name == name {
                     match &e.mode {

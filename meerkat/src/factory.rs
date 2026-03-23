@@ -898,6 +898,7 @@ impl AgentFactory {
 
     /// Build a shared builtin dispatcher using the provided config.
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_builtin_dispatcher(
         &self,
         store: Arc<dyn TaskStore>,

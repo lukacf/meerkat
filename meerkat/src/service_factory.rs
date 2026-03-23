@@ -340,6 +340,7 @@ pub fn build_persistent_service(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use async_trait::async_trait;

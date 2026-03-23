@@ -1032,6 +1032,7 @@ pub async fn handle_member_status(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::types::SessionId;

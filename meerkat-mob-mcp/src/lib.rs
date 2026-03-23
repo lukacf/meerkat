@@ -1296,11 +1296,10 @@ impl WireActionArgs {
                 meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
                 action,
             )),
-            (Some(_), Some(_), Some(_), Some(_))
+            (Some(_) | None, Some(_), Some(_), Some(_))
             | (Some(_), Some(_), Some(_), None)
             | (Some(_), Some(_), None, Some(_))
-            | (Some(_), None, Some(_), Some(_))
-            | (None, Some(_), Some(_), Some(_)) => {
+            | (Some(_), None, Some(_), Some(_)) => {
                 Err("provide either {local, target} or legacy {a, b}, but not both".to_string())
             }
             _ => Err("wire action requires either {local, target} or legacy {a, b}".to_string()),

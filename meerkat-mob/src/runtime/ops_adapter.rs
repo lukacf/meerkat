@@ -42,7 +42,7 @@ impl MobOpsAdapter {
     ) {
         self.session_bindings
             .lock()
-            .expect("mob ops binding poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 child_session_id,
                 SessionOpsBinding {
@@ -59,7 +59,7 @@ impl MobOpsAdapter {
         if let Some(binding) = self
             .session_bindings
             .lock()
-            .expect("mob ops binding poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
             .cloned()
         {
@@ -75,7 +75,7 @@ impl MobOpsAdapter {
     fn clear_session_binding(&self, session_id: &SessionId) {
         self.session_bindings
             .lock()
-            .expect("mob ops binding poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session_id);
     }
 

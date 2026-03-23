@@ -2049,7 +2049,7 @@ pub async fn mob_member_send(
         )
         .await
         .map_err(err_mob)?;
-    Ok(serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))?)
+    serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))
 }
 
 /// Retire and re-spawn a meerkat with the same profile.

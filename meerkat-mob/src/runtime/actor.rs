@@ -1766,15 +1766,13 @@ impl MobActor {
         if let Some(member_ref) = resume_member_ref {
             if let (Some(owner_session_id), Some(ops_registry)) =
                 (owner_session_id.clone(), ops_registry.clone())
-            {
-                if let Err(error) = self
+                && let Err(error) = self
                     .provisioner
                     .bind_member_owner_context(&member_ref, owner_session_id, ops_registry)
                     .await
-                {
-                    let _ = reply_tx.send(Err(error));
-                    return;
-                }
+            {
+                let _ = reply_tx.send(Err(error));
+                return;
             }
             let operation_id = self
                 .provisioner
@@ -3182,11 +3180,11 @@ impl MobActor {
         let (entry_a, entry_b, a_has_b_edge, b_has_a_edge) = {
             let roster = self.roster.read().await;
             let ea = roster
-                .get(&a)
+                .get(a)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(a.clone()))?;
             let eb = roster
-                .get(&b)
+                .get(b)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
             let a_has_b_edge = ea.wired_to.contains(b.as_str());
@@ -3238,7 +3236,7 @@ impl MobActor {
             let _ = comms_a.remove_trusted_peer(&key_b).await?;
             let _ = comms_b.remove_trusted_peer(&key_a).await?;
             self.edge_locks.remove(a.as_str(), b.as_str()).await;
-            self.debug_assert_roster_edge_symmetric(&a, &b, "handle_unwire/noop")
+            self.debug_assert_roster_edge_symmetric(a, b, "handle_unwire/noop")
                 .await;
             return Ok(());
         }
@@ -3247,7 +3245,7 @@ impl MobActor {
 
         // Notify both peers BEFORE removing trust (need trust to send).
         // Send FROM a TO b: notify b that a is being unwired
-        self.notify_peer_unwired(&b, &a, &entry_a, &comms_a).await?;
+        self.notify_peer_unwired(b, a, &entry_a, &comms_a).await?;
         rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
             let comms_a = comms_a.clone();
             let comms_name_b = comms_name_b.clone();
@@ -3260,7 +3258,7 @@ impl MobActor {
         });
         // Send FROM b TO a: notify a that b is being unwired
         if let Err(second_notification_error) =
-            self.notify_peer_unwired(&a, &b, &entry_b, &comms_b).await
+            self.notify_peer_unwired(a, b, &entry_b, &comms_b).await
         {
             return Err(rollback.fail(second_notification_error).await);
         }
@@ -3319,10 +3317,10 @@ impl MobActor {
         // Update roster
         {
             let mut roster = self.roster.write().await;
-            roster.unwire_members(&a, &b);
+            roster.unwire_members(a, b);
         }
         self.edge_locks.remove(a.as_str(), b.as_str()).await;
-        self.debug_assert_roster_edge_symmetric(&a, &b, "handle_unwire/post")
+        self.debug_assert_roster_edge_symmetric(a, b, "handle_unwire/post")
             .await;
 
         self.ensure_pending_spawn_alignment("handle_unwire/local completion")
@@ -3364,8 +3362,7 @@ impl MobActor {
 
         if collides_with_local_member {
             return Err(MobError::WiringError(format!(
-                "peer '{}' is a local roster member; use local unwire semantics instead",
-                peer_name
+                "peer '{peer_name}' is a local roster member; use local unwire semantics instead",
             )));
         }
 
@@ -3376,8 +3373,7 @@ impl MobActor {
         let spec = match (spec_hint, stored_spec.clone()) {
             (Some(hint), Some(stored)) if hint != stored => {
                 return Err(MobError::WiringError(format!(
-                    "external peer spec mismatch for '{local}' -> '{}'",
-                    peer_name
+                    "external peer spec mismatch for '{local}' -> '{peer_name}'",
                 )));
             }
             (Some(hint), Some(_)) => hint,
@@ -3385,8 +3381,7 @@ impl MobActor {
             (None, Some(stored)) => stored,
             (None, None) => {
                 return Err(MobError::WiringError(format!(
-                    "external unwire requires stored peer spec for '{local}' -> '{}'",
-                    peer_name
+                    "external unwire requires stored peer spec for '{local}' -> '{peer_name}'",
                 )));
             }
         };

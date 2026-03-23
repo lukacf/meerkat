@@ -26,7 +26,10 @@ pub fn parse_stdin_line(line: &str, format: StdinLineFormat) -> String {
     }
 }
 
-fn make_stdin_external_event_input(body: String) -> meerkat_runtime::Input {
+fn make_stdin_external_event_input(
+    body: String,
+    format: StdinLineFormat,
+) -> meerkat_runtime::Input {
     meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
         header: meerkat_runtime::InputHeader {
             id: meerkat_core::lifecycle::InputId::new(),
@@ -41,10 +44,15 @@ fn make_stdin_external_event_input(body: String) -> meerkat_runtime::Input {
             correlation_id: None,
         },
         event_type: "stdin".to_string(),
-        // Preserve the body as literal text. Do NOT reparse valid JSON into
-        // structured payload — text-mode stdin lines should remain literal
-        // through the pipeline. The runtime renders payload["text"] for LLM.
-        payload: serde_json::json!({ "text": body }),
+        // Text mode is literal by contract. JSON mode preserves structured JSON
+        // when the parsed body is itself valid JSON.
+        payload: match format {
+            StdinLineFormat::Text => serde_json::json!({ "body": body }),
+            StdinLineFormat::Json => match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(parsed) => serde_json::json!({ "body": parsed }),
+                Err(_) => serde_json::json!({ "body": body }),
+            },
+        },
         blocks: None,
     })
 }
@@ -69,7 +77,7 @@ pub fn spawn_stdin_reader(
                 continue;
             }
             match runtime_adapter
-                .accept_input(&session_id, make_stdin_external_event_input(body))
+                .accept_input(&session_id, make_stdin_external_event_input(body, format))
                 .await
             {
                 Ok(
@@ -139,15 +147,40 @@ mod tests {
 
     #[test]
     fn test_make_stdin_external_event_input_uses_runtime_external_event_shape() {
-        let input = make_stdin_external_event_input("hello".to_string());
+        let input = make_stdin_external_event_input("hello".to_string(), StdinLineFormat::Text);
         let meerkat_runtime::Input::ExternalEvent(event) = input else {
             panic!("expected external event input");
         };
         assert_eq!(event.event_type, "stdin");
-        assert_eq!(event.payload["text"], "hello");
+        assert_eq!(event.payload["body"], "hello");
+        assert_eq!(event.blocks, None);
         assert!(matches!(
             event.header.source,
             meerkat_runtime::InputOrigin::External { ref source_name } if source_name == "stdin"
         ));
+    }
+
+    #[test]
+    fn test_make_stdin_external_event_input_text_mode_preserves_json_looking_literal() {
+        let input = make_stdin_external_event_input(
+            r#"{"level":"info"}"#.to_string(),
+            StdinLineFormat::Text,
+        );
+        let meerkat_runtime::Input::ExternalEvent(event) = input else {
+            panic!("expected external event input");
+        };
+        assert_eq!(event.payload["body"], r#"{"level":"info"}"#);
+    }
+
+    #[test]
+    fn test_make_stdin_external_event_input_json_mode_preserves_structured_json() {
+        let input = make_stdin_external_event_input(
+            r#"{"level":"info"}"#.to_string(),
+            StdinLineFormat::Json,
+        );
+        let meerkat_runtime::Input::ExternalEvent(event) = input else {
+            panic!("expected external event input");
+        };
+        assert_eq!(event.payload["body"]["level"], "info");
     }
 }

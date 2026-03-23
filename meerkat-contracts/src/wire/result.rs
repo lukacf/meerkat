@@ -9,10 +9,7 @@ use meerkat_core::{RunResult, SchemaWarning, SessionId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireRunResult {
     pub session_id: SessionId,
-    /// Dead field — always None. Retained for wire backwards compatibility.
-    /// See `DerivedFieldEntry` in ownership ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[deprecated(note = "dead field: always None, retained for wire compat")]
     pub session_ref: Option<String>,
     pub text: String,
     pub turns: u32,
@@ -26,7 +23,6 @@ pub struct WireRunResult {
     pub skill_diagnostics: Option<meerkat_core::skills::SkillRuntimeDiagnostics>,
 }
 
-#[allow(deprecated)]
 impl From<RunResult> for WireRunResult {
     fn from(r: RunResult) -> Self {
         Self {
@@ -44,7 +40,6 @@ impl From<RunResult> for WireRunResult {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use meerkat_core::skills::{SkillRuntimeDiagnostics, SourceHealthSnapshot, SourceHealthState};

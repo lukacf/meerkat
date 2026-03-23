@@ -16,7 +16,7 @@ categories.workspace = true
 meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
-meerkat-runtime = { workspace = true, optional = true }
+meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-session = { workspace = true }
 meerkat-memory = { workspace = true, optional = true }
@@ -59,7 +59,7 @@ nix = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini"]
-integration-real-tests = ["mcp", "meerkat-mcp/test-support"]
+integration-real-tests = []
 
 # LLM providers
 anthropic = ["meerkat-client/anthropic"]
@@ -75,7 +75,6 @@ sqlite-store = ["meerkat-store/sqlite", "meerkat-runtime/sqlite-store"]
 # Session capabilities
 session-store = [
     "meerkat-session/session-store",
-    "dep:meerkat-runtime",
     "meerkat-runtime/redb-store",
     "meerkat-runtime/sqlite-store",
     "meerkat-store/sqlite",

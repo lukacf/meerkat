@@ -200,8 +200,7 @@ impl From<meerkat_core::SessionError> for WireError {
             meerkat_core::SessionError::PersistenceDisabled
             | meerkat_core::SessionError::CompactionDisabled
             | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
-            meerkat_core::SessionError::Store(_)
-            | meerkat_core::SessionError::IncompatibleFormat { .. } => ErrorCode::InternalError,
+            meerkat_core::SessionError::Store(_) => ErrorCode::InternalError,
         };
         WireError::new(code, err.to_string())
     }

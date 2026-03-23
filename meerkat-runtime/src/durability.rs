@@ -64,11 +64,6 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
                     kind: "flow_step".into(),
                 });
             }
-            Input::TerminalPeerResponse(_) => {
-                return Err(DurabilityError::DerivedForbidden {
-                    kind: "terminal_peer_response".into(),
-                });
-            }
             // External events, explicit continuations, and explicit operation
             // lifecycle inputs may be reconstructed or derived.
             Input::ExternalEvent(_) | Input::Continuation(_) | Input::Operation(_) => {}
@@ -191,6 +186,7 @@ mod tests {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             step_id: "s1".into(),
             instructions: "do it".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_err());

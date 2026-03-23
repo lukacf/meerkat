@@ -95,7 +95,6 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             active_skills: None,
         },
         host_mode: true,
-        host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
         comms_name: Some("agent-a".to_string()),
         peer_meta: None,
         realm_id: None,
@@ -252,7 +251,6 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         provider: meerkat_core::Provider::OpenAI,
         tooling: meerkat_core::SessionTooling::default(),
         host_mode: false,
-        host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
         comms_name: None,
         peer_meta: None,
         realm_id: None,
@@ -267,66 +265,6 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
     assert_eq!(decoded.max_tokens, 999);
     assert_eq!(decoded.provider, meerkat_core::Provider::OpenAI);
     Ok(())
-}
-
-#[test]
-fn test_session_metadata_host_mode_owner_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = meerkat_core::SessionMetadata {
-        model: "claude-test".to_string(),
-        max_tokens: 1024,
-        provider: meerkat_core::Provider::Anthropic,
-        tooling: meerkat_core::SessionTooling::default(),
-        host_mode: true,
-        host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
-        comms_name: None,
-        peer_meta: None,
-        realm_id: None,
-        instance_id: None,
-        backend: None,
-        config_generation: None,
-    };
-
-    let json = serde_json::to_value(&metadata)?;
-    assert_eq!(json["host_mode_owner"], "external_runtime");
-
-    let decoded: meerkat_core::SessionMetadata = serde_json::from_value(json)?;
-    assert_eq!(
-        decoded.host_mode_owner,
-        meerkat_core::service::HostModeOwner::ExternalRuntime
-    );
-    Ok(())
-}
-
-#[test]
-fn test_incompatible_format_error_code() {
-    let err = meerkat_core::service::SessionError::IncompatibleFormat {
-        reason: "test".into(),
-    };
-    assert_eq!(err.code(), "SESSION_INCOMPATIBLE_FORMAT");
-}
-
-#[test]
-fn test_session_metadata_missing_host_mode_owner_fails() {
-    // Simulate a legacy row that has no host_mode_owner field.
-    let legacy_json = serde_json::json!({
-        "model": "claude-test",
-        "max_tokens": 1024,
-        "provider": "anthropic",
-        "tooling": { "builtins": false, "shell": false, "comms": false },
-        "host_mode": false,
-        "comms_name": null,
-        "peer_meta": null,
-        "realm_id": null,
-        "instance_id": null,
-        "backend": null,
-        "config_generation": null
-    });
-
-    let result = serde_json::from_value::<meerkat_core::SessionMetadata>(legacy_json);
-    assert!(
-        result.is_err(),
-        "deserializing legacy metadata without host_mode_owner must fail"
-    );
 }
 
 #[tokio::test]

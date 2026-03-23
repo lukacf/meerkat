@@ -226,27 +226,24 @@ use std::collections::HashMap;
 
 let mut router = McpRouter::new();
 
-// Stage a stdio-based MCP server for addition
+// Add stdio-based MCP server
 let config = McpServerConfig::stdio(
     "my-server",
     "/path/to/mcp-server".to_string(),
     vec!["--arg".to_string()],
     HashMap::new(),
 );
-router.stage_add(config);
+router.add_server(config).await?;
 
-// Stage an HTTP/SSE-based MCP server for addition
+// Add HTTP/SSE-based MCP server
 let config = McpServerConfig::http(
     "remote-server",
     "https://mcp.example.com/sse".to_string(),
 );
-router.stage_add(config);
+router.add_server(config).await?;
 
-// Apply staged operations at the boundary (non-blocking)
-let result = router.apply_staged().await?;
-
-// List all visible tools (from the projection snapshot)
-let tools = router.list_tools();
+// List all available tools
+let tools = router.list_tools().await?;
 
 // Call a tool
 let result = router.call_tool("tool_name", &args).await?;

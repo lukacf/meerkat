@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_shell_job_status_tool_struct() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let _tool = ShellJobStatusTool::new(Arc::clone(&manager));
 
         // Tool should hold Arc<JobManager>
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_shell_job_status_tool_name() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobStatusTool::new(manager);
 
         assert_eq!(tool.name(), "shell_job_status");
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn test_shell_job_status_tool_schema() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobStatusTool::new(manager);
 
         let def = tool.def();
@@ -148,7 +148,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobStatusTool::new(Arc::clone(&manager));
 
         // Spawn a job
@@ -179,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_job_status_tool_not_found() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobStatusTool::new(manager);
 
         // Try to get status of non-existent job
@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_job_status_tool_invalid_args() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobStatusTool::new(manager);
 
         // Missing job_id

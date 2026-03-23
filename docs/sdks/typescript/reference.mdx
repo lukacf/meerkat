@@ -170,19 +170,19 @@ Content blocks are used in multimodal prompts and tool results. Both `createSess
 ```typescript
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; mediaType: string; data: string };
+  | { type: "image"; media_type: string; data: string };
 ```
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
 | `text` | `text: string` | Plain text content |
-| `image` | `mediaType: string`, `data: string` | Base64-encoded image with MIME type (e.g. `"image/png"`) |
+| `image` | `media_type: string`, `data: string` | Base64-encoded image with MIME type (e.g. `"image/png"`) |
 
 ```typescript
 // Multimodal prompt example
 const session = await client.createSession([
   { type: "text", text: "Describe this image" },
-  { type: "image", mediaType: "image/png", data: base64Data },
+  { type: "image", media_type: "image/png", data: base64Data },
 ]);
 ```
 

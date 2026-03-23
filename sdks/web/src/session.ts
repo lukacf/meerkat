@@ -132,8 +132,8 @@ export class Session {
   /** Destroy the session and release resources. */
   destroy(): void {
     if (this.destroyed) return;
-    this.destroyed = true;
     this.destroyFn(this.handle);
+    this.destroyed = true;
   }
 
   /** Whether this session has been destroyed. */

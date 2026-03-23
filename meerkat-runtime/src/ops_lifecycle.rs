@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::{Context, Poll};
-use std::time::{Instant, SystemTime};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -20,6 +19,7 @@ use meerkat_core::ops_lifecycle::{
     OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
     WaitAllSatisfied,
 };
+use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ops_lifecycle_authority::{
     OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput, OpsLifecycleMutator,
@@ -66,7 +66,7 @@ impl ShellRecord {
 
     fn epoch_millis(wall_anchor: &SystemTime) -> u64 {
         wall_anchor
-            .duration_since(SystemTime::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }

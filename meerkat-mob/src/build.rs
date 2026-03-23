@@ -144,13 +144,13 @@ pub async fn build_agent_config(
 /// request type that `SessionService::create_session()` accepts.
 pub fn to_create_session_request(
     config: &AgentBuildConfig,
-    prompt: String,
+    prompt: meerkat_core::types::ContentInput,
 ) -> CreateSessionRequest {
     let build_options = config.to_session_build_options();
 
     CreateSessionRequest {
         model: config.model.clone(),
-        prompt: prompt.into(),
+        prompt,
         render_metadata: None,
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
@@ -635,7 +635,7 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        let req = to_create_session_request(&config, "Hello mob".into());
+        let req = to_create_session_request(&config, "Hello mob".to_string().into());
         assert_eq!(req.model, "claude-opus-4-6");
         assert!(!req.host_mode, "host_mode must carry through as false");
         assert_eq!(req.prompt.text_content(), "Hello mob");
@@ -668,7 +668,7 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        let req = to_create_session_request(&config, "Start working".into());
+        let req = to_create_session_request(&config, "Start working".to_string().into());
         assert_eq!(req.model, "claude-sonnet-4-5");
         assert!(!req.host_mode);
         let build = req.build.expect("build options");
@@ -854,7 +854,7 @@ mod tests {
             "provider_params should be passed through to AgentBuildConfig"
         );
 
-        let req = to_create_session_request(&config, "hello".into());
+        let req = to_create_session_request(&config, "hello".to_string().into());
         let build = req.build.expect("build options should be set");
         assert_eq!(
             build.provider_params,

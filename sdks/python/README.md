@@ -20,7 +20,7 @@ Or in editable/development mode:
 pip install -e "sdks/python[dev]"
 ```
 
-The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero runtime dependencies -- only `pytest` and `pytest-asyncio` are needed for development.
+The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero runtime dependencies. Development extras install `pytest`, `pytest-asyncio`, and `tomli` automatically on Python 3.10.
 
 ## Prerequisites
 

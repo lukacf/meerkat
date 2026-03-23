@@ -5339,7 +5339,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 .mob_respawn(
                     &meerkat_mob::MobId::from(mob_id),
                     meerkat_mob::MeerkatId::from(meerkat_id),
-                    initial_message,
+                    initial_message.map(meerkat_core::ContentInput::from),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;

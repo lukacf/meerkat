@@ -358,8 +358,11 @@ Inject skills into a specific turn on an existing session. The skill content is 
     ```rust
     let result = service.start_turn(&session_id, StartTurnRequest {
         prompt: "Now format the output".into(),
+        render_metadata: None,
+        handling_mode: HandlingMode::Queue,
         event_tx: None,
         host_mode: false,
+        host_mode_owner: HostModeOwner::SessionService,
         skill_references: Some(vec!["/formatting/markdown".parse()?]),
         flow_tool_overlay: None,
         additional_instructions: None,

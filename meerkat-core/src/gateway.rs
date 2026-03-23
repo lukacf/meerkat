@@ -415,6 +415,45 @@ impl AgentToolDispatcher for ToolGateway {
             .any(|e| e.dispatcher.supports_wait_interrupt())
     }
 
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::agent::OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
+
+        let mut builder = ToolGatewayBuilder::new();
+        let mut any_rebound = false;
+        for entry in owned.entries {
+            if entry.dispatcher.supports_ops_lifecycle_binding() {
+                let rebound = entry
+                    .dispatcher
+                    .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?;
+                builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
+                any_rebound = true;
+            } else {
+                builder =
+                    builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
+            }
+        }
+
+        if !any_rebound {
+            return Err(crate::agent::OpsLifecycleBindError::Unsupported);
+        }
+
+        let gateway = builder
+            .build()
+            .map_err(|_| crate::agent::OpsLifecycleBindError::Unsupported)?;
+        Ok(Arc::new(gateway))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.dispatcher.supports_ops_lifecycle_binding())
+    }
+
     /// Aggregate external updates across all dispatcher entries.
     ///
     /// Deduplicates by server name for pending, by `(server, operation, status)`

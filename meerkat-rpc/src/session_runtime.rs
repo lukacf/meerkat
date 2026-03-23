@@ -1085,6 +1085,19 @@ impl SessionRuntime {
             Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
             None => None,
         };
+        self.runtime_adapter
+            .register_session(session_id.clone())
+            .await;
+        let ops_lifecycle = self
+            .runtime_adapter
+            .ops_lifecycle_registry(session_id)
+            .await
+            .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+            .ok_or_else(|| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("failed to obtain runtime ops registry for session {session_id}"),
+                data: None,
+            })?;
         let build = SessionBuildOptions {
             provider: stored_metadata.as_ref().map(|meta| meta.provider),
             output_schema: None,
@@ -1104,6 +1117,7 @@ impl SessionRuntime {
                 .default_llm_client
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            ops_lifecycle_override: Some(ops_lifecycle),
             override_builtins: Some(tooling.builtins),
             override_shell: Some(tooling.shell),
             override_memory: Some(tooling.memory),
@@ -1247,8 +1261,23 @@ impl SessionRuntime {
         let session_id = session.id().clone();
 
         // Inject the pre-created session so the agent builder will reuse this ID.
+        self.runtime_adapter
+            .register_session(session_id.clone())
+            .await;
+        let ops_lifecycle = self
+            .runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+            .ok_or_else(|| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("failed to obtain runtime ops registry for session {session_id}"),
+                data: None,
+            })?;
+
         let build_config = AgentBuildConfig {
             resume_session: Some(session),
+            ops_lifecycle_override: Some(ops_lifecycle),
             ..build_config
         };
 
@@ -2016,7 +2045,6 @@ impl SessionRuntime {
     }
 
     /// List all active sessions as canonical wire summaries, including pending sessions.
-    #[allow(deprecated)]
     pub async fn list_sessions_rich(
         &self,
         query: SessionQuery,
@@ -2059,7 +2087,6 @@ impl SessionRuntime {
     }
 
     /// Read a session as a canonical wire info object, checking pending and materialized.
-    #[allow(deprecated)]
     pub async fn read_session_rich(
         &self,
         session_id: &SessionId,
@@ -2118,7 +2145,6 @@ impl SessionRuntime {
     }
 
     /// Read a session transcript as canonical wire history, including pending sessions.
-    #[allow(deprecated)]
     pub async fn read_session_history_rich(
         &self,
         session_id: &SessionId,

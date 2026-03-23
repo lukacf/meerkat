@@ -6,11 +6,9 @@
  * 2. Delegation tools (delegate_to_*, check_agent_status) — registered only
  *    for the main agent session (after mob init, before create_session_simple).
  *
- * ORDERING MATTERS: JsToolDispatcher snapshots tool definitions at
- * build_wasm_tool_dispatcher() call time. WebCM tools are registered before
- * init_runtime_from_config (so mob members get them). Delegation tools are
- * registered after mob init but before create_session_simple (so only the
- * main agent gets them).
+ * ORDERING MATTERS: JS tools must be registered after runtime init, but before
+ * the mob or any standalone session is created. That keeps the tool set in the
+ * initial dispatcher snapshot for newly created agents.
  */
 
 import type { WebCMHost } from "./webcm-host";
@@ -78,8 +76,9 @@ function toolResult(content: string, isError = false): string {
  * Clear existing tool callbacks and register the three WebCM tools
  * (shell, write_file, read_file) against the given runtime and VM host.
  *
- * All VM operations are serialized through a queue because the PTY
- * bridge can only handle one command at a time.
+ * Call this only after the WASM runtime has been initialized, and before
+ * member/session creation. All VM operations are serialized through a queue
+ * because the PTY bridge can only handle one command at a time.
  */
 export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
   runtime.clear_tool_callbacks();

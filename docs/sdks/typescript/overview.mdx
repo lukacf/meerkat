@@ -71,7 +71,8 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `listSessions()` | List active sessions |
 | `readSession(sessionId)` | Read raw session state |
 | `readSessionHistory(sessionId, options?)` | Read committed session transcript history |
-| `createMob(definition, options?)` | Create a mob, return a `Mob` |
+| `createMob(options?)` | Create a mob, return a `Mob` |
+| `createDeferredSession(prompt, options?)` | Create a session without running the first turn; returns a `DeferredSession` |
 | `listMobs()` | List mobs |
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
@@ -144,7 +145,7 @@ Spawns `rkat-rpc`, performs `initialize` handshake, checks contract version comp
 export interface ConnectOptions {
   realmId?: string;
   instanceId?: string;
-  realmBackend?: "sqlite" | "jsonl" | "redb";
+  realmBackend?: "jsonl" | "redb";
   isolated?: boolean;
   stateRoot?: string;
   contextRoot?: string;

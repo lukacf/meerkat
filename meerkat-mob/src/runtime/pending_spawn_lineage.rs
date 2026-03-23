@@ -1,7 +1,10 @@
 use super::actor::PendingSpawn;
 use crate::error::MobError;
 use crate::ids::MeerkatId;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio::task::JoinHandle;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 use tracing::warn;
 

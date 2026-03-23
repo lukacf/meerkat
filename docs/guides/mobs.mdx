@@ -192,18 +192,21 @@ When mob capability is enabled on a session, the agent gets these tools:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `mob_create` | `definition` (JSON) | Create a mob |
-| `mob_list` | `mob_id?` | List mobs or get status of one |
-| `mob_lifecycle` | `mob_id`, `action` | Control state (stop/resume/complete/destroy) |
-| `mob_events` | `mob_id`, `after_cursor?`, `limit?` | Read event log |
+| `spawn_meerkat` | `mob_id`, `specs[]` | Spawn members (batch) |
+| `spawn_many_meerkats` | `mob_id`, `specs[]` | Spawn multiple members concurrently |
+| `retire_meerkat` | `mob_id`, `meerkat_id` | Remove a member |
+| `force_cancel_meerkat` | `mob_id`, `meerkat_id` | Force-cancel a member |
+| `meerkat_status` | `mob_id`, `meerkat_id` | Get member status |
+| `list_meerkats` | `mob_id` | List members and state |
+| `wire_peers` | `mob_id`, `a`, `b` | Wire a comms channel between two members |
+| `unwire_peers` | `mob_id`, `a`, `b` | Unwire a comms channel |
 | `mob_run_flow` | `mob_id`, `flow_id`, `params?` | Execute a DAG flow |
 | `mob_flow_status` | `mob_id`, `run_id` | Check flow run status |
 | `mob_cancel_flow` | `mob_id`, `run_id` | Cancel a running flow |
-| `meerkat_spawn` | `mob_id`, `specs[]` | Spawn members (batch) |
-| `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
-| `meerkat_wire` | `mob_id`, `a`, `b`, `action` | Wire or unwire comms channel (`action`: `"wire"` or `"unwire"`) |
-| `meerkat_list` | `mob_id` | List members and state |
-| `meerkat_message` | `mob_id`, `meerkat_id`, `message` | Send a turn to a member |
+| `mob_task_create` | `mob_id`, `title`, `body?` | Create a shared task |
+| `mob_task_list` | `mob_id` | List shared tasks |
+| `mob_task_update` | `mob_id`, `task_id`, `status` | Update a task's status |
+| `mob_task_get` | `mob_id`, `task_id` | Get task details |
 
 These tools are available on **every surface** — CLI, RPC, REST, MCP, Python SDK, TypeScript SDK. The agent orchestrates the mob by calling these tools in response to natural language instructions.
 
@@ -233,7 +236,7 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
     {"jsonrpc":"2.0","id":4,"method":"mob/send","params":{
       "mob_id": "my-mob",
       "meerkat_id": "lead-1",
-      "message": "Coordinate the release triage."
+      "content": "Coordinate the release triage."
     }}
     ```
   </Tab>

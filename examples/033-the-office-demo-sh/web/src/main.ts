@@ -500,7 +500,10 @@ async function startOffice(): Promise<void> {
       initConfig.openai_base_url = `${proxy.proxyUrl}/openai`;
       initConfig.gemini_base_url = `${proxy.proxyUrl}/gemini`;
     }
-    // Register fire-and-forget JS tools BEFORE init (required by WASM runtime)
+    // Init runtime before registering JS tools.
+    mod.init_runtime_from_config(JSON.stringify(initConfig));
+
+    // Register fire-and-forget JS tools after init, before creating the mob.
     setStatus("Registering tools...");
     mod.register_js_tool("request_human_approval",
       "Escalate a high-risk action for human sign-off. Use when an action needs human approval before proceeding.",
@@ -550,9 +553,6 @@ async function startOffice(): Promise<void> {
         },
         required: ["target", "reason"],
       }));
-
-    // Init runtime AFTER tool registration
-    mod.init_runtime_from_config(JSON.stringify(initConfig));
 
     setStatus("Creating office mob (10 agents)...");
     const def = buildOfficeDefinition(model);

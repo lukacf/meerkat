@@ -78,7 +78,8 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `await client.list_sessions()` | List active sessions; returns `list[SessionInfo]` |
 | `await client.read_session(session_id)` | Read raw session state |
 | `await client.read_session_history(session_id, offset=0, limit=None)` | Read committed session transcript history |
-| `await client.create_mob(definition, ...)` | Create a mob; returns `Mob` |
+| `await client.create_mob(*, prefab=..., definition=...)` | Create a mob; returns `Mob` |
+| `await client.create_deferred_session(prompt, ...)` | Create a session without running the first turn; returns `DeferredSession` |
 | `await client.list_mobs()` | List mobs; returns `list[MobSummary]` |
 | `client.capabilities` | `list[Capability]` — capabilities fetched during handshake |
 | `client.has_capability(id)` | `True` if a capability is available |

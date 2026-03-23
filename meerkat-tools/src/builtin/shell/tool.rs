@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
-use meerkat_core::ops::OperationId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -21,6 +20,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
+use super::types::JobId;
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Maximum number of characters to keep in output before truncation.
@@ -172,15 +172,9 @@ pub struct ShellTool {
 }
 
 impl ShellTool {
-    /// Create a new ShellTool with a foreground-only job manager.
-    ///
-    /// Background `spawn_job()` is NOT available on this instance.
-    /// For background-capable shell, use [`with_job_manager`](Self::with_job_manager)
-    /// with a canonically-bound [`JobManager`](super::job_manager::JobManager).
+    /// Create a new ShellTool with the given configuration
     pub fn new(config: ShellConfig) -> Self {
-        let job_manager = Arc::new(super::job_manager::JobManager::new_foreground(
-            config.clone(),
-        ));
+        let job_manager = Arc::new(super::job_manager::JobManager::new(config.clone()));
         Self {
             config,
             resolved_shell_path: Arc::new(Mutex::new(None)),
@@ -435,6 +429,11 @@ impl BuiltinTool for ShellTool {
 
         // Handle background execution
         if input.background {
+            if !self.job_manager.exports_canonical_async_ops() {
+                return Err(BuiltinToolError::execution_failed(
+                    "background shell execution requires canonical session binding",
+                ));
+            }
             let job_id = self
                 .job_manager
                 .spawn_job(
@@ -447,16 +446,8 @@ impl BuiltinTool for ShellTool {
                 .await
                 .map_err(|e| BuiltinToolError::execution_failed(e.to_string()))?;
 
-            let operation_id = self
-                .job_manager
-                .get_status(&job_id)
-                .await
-                .and_then(|job| job.operation_id)
-                .map(|id| id.to_string());
-
             return Ok(ToolOutput::Json(serde_json::json!({
                 "job_id": job_id.to_string(),
-                "operation_id": operation_id,
                 "status": "running",
                 "message": format!("Command started in background with job ID: {}", job_id)
             })));
@@ -493,9 +484,10 @@ impl BuiltinTool for ShellTool {
     fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {
         match output {
             ToolOutput::Json(value) => value
-                .get("operation_id")
+                .get("job_id")
                 .and_then(Value::as_str)
-                .and_then(|raw| serde_json::from_str::<OperationId>(&format!("\"{raw}\"")).ok())
+                .map(JobId::from_string)
+                .and_then(|job_id| self.job_manager.canonical_operation_for_job(&job_id))
                 .into_iter()
                 // Shell background jobs are detached — they run independently
                 // and do not block the turn boundary.
@@ -871,8 +863,14 @@ mod tests {
     async fn integration_real_shell_tool_call_background_success() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let job_manager = Arc::new(crate::builtin::shell::JobManager::new_local(config.clone()));
-        let tool = ShellTool::with_job_manager(config, job_manager);
+        let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let manager = Arc::new(
+            crate::builtin::shell::job_manager::JobManager::new(config.clone())
+                .with_owner_session_id(meerkat_core::types::SessionId::new())
+                .with_ops_registry(Arc::clone(&registry)),
+        );
+        let tool = ShellTool::with_job_manager(config, manager);
 
         // Try background execution
         let result = tool
@@ -885,16 +883,37 @@ mod tests {
         assert!(result.is_ok());
         let val = result.unwrap().into_json().unwrap();
         assert!(val["job_id"].is_string());
-        assert!(val["operation_id"].is_string());
         assert_eq!(val["status"], "running");
     }
 
     #[tokio::test]
-    async fn background_shell_output_produces_detached_async_op() {
+    async fn unbound_background_shell_execution_fails_fast() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let job_manager = Arc::new(crate::builtin::shell::JobManager::new_local(config.clone()));
-        let tool = ShellTool::with_job_manager(config, job_manager);
+        let tool = ShellTool::new(config);
+
+        let err = tool
+            .call(json!({
+                "command": "sleep 60",
+                "background": true
+            }))
+            .await
+            .expect_err("unbound background shell must fail");
+        assert!(matches!(err, BuiltinToolError::ExecutionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn bound_background_shell_output_produces_detached_async_op() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let manager = Arc::new(
+            crate::builtin::shell::job_manager::JobManager::new(config.clone())
+                .with_owner_session_id(meerkat_core::types::SessionId::new())
+                .with_ops_registry(Arc::clone(&registry)),
+        );
+        let tool = ShellTool::with_job_manager(config, manager);
 
         let output = tool
             .call(json!({
@@ -908,11 +927,14 @@ mod tests {
         let job_id = crate::builtin::shell::JobId::from_string(
             json["job_id"].as_str().expect("job id string").to_string(),
         );
-        let operation_id: OperationId = serde_json::from_str(&format!(
-            "\"{}\"",
-            json["operation_id"].as_str().expect("operation id string")
-        ))
-        .expect("operation id parse");
+        assert!(
+            json.get("operation_id").is_none(),
+            "public shell background output must not expose raw operation_id"
+        );
+        let operation_id = tool
+            .job_manager
+            .canonical_operation_for_job(&job_id)
+            .expect("canonical operation for job");
 
         let async_ops = tool.async_ops_for_output(&output);
         assert_eq!(async_ops.len(), 1);

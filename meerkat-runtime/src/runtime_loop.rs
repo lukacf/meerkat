@@ -6,11 +6,11 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
-use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
 };
+use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
 
 use crate::input::Input;
 use crate::tokio;
@@ -22,27 +22,18 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
         Input::Peer(p) => p.body.clone(),
         Input::FlowStep(f) => f.instructions.clone(),
         Input::ExternalEvent(e) => {
-            if let Some(ref blocks) = e.blocks {
-                // Multimodal: extract text from block content.
+            if let Some(blocks) = &e.blocks {
                 let text = meerkat_core::types::text_content(blocks);
-                format!("[External Event: {}] {text}", e.event_type)
-            } else if let Some(text) = e.payload.get("text").and_then(|v| v.as_str()) {
-                // Text-only: extract the canonical "text" field from payload.
-                format!("[External Event: {}] {text}", e.event_type)
+                if text.is_empty() {
+                    format!("[External Event: {}]", e.event_type)
+                } else {
+                    format!("[External Event: {}] {}", e.event_type, text)
+                }
             } else {
-                // Arbitrary payload (e.g. REST-originated events) — render raw JSON.
                 format!("[External Event: {}] {}", e.event_type, e.payload)
             }
         }
         Input::Continuation(c) => format!("[Continuation] {}", c.reason),
-        Input::TerminalPeerResponse(i) => {
-            if let Some(ref blocks) = i.blocks {
-                let text = meerkat_core::types::text_content(blocks);
-                format!("[Terminal Peer Response] {text}")
-            } else {
-                format!("[Terminal Peer Response] {}", i.body)
-            }
-        }
         Input::Operation(operation) => {
             format!(
                 "[Operation {}] {:?}",
@@ -52,12 +43,6 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
     }
 }
 
-/// Derive boundary classification from an `Input` variant.
-///
-/// This is the **shell-level** derivation — useful for tests that construct
-/// inputs directly. Production code uses the ingress authority's stored
-/// boundary instead (via `prepare_admitted_run`).
-#[cfg(test)]
 fn input_boundary(input: &Input) -> RunApplyBoundary {
     match input {
         Input::Peer(peer)
@@ -72,7 +57,6 @@ fn input_boundary(input: &Input) -> RunApplyBoundary {
             meerkat_core::types::HandlingMode::Queue => RunApplyBoundary::RunStart,
             meerkat_core::types::HandlingMode::Steer => RunApplyBoundary::RunCheckpoint,
         },
-        Input::TerminalPeerResponse(_) => RunApplyBoundary::RunStart,
         Input::Prompt(prompt) => {
             match prompt.turn_metadata.as_ref().and_then(|m| m.handling_mode) {
                 Some(meerkat_core::types::HandlingMode::Steer) => RunApplyBoundary::RunCheckpoint,
@@ -105,12 +89,6 @@ fn input_turn_metadata(
                 ..Default::default()
             },
         ),
-        Input::TerminalPeerResponse(_) => Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
-                ..Default::default()
-            },
-        ),
         _ => None,
     }
 }
@@ -123,19 +101,17 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::Peer(p) if p.blocks.is_some() => CoreRenderable::Blocks {
             blocks: p.blocks.clone().unwrap_or_default(),
         },
+        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: f.blocks.clone().unwrap_or_default(),
+        },
         Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
             blocks: e.blocks.clone().unwrap_or_default(),
         },
-        Input::TerminalPeerResponse(i) if i.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: i.blocks.clone().unwrap_or_default(),
-        },
-        Input::Prompt(_)
-        | Input::Peer(_)
-        | Input::FlowStep(_)
-        | Input::ExternalEvent(_)
-        | Input::TerminalPeerResponse(_) => CoreRenderable::Text {
-            text: input_to_prompt(input),
-        },
+        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
+            CoreRenderable::Text {
+                text: input_to_prompt(input),
+            }
+        }
         Input::Continuation(_) | Input::Operation(_) => return None,
     };
 
@@ -170,11 +146,6 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     })
 }
 
-/// Build a `RunPrimitive` using the shell-level `input_boundary()` derivation.
-///
-/// Test-only: production code uses `prepare_admitted_run` which gets the
-/// boundary from the ingress authority instead.
-#[cfg(test)]
 pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
     let boundary = inputs
         .first()
@@ -184,9 +155,6 @@ pub(crate) fn inputs_to_primitive(inputs: &[(InputId, Input)]) -> RunPrimitive {
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
-///
-/// Test-only: production code uses `prepare_admitted_run`.
-#[cfg(test)]
 pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimitive {
     inputs_to_primitive(&[(input_id, input.clone())])
 }
@@ -273,7 +241,7 @@ async fn process_queue(
         }
 
         // Dequeue and prepare under the driver lock
-        let prepared = {
+        let dequeued = {
             let mut d = driver.lock().await;
 
             // Only process if the runtime can process queue (Idle or Retired)
@@ -294,23 +262,52 @@ async fn process_queue(
             }
 
             // Dequeue the batch members from the physical queues.
-            let dequeued: Vec<_> = batch_ids
+            let staged_inputs: Vec<_> = batch_ids
                 .iter()
                 .filter_map(|id| d.dequeue_by_id(id))
                 .collect();
 
-            if dequeued.is_empty() {
+            if staged_inputs.is_empty() {
                 return false;
             }
 
-            // Shared helper: start_run → stage → build primitive (with authority boundary).
-            match d.prepare_admitted_run(&dequeued) {
-                Ok(prepared) => Some(prepared),
-                Err(_) => return false,
+            let run_id = RunId::new();
+
+            // Start run in the state machine
+            if d.start_run(run_id.clone()).is_err() {
+                return false;
             }
+
+            // Stage the input batch (Queued → Staged).
+            // Do NOT apply here — apply only after successful execution.
+            // If we pre-applied and the executor failed, the input would
+            // be stranded in AppliedPendingConsumption because RunFailed
+            // only rolls back Staged inputs.
+            let mut staged_ids = Vec::with_capacity(staged_inputs.len());
+            for (staged_input_id, _) in &staged_inputs {
+                if d.stage_input(staged_input_id, &run_id).is_err() {
+                    let _ = d.rollback_staged(&staged_ids);
+                    let _ = d.complete_run();
+                    return false;
+                }
+                staged_ids.push(staged_input_id.clone());
+            }
+
+            // Use the authority's boundary classification (derived from stored metadata)
+            // instead of the shell-level input_boundary function.
+            let boundary = staged_inputs
+                .first()
+                .map(|(id, _)| d.ingress().input_boundary(id))
+                .unwrap_or(RunApplyBoundary::RunStart);
+            let primitive = inputs_to_primitive_with_boundary(&staged_inputs, boundary);
+            let contributing_input_ids = staged_inputs
+                .iter()
+                .map(|(staged_input_id, _)| staged_input_id.clone())
+                .collect::<Vec<_>>();
+            Some((contributing_input_ids, run_id, primitive))
         };
 
-        match prepared {
+        match dequeued {
             Some((input_ids, run_id, primitive)) => {
                 // Execute outside the driver lock (this calls start_turn, which is slow)
                 let result = executor.apply(run_id.clone(), primitive).await;
@@ -319,60 +316,93 @@ async fn process_queue(
                 let mut d = driver.lock().await;
                 match result {
                     Ok(output) => {
-                        match d
-                            .record_run_success(run_id.clone(), output, input_ids.clone())
+                        // Capture run_result before moving output fields
+                        let run_result = output.run_result;
+
+                        // BoundaryApplied transitions Staged → Applied → APC
+                        // and triggers atomic persistence in PersistentRuntimeDriver
+                        if let Err(err) = d
+                            .as_driver_mut()
+                            .on_run_event(RunEvent::BoundaryApplied {
+                                run_id: run_id.clone(),
+                                receipt: output.receipt,
+                                session_snapshot: output.session_snapshot,
+                            })
                             .await
                         {
-                            Ok(run_result) => {
-                                // Resolve completion waiters unconditionally
-                                if let Some(completions) = completions.as_ref() {
-                                    let mut reg = completions.lock().await;
-                                    match run_result {
-                                        Some(result) => {
-                                            for input_id in &input_ids {
-                                                reg.resolve_completed(input_id, result.clone());
-                                            }
-                                        }
-                                        None => {
-                                            for input_id in &input_ids {
-                                                reg.resolve_without_result(input_id);
-                                            }
-                                        }
+                            tracing::error!(%run_id, error = %err, "failed to record boundary-applied event");
+                            if let Err(unwind_err) = d
+                                .as_driver_mut()
+                                .on_run_event(RunEvent::RunFailed {
+                                    run_id: run_id.clone(),
+                                    error: format!("boundary commit failed: {err}"),
+                                    recoverable: true,
+                                })
+                                .await
+                            {
+                                tracing::error!(
+                                    %run_id,
+                                    error = %unwind_err,
+                                    "failed to unwind runtime after boundary commit failure"
+                                );
+                            }
+                            drop(d);
+                            let _ = executor
+                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                                    reason: format!("runtime boundary commit failed for run {run_id}: {err}"),
+                                })
+                                .await;
+                            return false;
+                        }
+
+                        // RunCompleted transitions APC → Consumed and returns to Idle/Retired
+                        if let Err(err) = d
+                            .as_driver_mut()
+                            .on_run_event(RunEvent::RunCompleted {
+                                run_id,
+                                consumed_input_ids: input_ids.clone(),
+                            })
+                            .await
+                        {
+                            tracing::error!(error = %err, "failed to record run-completed event");
+                            drop(d);
+                            let _ = executor
+                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
+                                    reason: format!("runtime terminal snapshot failed after completion: {err}"),
+                                })
+                                .await;
+                            return false;
+                        }
+
+                        // Resolve completion waiters unconditionally
+                        if let Some(completions) = completions.as_ref() {
+                            let mut reg = completions.lock().await;
+                            match run_result {
+                                Some(result) => {
+                                    for input_id in &input_ids {
+                                        reg.resolve_completed(input_id, result.clone());
                                     }
                                 }
-                            }
-                            Err(record_err) => {
-                                let (_err_run_id, err_msg) = match &record_err {
-                                    crate::session_adapter::RecordRunError::BoundaryCommitFailed {
-                                        run_id, source, unwind_err,
-                                    } => {
-                                        tracing::error!(%run_id, error = %source, "failed to record boundary-applied event");
-                                        if let Some(ue) = unwind_err {
-                                            tracing::error!(%run_id, error = %ue, "failed to unwind runtime after boundary commit failure");
-                                        }
-                                        (run_id.clone(), format!("runtime boundary commit failed for run {run_id}: {source}"))
+                                None => {
+                                    for input_id in &input_ids {
+                                        reg.resolve_without_result(input_id);
                                     }
-                                    crate::session_adapter::RecordRunError::CompletionFailed {
-                                        run_id, source,
-                                    } => {
-                                        tracing::error!(error = %source, "failed to record run-completed event");
-                                        (run_id.clone(), format!("runtime terminal snapshot failed after completion: {source}"))
-                                    }
-                                };
-                                drop(d);
-                                let _ = executor
-                                    .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                                        reason: err_msg,
-                                    })
-                                    .await;
-                                return false;
+                                }
                             }
                         }
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
                         // RunFailed rolls back Staged → Queued and returns to Idle
-                        if let Err(err) = d.record_run_failure(run_id, error_msg.clone()).await {
+                        if let Err(err) = d
+                            .as_driver_mut()
+                            .on_run_event(RunEvent::RunFailed {
+                                run_id,
+                                error: error_msg.clone(),
+                                recoverable: true,
+                            })
+                            .await
+                        {
                             tracing::error!(error = %err, "failed to record run-failed event");
                             drop(d);
                             let _ = executor
@@ -474,28 +504,28 @@ mod tests {
     }
 
     #[test]
-    fn input_to_primitive_creates_staged() {
+    fn input_to_primitive_creates_staged() -> Result<(), String> {
         let input = make_prompt("test prompt");
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id.clone());
 
-        match primitive {
-            RunPrimitive::StagedInput(staged) => {
-                assert_eq!(staged.boundary, RunApplyBoundary::RunStart);
-                assert_eq!(staged.contributing_input_ids, vec![input_id]);
-                assert_eq!(staged.appends.len(), 1);
-                assert_eq!(staged.appends[0].role, ConversationAppendRole::User);
-                match &staged.appends[0].content {
-                    CoreRenderable::Text { text } => assert_eq!(text, "test prompt"),
-                    _ => panic!("Expected Text content"),
-                }
-            }
-            _ => panic!("Expected StagedInput"),
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(staged.boundary, RunApplyBoundary::RunStart);
+        assert_eq!(staged.contributing_input_ids, vec![input_id]);
+        assert_eq!(staged.appends.len(), 1);
+        assert_eq!(staged.appends[0].role, ConversationAppendRole::User);
+        match &staged.appends[0].content {
+            CoreRenderable::Text { text } => assert_eq!(text, "test prompt"),
+            other => return Err(format!("expected text content, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn peer_input_with_blocks_produces_blocks_renderable() {
+    fn peer_input_with_blocks_produces_blocks_renderable() -> Result<(), String> {
         let blocks = vec![
             meerkat_core::types::ContentBlock::Text {
                 text: "see this image".into(),
@@ -527,17 +557,107 @@ mod tests {
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id);
 
-        match primitive {
-            RunPrimitive::StagedInput(staged) => {
-                assert_eq!(staged.appends.len(), 1);
-                match &staged.appends[0].content {
-                    CoreRenderable::Blocks { blocks: got } => {
-                        assert_eq!(got.len(), 2);
-                    }
-                    other => panic!("Expected Blocks content, got {other:?}"),
-                }
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(staged.appends.len(), 1);
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => {
+                assert_eq!(got.len(), 2);
             }
-            _ => panic!("Expected StagedInput"),
+            other => return Err(format!("expected blocks content, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn flow_step_with_blocks_produces_blocks_renderable() -> Result<(), String> {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "analyze this screenshot".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc123".into(),
+                source_path: None,
+            },
+        ];
+        let input = Input::FlowStep(FlowStepInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Flow {
+                    flow_id: "flow-1".into(),
+                    step_index: 0,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            step_id: "step-1".into(),
+            instructions: "analyze this screenshot".into(),
+            blocks: Some(blocks),
+            turn_metadata: None,
+        });
+        let input_id = input.id().clone();
+        let primitive = input_to_primitive(&input, input_id);
+
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(staged.appends.len(), 1);
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => assert_eq!(got.len(), 2),
+            other => return Err(format!("expected blocks content, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn external_event_with_blocks_produces_blocks_renderable() -> Result<(), String> {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "see this event".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc123".into(),
+                source_path: None,
+            },
+        ];
+        let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "webhook".into(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "webhook".into(),
+            payload: serde_json::json!({"body": "see this event"}),
+            blocks: Some(blocks),
+        });
+        let input_id = input.id().clone();
+        let primitive = input_to_primitive(&input, input_id);
+
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(staged.appends.len(), 1);
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => assert_eq!(got.len(), 2),
+            other => return Err(format!("expected blocks content, got {other:?}")),
+        }
+        Ok(())
     }
 }

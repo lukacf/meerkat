@@ -7,6 +7,7 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
+use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -68,10 +69,6 @@ pub enum SessionError {
     /// The requested operation is not supported by this session service.
     #[error("unsupported: {0}")]
     Unsupported(String),
-
-    /// Persisted session data is from an incompatible format version.
-    #[error("incompatible session format: {reason}")]
-    IncompatibleFormat { reason: String },
 }
 
 impl SessionError {
@@ -85,7 +82,6 @@ impl SessionError {
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
-            Self::IncompatibleFormat { .. } => "SESSION_INCOMPATIBLE_FORMAT",
             Self::Agent(_) => "AGENT_ERROR",
         }
     }
@@ -180,6 +176,12 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Canonical async-op registry for the owning session.
+    ///
+    /// Runtime-backed surfaces should provide the real per-session registry
+    /// from the runtime adapter rather than letting deeper layers allocate a
+    /// fresh local registry.
+    pub ops_lifecycle_override: Option<Arc<dyn OpsLifecycleRegistry>>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
@@ -232,6 +234,7 @@ impl Default for SessionBuildOptions {
             provider_params: None,
             external_tools: None,
             llm_client_override: None,
+            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -265,6 +268,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field(
+                "ops_lifecycle_override",
+                &self.ops_lifecycle_override.is_some(),
+            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
@@ -352,8 +359,7 @@ pub struct TurnToolOverlay {
 }
 
 /// Owner of the background host-mode comms drain lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HostModeOwner {
     /// SessionService owns host-mode draining directly.
     #[default]

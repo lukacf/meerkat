@@ -118,10 +118,7 @@ async function boot() {
     bootStatus.textContent = "Loading Meerkat WASM runtime...";
     const runtime = await loadWasmRuntime();
 
-    // Step 3: Register WebCM tools (before init_runtime_from_config)
-    registerWebCMTools(runtime as ToolRuntime, vm);
-
-    // Step 4: Init mob runtime
+    // Step 3: Init mob runtime
     bootStatus.textContent = "Initializing mob runtime...";
     const mobRuntime = runtime as unknown as MobRuntime;
 
@@ -151,19 +148,21 @@ async function boot() {
       });
     }
 
-    // Step 5: Create mob (orchestrator + planner + coder + reviewer)
+    // Step 4: Create mob (orchestrator + planner + coder + reviewer)
     mob = new MobOrchestrator(mobRuntime, panelStates);
-    await mob.init(keys, models, PROXY_URL ?? undefined);
+    await mob.init(keys, models, PROXY_URL ?? undefined, () => {
+      registerWebCMTools(runtime as ToolRuntime, vm);
+    });
 
-    // Step 6: Show workspace
+    // Step 5: Show workspace
     setupOverlay.classList.add("hidden");
     workspace.classList.remove("hidden");
     mainStream.appendBanner(models);
 
-    // Step 7: Start event polling for all agents
+    // Step 6: Start event polling for all agents
     mob.startPolling();
 
-    // Step 8: Focus prompt
+    // Step 7: Focus prompt
     promptInput.focus();
 
   } catch (err: any) {

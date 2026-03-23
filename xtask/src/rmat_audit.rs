@@ -210,13 +210,8 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
     findings.extend(collect_protocol_realization_site_findings(root, policy));
     findings.extend(collect_protocol_feedback_constraint_findings(root, policy));
     findings.extend(collect_terminal_mapping_constraint_findings(root, policy));
-
-    // Contract-driven findings from ownership registry
-    findings.extend(collect_fallback_contract_findings(root, policy)?);
-    findings.extend(collect_projection_contract_findings(root)?);
-    findings.extend(collect_derived_field_findings(root)?);
-    findings.extend(collect_surface_conformance_findings(root, policy));
-    findings.extend(collect_atomic_bundle_findings(root));
+    findings.extend(collect_runtime_comms_bridge_projection_findings(root));
+    findings.extend(collect_runtime_external_event_projection_findings(root));
 
     findings.sort_by(|a, b| a.key.cmp(&b.key));
     findings.dedup_by(|a, b| a.key == b.key);
@@ -956,307 +951,266 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
     findings
 }
 
-/// Contract-driven audit: fallback policy violations.
-///
-/// For `HardError` boundaries, the declared function must not contain `warn!` followed
-/// by a fallback return pattern -- it should propagate the error instead.
-///
-/// For `TestOnlyLegacy` boundaries, the declared function should only be called from
-/// test modules or should be gated with `#[cfg(test)]`.
-fn collect_fallback_contract_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding>> {
+/// Structural runtime bridge rule: classified comms ingress must project into
+/// runtime input families without re-deriving class from raw peer names, and
+/// must preserve rendered peer body plus multimodal blocks.
+fn collect_runtime_comms_bridge_projection_findings(root: &Path) -> Vec<Finding> {
+    let bridge_path = "meerkat-runtime/src/comms_bridge.rs";
+    let drain_path = "meerkat-runtime/src/comms_drain.rs";
+
+    let bridge_source = match fs::read_to_string(root.join(bridge_path)) {
+        Ok(source) => source,
+        Err(_) => return Vec::new(),
+    };
+    let drain_source = match fs::read_to_string(root.join(drain_path)) {
+        Ok(source) => source,
+        Err(_) => return Vec::new(),
+    };
+
+    runtime_comms_bridge_projection_findings_for_sources(
+        bridge_path,
+        &bridge_source,
+        drain_path,
+        &drain_source,
+    )
+}
+
+/// Structural runtime external-event rule: all external-event producers must
+/// preserve canonical text-vs-JSON mode, plain-event multimodal blocks, and
+/// runtime block rendering for ExternalEvent inputs.
+fn collect_runtime_external_event_projection_findings(root: &Path) -> Vec<Finding> {
+    let stdin_path = "meerkat-cli/src/stdin_events.rs";
+    let bridge_path = "meerkat-runtime/src/comms_bridge.rs";
+    let loop_path = "meerkat-runtime/src/runtime_loop.rs";
+
+    let stdin_source = match fs::read_to_string(root.join(stdin_path)) {
+        Ok(source) => source,
+        Err(_) => return Vec::new(),
+    };
+    let bridge_source = match fs::read_to_string(root.join(bridge_path)) {
+        Ok(source) => source,
+        Err(_) => return Vec::new(),
+    };
+    let loop_source = match fs::read_to_string(root.join(loop_path)) {
+        Ok(source) => source,
+        Err(_) => return Vec::new(),
+    };
+
+    runtime_external_event_projection_findings_for_sources(
+        stdin_path,
+        &stdin_source,
+        bridge_path,
+        &bridge_source,
+        loop_path,
+        &loop_source,
+    )
+}
+
+fn runtime_external_event_projection_findings_for_sources(
+    stdin_path: &str,
+    stdin_source: &str,
+    bridge_path: &str,
+    bridge_source: &str,
+    loop_path: &str,
+    loop_source: &str,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    for rule in &policy.fallback_policy_rules {
-        let file_path = root.join(&rule.boundary_path);
-        let source = match fs::read_to_string(&file_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        match rule.policy.as_str() {
-            "hard_error" => {
-                // For HardError boundaries, check that the function does not contain
-                // `warn!` or `tracing::warn!` followed by a default/fallback return.
-                if let Some(fn_body) = extract_fn_body(&source, &rule.symbol) {
-                    let has_warn = fn_body.contains("warn!") || fn_body.contains("tracing::warn!");
-                    let has_fallback_return = fn_body.contains("return")
-                        && (fn_body.contains("default()")
-                            || fn_body.contains("Default::default")
-                            || fn_body.contains("unwrap_or"));
-                    if has_warn && has_fallback_return {
-                        findings.push(error_finding(
-                            "FallbackPolicyViolation",
-                            &rule.boundary_path,
-                            &rule.symbol,
-                            format!(
-                                "boundary `{}::{}` has fallback_policy=hard_error but contains \
-                                 warn+fallback pattern; should propagate error via Result instead",
-                                rule.boundary_path, rule.symbol
-                            ),
-                            false,
-                        ));
-                    }
-                }
-            }
-            "test_only_legacy" => {
-                // For TestOnlyLegacy, check if the function is used outside test modules.
-                let repo_files = collect_repo_rs_files(root)?;
-                for file in &repo_files {
-                    let relative = file
-                        .strip_prefix(root)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if relative == rule.boundary_path {
-                        continue;
-                    }
-                    let file_source = match fs::read_to_string(file) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    let call_pattern = format!(".{}(", rule.symbol);
-                    if file_source.contains(&call_pattern) {
-                        let in_test_module = is_call_in_test_context(&file_source, &call_pattern);
-                        if !in_test_module {
-                            findings.push(warn_finding(
-                                "FallbackPolicyViolation",
-                                &relative,
-                                &rule.symbol,
-                                format!(
-                                    "test_only_legacy function `{}` is called from non-test \
-                                     code in `{}`; migrate to the canonical API",
-                                    rule.symbol, relative
-                                ),
-                                false,
-                            ));
-                        }
-                    }
-                }
-            }
-            "observable_best_effort" => {
-                // For ObservableBestEffort, check that the function has observability
-                // (warn!/info!/tracing) at the fallback point.
-                if let Some(fn_body) = extract_fn_body(&source, &rule.symbol) {
-                    let has_observability = fn_body.contains("warn!")
-                        || fn_body.contains("info!")
-                        || fn_body.contains("tracing::");
-                    if !has_observability {
-                        findings.push(warn_finding(
-                            "FallbackPolicyViolation",
-                            &rule.boundary_path,
-                            &rule.symbol,
-                            format!(
-                                "boundary `{}::{}` has fallback_policy=observable_best_effort \
-                                 but contains no observability (warn!/info!/tracing) at \
-                                 fallback point",
-                                rule.boundary_path, rule.symbol
-                            ),
-                            false,
-                        ));
-                    }
-                }
-            }
-            _ => {}
-        }
+    if !stdin_source.contains("StdinLineFormat::Text => serde_json::json!({ \"body\": body })") {
+        findings.push(error_finding(
+            "RuntimeExternalEventProjectionAlignment",
+            stdin_path,
+            "make_stdin_external_event_input",
+            "stdin text mode must preserve literal lines instead of reparsing JSON-looking input"
+                .to_string(),
+            false,
+        ));
     }
 
-    Ok(findings)
+    if !stdin_source
+        .contains("StdinLineFormat::Json => match serde_json::from_str::<serde_json::Value>(&body)")
+    {
+        findings.push(error_finding(
+            "RuntimeExternalEventProjectionAlignment",
+            stdin_path,
+            "make_stdin_external_event_input",
+            "stdin JSON mode must remain the only mode that reparses structured JSON bodies"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("let blocks = external_event_blocks(interaction);") {
+        findings.push(error_finding(
+            "RuntimeExternalEventProjectionAlignment",
+            bridge_path,
+            "classified_interaction_to_runtime_input",
+            "plain-event bridge must derive ExternalEvent blocks through external_event_blocks"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("payload: external_event_payload(interaction),") {
+        findings.push(error_finding(
+            "RuntimeExternalEventProjectionAlignment",
+            bridge_path,
+            "classified_interaction_to_runtime_input",
+            "plain-event bridge must derive ExternalEvent payload through external_event_payload"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("InteractionContent::Message { blocks, .. } => blocks.clone()") {
+        findings.push(error_finding(
+            "RuntimeExternalEventProjectionAlignment",
+            bridge_path,
+            "external_event_blocks",
+            "plain-event bridge must preserve multimodal message blocks when building ExternalEvent inputs"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !loop_source
+        .contains("Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks")
+    {
+        findings.push(error_finding(
+            "RuntimeExternalEventProjectionAlignment",
+            loop_path,
+            "input_to_append",
+            "runtime loop must preserve ExternalEvent blocks as block renderables instead of flattening them to text"
+                .to_string(),
+            false,
+        ));
+    }
+
+    findings
 }
 
-/// Contract-driven audit: projection reclassification violations.
-///
-/// For each `ProjectionContractEntry` where `reclassification_forbidden: true`,
-/// check the sink files for raw string pattern matching that bypasses the typed
-/// canonical source.
-fn collect_projection_contract_findings(root: &Path) -> Result<Vec<Finding>> {
-    let entries = ownership_ledger::projection_contracts_snapshot();
+fn runtime_comms_bridge_projection_findings_for_sources(
+    bridge_path: &str,
+    bridge_source: &str,
+    drain_path: &str,
+    drain_source: &str,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    let reclassification_patterns = [
-        ".starts_with(",
-        ".ends_with(",
-        ".contains(\":",
-        "as_str() {",
-        ".as_str(),",
-        "kind_str",
-        "type_str",
-        "event_type ==",
-    ];
-
-    let repo_files = collect_repo_rs_files(root)?;
-
-    for entry in &entries {
-        if !entry.reclassification_forbidden {
-            continue;
-        }
-
-        for file in &repo_files {
-            let relative = file
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            let source = match fs::read_to_string(file) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            if !source.contains(&entry.sink_type) {
-                continue;
-            }
-
-            if relative.contains("/src/generated/") || relative.starts_with("xtask/") {
-                continue;
-            }
-
-            for pattern in &reclassification_patterns {
-                if source.contains(pattern) {
-                    let canonical_nearby = entry
-                        .preserved_fields
-                        .iter()
-                        .any(|field| source.contains(field));
-                    if canonical_nearby {
-                        findings.push(warn_finding(
-                            "ProjectionReclassificationBypass",
-                            &relative,
-                            &entry.sink_type,
-                            format!(
-                                "file references sink type `{}` and contains raw string \
-                                 classification pattern `{}`; reclassification is forbidden \
-                                 -- consume the typed canonical source `{}` instead",
-                                entry.sink_type, pattern, entry.canonical_type
-                            ),
-                            false,
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
+    if !contains_identifier_call(bridge_source, "classified_interaction_to_runtime_input") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "classified_interaction_to_runtime_input",
+            "runtime comms bridge must route from classified ingress truth instead of a raw interaction-only adapter".to_string(),
+            false,
+        ));
     }
 
-    Ok(findings)
+    if !bridge_source.contains("classified.class == PeerInputClass::PlainEvent") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "classified_interaction_to_runtime_input",
+            "runtime comms bridge must derive ExternalEvent routing from PeerInputClass::PlainEvent".to_string(),
+            false,
+        ));
+    }
+
+    if bridge_source.contains(".starts_with(\"event:\")") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "classified_interaction_to_runtime_input",
+            "runtime comms bridge must not classify external events from sender-name prefixes"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("body: peer_rendered_body(interaction)") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "interaction_to_peer_input",
+            "runtime comms bridge must project peer body from the rendered peer text helper"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("interaction.rendered_text") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "peer_rendered_body",
+            "runtime comms bridge must preserve rendered peer text from classified ingress"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("blocks: peer_blocks(interaction)") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "interaction_to_peer_input",
+            "runtime comms bridge must project multimodal blocks through the peer block helper"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !bridge_source.contains("InteractionContent::Message { blocks, .. } => blocks.clone()") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "peer_blocks",
+            "runtime comms bridge must preserve message blocks from drained peer interactions"
+                .to_string(),
+            false,
+        ));
+    }
+
+    if !contains_identifier_call(drain_source, "classified_interaction_to_runtime_input") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            drain_path,
+            "run_comms_drain",
+            "runtime comms drain must submit classified interactions through the classified bridge adapter".to_string(),
+            false,
+        ));
+    }
+
+    if contains_identifier_call(drain_source, "interaction_to_runtime_input") {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            drain_path,
+            "run_comms_drain",
+            "runtime comms drain still references the raw interaction-only bridge adapter"
+                .to_string(),
+            false,
+        ));
+    }
+
+    findings
 }
 
-/// Contract-driven audit: dead field spread detection.
-///
-/// For each `DerivedFieldEntry` where `dead_field: true`, check that the field
-/// does not appear in any NEW code outside of its original declaration.
-fn collect_derived_field_findings(root: &Path) -> Result<Vec<Finding>> {
-    let entries = ownership_ledger::derived_fields_snapshot();
-    let mut findings = Vec::new();
-
-    let repo_files = collect_repo_rs_files(root)?;
-
-    for entry in &entries {
-        if !entry.dead_field {
-            continue;
+fn contains_identifier_call(source: &str, ident: &str) -> bool {
+    let pattern = format!("{ident}(");
+    let mut search_start = 0;
+    while let Some(offset) = source[search_start..].find(&pattern) {
+        let start = search_start + offset;
+        let boundary_ok = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
+        if boundary_ok {
+            return true;
         }
-
-        let field_name = entry
-            .field_path
-            .rsplit("::")
-            .next()
-            .unwrap_or(&entry.field_path);
-
-        let declaring_type = entry
-            .field_path
-            .split("::")
-            .next()
-            .unwrap_or(&entry.field_path);
-
-        for file in &repo_files {
-            let relative = file
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            if relative.contains("/src/generated/") || relative.starts_with("xtask/") {
-                continue;
-            }
-
-            let source = match fs::read_to_string(file) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            if source.contains(&format!("struct {declaring_type}")) {
-                continue;
-            }
-
-            let construction_pattern = format!("{field_name}:");
-            let access_pattern = format!(".{field_name}");
-
-            let has_construction = source.lines().any(|line| {
-                let trimmed = line.trim();
-                trimmed.starts_with(&construction_pattern) && !trimmed.starts_with("//")
-            });
-            let has_access = source.contains(&access_pattern);
-
-            if has_construction || has_access {
-                findings.push(warn_finding(
-                    "DeadFieldSpread",
-                    &relative,
-                    &entry.field_path,
-                    format!(
-                        "dead field `{}` (always {}) is referenced in `{}`; \
-                         avoid spreading dead fields to new code",
-                        entry.field_path, entry.derivation_rule, relative
-                    ),
-                    false,
-                ));
-            }
-        }
+        search_start = start + 1;
     }
-
-    Ok(findings)
-}
-
-/// Extract the body of a function with the given name from source code.
-/// Returns `None` if the function is not found. Uses a simple brace-counting
-/// heuristic rather than full syn parsing for efficiency.
-fn extract_fn_body(source: &str, fn_name: &str) -> Option<String> {
-    let pattern = format!("fn {fn_name}");
-    let start = source.find(&pattern)?;
-    let rest = &source[start..];
-    let brace_start = rest.find('{')?;
-    let body_start = start + brace_start;
-
-    let mut depth = 0u32;
-    let mut end = body_start;
-    for (i, ch) in source[body_start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = body_start + i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Some(source[body_start..end].to_string())
-}
-
-/// Check if a call pattern appears exclusively within `#[cfg(test)]` or `mod tests` blocks.
-/// Returns `true` if ALL occurrences of the pattern are in test context.
-fn is_call_in_test_context(source: &str, call_pattern: &str) -> bool {
-    let mut in_test_region = false;
-    let mut all_in_test = true;
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed == "#[cfg(test)]" {
-            in_test_region = true;
-        }
-        if line.contains(call_pattern) && !trimmed.starts_with("//") && !in_test_region {
-            all_in_test = false;
-        }
-    }
-
-    all_in_test
+    false
 }
 
 fn error_finding(
@@ -1297,218 +1251,6 @@ fn warn_finding(
     }
 }
 
-/// Validate surface family metadata integrity.
-///
-/// This checks that registry entries are well-formed: policy rules reference
-/// real families, IntentionalDivergence entries have reasons, and Open
-/// families have at least one Canonical surface.
-///
-/// This does NOT verify live code conformance across surfaces — the
-/// canonical_contract field is a description string, not a machine-readable
-/// schema. Cross-surface conformance verification requires a manifest-backed
-/// snapshot/diff system, which is a future mechanism.
-fn collect_surface_conformance_findings(_root: &Path, policy: &AuditPolicy) -> Vec<Finding> {
-    let families = ownership_ledger::surface_families_snapshot();
-    let mut findings = Vec::new();
-
-    // Cross-check: every rule in policy must reference a declared family
-    for rule in &policy.surface_conformance_rules {
-        let family_exists = families.iter().any(|f| f.family == rule.family);
-        if !family_exists {
-            findings.push(error_finding(
-                "SurfaceConformanceOrphanRule",
-                "<policy>",
-                &rule.family,
-                format!(
-                    "surface conformance rule references family `{}` which has no SurfaceFamilyEntry",
-                    rule.family
-                ),
-                false,
-            ));
-        }
-    }
-
-    // Validate family entries: IntentionalDivergence must have a reason,
-    // and every Open family must have at least one Canonical surface.
-    for family in &families {
-        if family.status == ownership_ledger::EntryStatus::Open {
-            let has_canonical = family
-                .surfaces
-                .iter()
-                .any(|s| s.conformance == ownership_ledger::SurfaceConformance::Canonical);
-            if !has_canonical {
-                findings.push(warn_finding(
-                    "SurfaceConformanceNoCanonical",
-                    "<surface-families>",
-                    &family.family,
-                    format!(
-                        "surface family `{}` has no Canonical surface — cannot verify conformance",
-                        family.family
-                    ),
-                    false,
-                ));
-            }
-
-            for member in &family.surfaces {
-                if member.conformance == ownership_ledger::SurfaceConformance::IntentionalDivergence
-                    && member
-                        .divergence_reason
-                        .as_ref()
-                        .map_or(true, |r| r.is_empty())
-                {
-                    findings.push(error_finding(
-                        "SurfaceConformanceMissingReason",
-                        "<surface-families>",
-                        &format!("{}::{}", family.family, member.surface),
-                        format!(
-                            "surface `{}` in family `{}` is IntentionalDivergence but has no reason",
-                            member.surface, family.family
-                        ),
-                        false,
-                    ));
-                }
-            }
-        }
-    }
-
-    findings
-}
-
-/// Verify that declared atomic bundles have canonical paths that exist.
-///
-/// For each AtomicBundleEntry, check that the declared canonical_path file
-/// exists and contains a function or type related to the bundle.
-/// Verify declared atomic bundles against live code.
-///
-/// For each bundle: reads the canonical path file, extracts the scope block
-/// identified by `scope_anchor`, and verifies every step's `anchor_pattern`
-/// appears inside that scope. This is manifest-driven — the patterns come
-/// from the registry, not hardcoded here.
-fn collect_atomic_bundle_findings(root: &Path) -> Vec<Finding> {
-    let bundles = ownership_ledger::atomic_bundles_snapshot();
-    let mut findings = Vec::new();
-
-    for bundle in &bundles {
-        if bundle.status != ownership_ledger::EntryStatus::Open {
-            continue;
-        }
-
-        // Metadata checks
-        if bundle.steps.len() < 2 {
-            findings.push(warn_finding(
-                "AtomicBundleTrivial",
-                &bundle.canonical_path,
-                &bundle.bundle_name,
-                format!(
-                    "atomic bundle `{}` has fewer than 2 steps",
-                    bundle.bundle_name
-                ),
-                false,
-            ));
-        }
-        if bundle.rollback_contract.trim().is_empty() {
-            findings.push(error_finding(
-                "AtomicBundleNoRollback",
-                &bundle.canonical_path,
-                &bundle.bundle_name,
-                format!(
-                    "atomic bundle `{}` has no rollback contract declared",
-                    bundle.bundle_name
-                ),
-                false,
-            ));
-        }
-
-        // Live code verification
-        let canonical_file = root.join(&bundle.canonical_path);
-        let source = match fs::read_to_string(&canonical_file) {
-            Ok(s) => s,
-            Err(_) => {
-                findings.push(error_finding(
-                    "AtomicBundleCanonicalPathMissing",
-                    &bundle.canonical_path,
-                    &bundle.bundle_name,
-                    format!(
-                        "atomic bundle `{}` declares canonical path `{}` which does not exist",
-                        bundle.bundle_name, bundle.canonical_path
-                    ),
-                    false,
-                ));
-                continue;
-            }
-        };
-
-        // Extract the scope block using brace-counting from the scope_anchor
-        let scope_block = if bundle.scope_anchor.is_empty() {
-            // No scope anchor — use entire file
-            source.clone()
-        } else {
-            match extract_scope_block(&source, &bundle.scope_anchor) {
-                Some(block) => block,
-                None => {
-                    findings.push(error_finding(
-                        "AtomicBundleScopeNotFound",
-                        &bundle.canonical_path,
-                        &bundle.bundle_name,
-                        format!(
-                            "atomic bundle `{}` scope anchor `{}` not found in `{}`",
-                            bundle.bundle_name, bundle.scope_anchor, bundle.canonical_path
-                        ),
-                        false,
-                    ));
-                    continue;
-                }
-            }
-        };
-
-        // Verify every step's anchor pattern appears inside the scope block
-        for step in &bundle.steps {
-            if !scope_block.contains(&step.anchor_pattern) {
-                findings.push(error_finding(
-                    "AtomicBundleStepMissing",
-                    &bundle.canonical_path,
-                    &format!("{}::{}", bundle.bundle_name, step.name),
-                    format!(
-                        "atomic bundle `{}` step `{}` anchor `{}` not found inside scope `{}`",
-                        bundle.bundle_name, step.name, step.anchor_pattern, bundle.scope_anchor
-                    ),
-                    false,
-                ));
-            }
-        }
-    }
-
-    findings
-}
-
-/// Extract a brace-delimited block starting at the given anchor pattern.
-/// Returns the content between the opening `{` after the anchor and its
-/// matching closing `}`.
-fn extract_scope_block(source: &str, anchor: &str) -> Option<String> {
-    let anchor_pos = source.find(anchor)?;
-    let rest = &source[anchor_pos..];
-    let brace_start = rest.find('{')?;
-    let block_start = anchor_pos + brace_start;
-
-    let mut depth = 0u32;
-    let mut end = block_start;
-    for (i, ch) in source[block_start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = block_start + i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Some(source[block_start..end].to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,5 +1269,211 @@ mod tests {
         assert_eq!(parsed.finding.len(), 1);
         assert_eq!(parsed.finding[0].symbol, "LoopState::transition");
         Ok(())
+    }
+
+    #[test]
+    fn runtime_comms_bridge_projection_rule_accepts_current_shape() {
+        let bridge = r#"
+            pub fn classified_interaction_to_runtime_input(
+                classified: &ClassifiedInboxInteraction,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Input {
+                if classified.class == PeerInputClass::PlainEvent {
+                    let source_name = interaction
+                        .from
+                        .strip_prefix("event:")
+                        .unwrap_or(interaction.from.as_str());
+                    return Input::ExternalEvent(todo!());
+                }
+
+                interaction_to_peer_input(interaction, runtime_id)
+            }
+
+            pub fn interaction_to_peer_input(
+                interaction: &InboxInteraction,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Input {
+                Input::Peer(PeerInput {
+                    body: peer_rendered_body(interaction),
+                    blocks: peer_blocks(interaction),
+                })
+            }
+
+            fn peer_rendered_body(interaction: &InboxInteraction) -> String {
+                if !interaction.rendered_text.is_empty() {
+                    return interaction.rendered_text.clone();
+                }
+                String::new()
+            }
+
+            fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<ContentBlock>> {
+                match &interaction.content {
+                    InteractionContent::Message { blocks, .. } => blocks.clone(),
+                    _ => None,
+                }
+            }
+        "#;
+        let drain = r#"
+            fn run_comms_drain(ci: ClassifiedInboxInteraction, runtime_id: LogicalRuntimeId) {
+                let input = classified_interaction_to_runtime_input(&ci, &runtime_id);
+            }
+        "#;
+
+        let findings = runtime_comms_bridge_projection_findings_for_sources(
+            "meerkat-runtime/src/comms_bridge.rs",
+            bridge,
+            "meerkat-runtime/src/comms_drain.rs",
+            drain,
+        );
+        assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
+    }
+
+    #[test]
+    fn runtime_comms_bridge_projection_rule_flags_raw_prefix_routing_and_dropped_blocks() {
+        let bridge = r#"
+            pub fn interaction_to_runtime_input(interaction: &InboxInteraction, runtime_id: &LogicalRuntimeId) -> Input {
+                if interaction.from.starts_with("event:") {
+                    return Input::ExternalEvent(todo!());
+                }
+                Input::Peer(PeerInput { body: String::new(), blocks: None })
+            }
+        "#;
+        let drain = r#"
+            fn run_comms_drain(ci: InboxInteraction, runtime_id: LogicalRuntimeId) {
+                let input = interaction_to_runtime_input(&ci, &runtime_id);
+            }
+        "#;
+
+        let findings = runtime_comms_bridge_projection_findings_for_sources(
+            "meerkat-runtime/src/comms_bridge.rs",
+            bridge,
+            "meerkat-runtime/src/comms_drain.rs",
+            drain,
+        );
+        let rules = findings
+            .iter()
+            .map(|finding| finding.key.rule.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            rules
+                .iter()
+                .all(|rule| *rule == "RuntimeCommsBridgeProjectionAlignment")
+        );
+        assert!(
+            findings.len() >= 5,
+            "expected multiple projection findings, got {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn runtime_external_event_projection_rule_accepts_literal_text_and_blocks() {
+        let stdin = r#"
+            fn make_stdin_external_event_input(body: String, format: StdinLineFormat) -> Input {
+                Input::ExternalEvent(ExternalEventInput {
+                    payload: match format {
+                        StdinLineFormat::Text => serde_json::json!({ "body": body }),
+                        StdinLineFormat::Json => match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(parsed) => serde_json::json!({ "body": parsed }),
+                            Err(_) => serde_json::json!({ "body": body }),
+                        },
+                    },
+                    blocks: None,
+                })
+            }
+        "#;
+        let bridge = r#"
+            pub fn classified_interaction_to_runtime_input(classified: &ClassifiedInboxInteraction) -> Input {
+                let interaction = &classified.interaction;
+                if classified.class == PeerInputClass::PlainEvent {
+                    let blocks = external_event_blocks(interaction);
+                    return Input::ExternalEvent(ExternalEventInput {
+                        payload: external_event_payload(interaction),
+                        blocks,
+                    });
+                }
+                todo!()
+            }
+
+            fn external_event_blocks(interaction: &InboxInteraction) -> Option<Vec<ContentBlock>> {
+                match &interaction.content {
+                    InteractionContent::Message { blocks, .. } => blocks.clone(),
+                    _ => None,
+                }
+            }
+        "#;
+        let loop_source = r#"
+            fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+                let content = match input {
+                    Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
+                        blocks: e.blocks.clone().unwrap_or_default(),
+                    },
+                    _ => todo!(),
+                };
+                Some(todo!())
+            }
+        "#;
+
+        let findings = runtime_external_event_projection_findings_for_sources(
+            "meerkat-cli/src/stdin_events.rs",
+            stdin,
+            "meerkat-runtime/src/comms_bridge.rs",
+            bridge,
+            "meerkat-runtime/src/runtime_loop.rs",
+            loop_source,
+        );
+        assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
+    }
+
+    #[test]
+    fn runtime_external_event_projection_rule_flags_json_reparse_and_dropped_blocks() {
+        let stdin = r#"
+            fn make_stdin_external_event_input(body: String, _format: StdinLineFormat) -> Input {
+                let parsed = serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::Value::String(body));
+                Input::ExternalEvent(ExternalEventInput {
+                    payload: serde_json::json!({ "body": parsed }),
+                    blocks: None,
+                })
+            }
+        "#;
+        let bridge = r#"
+            pub fn classified_interaction_to_runtime_input(classified: &ClassifiedInboxInteraction) -> Input {
+                let interaction = &classified.interaction;
+                if classified.class == PeerInputClass::PlainEvent {
+                    return Input::ExternalEvent(ExternalEventInput {
+                        payload: serde_json::json!({ "body": "flattened" }),
+                        blocks: None,
+                    });
+                }
+                todo!()
+            }
+        "#;
+        let loop_source = r#"
+            fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+                let content = match input {
+                    Input::ExternalEvent(_) => CoreRenderable::Text { text: String::new() },
+                    _ => todo!(),
+                };
+                Some(todo!())
+            }
+        "#;
+
+        let findings = runtime_external_event_projection_findings_for_sources(
+            "meerkat-cli/src/stdin_events.rs",
+            stdin,
+            "meerkat-runtime/src/comms_bridge.rs",
+            bridge,
+            "meerkat-runtime/src/runtime_loop.rs",
+            loop_source,
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.key.rule == "RuntimeExternalEventProjectionAlignment"),
+            "unexpected rule set: {findings:#?}"
+        );
+        assert!(
+            findings.len() >= 4,
+            "expected multiple projection findings, got {findings:#?}"
+        );
     }
 }

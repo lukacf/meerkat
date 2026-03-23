@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn test_shell_jobs_list_tool_struct() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let _tool = ShellJobsListTool::new(Arc::clone(&manager));
 
         // Tool should hold Arc<JobManager>
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_shell_jobs_list_tool_name() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobsListTool::new(manager);
 
         assert_eq!(tool.name(), "shell_jobs");
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn test_shell_jobs_list_tool_schema() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobsListTool::new(manager);
 
         let def = tool.def();
@@ -127,7 +127,7 @@ mod tests {
         let mut config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
         config.shell = "sh".to_string();
 
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobsListTool::new(Arc::clone(&manager));
 
         // Initially empty
@@ -156,7 +156,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_jobs_list_tool_empty_list() {
         let config = ShellConfig::default();
-        let manager = Arc::new(JobManager::new_local(config));
+        let manager = Arc::new(JobManager::new(config));
         let tool = ShellJobsListTool::new(manager);
 
         // Empty list should return empty array

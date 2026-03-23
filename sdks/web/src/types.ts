@@ -291,7 +291,7 @@ export interface MobStatus {
 }
 
 /** Mob lifecycle actions. */
-export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'destroy';
+export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────
 

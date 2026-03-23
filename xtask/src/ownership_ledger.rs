@@ -164,128 +164,6 @@ pub struct CouplingInvariantEntry {
     pub status: EntryStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FallbackPolicy {
-    HardError,
-    ObservableBestEffort,
-    IntentionalSurfaceDifference,
-    TestOnlyLegacy,
-}
-
-impl fmt::Display for FallbackPolicy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::HardError => write!(f, "hard-error"),
-            Self::ObservableBestEffort => write!(f, "observable-best-effort"),
-            Self::IntentionalSurfaceDifference => write!(f, "intentional-surface-difference"),
-            Self::TestOnlyLegacy => write!(f, "test-only-legacy"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FallbackVisibility {
-    TypedEvent,
-    TracingOnly,
-    None,
-}
-
-impl fmt::Display for FallbackVisibility {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TypedEvent => write!(f, "typed-event"),
-            Self::TracingOnly => write!(f, "tracing-only"),
-            Self::None => write!(f, "none"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SurfaceConformance {
-    Canonical,
-    IntentionalDivergence,
-    DeprecatedLegacy,
-}
-
-impl fmt::Display for SurfaceConformance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Canonical => write!(f, "canonical"),
-            Self::IntentionalDivergence => write!(f, "intentional-divergence"),
-            Self::DeprecatedLegacy => write!(f, "deprecated-legacy"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectionContractEntry {
-    pub canonical_source: String,
-    pub canonical_type: String,
-    pub sink_boundary: String,
-    pub sink_type: String,
-    pub preserved_fields: Vec<String>,
-    pub reclassification_forbidden: bool,
-    pub bundle_name: Option<String>,
-    pub status: EntryStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FallbackContractEntry {
-    pub boundary: String,
-    pub authoritative_source: String,
-    pub fallback_policy: FallbackPolicy,
-    pub visibility_policy: FallbackVisibility,
-    pub status: EntryStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SurfaceMember {
-    pub surface: String,
-    pub conformance: SurfaceConformance,
-    pub divergence_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SurfaceFamilyEntry {
-    pub family: String,
-    pub canonical_contract: String,
-    pub surfaces: Vec<SurfaceMember>,
-    pub status: EntryStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DerivedFieldEntry {
-    pub field_path: String,
-    pub canonical_source: String,
-    pub derivation_rule: String,
-    pub dead_field: bool,
-    pub status: EntryStatus,
-}
-
-/// A step in an atomic bundle with a semantic anchor pattern for verification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AtomicBundleStep {
-    pub name: String,
-    /// Stable semantic anchor (type name, canonical helper) to search for in
-    /// the canonical path file. NOT a local variable name.
-    pub anchor_pattern: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AtomicBundleEntry {
-    pub bundle_name: String,
-    pub steps: Vec<AtomicBundleStep>,
-    pub canonical_path: String,
-    /// Precise pattern marking the scope block where all steps must co-locate.
-    /// Example: `"if is_terminal {"` — the exact branch head.
-    pub scope_anchor: String,
-    pub rollback_contract: String,
-    pub status: EntryStatus,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraitImplBoundary {
     pub family_name: String,
@@ -323,11 +201,37 @@ pub struct CallbackBoundary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportContractBoundary {
+    pub family_name: String,
+    pub path_suffix: String,
+    pub symbol: String,
+    pub scope: ExportContractScope,
+    pub exports_raw_operation_id: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExportContractScope {
+    AppFacing,
+    InfraCanonicalOp,
+}
+
+impl fmt::Display for ExportContractScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AppFacing => write!(f, "app-facing"),
+            Self::InfraCanonicalOp => write!(f, "infra-canonical-op"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundaryDiscoveryManifest {
     pub trait_impls: Vec<TraitImplBoundary>,
     pub public_inherent: Vec<PublicInherentBoundary>,
     pub enum_dispatch: Vec<EnumDispatchBoundary>,
     pub callbacks: Vec<CallbackBoundary>,
+    pub export_contracts: Vec<ExportContractBoundary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,11 +240,6 @@ pub struct OwnershipRegistry {
     pub state_cells: Vec<StateCellEntry>,
     pub semantic_operations: Vec<SemanticOperationEntry>,
     pub coupling_invariants: Vec<CouplingInvariantEntry>,
-    pub projection_contracts: Vec<ProjectionContractEntry>,
-    pub fallback_contracts: Vec<FallbackContractEntry>,
-    pub surface_families: Vec<SurfaceFamilyEntry>,
-    pub derived_fields: Vec<DerivedFieldEntry>,
-    pub atomic_bundles: Vec<AtomicBundleEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -387,11 +286,6 @@ struct OwnershipReport {
     state_cells: Vec<StateCellEntry>,
     semantic_operations: Vec<SemanticOperationEntry>,
     coupling_invariants: Vec<CouplingInvariantEntry>,
-    projection_contracts: Vec<ProjectionContractEntry>,
-    fallback_contracts: Vec<FallbackContractEntry>,
-    surface_families: Vec<SurfaceFamilyEntry>,
-    derived_fields: Vec<DerivedFieldEntry>,
-    atomic_bundles: Vec<AtomicBundleEntry>,
     findings: Vec<OwnershipFinding>,
     summaries: Vec<SubsystemSummary>,
 }
@@ -897,6 +791,13 @@ pub fn collect_ownership_findings(
                 .iter()
                 .map(|family| family.family_name.clone()),
         )
+        .chain(
+            registry
+                .manifest
+                .export_contracts
+                .iter()
+                .map(|family| family.family_name.clone()),
+        )
         .collect::<BTreeSet<_>>();
     for family in &registry.manifest.trait_impls {
         let mut seen = BTreeSet::new();
@@ -971,6 +872,72 @@ pub fn collect_ownership_findings(
                 format!(
                     "manual callback `{}` references unknown compensating family `{}`",
                     callback.method_name, callback.compensating_family
+                ),
+            ));
+        }
+    }
+    let mut seen_export_contracts = BTreeSet::new();
+    for contract in &registry.manifest.export_contracts {
+        if !seen_export_contracts.insert((contract.path_suffix.clone(), contract.symbol.clone())) {
+            findings.push(error_finding(
+                "OwnershipExportContractDuplicate",
+                &contract.path_suffix,
+                &contract.symbol,
+                format!(
+                    "export contract `{}` in `{}` is declared more than once",
+                    contract.symbol, contract.path_suffix
+                ),
+            ));
+        }
+        let parsed = match parsed_files.entry(contract.path_suffix.clone()) {
+            Entry::Vacant(entry) => entry.insert(parse_repo_file(root, &contract.path_suffix)?),
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
+        let has_raw_op_field =
+            type_has_named_field(parsed, &contract.symbol, "operation_id").unwrap_or(false);
+        if contract.exports_raw_operation_id
+            && contract.scope != ExportContractScope::InfraCanonicalOp
+        {
+            findings.push(error_finding(
+                "OwnershipExportContractScopeInvalid",
+                &contract.path_suffix,
+                &contract.symbol,
+                format!(
+                    "export contract `{}` exports raw operation_id and must be scoped as infra-canonical-op",
+                    contract.symbol
+                ),
+            ));
+        }
+        if !contract.exports_raw_operation_id && contract.scope != ExportContractScope::AppFacing {
+            findings.push(error_finding(
+                "OwnershipExportContractScopeInvalid",
+                &contract.path_suffix,
+                &contract.symbol,
+                format!(
+                    "export contract `{}` does not export raw operation_id and must be scoped as app-facing",
+                    contract.symbol
+                ),
+            ));
+        }
+        if contract.exports_raw_operation_id && !has_raw_op_field {
+            findings.push(error_finding(
+                "OwnershipExportContractMissingRawOperationId",
+                &contract.path_suffix,
+                &contract.symbol,
+                format!(
+                    "export contract `{}` is marked exports_raw_operation_id=true but has no `operation_id` field",
+                    contract.symbol
+                ),
+            ));
+        }
+        if !contract.exports_raw_operation_id && has_raw_op_field {
+            findings.push(error_finding(
+                "OwnershipExportContractLeaksRawOperationId",
+                &contract.path_suffix,
+                &contract.symbol,
+                format!(
+                    "app-facing export contract `{}` still exposes raw `operation_id`",
+                    contract.symbol
                 ),
             ));
         }
@@ -1065,11 +1032,6 @@ fn build_report(registry: &OwnershipRegistry, findings: Vec<OwnershipFinding>) -
         state_cells: registry.state_cells.clone(),
         semantic_operations: registry.semantic_operations.clone(),
         coupling_invariants: registry.coupling_invariants.clone(),
-        projection_contracts: registry.projection_contracts.clone(),
-        fallback_contracts: registry.fallback_contracts.clone(),
-        surface_families: registry.surface_families.clone(),
-        derived_fields: registry.derived_fields.clone(),
-        atomic_bundles: registry.atomic_bundles.clone(),
         findings,
         summaries,
     }
@@ -1135,6 +1097,16 @@ fn render_markdown(report: &OwnershipReport) -> String {
             callback.path_suffix,
             callback.owner_type_name.as_deref().unwrap_or("<free fn>"),
             callback.method_name
+        ));
+    }
+    for contract in &report.manifest.export_contracts {
+        out.push_str(&format!(
+            "| {} | export-contract ({}) | `{}` | `{}` | `exports_raw_operation_id={}` |\n",
+            contract.family_name,
+            contract.scope,
+            contract.path_suffix,
+            contract.symbol,
+            contract.exports_raw_operation_id
         ));
     }
 
@@ -1365,6 +1337,42 @@ fn discover_boundaries(
     Ok(boundaries)
 }
 
+fn type_has_named_field(parsed: &syn::File, type_name: &str, field_name: &str) -> Option<bool> {
+    for item in &parsed.items {
+        match item {
+            Item::Struct(item_struct) if item_struct.ident == type_name => {
+                let syn::Fields::Named(fields) = &item_struct.fields else {
+                    return Some(false);
+                };
+                return Some(fields.named.iter().any(|field| {
+                    field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|ident| ident == field_name)
+                }));
+            }
+            Item::Enum(item_enum) if item_enum.ident == type_name => {
+                return Some(
+                    item_enum
+                        .variants
+                        .iter()
+                        .any(|variant| match &variant.fields {
+                            syn::Fields::Named(fields) => fields.named.iter().any(|field| {
+                                field
+                                    .ident
+                                    .as_ref()
+                                    .is_some_and(|ident| ident == field_name)
+                            }),
+                            _ => false,
+                        }),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_repo_file(root: &Path, rel: &str) -> Result<syn::File> {
     let path = root.join(rel);
     let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -1497,229 +1505,7 @@ fn ownership_registry() -> OwnershipRegistry {
         state_cells: state_cells(),
         semantic_operations: semantic_operations(),
         coupling_invariants: coupling_invariants(),
-        projection_contracts: projection_contracts(),
-        fallback_contracts: fallback_contracts(),
-        surface_families: surface_families(),
-        derived_fields: derived_fields(),
-        atomic_bundles: atomic_bundles(),
     }
-}
-
-fn projection_contracts() -> Vec<ProjectionContractEntry> {
-    vec![
-        ProjectionContractEntry {
-            canonical_source: "CommsRuntime drain (comms_runtime.rs)".into(),
-            canonical_type: "ClassifiedInboxInteraction".into(),
-            sink_boundary:
-                "comms_bridge interaction_to_runtime_input / interaction_to_terminal_peer_response"
-                    .into(),
-            sink_type: "Input::Peer / Input::ExternalEvent / Input::TerminalPeerResponse".into(),
-            preserved_fields: vec!["body".into(), "blocks".into(), "rendered_text".into()],
-            reclassification_forbidden: true,
-            bundle_name: None,
-            status: EntryStatus::Open,
-        },
-        ProjectionContractEntry {
-            canonical_source: "comms_bridge map_convention".into(),
-            canonical_type: "InteractionContent".into(),
-            sink_boundary: "PeerInput assembly".into(),
-            sink_type: "PeerInput".into(),
-            preserved_fields: vec!["body".into(), "blocks".into(), "convention".into()],
-            reclassification_forbidden: true,
-            bundle_name: None,
-            status: EntryStatus::Open,
-        },
-        ProjectionContractEntry {
-            canonical_source: "MobActor turn submission".into(),
-            canonical_type: "ContentInput".into(),
-            sink_boundary: "SessionService::start_turn".into(),
-            sink_type: "ContentInput".into(),
-            preserved_fields: vec!["text".into(), "blocks".into()],
-            reclassification_forbidden: false,
-            bundle_name: None,
-            status: EntryStatus::Open,
-        },
-    ]
-}
-
-fn fallback_contracts() -> Vec<FallbackContractEntry> {
-    vec![
-        FallbackContractEntry {
-            boundary: "FactoryAgentBuilder::resolve_config".into(),
-            authoritative_source: "Config layering (file -> env -> per-request)".into(),
-            fallback_policy: FallbackPolicy::ObservableBestEffort,
-            visibility_policy: FallbackVisibility::TracingOnly,
-            status: EntryStatus::Open,
-        },
-        FallbackContractEntry {
-            boundary: "McpRouter::add_server_for_testing (test-only path)".into(),
-            authoritative_source: "McpRouter staged lifecycle (stage_add/apply_staged)".into(),
-            fallback_policy: FallbackPolicy::TestOnlyLegacy,
-            visibility_policy: FallbackVisibility::None,
-            status: EntryStatus::Closed,
-        },
-        FallbackContractEntry {
-            boundary: "PersistentSessionService recovery".into(),
-            authoritative_source: "EventStore replay + SessionProjector".into(),
-            fallback_policy: FallbackPolicy::ObservableBestEffort,
-            visibility_policy: FallbackVisibility::TracingOnly,
-            status: EntryStatus::Open,
-        },
-        FallbackContractEntry {
-            boundary: "Override/config decode".into(),
-            authoritative_source: "Typed Config struct".into(),
-            fallback_policy: FallbackPolicy::HardError,
-            visibility_policy: FallbackVisibility::None,
-            status: EntryStatus::Closed,
-        },
-    ]
-}
-
-fn surface_families() -> Vec<SurfaceFamilyEntry> {
-    vec![
-        SurfaceFamilyEntry {
-            family: "external_event_ingestion".into(),
-            canonical_contract: "SessionService::turn with ExternalEvent content".into(),
-            surfaces: vec![
-                SurfaceMember {
-                    surface: "CLI".into(),
-                    conformance: SurfaceConformance::IntentionalDivergence,
-                    divergence_reason: Some("text-mode human input".into()),
-                },
-                SurfaceMember {
-                    surface: "REST".into(),
-                    conformance: SurfaceConformance::Canonical,
-                    divergence_reason: None,
-                },
-                SurfaceMember {
-                    surface: "RPC".into(),
-                    conformance: SurfaceConformance::Canonical,
-                    divergence_reason: None,
-                },
-            ],
-            status: EntryStatus::Open,
-        },
-        SurfaceFamilyEntry {
-            family: "mob_send".into(),
-            canonical_contract: "MobHandle::internal_turn with comms payload".into(),
-            surfaces: vec![
-                SurfaceMember {
-                    surface: "RPC".into(),
-                    conformance: SurfaceConformance::Canonical,
-                    divergence_reason: None,
-                },
-                SurfaceMember {
-                    surface: "TypeScript SDK".into(),
-                    conformance: SurfaceConformance::IntentionalDivergence,
-                    divergence_reason: Some("void return, session_id hidden".into()),
-                },
-                SurfaceMember {
-                    surface: "Python SDK".into(),
-                    conformance: SurfaceConformance::IntentionalDivergence,
-                    divergence_reason: Some("void return, session_id hidden".into()),
-                },
-                SurfaceMember {
-                    surface: "Web SDK".into(),
-                    conformance: SurfaceConformance::IntentionalDivergence,
-                    divergence_reason: Some("void return, session_id hidden".into()),
-                },
-                SurfaceMember {
-                    surface: "REST".into(),
-                    conformance: SurfaceConformance::IntentionalDivergence,
-                    divergence_reason: Some("tool-based via mob/call".into()),
-                },
-            ],
-            status: EntryStatus::Open,
-        },
-        SurfaceFamilyEntry {
-            family: "mob_control".into(),
-            canonical_contract: "MobHandle lifecycle methods".into(),
-            surfaces: vec![
-                SurfaceMember {
-                    surface: "RPC".into(),
-                    conformance: SurfaceConformance::Canonical,
-                    divergence_reason: None,
-                },
-                SurfaceMember {
-                    surface: "REST".into(),
-                    conformance: SurfaceConformance::IntentionalDivergence,
-                    divergence_reason: Some("tool-oriented subset only".into()),
-                },
-            ],
-            status: EntryStatus::Open,
-        },
-    ]
-}
-
-fn derived_fields() -> Vec<DerivedFieldEntry> {
-    vec![
-        DerivedFieldEntry {
-            field_path: "SubAgentStatusResponse::is_final".into(),
-            canonical_source: "SubAgentStatusResponse::state".into(),
-            derivation_rule: "is_final = state != Running".into(),
-            dead_field: false,
-            status: EntryStatus::Open,
-        },
-        DerivedFieldEntry {
-            field_path: "WireRunResult::session_ref".into(),
-            canonical_source: "N/A".into(),
-            derivation_rule: "always None".into(),
-            dead_field: true,
-            status: EntryStatus::Open,
-        },
-        DerivedFieldEntry {
-            field_path: "WireSessionInfo::session_ref".into(),
-            canonical_source: "N/A".into(),
-            derivation_rule: "always None".into(),
-            dead_field: true,
-            status: EntryStatus::Open,
-        },
-        DerivedFieldEntry {
-            field_path: "WireSessionSummary::session_ref".into(),
-            canonical_source: "N/A".into(),
-            derivation_rule: "always None".into(),
-            dead_field: true,
-            status: EntryStatus::Open,
-        },
-    ]
-}
-
-fn atomic_bundles() -> Vec<AtomicBundleEntry> {
-    vec![AtomicBundleEntry {
-        bundle_name: "terminal_peer_response".into(),
-        steps: vec![
-            AtomicBundleStep {
-                name: "single_input".into(),
-                anchor_pattern: "Input::TerminalPeerResponse(TerminalPeerResponseInput".into(),
-            },
-        ],
-        canonical_path: "meerkat-runtime/src/comms_drain.rs".into(),
-        scope_anchor: "interaction_to_terminal_peer_response(".into(),
-        rollback_contract:
-            "Closed: no bundle needed. TerminalPeerResponse is a single canonical input variant carrying both content and continuation semantics. Admitted via accept_input() — no transactional rollback required."
-                .into(),
-        status: EntryStatus::Closed,
-    }]
-}
-
-pub fn projection_contracts_snapshot() -> Vec<ProjectionContractEntry> {
-    projection_contracts()
-}
-
-pub fn fallback_contracts_snapshot() -> Vec<FallbackContractEntry> {
-    fallback_contracts()
-}
-
-pub fn derived_fields_snapshot() -> Vec<DerivedFieldEntry> {
-    derived_fields()
-}
-
-pub fn surface_families_snapshot() -> Vec<SurfaceFamilyEntry> {
-    surface_families()
-}
-
-pub fn atomic_bundles_snapshot() -> Vec<AtomicBundleEntry> {
-    atomic_bundles()
 }
 
 pub fn collect_current_findings(root: &Path) -> Result<Vec<OwnershipFinding>> {
@@ -1798,7 +1584,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 type_name: "McpRouter".into(),
                 method_names: vec![
                     "set_removal_timeout",
-                    "add_server_for_testing",
+                    "add_server",
                     "stage_add",
                     "stage_remove",
                     "stage_reload",
@@ -1844,9 +1630,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                     "attach_existing_session_as_orchestrator",
                     "attach_existing_session_as_member",
                     "spawn_spec",
-                    "spawn_spec_receipt",
                     "spawn_many",
-                    "spawn_many_receipts",
                     "retire",
                     "respawn",
                     "retire_all",
@@ -1938,6 +1722,36 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 sunset_condition:
                     "remove once spawn-provisioned callback boundaries are auto-derived from runtime bridge protocol metadata"
                         .into(),
+            },
+        ],
+        export_contracts: vec![
+            ExportContractBoundary {
+                family_name: "shell-background-job-view".into(),
+                path_suffix: "meerkat-tools/src/builtin/shell/types.rs".into(),
+                symbol: "BackgroundJob".into(),
+                scope: ExportContractScope::AppFacing,
+                exports_raw_operation_id: false,
+            },
+            ExportContractBoundary {
+                family_name: "shell-job-summary-view".into(),
+                path_suffix: "meerkat-tools/src/builtin/shell/types.rs".into(),
+                symbol: "JobSummary".into(),
+                scope: ExportContractScope::AppFacing,
+                exports_raw_operation_id: false,
+            },
+            ExportContractBoundary {
+                family_name: "mob-member-ref".into(),
+                path_suffix: "meerkat-mob/src/event.rs".into(),
+                symbol: "MemberRef".into(),
+                scope: ExportContractScope::AppFacing,
+                exports_raw_operation_id: false,
+            },
+            ExportContractBoundary {
+                family_name: "mob-infra-member-spawn-receipt".into(),
+                path_suffix: "meerkat-mob/src/runtime/handle.rs".into(),
+                symbol: "MemberSpawnReceipt".into(),
+                scope: ExportContractScope::InfraCanonicalOp,
+                exports_raw_operation_id: true,
             },
         ],
     }
@@ -2333,7 +2147,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         ),
         state_entry!(
             "meerkat-mob/src/runtime/ops_adapter.rs",
-            "MobOpsAdapter.registry",
+            "MobOpsAdapter.fallback_registry",
             Subsystem::Mob,
             StateClass::CapabilityHandle,
             "RuntimeOpsLifecycleRegistry",
@@ -2633,15 +2447,13 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mcp/src/router.rs",
-            "add_server_for_testing",
+            "add_server",
             BoundaryKind::PublicInherent,
             "McpRouter",
             &["servers", "projection", "pending_obligations"],
             "ExternalToolSurfaceAuthority + RouterProjectionSnapshot publication contract",
-            &["test-only add path still drives authority and publishes projection snapshot"],
-            &[
-                "test convenience surface cannot diverge from canonical staged/boundary semantics; gated behind cfg(test) or test-support feature"
-            ],
+            &["compatibility add path still drives authority and publishes projection snapshot"],
+            &["compatibility surface cannot diverge from canonical staged/boundary semantics"],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
@@ -2975,17 +2787,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
-            "spawn_spec_receipt",
-            BoundaryKind::PublicInherent,
-            "MobHandle",
-            &["pending_spawns"],
-            "PendingSpawnLineage + RosterAuthority",
-            &["spawn lineage is authority-owned and receipt reflects canonical member truth"],
-            &["pending spawn lineage cannot drift from canonical roster truth"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
             "spawn_many",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -2995,21 +2796,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
                 "batch spawn wrapper preserves per-spec canonical spawn lineage and ordering contract",
             ],
             &["batch convenience path cannot classify spawn success outside canonical receipts"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
-            "spawn_many_receipts",
-            BoundaryKind::PublicInherent,
-            "MobHandle",
-            &["pending_spawns"],
-            "PendingSpawnLineage + RosterAuthority",
-            &[
-                "batch receipt path preserves per-spec canonical spawn lineage and ordering contract",
-            ],
-            &[
-                "batch receipt convenience path cannot classify spawn outcomes outside canonical receipts",
-            ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
@@ -3571,6 +3357,32 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             EntryStatus::Closed,
         ),
         invariant(
+            "runtime_comms_bridge_projection_alignment",
+            Subsystem::Runtime,
+            &[
+                "PeerCommsMachine.classified_interactions",
+                "RuntimeCommsBridge.runtime_input_projection",
+            ],
+            "runtime comms bridge consumes classified peer ingress truth, preserves rendered peer body and multimodal blocks, and routes ExternalEvent only from PeerInputClass::PlainEvent",
+            "PeerCommsMachine classification + RuntimeCommsBridge projection contract",
+            "classified interaction routing + rendered_text/body projection + multimodal block preservation + ownership-ledger",
+            EntryStatus::Closed,
+        ),
+        invariant(
+            "runtime_external_event_projection_alignment",
+            Subsystem::Runtime,
+            &[
+                "CLI.stdin_external_event_projection",
+                "PeerCommsMachine.plain_events",
+                "Runtime.ExternalEventInput",
+                "RuntimeLoop.external_event_rendering",
+            ],
+            "runtime external-event producers preserve literal text-mode stdin bodies, plain-event multimodal blocks, and block-aware external-event rendering without re-parsing or flattening canonical content",
+            "ExternalEventInput projection contract + runtime external-event render contract",
+            "stdin literal text boundary + classified plain-event bridge + external-event block preservation + runtime-loop block rendering + ownership-ledger",
+            EntryStatus::Closed,
+        ),
+        invariant(
             "mcp_snapshot_alignment",
             Subsystem::Mcp,
             &["McpRouter.servers", "RouterProjectionSnapshot"],
@@ -3610,7 +3422,7 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             &[
                 "SessionBackend.runtime_sessions",
                 "RuntimeSessionState.queued_turns",
-                "MobOpsAdapter.registry",
+                "MobOpsAdapter.fallback_registry",
             ],
             "runtime-backed bridge tables must agree on member/session/runtime association",
             "SessionBackend runtime session sidecar contract + RuntimeSessionAdapter registration truth + RuntimeOpsLifecycleRegistry",
@@ -3708,5 +3520,35 @@ mod tests {
             structural.is_empty(),
             "manifest/operation drift: {structural:#?}"
         );
+    }
+
+    #[test]
+    fn runtime_comms_bridge_projection_invariant_is_closed() {
+        let registry = ownership_registry();
+        let invariant = match registry
+            .coupling_invariants
+            .iter()
+            .find(|entry| entry.name == "runtime_comms_bridge_projection_alignment")
+        {
+            Some(invariant) => invariant,
+            None => panic!("runtime comms bridge projection invariant must exist"),
+        };
+        assert_eq!(invariant.subsystem, Subsystem::Runtime);
+        assert_eq!(invariant.status, EntryStatus::Closed);
+    }
+
+    #[test]
+    fn runtime_external_event_projection_invariant_is_closed() {
+        let registry = ownership_registry();
+        let invariant = match registry
+            .coupling_invariants
+            .iter()
+            .find(|entry| entry.name == "runtime_external_event_projection_alignment")
+        {
+            Some(invariant) => invariant,
+            None => panic!("runtime external event projection invariant must exist"),
+        };
+        assert_eq!(invariant.subsystem, Subsystem::Runtime);
+        assert_eq!(invariant.status, EntryStatus::Closed);
     }
 }

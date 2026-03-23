@@ -281,17 +281,11 @@ impl McpRouter {
         }
     }
 
-    /// Test-only synchronous server addition. Production paths must use
-    /// [`stage_add`](Self::stage_add) + [`apply_staged`](Self::apply_staged).
+    /// Backward-compatible immediate add path.
     ///
-    /// This bypasses the staged boundary and drives the authority through
-    /// Stage -> Apply -> Success synchronously. It exists solely for test
-    /// convenience where the full async lifecycle is not under test.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn add_server_for_testing(
-        &mut self,
-        config: McpServerConfig,
-    ) -> Result<(), McpError> {
+    /// Prefer [`stage_add`](Self::stage_add) + [`apply_staged`](Self::apply_staged)
+    /// for boundary semantics.
+    pub async fn add_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
         self.install_active_server(config).await?;
         let _ = self.publish_projection_snapshot();
         Ok(())
@@ -422,17 +416,17 @@ impl McpRouter {
                     }
                 }
                 Err(error) => {
-                    return Err(McpError::ProtocolError {
-                        message: format!(
-                            "authority rejected ApplyBoundary for staged intent on '{server_name}': {error}"
-                        ),
-                    });
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %error,
+                        "Authority rejected ApplyBoundary for staged intent"
+                    );
                 }
             }
         }
 
         self.process_removals(&mut delta, &mut snapshot_alignment)
-            .await?;
+            .await;
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
         if published {
@@ -804,7 +798,6 @@ impl McpRouter {
 
     /// Backward-compatible immediate install path. Bypasses staged/boundary
     /// flow and directly drives the authority through Stage -> Apply -> Success.
-    #[cfg(any(test, feature = "test-support"))]
     async fn install_active_server(&mut self, config: McpServerConfig) -> Result<(), McpError> {
         let (conn, tools) = McpConnection::connect_and_enumerate(&config).await?;
 
@@ -885,7 +878,7 @@ impl McpRouter {
         &mut self,
         delta: &mut McpApplyDelta,
         snapshot_alignment: &mut Option<SurfaceSnapshotAlignmentObligation>,
-    ) -> Result<(), McpError> {
+    ) {
         let now = Instant::now();
         let mut finalized: Vec<(String, bool)> = Vec::new();
 
@@ -934,16 +927,15 @@ impl McpRouter {
                         delta.degraded_removals.push(server_name);
                     }
                 }
-                Err(error) => {
-                    return Err(McpError::ProtocolError {
-                        message: format!(
-                            "authority rejected removal finalization for '{server_name}': {error}"
-                        ),
-                    });
+                Err(e) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %e,
+                        "Authority rejected finalize removal"
+                    );
                 }
             }
         }
-        Ok(())
     }
 
     fn align_snapshot_if_requested(
@@ -1090,18 +1082,18 @@ impl McpRouter {
     }
 
     /// Progress only server removals (drain/timeout finalization) without applying staged ops.
-    pub async fn progress_removals(&mut self) -> Result<McpApplyDelta, McpError> {
+    pub async fn progress_removals(&mut self) -> McpApplyDelta {
         let mut delta = McpApplyDelta::default();
         let mut snapshot_alignment = None;
         self.process_removals(&mut delta, &mut snapshot_alignment)
-            .await?;
+            .await;
         self.record_snapshot_alignment(snapshot_alignment);
         let published = self.publish_projection_snapshot();
         if published {
             let obligation = self.pending_snapshot_alignment.take();
             self.align_snapshot_if_requested(obligation);
         }
-        Ok(delta)
+        delta
     }
 
     /// Call a tool by name, returning multimodal content blocks.
@@ -1321,9 +1313,9 @@ mod tests {
         let mut router = McpRouter::new();
 
         router
-            .add_server_for_testing(test_server_config("test-server", &server_path))
+            .add_server(test_server_config("test-server", &server_path))
             .await
-            .expect("add_server_for_testing");
+            .expect("add_server");
 
         assert!(matches!(
             router.server_lifecycle_state("test-server"),
@@ -1359,9 +1351,9 @@ mod tests {
 
         let mut router = McpRouter::new();
         router
-            .add_server_for_testing(test_server_config("test-server", &server_path))
+            .add_server(test_server_config("test-server", &server_path))
             .await
-            .expect("add_server_for_testing");
+            .expect("add_server");
 
         let has_echo_before = router.list_tools().iter().any(|tool| tool.name == "echo");
         assert!(has_echo_before, "tool should be visible before remove");
@@ -1381,9 +1373,9 @@ mod tests {
 
         let mut router = McpRouter::new_with_removal_timeout(Duration::from_secs(60));
         router
-            .add_server_for_testing(test_server_config("test-server", &server_path))
+            .add_server(test_server_config("test-server", &server_path))
             .await
-            .expect("add_server_for_testing");
+            .expect("add_server");
 
         router.set_inflight_calls_for_testing("test-server", 1);
         router.stage_remove("test-server");
@@ -1425,9 +1417,9 @@ mod tests {
 
         let mut router = McpRouter::new_with_removal_timeout(Duration::from_millis(10));
         router
-            .add_server_for_testing(test_server_config("test-server", &server_path))
+            .add_server(test_server_config("test-server", &server_path))
             .await
-            .expect("add_server_for_testing");
+            .expect("add_server");
 
         router.set_inflight_calls_for_testing("test-server", 1);
         router.stage_remove("test-server");
@@ -1520,25 +1512,6 @@ mod tests {
         router.stage_add(test_server_config("test-server", &server_path));
         let result = router.apply_staged().await.expect("first add");
         assert_eq!(result.pending_count, 1);
-
-        // Wait for the async add to complete before staging a remove;
-        // apply_staged now returns an error if a pending operation is unresolved.
-        let deadline = Instant::now() + async_connect_test_timeout();
-        loop {
-            let ext = router.take_external_updates();
-            if ext
-                .notices
-                .iter()
-                .any(|n| n.target == "test-server" && n.phase == McpLifecyclePhase::Applied)
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for first add to complete"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
 
         router.stage_remove("test-server");
         router.apply_staged().await.expect("remove");

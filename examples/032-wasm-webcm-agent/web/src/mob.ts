@@ -236,12 +236,18 @@ export class MobOrchestrator {
 
   /**
    * Initialize the mob runtime and create + spawn the dev team.
-   * Must be called after WebCM tools are registered.
+   * The optional hook runs immediately after runtime init so JS tools can be
+   * registered before the mob and its member sessions are created.
    *
    * When `proxyBaseUrl` is set, per-provider base URLs are injected so all
    * LLM traffic routes through the proxy (keys are server-side).
    */
-  async init(keys: ApiKeys, models: ModelAssignments, proxyBaseUrl?: string): Promise<void> {
+  async init(
+    keys: ApiKeys,
+    models: ModelAssignments,
+    proxyBaseUrl?: string,
+    afterRuntimeInit?: () => void | Promise<void>,
+  ): Promise<void> {
     // Build config with all available API keys
     const config: Record<string, any> = { model: models.main, max_sessions: 32 };
     if (keys.anthropic) config.anthropic_api_key = keys.anthropic;
@@ -254,6 +260,9 @@ export class MobOrchestrator {
     }
 
     this.runtime.init_runtime_from_config(JSON.stringify(config));
+    if (afterRuntimeInit) {
+      await afterRuntimeInit();
+    }
 
     // Create mob
     const definition = buildMobDefinition(models);

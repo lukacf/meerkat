@@ -176,8 +176,8 @@ mod tests {
             .unwrap();
 
         let result = handle.await.unwrap().unwrap();
-        assert_eq!(result.text_content(), "results here");
-        assert!(!result.is_error);
+        assert_eq!(result.result.text_content(), "results here");
+        assert!(!result.result.is_error);
     }
 
     #[tokio::test]

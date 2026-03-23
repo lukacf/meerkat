@@ -111,7 +111,7 @@ rkat run --model gemini-3-flash-preview "Explain monads"
 Register an MCP server and its tools are available to the agent immediately:
 
 ```bash
-rkat mcp add filesystem -- npx -y @anthropic/mcp-server-filesystem /tmp
+rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 rkat run "List the files in /tmp"
 ```
 
@@ -120,7 +120,7 @@ rkat run "List the files in /tmp"
 Cap token usage, wall-clock time, or tool calls:
 
 ```bash
-rkat run --max-total-tokens 10000 --max-duration 30s --max-tool-calls 5 "Analyze this codebase"
+rkat run --max-tokens 10000 --max-duration 30s --max-tool-calls 5 "Analyze this codebase"
 ```
 
 The agent completes its current turn when a limit is hit, then stops.

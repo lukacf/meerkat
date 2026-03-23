@@ -240,30 +240,6 @@ impl DefaultPolicyTable {
                 true,
             ),
 
-            // TerminalPeerResponse — StageRunBoundary + Steer semantics.
-            // Carries content (transcript-visible) AND continuation signal.
-            // When idle: WakeIfIdle. When running: InterruptYielding.
-            ("terminal_peer_response", true) => pd(
-                ApplyMode::StageRunBoundary,
-                WakeMode::WakeIfIdle,
-                QueueMode::Fifo,
-                ConsumePoint::OnRunComplete,
-                InterruptPolicy::InterruptYielding,
-                DrainPolicy::SteerBatch,
-                RoutingDisposition::Steer,
-                true,
-            ),
-            ("terminal_peer_response", false) => pd(
-                ApplyMode::StageRunBoundary,
-                WakeMode::InterruptYielding,
-                QueueMode::Fifo,
-                ConsumePoint::OnRunComplete,
-                InterruptPolicy::InterruptYielding,
-                DrainPolicy::SteerBatch,
-                RoutingDisposition::Steer,
-                true,
-            ),
-
             // Continuation work remains explicit ordinary runtime work.
             ("continuation", true) => pd(
                 ApplyMode::StageRunBoundary,
@@ -514,30 +490,6 @@ mod tests {
             false,
             ApplyMode::StageRunStart,
             WakeMode::None,
-            QueueMode::Fifo,
-            ConsumePoint::OnRunComplete,
-            true,
-        );
-    }
-    #[test]
-    fn terminal_peer_response_idle() {
-        assert_cell(
-            "terminal_peer_response",
-            true,
-            ApplyMode::StageRunBoundary,
-            WakeMode::WakeIfIdle,
-            QueueMode::Fifo,
-            ConsumePoint::OnRunComplete,
-            true,
-        );
-    }
-    #[test]
-    fn terminal_peer_response_running() {
-        assert_cell(
-            "terminal_peer_response",
-            false,
-            ApplyMode::StageRunBoundary,
-            WakeMode::InterruptYielding,
             QueueMode::Fifo,
             ConsumePoint::OnRunComplete,
             true,

@@ -21,8 +21,7 @@ use meerkat_core::comms_drain_lifecycle_authority::{
 use meerkat_core::generated::{protocol_comms_drain_abort, protocol_comms_drain_spawn};
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 
 use crate::accept::AcceptOutcome;
@@ -203,165 +202,6 @@ impl DriverEntry {
             DriverEntry::Persistent(d) => d.abandon_pending_inputs(reason).await,
         }
     }
-
-    // ── Shared run-lifecycle helpers ──────────────────────────────────
-
-    /// Prepare a run from already-dequeued inputs.
-    ///
-    /// Orchestrates: `start_run` → `stage_input` (with rollback on failure) →
-    /// build `RunPrimitive` using the **ingress authority's** stored boundary
-    /// classification (NOT the shell-level `input_boundary()` helper).
-    ///
-    /// Both `process_queue()` (async) and `accept_input_and_run()` (sync) call
-    /// this so the dequeue→stage→primitive pipeline is defined exactly once.
-    ///
-    /// Returns `(contributing_input_ids, run_id, primitive)` on success.
-    pub(crate) fn prepare_admitted_run(
-        &mut self,
-        dequeued: &[(InputId, Input)],
-    ) -> Result<(Vec<InputId>, RunId, RunPrimitive), PrepareRunError> {
-        if dequeued.is_empty() {
-            return Err(PrepareRunError::EmptyBatch);
-        }
-
-        let run_id = RunId::new();
-
-        self.start_run(run_id.clone())
-            .map_err(PrepareRunError::StartRunFailed)?;
-
-        let mut staged_ids = Vec::with_capacity(dequeued.len());
-        for (input_id, _) in dequeued {
-            if let Err(err) = self.stage_input(input_id, &run_id) {
-                let _ = self.rollback_staged(&staged_ids);
-                let _ = self.complete_run();
-                return Err(PrepareRunError::StageFailed(err));
-            }
-            staged_ids.push(input_id.clone());
-        }
-
-        // Use the ingress authority's stored boundary classification.
-        // This is load-bearing: the authority stores per-input handling_mode
-        // from admission time. Re-deriving from the Input variant (the shell-
-        // level `input_boundary()`) can disagree for inputs whose metadata
-        // was normalized/overridden during admission.
-        let boundary = dequeued
-            .first()
-            .map(|(id, _)| self.ingress().input_boundary(id))
-            .unwrap_or(meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart);
-        let primitive = crate::runtime_loop::inputs_to_primitive_with_boundary(dequeued, boundary);
-
-        Ok((staged_ids, run_id, primitive))
-    }
-
-    /// Record a successful run: `BoundaryApplied` then `RunCompleted`.
-    ///
-    /// On `BoundaryApplied` failure, attempts `RunFailed` as a fallback unwind.
-    /// Returns the `run_result` from the `CoreApplyOutput` on success, or a
-    /// structured `RecordRunError` on failure.
-    pub(crate) async fn record_run_success(
-        &mut self,
-        run_id: RunId,
-        output: CoreApplyOutput,
-        consumed_input_ids: Vec<InputId>,
-    ) -> Result<Option<meerkat_core::types::RunResult>, RecordRunError> {
-        let run_result = output.run_result;
-
-        // BoundaryApplied transitions Staged → Applied → APC
-        if let Err(err) = self
-            .as_driver_mut()
-            .on_run_event(RunEvent::BoundaryApplied {
-                run_id: run_id.clone(),
-                receipt: output.receipt,
-                session_snapshot: output.session_snapshot,
-            })
-            .await
-        {
-            // Attempt RunFailed fallback unwind.
-            let unwind_err = self
-                .as_driver_mut()
-                .on_run_event(RunEvent::RunFailed {
-                    run_id: run_id.clone(),
-                    error: format!("boundary commit failed: {err}"),
-                    recoverable: true,
-                })
-                .await
-                .err();
-            return Err(RecordRunError::BoundaryCommitFailed {
-                run_id,
-                source: err,
-                unwind_err,
-            });
-        }
-
-        // RunCompleted transitions APC → Consumed and returns to Idle/Retired
-        if let Err(err) = self
-            .as_driver_mut()
-            .on_run_event(RunEvent::RunCompleted {
-                run_id: run_id.clone(),
-                consumed_input_ids,
-            })
-            .await
-        {
-            return Err(RecordRunError::CompletionFailed {
-                run_id,
-                source: err,
-            });
-        }
-
-        Ok(run_result)
-    }
-
-    /// Record a failed run: `RunFailed` event.
-    ///
-    /// Returns the recording error if the event itself fails to persist.
-    pub(crate) async fn record_run_failure(
-        &mut self,
-        run_id: RunId,
-        error: String,
-    ) -> Result<(), RuntimeDriverError> {
-        self.as_driver_mut()
-            .on_run_event(RunEvent::RunFailed {
-                run_id,
-                error,
-                recoverable: true,
-            })
-            .await
-    }
-}
-
-/// Errors from `prepare_admitted_run`.
-#[derive(Debug)]
-pub(crate) enum PrepareRunError {
-    EmptyBatch,
-    StartRunFailed(RuntimeStateTransitionError),
-    StageFailed(InputLifecycleError),
-}
-
-impl std::fmt::Display for PrepareRunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyBatch => write!(f, "empty batch"),
-            Self::StartRunFailed(e) => write!(f, "start_run failed: {e}"),
-            Self::StageFailed(e) => write!(f, "stage_input failed: {e}"),
-        }
-    }
-}
-
-/// Errors from `record_run_success`.
-#[derive(Debug)]
-pub(crate) enum RecordRunError {
-    /// BoundaryApplied event failed to persist.
-    BoundaryCommitFailed {
-        run_id: RunId,
-        source: RuntimeDriverError,
-        /// If the fallback RunFailed also failed.
-        unwind_err: Option<RuntimeDriverError>,
-    },
-    /// RunCompleted event failed to persist.
-    CompletionFailed {
-        run_id: RunId,
-        source: RuntimeDriverError,
-    },
 }
 
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
@@ -584,18 +424,6 @@ impl RuntimeSessionAdapter {
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
     pub async fn register_session(&self, session_id: SessionId) {
-        self.register_session_with_ops_registry(session_id, None)
-            .await;
-    }
-
-    /// Register a runtime driver for a session, optionally sharing a
-    /// pre-created ops lifecycle registry (e.g. one that was already injected
-    /// into the agent's tool dispatcher at build time).
-    pub async fn register_session_with_ops_registry(
-        &self,
-        session_id: SessionId,
-        ops_registry: Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>,
-    ) {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(existing) = sessions.get_mut(&session_id) {
@@ -611,9 +439,7 @@ impl RuntimeSessionAdapter {
         }
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
-            ops_lifecycle: ops_registry.unwrap_or_else(|| {
-                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new())
-            }),
+            ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
         };
@@ -1023,57 +849,73 @@ impl RuntimeSessionAdapter {
                     state: driver.as_driver().runtime_state(),
                 });
             }
-
-            // Use the shared prepare_admitted_run helper — same path as
-            // process_queue() — so boundary classification comes from the
-            // ingress authority, not the shell-level input_boundary() helper.
-            let (_input_ids, run_id, primitive) = driver
-                .prepare_admitted_run(&[(dequeued_id, dequeued_input)])
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(format!("failed to prepare admitted run: {err}"))
-                })?;
+            let run_id = RunId::new();
+            driver.start_run(run_id.clone()).map_err(|err| {
+                RuntimeDriverError::Internal(format!("failed to start runtime run: {err}"))
+            })?;
+            driver.stage_input(&dequeued_id, &run_id).map_err(|err| {
+                RuntimeDriverError::Internal(format!("failed to stage accepted input: {err}"))
+            })?;
+            let primitive = crate::runtime_loop::input_to_primitive(&dequeued_input, dequeued_id);
             (input_id, run_id, primitive)
         };
 
-        match op(run_id.clone(), primitive).await {
+        match op(run_id.clone(), primitive.clone()).await {
             Ok((result, output)) => {
                 let mut driver = driver.lock().await;
-                // Use the shared record_run_success helper — same path as
-                // process_queue() — for BoundaryApplied + RunCompleted events.
-                match driver
-                    .record_run_success(run_id.clone(), output, vec![input_id])
+                if let Err(err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        receipt: output.receipt,
+                        session_snapshot: output.session_snapshot,
+                    })
                     .await
                 {
-                    Ok(_run_result) => Ok(result),
-                    Err(RecordRunError::BoundaryCommitFailed {
-                        run_id: _,
-                        source,
-                        unwind_err,
-                    }) => {
-                        if let Some(ref ue) = unwind_err {
-                            Err(RuntimeDriverError::Internal(format!(
-                                "runtime boundary commit failed: {source}; additionally failed to unwind runtime state: {ue}"
-                            )))
-                        } else {
-                            Err(RuntimeDriverError::Internal(format!(
-                                "runtime boundary commit failed: {source}"
-                            )))
-                        }
+                    if let Err(unwind_err) = driver
+                        .as_driver_mut()
+                        .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                            run_id,
+                            error: format!("boundary commit failed: {err}"),
+                            recoverable: true,
+                        })
+                        .await
+                    {
+                        return Err(RuntimeDriverError::Internal(format!(
+                            "runtime boundary commit failed: {err}; additionally failed to unwind runtime state: {unwind_err}"
+                        )));
                     }
-                    Err(RecordRunError::CompletionFailed { run_id: _, source }) => {
-                        drop(driver);
-                        self.unregister_session(session_id).await;
-                        Err(RuntimeDriverError::Internal(format!(
-                            "failed to persist runtime completion snapshot: {source}"
-                        )))
-                    }
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "runtime boundary commit failed: {err}"
+                    )));
                 }
+                if let Err(err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunCompleted {
+                        run_id,
+                        consumed_input_ids: vec![input_id],
+                    })
+                    .await
+                {
+                    drop(driver);
+                    self.unregister_session(session_id).await;
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to persist runtime completion snapshot: {err}"
+                    )));
+                }
+                Ok(result)
             }
             Err(err) => {
                 let mut driver = driver.lock().await;
-                // Use the shared record_run_failure helper — same path as
-                // process_queue() — for RunFailed event.
-                if let Err(run_err) = driver.record_run_failure(run_id, err.to_string()).await {
+                if let Err(run_err) = driver
+                    .as_driver_mut()
+                    .on_run_event(meerkat_core::lifecycle::RunEvent::RunFailed {
+                        run_id,
+                        error: err.to_string(),
+                        recoverable: true,
+                    })
+                    .await
+                {
                     drop(driver);
                     self.unregister_session(session_id).await;
                     return Err(RuntimeDriverError::Internal(format!(

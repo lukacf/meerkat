@@ -15,7 +15,6 @@ pub fn jsonrpc_code(err: &SessionError) -> i64 {
         SessionError::NotRunning { .. } => -32005,
         SessionError::Store(_) => -32006,
         SessionError::Unsupported(_) => -32007,
-        SessionError::IncompatibleFormat { .. } => -32008,
         SessionError::Agent(_) => -32000,
     }
 }
@@ -28,9 +27,7 @@ pub fn http_status(err: &SessionError) -> u16 {
         SessionError::PersistenceDisabled
         | SessionError::CompactionDisabled
         | SessionError::Unsupported(_) => 501,
-        SessionError::Store(_)
-        | SessionError::IncompatibleFormat { .. }
-        | SessionError::Agent(_) => 500,
+        SessionError::Store(_) | SessionError::Agent(_) => 500,
     }
 }
 

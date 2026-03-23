@@ -9,11 +9,11 @@ use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutpu
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
+use meerkat_core::agent::OpsLifecycleBindError;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_runtime::RuntimeOpsLifecycleRegistry;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,7 +62,31 @@ impl CompositeDispatcher {
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
         _image_tool_results: bool,
-        ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
+    ) -> Result<Self, CompositeDispatcherError> {
+        Self::new_with_ops_lifecycle(
+            task_store,
+            config,
+            project_root,
+            shell_config,
+            external,
+            session_id,
+            None,
+            _image_tool_results,
+        )
+    }
+
+    /// Create a new composite dispatcher with an optional session-canonical ops registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ops_lifecycle(
+        task_store: Arc<dyn TaskStore>,
+        config: &BuiltinToolConfig,
+        project_root: Option<PathBuf>,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+        _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
         let shell_session_id = session_id.clone();
@@ -97,15 +121,16 @@ impl CompositeDispatcher {
         // Add shell tools if enabled
         let job_manager = if let Some(cfg) = shell_config {
             if cfg.enabled {
-                let owner_session_id = shell_session_id
+                let mut manager = JobManager::new(cfg.clone());
+                if let Some(session_id) = shell_session_id
                     .as_deref()
                     .and_then(|id| meerkat_core::types::SessionId::parse(id).ok())
-                    .unwrap_or_else(meerkat_core::types::SessionId::new);
-                let manager = if let Some(registry) = ops_registry {
-                    JobManager::new_canonical(cfg.clone(), registry, owner_session_id)
-                } else {
-                    JobManager::new_foreground(cfg.clone())
-                };
+                {
+                    manager = manager.with_owner_session_id(session_id);
+                }
+                if let Some(registry) = ops_lifecycle {
+                    manager = manager.with_ops_registry(registry);
+                }
                 let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
                     ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
@@ -371,6 +396,12 @@ impl AgentToolDispatcher for CompositeDispatcher {
             }
         }
 
+        if let Some(ref ext) = self.external
+            && ext.tools().iter().any(|t| t.name == call.name)
+        {
+            return ext.dispatch(call).await;
+        }
+
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
@@ -405,6 +436,30 @@ impl AgentToolDispatcher for CompositeDispatcher {
 
     fn supports_wait_interrupt(&self) -> bool {
         self.builtin_tools.iter().any(|t| t.name() == "wait")
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        let mut owned =
+            Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let Some(external) = owned.external.take() else {
+            return Err(OpsLifecycleBindError::Unsupported);
+        };
+        if !external.supports_ops_lifecycle_binding() {
+            owned.external = Some(external);
+            return Err(OpsLifecycleBindError::Unsupported);
+        }
+        owned.external = Some(external.bind_ops_lifecycle(registry, owner_session_id)?);
+        Ok(Arc::new(owned))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.external
+            .as_ref()
+            .is_some_and(|ext| ext.supports_ops_lifecycle_binding())
     }
 }
 
@@ -462,7 +517,6 @@ mod tests {
             Some(external),
             None,
             true,
-            None,
         )
         .expect("composite dispatcher should build");
 
@@ -489,7 +543,6 @@ mod tests {
                 None,
                 None,
                 true,
-                None,
             )
             .expect("composite dispatcher should build"),
         );
@@ -544,7 +597,6 @@ mod tests {
                 None,
                 None,
                 true,
-                None,
             )
             .expect("composite dispatcher should build"),
         );
@@ -570,7 +622,6 @@ mod tests {
             None,
             None,
             true,
-            None,
         )
         .expect("composite dispatcher should build");
 
@@ -605,7 +656,6 @@ mod tests {
             None,
             None,
             true,
-            None,
         )
         .expect("composite dispatcher should build");
 
@@ -627,6 +677,65 @@ mod tests {
             parsed.get("iso8601").is_some(),
             "should contain iso8601 field"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_forwards_allowed_external_tool_calls() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockExternalDispatcher::new("mob_list", "List active mobs"));
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ext-1",
+            name: "mob_list",
+            args: &call_json,
+        };
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("external tool dispatch should succeed");
+        assert_eq!(result.result.text_content(), "{}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_forwards_external_tool_calls_when_allowed_set_contains_name() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockExternalDispatcher::new("mob_list", "List active mobs"));
+        let mut dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+        dispatcher.allowed_tools.insert("mob_list".to_string());
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ext-2",
+            name: "mob_list",
+            args: &call_json,
+        };
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("external tool dispatch should succeed even with a stale allow-set entry");
+        assert_eq!(result.result.text_content(), "{}");
     }
 
     #[tokio::test]
@@ -657,7 +766,6 @@ mod tests {
                 None,
                 None,
                 image_tool_results,
-                None,
             )
             .expect("composite dispatcher should build");
 

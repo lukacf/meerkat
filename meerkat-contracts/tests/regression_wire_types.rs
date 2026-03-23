@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Regression tests that pin wire type field names and shapes.
 //!

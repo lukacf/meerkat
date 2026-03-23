@@ -54,7 +54,6 @@ fn generate_snapshot() -> Result<Value, Box<dyn std::error::Error>> {
         None,
         None,
         true,
-        None,
     )?;
 
     let mut tools: Vec<_> = dispatcher.tools().iter().cloned().collect();

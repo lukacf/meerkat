@@ -352,7 +352,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
       hooksOverride: {
         entries: [{
           id: "policy-server",
-          point: "pre_llm_call",
+          point: "pre_llm_request",
           mode: "blocking",
           url: "https://hooks.example.com/policy",
           timeoutMs: 10000,

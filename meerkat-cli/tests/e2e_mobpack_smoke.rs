@@ -964,7 +964,8 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         120,
     )
     .await?;
-    assert_eq!(sent["sent"], true);
+    assert_eq!(sent["session_id"], worker_session_id);
+    assert_eq!(sent["member_id"], "worker-1");
 
     let read_after_send = rpc_call(
         &mut surface,
@@ -1046,15 +1047,13 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with RESPAWN_PROBE_29."
+            "content": "Reply with RESPAWN_PROBE_29."
         }),
         120,
     )
     .await?;
-    assert!(
-        sent_after_respawn["session_id"].is_string(),
-        "mob/send should return delivery receipt"
-    );
+    assert_eq!(sent_after_respawn["session_id"], respawned_session_id);
+    assert_eq!(sent_after_respawn["member_id"], "worker-1");
 
     let read_after_respawn = rpc_call(
         &mut surface,
@@ -1393,12 +1392,13 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
+            "content": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
         }),
         120,
     )
     .await?;
-    assert_eq!(sent["sent"], true);
+    assert_eq!(sent["session_id"], original_session_id);
+    assert_eq!(sent["member_id"], "worker-1");
 
     let read_after_send = rpc_call(
         &mut surface,
@@ -1451,7 +1451,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
                 json!({
                     "mob_id": mob_id,
                     "meerkat_id": "broken-1",
-                    "message": "This turn must fail because the member model is invalid."
+                    "content": "This turn must fail because the member model is invalid."
                 }),
                 60,
             )
@@ -1513,7 +1513,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with RESPAWN_PROBE_29."
+            "content": "Reply with RESPAWN_PROBE_29."
         }),
         120,
     )

@@ -130,6 +130,7 @@ pub async fn create_dispatcher_with_builtins(
             shell_config,
             external,
             session_id,
+            None,
         )
         .await
 }
@@ -154,6 +155,7 @@ pub async fn create_dispatcher_with_builtins_persisted(
             shell_config,
             external,
             session_id,
+            None,
         )
         .await
 }
@@ -201,6 +203,7 @@ pub async fn create_dispatcher_with_builtins_in_project(
             shell_config,
             external,
             session_id,
+            None,
         )
         .await
 }

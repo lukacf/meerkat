@@ -181,6 +181,32 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn supports_wait_interrupt(&self) -> bool {
         false
     }
+
+    /// Bind a session-canonical ops registry into this dispatcher.
+    ///
+    /// Dispatchers that emit session-visible `AsyncOpRef`s must route those
+    /// operation IDs into the bound registry. Default returns Unsupported.
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        _registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        _owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        Err(OpsLifecycleBindError::Unsupported)
+    }
+
+    /// Whether this dispatcher supports ops lifecycle binding.
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        false
+    }
+}
+
+/// Error from [`AgentToolDispatcher::bind_ops_lifecycle`].
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum OpsLifecycleBindError {
+    #[error("ops lifecycle binding is unsupported")]
+    Unsupported,
+    #[error("dispatcher has shared ownership and cannot be rebound")]
+    SharedOwnership,
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -252,6 +278,24 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 
     fn supports_wait_interrupt(&self) -> bool {
         self.inner.supports_wait_interrupt()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let rebound_inner = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+        Ok(Arc::new(FilteredToolDispatcher {
+            inner: rebound_inner,
+            allowed_tools: owned.allowed_tools,
+            filtered_tools: owned.filtered_tools,
+        }))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.inner.supports_ops_lifecycle_binding()
     }
 }
 

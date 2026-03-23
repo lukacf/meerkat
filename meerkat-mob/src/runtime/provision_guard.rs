@@ -120,6 +120,7 @@ mod tests {
     use meerkat_core::comms::TrustedPeerSpec;
     use meerkat_core::event_injector::SubscribableInjector;
     use meerkat_core::ops::OperationId;
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::service::StartTurnRequest;
     use meerkat_core::types::SessionId;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -200,6 +201,15 @@ mod tests {
             _member_ref: &MemberRef,
         ) -> Option<OperationId> {
             None
+        }
+
+        async fn bind_member_owner_context(
+            &self,
+            _member_ref: &MemberRef,
+            _owner_session_id: SessionId,
+            _ops_registry: Arc<dyn OpsLifecycleRegistry>,
+        ) -> Result<(), MobError> {
+            Ok(())
         }
     }
 

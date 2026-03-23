@@ -1,6 +1,6 @@
 {
   "name": "@rkat/sdk",
-  "version": "0.4.11",
+  "version": "0.4.13",
   "description": "TypeScript SDK for Meerkat agent runtime",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.js tests/*.test.mjs",
     "test:e2e": "npm run build && node --test tests/e2e_smoke.test.mjs tests/e2e_sdk_smoke.test.mjs",
     "test:live-smoke": "npm run build && node --test tests/e2e_smoke.test.mjs"
   },

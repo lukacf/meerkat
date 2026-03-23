@@ -8,6 +8,7 @@
 //! When present, it enables v9 input lifecycle tracking for mob members.
 
 use meerkat_core::lifecycle::InputId;
+use meerkat_core::types::ContentInput;
 use meerkat_core::types::SessionId;
 
 use crate::RuntimeSessionAdapter;
@@ -21,11 +22,17 @@ use crate::traits::RuntimeDriverError;
 /// Create a FlowStepInput for a mob flow step.
 pub fn create_flow_step_input(
     step_id: &str,
-    instructions: &str,
+    instructions: ContentInput,
     flow_id: &str,
     step_index: usize,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
 ) -> Input {
+    let instructions_text = instructions.text_content();
+    let blocks = if instructions.has_images() {
+        Some(instructions.into_blocks())
+    } else {
+        None
+    };
     Input::FlowStep(FlowStepInput {
         header: InputHeader {
             id: InputId::new(),
@@ -41,7 +48,8 @@ pub fn create_flow_step_input(
             correlation_id: None,
         },
         step_id: step_id.into(),
-        instructions: instructions.into(),
+        instructions: instructions_text,
+        blocks,
         turn_metadata,
     })
 }
@@ -61,11 +69,11 @@ pub async fn deliver_flow_step(
     adapter: &RuntimeSessionAdapter,
     session_id: &SessionId,
     step_id: &str,
-    instructions: &str,
+    instructions: impl Into<ContentInput>,
     flow_id: &str,
     step_index: usize,
 ) -> Result<crate::AcceptOutcome, RuntimeDriverError> {
-    let input = create_flow_step_input(step_id, instructions, flow_id, step_index, None);
+    let input = create_flow_step_input(step_id, instructions.into(), flow_id, step_index, None);
     adapter.accept_input(session_id, input).await
 }
 
@@ -112,7 +120,7 @@ mod tests {
         assert!(outcome.is_accepted());
 
         // Verify policy: flow_step → StageRunStart + WakeIfIdle
-        let input = create_flow_step_input("s", "i", "f", 0, None);
+        let input = create_flow_step_input("s", "i".into(), "f", 0, None);
         let policy = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(policy.apply_mode, crate::ApplyMode::StageRunStart);
         assert_eq!(policy.wake_mode, crate::WakeMode::WakeIfIdle);
@@ -134,6 +142,34 @@ mod tests {
         let report = retire_mob_member(&adapter, &sid).await.unwrap();
         assert_eq!(report.inputs_abandoned, 1);
         assert_eq!(report.inputs_pending_drain, 0);
+    }
+
+    #[tokio::test]
+    async fn create_flow_step_input_preserves_multimodal_blocks() -> Result<(), String> {
+        let input = create_flow_step_input(
+            "s",
+            ContentInput::Blocks(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "inspect image".into(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                    source_path: None,
+                },
+            ]),
+            "f",
+            0,
+            None,
+        );
+
+        let flow_step = match input {
+            Input::FlowStep(flow_step) => flow_step,
+            other => return Err(format!("expected flow step input, got {other:?}")),
+        };
+        assert_eq!(flow_step.instructions, "inspect image\n[image: image/png]");
+        assert_eq!(flow_step.blocks.as_ref().map(Vec::len), Some(2));
+        Ok(())
     }
 
     #[tokio::test]

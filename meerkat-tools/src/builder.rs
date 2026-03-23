@@ -9,6 +9,7 @@ use meerkat_comms::agent::DynCommsToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
 #[cfg(feature = "comms")]
@@ -43,6 +44,7 @@ pub struct BuiltinDispatcherConfig {
     pub shell_config: Option<ShellConfig>,
     pub external: Option<Arc<dyn AgentToolDispatcher>>,
     pub session_id: Option<String>,
+    pub ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     /// Whether the model can process image blocks in tool results.
     /// When false, `view_image` is hidden from the tool list.
     /// Defaults to `true`.
@@ -111,16 +113,18 @@ impl ToolDispatcherBuilder {
             ToolDispatcherSource::Empty => Arc::new(EmptyToolDispatcher),
             #[cfg(feature = "mcp")]
             ToolDispatcherSource::Mcp(mcp) => mcp.router,
-            ToolDispatcherSource::Composite(comp) => Arc::new(CompositeDispatcher::new(
-                comp.store,
-                &comp.config,
-                comp.project_root,
-                comp.shell_config,
-                comp.external,
-                comp.session_id,
-                comp.image_tool_results,
-                None,
-            )?),
+            ToolDispatcherSource::Composite(comp) => {
+                Arc::new(CompositeDispatcher::new_with_ops_lifecycle(
+                    comp.store,
+                    &comp.config,
+                    comp.project_root,
+                    comp.shell_config,
+                    comp.external,
+                    comp.session_id,
+                    comp.ops_lifecycle,
+                    comp.image_tool_results,
+                )?)
+            }
         };
 
         // Wrap with comms if enabled
@@ -152,14 +156,14 @@ impl ToolDispatcherBuilder {
 pub fn build_builtin_dispatcher(
     config: BuiltinDispatcherConfig,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
-    Ok(Arc::new(CompositeDispatcher::new(
+    Ok(Arc::new(CompositeDispatcher::new_with_ops_lifecycle(
         config.store,
         &config.config,
         config.project_root,
         config.shell_config,
         config.external,
         config.session_id,
+        config.ops_lifecycle,
         config.image_tool_results,
-        None,
     )?))
 }

@@ -532,7 +532,7 @@ mod tool_invocation {
             HashMap::new(),
         );
         router
-            .add_server_for_testing(config)
+            .add_server(config)
             .await
             .expect("Should connect to MCP server");
 
@@ -929,7 +929,7 @@ mod parallel_tools {
             HashMap::new(),
         );
         router
-            .add_server_for_testing(config)
+            .add_server(config)
             .await
             .expect("Should connect to MCP server");
 

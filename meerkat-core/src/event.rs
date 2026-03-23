@@ -48,7 +48,6 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::RunStarted { .. } => "run_started",
         AgentEvent::RunCompleted { .. } => "run_completed",
         AgentEvent::RunFailed { .. } => "run_failed",
-        AgentEvent::ConfigSnapshotFallback { .. } => "config_snapshot_fallback",
         AgentEvent::HookStarted { .. } => "hook_started",
         AgentEvent::HookCompleted { .. } => "hook_completed",
         AgentEvent::HookFailed { .. } => "hook_failed",
@@ -229,14 +228,6 @@ pub enum AgentEvent {
     RunFailed {
         session_id: SessionId,
         error: String,
-    },
-
-    /// Config store read failed; session built with cached snapshot instead.
-    ConfigSnapshotFallback {
-        error: String,
-        /// Config generation of the cached snapshot, if known.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        config_generation: Option<u64>,
     },
 
     // === Hook Lifecycle ===
@@ -686,10 +677,6 @@ mod tests {
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
                 error: "Budget exceeded".to_string(),
-            },
-            AgentEvent::ConfigSnapshotFallback {
-                error: "store unavailable".to_string(),
-                config_generation: Some(42),
             },
             AgentEvent::CompactionStarted {
                 input_tokens: 120_000,

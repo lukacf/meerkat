@@ -1,9 +1,7 @@
 //! Shell tool types for background job execution
 //!
-//! This module defines the core types for shell job management including
+//! This module defines the app-facing types for shell job management including
 //! [`JobId`], [`JobStatus`], [`BackgroundJob`], and [`JobSummary`].
-
-use meerkat_core::ops_lifecycle::OperationId;
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for background jobs
@@ -98,9 +96,6 @@ pub enum JobStatus {
 pub struct BackgroundJob {
     /// Unique identifier for this job
     pub id: JobId,
-    /// Shared async-operation lifecycle ID for this job.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<OperationId>,
     /// The command being executed
     pub command: String,
     /// Working directory for the command (None means current directory)
@@ -118,9 +113,6 @@ pub struct BackgroundJob {
 pub struct JobSummary {
     /// Unique identifier for this job
     pub id: JobId,
-    /// Shared async-operation lifecycle ID for this job.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<OperationId>,
     /// The command being executed
     pub command: String,
     /// Status as a simple string: "running", "completed", "failed", "timed_out", "cancelled"
@@ -332,7 +324,6 @@ mod tests {
     fn test_background_job_struct() {
         let job = BackgroundJob {
             id: JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v"),
-            operation_id: Some(OperationId::new()),
             command: "cargo build".to_string(),
             working_dir: Some("/project".to_string()),
             timeout_secs: 300,
@@ -354,7 +345,6 @@ mod tests {
     fn test_background_job_serde_roundtrip() {
         let job = BackgroundJob {
             id: JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v"),
-            operation_id: Some(OperationId::new()),
             command: "cargo test".to_string(),
             working_dir: None,
             timeout_secs: 60,
@@ -399,7 +389,6 @@ mod tests {
     fn test_job_summary_struct() {
         let summary = JobSummary {
             id: JobId::from_string("job_01hx7z8k9m2n3p4q5r6s7t8u9v"),
-            operation_id: Some(OperationId::new()),
             command: "npm test".to_string(),
             status: "running".to_string(),
             started_at_unix: 1706123500,
@@ -415,7 +404,6 @@ mod tests {
     fn test_job_summary_serde_roundtrip() {
         let summary = JobSummary {
             id: JobId::from_string("job_01hx7z9abcdefghijklmnopqr"),
-            operation_id: Some(OperationId::new()),
             command: "make build".to_string(),
             status: "completed".to_string(),
             started_at_unix: 1706123456,
@@ -438,7 +426,6 @@ mod tests {
         for status in statuses {
             let summary = JobSummary {
                 id: JobId::from_string("job_test"),
-                operation_id: Some(OperationId::new()),
                 command: "test".to_string(),
                 status: status.to_string(),
                 started_at_unix: 0,

@@ -123,6 +123,117 @@ fn spawn_scoped_event_handler(
     })
 }
 
+struct CliOutputPipeline {
+    event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
+    scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+    verbose_task: Option<tokio::task::JoinHandle<()>>,
+    stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>>,
+    primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CliOutputPipeline {
+    fn new(
+        stream: bool,
+        verbose: bool,
+        stream_policy: Option<stream_renderer::StreamRenderPolicy>,
+        primary_scope_path: Vec<StreamScopeFrame>,
+    ) -> anyhow::Result<Self> {
+        let mut pipeline = Self {
+            event_tx: None,
+            scoped_event_tx: None,
+            verbose_task: None,
+            stream_task: None,
+            primary_to_scoped_bridge_task: None,
+        };
+
+        if stream {
+            let policy =
+                stream_policy.ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
+            let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
+            let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
+            let bridge_scoped_tx = scoped_tx.clone();
+            pipeline.primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
+                while let Some(event) = primary_rx.recv().await {
+                    let scoped = ScopedAgentEvent::new(primary_scope_path.clone(), event.payload);
+                    if bridge_scoped_tx.send(scoped).await.is_err() {
+                        break;
+                    }
+                }
+            }));
+
+            pipeline.event_tx = Some(primary_tx);
+            pipeline.scoped_event_tx = Some(scoped_tx);
+            pipeline.stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
+        } else if verbose {
+            let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
+            pipeline.event_tx = Some(tx);
+            pipeline.verbose_task = Some(spawn_verbose_event_handler(rx, verbose));
+        }
+
+        Ok(pipeline)
+    }
+
+    fn event_sender(&self) -> Option<mpsc::Sender<EventEnvelope<AgentEvent>>> {
+        self.event_tx.clone()
+    }
+
+    async fn shutdown_after<F>(self, after_sender_drop: F) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let Self {
+            event_tx,
+            scoped_event_tx,
+            verbose_task,
+            stream_task,
+            primary_to_scoped_bridge_task,
+        } = self;
+
+        drop(event_tx);
+        drop(scoped_event_tx);
+
+        after_sender_drop.await?;
+
+        if let Some(task) = primary_to_scoped_bridge_task {
+            let _ = task.await;
+        }
+
+        if let Some(task) = verbose_task {
+            let _ = task.await;
+        }
+
+        if let Some(task) = stream_task {
+            let summary = task
+                .await
+                .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
+            println!();
+            validate_stream_render_summary(&summary)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_stream_render_summary(
+    summary: &stream_renderer::StreamRenderSummary,
+) -> anyhow::Result<()> {
+    if let Some(focus) = &summary.focus_requested
+        && !summary.focus_seen
+    {
+        let discovered = if summary.discovered_scopes.is_empty() {
+            "<none>".to_string()
+        } else {
+            summary.discovered_scopes.join(", ")
+        };
+        anyhow::bail!(
+            "stream focus '{}' did not match any emitted scope (discovered scopes: {})",
+            focus,
+            discovered
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ToolPresetResolution {
     builtins: bool,
@@ -2986,41 +3097,8 @@ async fn run_agent(
         session_id: session.id().to_string(),
     }];
 
-    // Create event channels:
-    // - primary AgentEvent channel for the running session turn
-    // - optional scoped stream path for mux/focus attribution
-    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
-    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
-    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
-        None;
-    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
-
-    if stream {
-        let policy = stream_policy
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
-        let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
-        let bridge_scoped_tx = scoped_tx.clone();
-        let scope_path_for_bridge = primary_scope_path.clone();
-        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
-            while let Some(event) = primary_rx.recv().await {
-                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
-                if bridge_scoped_tx.send(scoped).await.is_err() {
-                    break;
-                }
-            }
-        }));
-
-        event_tx = Some(primary_tx);
-        scoped_event_tx = Some(scoped_tx);
-        stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
-    } else if verbose {
-        let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        event_tx = Some(tx);
-        verbose_task = Some(spawn_verbose_event_handler(rx, verbose));
-    }
+    let output_pipeline =
+        CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
     // Load optional MCP tools; we compose these with CLI-local mob tools below.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
@@ -3156,7 +3234,7 @@ async fn run_agent(
         render_metadata: None,
         system_prompt,
         max_tokens: Some(max_tokens),
-        event_tx: event_tx.clone(),
+        event_tx: output_pipeline.event_sender(),
         host_mode,
         host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: if run_initial_turn_during_create {
@@ -3286,46 +3364,18 @@ async fn run_agent(
         h.abort();
     }
 
-    // Drop CLI-held sender clones; remaining senders are owned by session/runtime state.
-    drop(event_tx);
-    drop(scoped_event_tx);
-
-    // Shutdown the session service and MCP connections gracefully.
-    // This drops runtime-held event senders so the receiver can close cleanly.
-    service.shutdown().await;
-    shutdown_mcp(&mcp_adapter).await;
-    if let Some(ref mut mob_ctx) = run_mob_tools {
-        mob_ctx.persist(scope).await?;
-    }
-
-    // Ensure the primary->scoped bridge is drained before final stream completion checks.
-    if let Some(task) = primary_to_scoped_bridge_task {
-        let _ = task.await;
-    }
-
-    if let Some(task) = verbose_task {
-        let _ = task.await;
-    }
-
-    // Wait for scoped stream task (it ends when all scoped senders are dropped).
-    if let Some(task) = stream_task {
-        let summary = task
-            .await
-            .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
-        println!();
-        if let Some(focus) = summary.focus_requested
-            && !summary.focus_seen
-        {
-            let discovered = if summary.discovered_scopes.is_empty() {
-                "<none>".to_string()
-            } else {
-                summary.discovered_scopes.join(", ")
-            };
-            return Err(anyhow::anyhow!(
-                "stream focus '{focus}' did not match any emitted scope (discovered scopes: {discovered})"
-            ));
-        }
-    }
+    output_pipeline
+        .shutdown_after(async {
+            // Shutdown the session service and MCP connections gracefully.
+            // This drops runtime-held event senders so the receiver can close cleanly.
+            service.shutdown().await;
+            shutdown_mcp(&mcp_adapter).await;
+            if let Some(ref mut mob_ctx) = run_mob_tools {
+                mob_ctx.persist(scope).await?;
+            }
+            Ok(())
+        })
+        .await?;
 
     // Output the result
     match output {
@@ -3604,39 +3654,18 @@ async fn resume_session_with_llm_override(
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
-    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
-    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
-    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
-        None;
-    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
-
-    if stream {
-        let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
-        let scope_path_for_bridge = vec![StreamScopeFrame::Primary {
+    let output_pipeline = CliOutputPipeline::new(
+        stream,
+        verbose,
+        if stream {
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
+        } else {
+            None
+        },
+        vec![StreamScopeFrame::Primary {
             session_id: session_id.to_string(),
-        }];
-        let bridge_scoped_tx = scoped_tx.clone();
-        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
-            while let Some(event) = primary_rx.recv().await {
-                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
-                if bridge_scoped_tx.send(scoped).await.is_err() {
-                    break;
-                }
-            }
-        }));
-        event_tx = Some(primary_tx);
-        stream_task = Some(spawn_scoped_event_handler(
-            scoped_rx,
-            stream_renderer::StreamRenderPolicy::PrimaryOnly,
-        ));
-        scoped_event_tx = Some(scoped_tx);
-    } else if verbose {
-        let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        event_tx = Some(tx);
-        verbose_task = Some(spawn_verbose_event_handler(rx, true));
-    }
+        }],
+    )?;
 
     // Pre-register session on the adapter so we can obtain the canonical ops
     // lifecycle registry for the build options.
@@ -3698,7 +3727,7 @@ async fn resume_session_with_llm_override(
             render_metadata: None,
             system_prompt,
             max_tokens: Some(max_tokens),
-            event_tx: event_tx.clone(),
+            event_tx: output_pipeline.event_sender(),
             host_mode,
             host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references: if run_initial_turn_during_create {
@@ -3790,25 +3819,20 @@ async fn resume_session_with_llm_override(
 
     log_stage("service.create_session(done)");
 
-    // Shutdown the session service and MCP connections gracefully
-    log_stage("service.shutdown");
-    service.shutdown().await;
-    log_stage("shutdown_mcp");
-    shutdown_mcp(&mcp_adapter).await;
-    log_stage("persist_mob_registry");
-    if let Some(ref mut mob_ctx) = run_mob_tools {
-        mob_ctx.persist(scope).await?;
-    }
-    drop(scoped_event_tx);
-    if let Some(task) = primary_to_scoped_bridge_task {
-        let _ = task.await;
-    }
-    if let Some(task) = verbose_task {
-        let _ = task.await;
-    }
-    if let Some(task) = stream_task {
-        let _ = task.await;
-    }
+    output_pipeline
+        .shutdown_after(async {
+            // Shutdown the session service and MCP connections gracefully.
+            log_stage("service.shutdown");
+            service.shutdown().await;
+            log_stage("shutdown_mcp");
+            shutdown_mcp(&mcp_adapter).await;
+            log_stage("persist_mob_registry");
+            if let Some(ref mut mob_ctx) = run_mob_tools {
+                mob_ctx.persist(scope).await?;
+            }
+            Ok(())
+        })
+        .await?;
 
     // Output the result
     log_stage("print_result");
@@ -6383,6 +6407,41 @@ mod tests {
             context_root: None,
             user_config_root: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_drops_stream_sender_before_awaiting_tasks() {
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: "test-session".to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async { Ok(()) }),
+        )
+        .await
+        .expect("stream pipeline shutdown should not deadlock")
+        .expect("stream pipeline shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_handles_verbose_mode() {
+        let pipeline = CliOutputPipeline::new(false, true, None, Vec::new())
+            .expect("verbose pipeline should build");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async { Ok(()) }),
+        )
+        .await
+        .expect("verbose pipeline shutdown should not deadlock")
+        .expect("verbose pipeline shutdown should succeed");
     }
 
     struct StaticDispatcher {

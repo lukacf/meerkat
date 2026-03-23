@@ -1345,11 +1345,11 @@ mod tests {
                 }
             }
         "#;
-        let drain = r#"
+        let drain = r"
             fn run_comms_drain(ci: ClassifiedInboxInteraction, runtime_id: LogicalRuntimeId) {
                 let input = classified_interaction_to_runtime_input(&ci, &runtime_id);
             }
-        "#;
+        ";
 
         let findings = runtime_comms_bridge_projection_findings_for_sources(
             "meerkat-runtime/src/comms_bridge.rs",
@@ -1370,11 +1370,11 @@ mod tests {
                 Input::Peer(PeerInput { body: String::new(), blocks: None })
             }
         "#;
-        let drain = r#"
+        let drain = r"
             fn run_comms_drain(ci: InboxInteraction, runtime_id: LogicalRuntimeId) {
                 let input = interaction_to_runtime_input(&ci, &runtime_id);
             }
-        "#;
+        ";
 
         let findings = runtime_comms_bridge_projection_findings_for_sources(
             "meerkat-runtime/src/comms_bridge.rs",
@@ -1413,7 +1413,7 @@ mod tests {
                 })
             }
         "#;
-        let bridge = r#"
+        let bridge = r"
             pub fn classified_interaction_to_runtime_input(classified: &ClassifiedInboxInteraction) -> Input {
                 let interaction = &classified.interaction;
                 if classified.class == PeerInputClass::PlainEvent {
@@ -1432,8 +1432,8 @@ mod tests {
                     _ => None,
                 }
             }
-        "#;
-        let loop_source = r#"
+        ";
+        let loop_source = r"
             fn input_to_append(input: &Input) -> Option<ConversationAppend> {
                 let content = match input {
                     Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
@@ -1443,7 +1443,7 @@ mod tests {
                 };
                 Some(todo!())
             }
-        "#;
+        ";
 
         let findings = runtime_external_event_projection_findings_for_sources(
             "meerkat-cli/src/stdin_events.rs",
@@ -1479,7 +1479,7 @@ mod tests {
                 todo!()
             }
         "#;
-        let loop_source = r#"
+        let loop_source = r"
             fn input_to_append(input: &Input) -> Option<ConversationAppend> {
                 let content = match input {
                     Input::ExternalEvent(_) => CoreRenderable::Text { text: String::new() },
@@ -1487,7 +1487,7 @@ mod tests {
                 };
                 Some(todo!())
             }
-        "#;
+        ";
 
         let findings = runtime_external_event_projection_findings_for_sources(
             "meerkat-cli/src/stdin_events.rs",

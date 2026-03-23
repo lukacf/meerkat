@@ -3474,6 +3474,7 @@ fn invariant(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::public_contracts::repo_root;
@@ -3525,14 +3526,11 @@ mod tests {
     #[test]
     fn runtime_comms_bridge_projection_invariant_is_closed() {
         let registry = ownership_registry();
-        let invariant = match registry
+        let invariant = registry
             .coupling_invariants
             .iter()
             .find(|entry| entry.name == "runtime_comms_bridge_projection_alignment")
-        {
-            Some(invariant) => invariant,
-            None => panic!("runtime comms bridge projection invariant must exist"),
-        };
+            .expect("runtime comms bridge projection invariant must exist");
         assert_eq!(invariant.subsystem, Subsystem::Runtime);
         assert_eq!(invariant.status, EntryStatus::Closed);
     }
@@ -3540,14 +3538,11 @@ mod tests {
     #[test]
     fn runtime_external_event_projection_invariant_is_closed() {
         let registry = ownership_registry();
-        let invariant = match registry
+        let invariant = registry
             .coupling_invariants
             .iter()
             .find(|entry| entry.name == "runtime_external_event_projection_alignment")
-        {
-            Some(invariant) => invariant,
-            None => panic!("runtime external event projection invariant must exist"),
-        };
+            .expect("runtime external event projection invariant must exist");
         assert_eq!(invariant.subsystem, Subsystem::Runtime);
         assert_eq!(invariant.status, EntryStatus::Closed);
     }

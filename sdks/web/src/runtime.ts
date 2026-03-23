@@ -93,6 +93,8 @@ export interface WasmModule {
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_wire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
   mob_unwire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;

@@ -480,22 +480,45 @@ pub struct MobWireParams {
 
 impl MobWireParams {
     fn resolve(self) -> Result<(MeerkatId, meerkat_mob::PeerTarget), String> {
-        let member = self.member.or(self.local);
-        let peer = self.peer.or(self.target);
-        match (member, peer, self.a, self.b) {
-            (Some(member), Some(peer), None, None) => Ok((MeerkatId::from(member), peer)),
-            (None, None, Some(a), Some(b)) => Ok((
+        let has_canonical = self.member.is_some() || self.peer.is_some();
+        let has_compat = self.local.is_some() || self.target.is_some();
+        let has_legacy = self.a.is_some() || self.b.is_some();
+
+        if has_legacy && (has_canonical || has_compat) {
+            return Err(
+                "provide either canonical {member, peer}, compatibility {local, target}, or legacy {a, b}, but not both"
+                    .to_string(),
+            );
+        }
+        if has_canonical && has_compat {
+            return Err(
+                "do not mix canonical {member, peer} with compatibility {local, target}"
+                    .to_string(),
+            );
+        }
+
+        match (
+            self.member,
+            self.peer,
+            self.local,
+            self.target,
+            self.a,
+            self.b,
+        ) {
+            (Some(member), Some(peer), None, None, None, None) => {
+                Ok((MeerkatId::from(member), peer))
+            }
+            (None, None, Some(member), Some(peer), None, None) => {
+                Ok((MeerkatId::from(member), peer))
+            }
+            (None, None, None, None, Some(a), Some(b)) => Ok((
                 MeerkatId::from(a),
                 meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
             )),
-            (Some(_), Some(_), Some(_), Some(_))
-            | (Some(_), Some(_), Some(_), None)
-            | (Some(_), Some(_), None, Some(_))
-            | (Some(_), None, Some(_), Some(_))
-            | (None, Some(_), Some(_), Some(_)) => {
-                Err("provide either {member, peer}, compatibility {local, target}, or legacy {a, b}, but not both".to_string())
-            }
-            _ => Err("mob wire requires either {member, peer}, compatibility {local, target}, or legacy {a, b}".to_string()),
+            _ => Err(
+                "mob wire requires canonical {member, peer}, compatibility {local, target}, or legacy {a, b}"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -1083,5 +1106,43 @@ mod tests {
         assert_eq!(params.meerkat_id, "worker-1");
         assert_eq!(params.content.text_content(), "hello from legacy caller");
         Ok(())
+    }
+
+    #[test]
+    fn mob_wire_params_reject_mixed_canonical_and_compatibility_fields() {
+        let params = MobWireParams {
+            mob_id: "mob-1".to_string(),
+            member: Some("worker-a".to_string()),
+            peer: None,
+            local: None,
+            target: Some(meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))),
+            a: None,
+            b: None,
+        };
+        let err = params
+            .resolve()
+            .expect_err("mixed canonical/compat fields must fail");
+        assert!(err.contains("do not mix canonical"));
+    }
+
+    #[test]
+    fn mob_wire_params_resolve_compatibility_shape() {
+        let params = MobWireParams {
+            mob_id: "mob-1".to_string(),
+            member: None,
+            peer: None,
+            local: Some("worker-a".to_string()),
+            target: Some(meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))),
+            a: None,
+            b: None,
+        };
+        let (member, target) = params
+            .resolve()
+            .expect("compatibility shape should resolve");
+        assert_eq!(member, MeerkatId::from("worker-a"));
+        assert_eq!(
+            target,
+            meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))
+        );
     }
 }

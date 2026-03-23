@@ -17,7 +17,8 @@ pub use mcp_live::{
     McpRemoveParams,
 };
 pub use mob::{
-    MobPeerTarget, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
+    MobPeerTarget, MobSendParams, MobSendResult, MobUnwireParams, MobUnwireResult, MobWireParams,
+    MobWireResult, WireHandlingMode, WireRenderClass, WireRenderMetadata, WireRenderSalience,
     WireTrustedPeerSpec,
 };
 pub use models::{
@@ -26,7 +27,7 @@ pub use models::{
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use result::WireRunResult;
 pub use runtime::{
-    InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
+    InputListParams, InputListResult, InputStateParams, InputStateResult, RuntimeAcceptOutcomeType,
     RuntimeAcceptParams, RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult,
     RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
     WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireRuntimeState,

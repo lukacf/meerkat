@@ -21,6 +21,33 @@ RenderMetadata = TypedDict(
     {"class": RenderClass, "salience": NotRequired[RenderSalience]},
 )
 
+MemberDeliveryReceipt = TypedDict(
+    "MemberDeliveryReceipt",
+    {
+        "member_id": str,
+        "session_id": str,
+        "handling_mode": Literal["queue", "steer"],
+    },
+)
+
+MemberRespawnReceipt = TypedDict(
+    "MemberRespawnReceipt",
+    {
+        "member_id": str,
+        "old_session_id": NotRequired[str | None],
+        "new_session_id": NotRequired[str | None],
+    },
+)
+
+MobRespawnResult = TypedDict(
+    "MobRespawnResult",
+    {
+        "status": Literal["completed", "topology_restore_failed"],
+        "receipt": MemberRespawnReceipt,
+        "failed_peer_ids": NotRequired[list[str]],
+    },
+)
+
 
 class Member:
     """Capability-bearing mob member handle."""
@@ -35,7 +62,7 @@ class Member:
         *,
         handling_mode: Literal["queue", "steer"] = "queue",
         render_metadata: RenderMetadata | None = None,
-    ) -> dict[str, Any]:
+    ) -> MemberDeliveryReceipt:
         return await self._mob._client.send_mob_member_content(
             self._mob.id,
             self.meerkat_id,
@@ -95,7 +122,7 @@ class Mob:
         self,
         meerkat_id: str,
         initial_message: str | list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobRespawnResult:
         return await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
 
     async def force_cancel(self, meerkat_id: str) -> None:

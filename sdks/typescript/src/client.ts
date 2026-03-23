@@ -676,7 +676,11 @@ export class MeerkatClient {
     initialMessage?: string | ContentBlock[],
   ): Promise<{
     status: "completed" | "topology_restore_failed";
-    receipt: Record<string, unknown>;
+    receipt: {
+      memberId: string;
+      oldSessionId?: string;
+      newSessionId?: string;
+    };
     failedPeerIds?: string[];
   }> {
     const result = await this.request("mob/respawn", {
@@ -697,7 +701,13 @@ export class MeerkatClient {
     }
     return {
       status: status === "topology_restore_failed" ? "topology_restore_failed" : "completed",
-      receipt,
+      receipt: {
+        memberId: String(receipt.member_id ?? meerkatId),
+        oldSessionId:
+          receipt.old_session_id != null ? String(receipt.old_session_id) : undefined,
+        newSessionId:
+          receipt.new_session_id != null ? String(receipt.new_session_id) : undefined,
+      },
       failedPeerIds: rawFailed.map((peerId) => String(peerId)),
     };
   }

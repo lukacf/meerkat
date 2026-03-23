@@ -27,11 +27,12 @@
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, meerkat_id)`
-//! - `mob_wire(mob_id, a, b)`
-//! - `mob_unwire(mob_id, a, b)`
+//! - `mob_wire_peer(mob_id, member, peer_json)` / `mob_unwire_peer(mob_id, member, peer_json)` — canonical member/peer wiring
+//! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — legacy local-local wiring
+//! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — compatibility aliases
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
-//! - `mob_member_send(mob_id, meerkat_id, request_json)` → session id
+//! - `mob_member_send(mob_id, meerkat_id, request_json)` → JSON delivery receipt
 //! - `mob_respawn(mob_id, meerkat_id, initial_message?)` → JSON result envelope
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
@@ -1817,12 +1818,18 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
 /// Wire a local meerkat to a local or external peer target.
 #[wasm_bindgen]
 pub async fn mob_wire_target(mob_id: &str, local: &str, target_json: &str) -> Result<(), JsValue> {
+    mob_wire_peer(mob_id, local, target_json).await
+}
+
+/// Wire a local member to a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_wire_peer(mob_id: &str, member: &str, peer_json: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let target: meerkat_mob::PeerTarget =
-        serde_json::from_str(target_json).map_err(|e| err_str("invalid_peer_target", e))?;
+        serde_json::from_str(peer_json).map_err(|e| err_str("invalid_peer_target", e))?;
     mob_state
-        .mob_wire(&id, MeerkatId::from(local), target)
+        .mob_wire(&id, MeerkatId::from(member), target)
         .await
         .map_err(err_mob)
 }
@@ -1849,12 +1856,18 @@ pub async fn mob_unwire_target(
     local: &str,
     target_json: &str,
 ) -> Result<(), JsValue> {
+    mob_unwire_peer(mob_id, local, target_json).await
+}
+
+/// Unwire a local member from a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_unwire_peer(mob_id: &str, member: &str, peer_json: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let target: meerkat_mob::PeerTarget =
-        serde_json::from_str(target_json).map_err(|e| err_str("invalid_peer_target", e))?;
+        serde_json::from_str(peer_json).map_err(|e| err_str("invalid_peer_target", e))?;
     mob_state
-        .mob_unwire(&id, MeerkatId::from(local), target)
+        .mob_unwire(&id, MeerkatId::from(member), target)
         .await
         .map_err(err_mob)
 }
@@ -2014,7 +2027,7 @@ struct MobMemberSendOptions {
 
 /// Send external work to a spawned meerkat through the canonical member path.
 ///
-/// Returns the session ID of the session that handled the turn.
+/// Returns a JSON-encoded delivery receipt.
 #[wasm_bindgen]
 pub async fn mob_member_send(
     mob_id: &str,
@@ -2036,7 +2049,7 @@ pub async fn mob_member_send(
         )
         .await
         .map_err(err_mob)?;
-    Ok(receipt.session_id.to_string())
+    Ok(serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))?)
 }
 
 /// Retire and re-spawn a meerkat with the same profile.

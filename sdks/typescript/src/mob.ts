@@ -40,9 +40,15 @@ export interface MemberDeliveryReceipt {
   handlingMode: MobHandlingMode;
 }
 
+export interface MemberRespawnReceipt {
+  memberId: string;
+  oldSessionId?: string;
+  newSessionId?: string;
+}
+
 export interface MobRespawnResult {
   status: "completed" | "topology_restore_failed";
-  receipt: Record<string, unknown>;
+  receipt: MemberRespawnReceipt;
   failedPeerIds?: string[];
 }
 

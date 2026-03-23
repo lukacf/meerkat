@@ -24,6 +24,8 @@ interface MobWasmBindings {
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_wire_target?: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_unwire_target?: (mobId: string, member: string, peerJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
@@ -63,7 +65,7 @@ export class Member {
     handlingMode: HandlingMode = 'queue',
     renderMetadata?: RenderMetadata,
   ): Promise<{ member_id: string; session_id: string; handling_mode: HandlingMode }> {
-    const sessionId = await this.bindings.mob_member_send(
+    const json = await this.bindings.mob_member_send(
       this.mobId,
       this.meerkatId,
       JSON.stringify({
@@ -72,13 +74,21 @@ export class Member {
         render_metadata: renderMetadata,
       }),
     );
-    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    const receipt = JSON.parse(json) as {
+      member_id?: string;
+      session_id?: string;
+      handling_mode?: HandlingMode;
+    };
+    if (typeof receipt.session_id !== 'string' || receipt.session_id.length === 0) {
       throw new Error('Invalid mob/send response: missing session_id');
     }
     return {
-      member_id: this.meerkatId,
-      session_id: sessionId,
-      handling_mode: handlingMode,
+      member_id:
+        typeof receipt.member_id === 'string' && receipt.member_id.length > 0
+          ? receipt.member_id
+          : this.meerkatId,
+      session_id: receipt.session_id,
+      handling_mode: receipt.handling_mode ?? handlingMode,
     };
   }
 
@@ -125,10 +135,11 @@ export class Mob {
       await this.bindings.mob_wire(this.mobId, member, peer);
       return;
     }
-    if (!this.bindings.mob_wire_target) {
+    const wirePeer = this.bindings.mob_wire_peer ?? this.bindings.mob_wire_target;
+    if (!wirePeer) {
       throw new Error('This runtime does not support external peer wiring');
     }
-    await this.bindings.mob_wire_target(this.mobId, member, JSON.stringify(peer));
+    await wirePeer(this.mobId, member, JSON.stringify(peer));
   }
 
   /** Remove comms trust between two agents. */
@@ -137,10 +148,11 @@ export class Mob {
       await this.bindings.mob_unwire(this.mobId, member, peer);
       return;
     }
-    if (!this.bindings.mob_unwire_target) {
+    const unwirePeer = this.bindings.mob_unwire_peer ?? this.bindings.mob_unwire_target;
+    if (!unwirePeer) {
       throw new Error('This runtime does not support external peer unwiring');
     }
-    await this.bindings.mob_unwire_target(this.mobId, member, JSON.stringify(peer));
+    await unwirePeer(this.mobId, member, JSON.stringify(peer));
   }
 
   /** List all members in the mob. */

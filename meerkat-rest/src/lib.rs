@@ -1669,7 +1669,14 @@ fn normalize_rest_comms_send_error(
                 }),
             }
         }
-        other => ApiError::Internal(other.to_string()),
+        other => ApiError::InternalWithData {
+            message: format!("send_failed: {other}"),
+            code: "send_failed".to_string(),
+            details: json!({
+                "code": "send_failed",
+                "message": other.to_string(),
+            }),
+        },
     }
 }
 
@@ -3233,6 +3240,34 @@ mod tests {
                 assert_eq!(
                     details.get("reason").and_then(Value::as_str),
                     Some("offline_or_no_ack")
+                );
+            }
+            other => panic!("expected structured internal error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_rest_comms_send_error_fallback_is_structured() {
+        let err = normalize_rest_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Internal("boom".to_string()),
+        );
+        match err {
+            ApiError::InternalWithData {
+                message,
+                code,
+                details,
+            } => {
+                assert_eq!(message, "send_failed: internal: boom");
+                assert_eq!(code, "send_failed");
+                assert_eq!(
+                    details.get("code").and_then(Value::as_str),
+                    Some("send_failed")
+                );
+                assert_eq!(
+                    details.get("message").and_then(Value::as_str),
+                    Some("internal: boom")
                 );
             }
             other => panic!("expected structured internal error, got {other:?}"),

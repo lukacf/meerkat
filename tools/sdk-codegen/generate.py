@@ -36,6 +36,15 @@ def _resolve_schema_ref_name(ref: str) -> str | None:
     return ref.removeprefix("#/$defs/")
 
 
+def _lookup_named_schema(root: dict[str, Any], name: str) -> dict[str, Any]:
+    schema = root.get(name)
+    if isinstance(schema, dict):
+        return schema
+    defs = root.get("$defs", {})
+    nested = defs.get(name)
+    return nested if isinstance(nested, dict) else {}
+
+
 def _python_identifier(name: str) -> str:
     return f"{name}_" if keyword.iskeyword(name) else name
 
@@ -58,10 +67,19 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
             if len(non_null) == 1:
                 inner_type, inner_optional = _python_type_from_schema(root, non_null[0])
                 return (inner_type, optional or inner_optional)
+            variant_types: list[str] = []
+            for variant in non_null:
+                inner_type, _ = _python_type_from_schema(root, variant)
+                if inner_type not in variant_types:
+                    variant_types.append(inner_type)
+            if variant_types:
+                return (" | ".join(variant_types), optional)
     if "$ref" in field_schema:
         ref_name = _resolve_schema_ref_name(str(field_schema["$ref"]))
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
-        if resolved.get("type") == "object" and ref_name:
+        if not resolved and ref_name:
+            resolved = _lookup_named_schema(root, ref_name)
+        if ref_name and resolved:
             return (ref_name, False)
         return _python_type_from_schema(root, resolved)
 
@@ -74,6 +92,9 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
 
     match schema_type:
         case "string":
+            if "enum" in field_schema and isinstance(field_schema["enum"], list):
+                values = ", ".join([repr(v) for v in field_schema["enum"]])
+                return (f"Literal[{values}]", optional)
             return ("str", optional)
         case "boolean":
             return ("bool", optional)
@@ -88,6 +109,12 @@ def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[s
                 return ("list[Any]", optional)
             return (f"list[{item_type}]", optional)
         case "object":
+            properties = field_schema.get("properties")
+            additional = field_schema.get("additionalProperties", True)
+            if isinstance(properties, dict) and len(properties) == 1 and additional is False:
+                (_, value_schema), = properties.items()
+                value_type, _ = _python_type_from_schema(root, value_schema)
+                return (f"dict[str, {value_type}]", optional)
             return ("dict[str, Any]", optional)
         case _:
             return ("Any", optional)
@@ -111,10 +138,19 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
             if len(non_null) == 1:
                 inner_type, inner_optional = _typescript_type_from_schema(root, non_null[0])
                 return (inner_type, optional or inner_optional)
+            variant_types: list[str] = []
+            for variant in non_null:
+                inner_type, _ = _typescript_type_from_schema(root, variant)
+                if inner_type not in variant_types:
+                    variant_types.append(inner_type)
+            if variant_types:
+                return (" | ".join(variant_types), optional)
     if "$ref" in field_schema:
         ref_name = _resolve_schema_ref_name(str(field_schema["$ref"]))
         resolved = _resolve_schema_ref(root, str(field_schema["$ref"]))
-        if resolved.get("type") == "object" and ref_name:
+        if not resolved and ref_name:
+            resolved = _lookup_named_schema(root, ref_name)
+        if ref_name and resolved:
             return (ref_name, False)
         return _typescript_type_from_schema(root, resolved)
 
@@ -144,6 +180,12 @@ def _typescript_type_from_schema(root: dict[str, Any], field_schema: Any) -> tup
                 return ("unknown[]", optional)
             return (f"{item_type}[]", optional)
         case "object":
+            properties = field_schema.get("properties")
+            additional = field_schema.get("additionalProperties", True)
+            if isinstance(properties, dict) and len(properties) == 1 and additional is False:
+                (field_name, value_schema), = properties.items()
+                value_type, _ = _typescript_type_from_schema(root, value_schema)
+                return (f"{{ {field_name}: {value_type} }}", optional)
             return ("Record<string, unknown>", optional)
         case _:
             return ("unknown", optional)
@@ -166,7 +208,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content = "from __future__ import annotations\n\n"
     types_content += f'"""Generated wire types for Meerkat SDK.\n\nContract version: {contract_version}\n"""\n\n'
     types_content += "from dataclasses import dataclass, field\n"
-    types_content += "from typing import Any, Optional\n\n\n"
+    types_content += "from typing import Any, Literal, Optional\n\n\n"
     types_content += f'CONTRACT_VERSION = "{contract_version}"\n\n\n'
 
     # WireUsage
@@ -256,6 +298,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += '    """Comms parameters (available because comms capability is compiled)."""\n'
         types_content += "    host_mode: bool = False\n"
         types_content += "    comms_name: Optional[str] = None\n\n"
+        types_content += "    peer_meta: Optional[dict[str, Any]] = None\n\n"
 
     if has_skills:
         types_content += "\n@dataclass\nclass SkillsParams:\n"
@@ -298,6 +341,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
             types_content += f"    {python_field_name}: {annotation} = {default_expr}\n"
         types_content += "\n"
 
+    def append_python_alias(name: str, root_schema: dict[str, Any], default_doc: str) -> None:
+        nonlocal types_content
+        schema = _lookup_named_schema(root_schema, name)
+        alias_type, _ = _python_type_from_schema(root_schema, schema)
+        doc = schema.get("description", default_doc) if isinstance(schema, dict) else default_doc
+        types_content += f"\n# {doc}\n{name} = {alias_type}\n"
+
     append_python_dataclass("McpAddParams", params_schema, "Request payload for mcp/add.")
     append_python_dataclass("McpRemoveParams", params_schema, "Request payload for mcp/remove.")
     append_python_dataclass("McpReloadParams", params_schema, "Request payload for mcp/reload.")
@@ -312,6 +362,17 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("InputListParams", params_schema, "Request payload for input/list.")
     append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
     types_content += "InputStateResult = Optional[WireInputState]\n\n"
+    append_python_alias("WireContentBlock", wire_schema, "Wire-safe content block.")
+    append_python_alias("WireContentInput", wire_schema, "Wire-safe content input.")
+    append_python_alias("McpLiveOperation", wire_schema, "Shared operation kind for live MCP operations.")
+    append_python_alias("McpLiveOpStatus", wire_schema, "Shared status for live MCP operations.")
+    append_python_alias("MobPeerTarget", wire_schema, "Target for a mob wire/unwire call.")
+    append_python_alias("WireHandlingMode", wire_schema, "Public handling mode for mob member delivery.")
+    append_python_alias("WireRenderClass", wire_schema, "Public render class contract for mob member delivery.")
+    append_python_alias("WireRenderSalience", wire_schema, "Public render salience contract for mob member delivery.")
+    append_python_alias("WireRuntimeState", wire_schema, "Public runtime state projection used by RPC surfaces.")
+    append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for runtime/accept responses.")
+    append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_dataclass("WireRenderMetadata", wire_schema, "Render metadata for mob/send.")
     append_python_dataclass("MobSendResult", wire_schema, "Response payload for mob/send.")
     append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
@@ -447,6 +508,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         types_content += "\nexport interface CommsParams {\n"
         types_content += "  host_mode: boolean;\n"
         types_content += "  comms_name?: string;\n"
+        types_content += "  peer_meta?: Record<string, unknown>;\n"
         types_content += "}\n"
 
     if has_skills:
@@ -470,6 +532,12 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
             types_content += f"  {field_name}{optional}: {field_type};\n"
         types_content += "}\n"
 
+    def append_typescript_alias(name: str, root_schema: dict[str, Any]) -> None:
+        nonlocal types_content
+        schema = _lookup_named_schema(root_schema, name)
+        alias_type, _ = _typescript_type_from_schema(root_schema, schema)
+        types_content += f"\nexport type {name} = {alias_type};\n"
+
     append_typescript_interface("McpAddParams", params_schema)
     append_typescript_interface("McpRemoveParams", params_schema)
     append_typescript_interface("McpReloadParams", params_schema)
@@ -484,6 +552,17 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("InputListParams", params_schema)
     append_typescript_interface("McpLiveOpResponse", wire_schema)
     types_content += "\nexport type InputStateResult = WireInputState | null;\n"
+    append_typescript_alias("WireContentBlock", wire_schema)
+    append_typescript_alias("WireContentInput", wire_schema)
+    append_typescript_alias("McpLiveOperation", wire_schema)
+    append_typescript_alias("McpLiveOpStatus", wire_schema)
+    append_typescript_alias("MobPeerTarget", wire_schema)
+    append_typescript_alias("WireHandlingMode", wire_schema)
+    append_typescript_alias("WireRenderClass", wire_schema)
+    append_typescript_alias("WireRenderSalience", wire_schema)
+    append_typescript_alias("WireRuntimeState", wire_schema)
+    append_typescript_alias("RuntimeAcceptOutcomeType", wire_schema)
+    append_typescript_alias("WireInputLifecycleState", wire_schema)
     append_typescript_interface("WireRenderMetadata", wire_schema)
     append_typescript_interface("MobSendResult", wire_schema)
     append_typescript_interface("WireTrustedPeerSpec", wire_schema)

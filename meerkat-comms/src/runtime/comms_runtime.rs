@@ -1254,7 +1254,7 @@ impl CommsRuntime {
                         &resolved_peer.reachability_key(),
                         PeerReachabilityReason::OfflineOrNoAck,
                     );
-                    Err(SendError::PeerOffline)
+                    Err(SendError::PeerNotFound(peer))
                 } else {
                     Err(SendError::PeerNotFound(peer))
                 }
@@ -2634,8 +2634,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(result, Err(SendError::PeerOffline)),
-            "resolved missing peer should surface as unreachable, got: {result:?}"
+            matches!(result, Err(SendError::PeerNotFound(ref peer)) if peer == &missing_name),
+            "resolved missing peer should preserve PeerNotFound, got: {result:?}"
         );
 
         let peers = CoreCommsRuntime::peers(&sender).await;

@@ -6,7 +6,7 @@ Contract version: 0.4.13
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 CONTRACT_VERSION = "0.4.13"
@@ -117,6 +117,8 @@ class CommsParams:
     host_mode: bool = False
     comms_name: Optional[str] = None
 
+    peer_meta: Optional[dict[str, Any]] = None
+
 
 @dataclass
 class SkillsParams:
@@ -153,8 +155,8 @@ class McpReloadParams:
 @dataclass
 class MobSendParams:
     """Request payload for `mob/send`."""
-    content: Any = None
-    handling_mode: Optional[str] = None
+    content: WireContentInput = None
+    handling_mode: Optional[WireHandlingMode] = None
     meerkat_id: str = ''
     mob_id: str = ''
     render_metadata: Optional[WireRenderMetadata] = None
@@ -165,7 +167,7 @@ class MobWireParams:
     """Request payload for `mob/wire`."""
     member: str = ''
     mob_id: str = ''
-    peer: Any = None
+    peer: MobPeerTarget = None
 
 
 @dataclass
@@ -173,7 +175,7 @@ class MobUnwireParams:
     """Request payload for `mob/unwire`."""
     member: str = ''
     mob_id: str = ''
-    peer: Any = None
+    peer: MobPeerTarget = None
 
 
 @dataclass
@@ -218,26 +220,59 @@ class InputListParams:
 class McpLiveOpResponse:
     """Response payload for live MCP operations."""
     applied_at_turn: Optional[int] = None
-    operation: str = ''
+    operation: McpLiveOperation = None
     persisted: bool = False
     server_name: Optional[str] = None
     session_id: str = ''
-    status: str = ''
+    status: McpLiveOpStatus = None
 
 InputStateResult = Optional[WireInputState]
 
 
+# Wire-safe content block (no `source_path` — internal only).
+WireContentBlock = dict[str, Any]
+
+# Wire-safe content input (mirrors `ContentInput`).
+WireContentInput = str | list[WireContentBlock]
+
+# Shared operation kind for live MCP operations.
+McpLiveOperation = Literal['add', 'remove', 'reload']
+
+# Shared status for live MCP operations.
+McpLiveOpStatus = Literal['staged', 'applied', 'rejected']
+
+# Target for a mob wire/unwire call.
+MobPeerTarget = dict[str, str] | dict[str, WireTrustedPeerSpec]
+
+# Public handling mode for mob member delivery.
+WireHandlingMode = Literal['queue', 'steer']
+
+# Public render class contract for mob member delivery.
+WireRenderClass = Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
+
+# Public render salience contract for mob member delivery.
+WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
+
+# Public runtime state projection used by RPC surfaces.
+WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'recovering', 'retired', 'stopped', 'destroyed']
+
+# Discriminator for `runtime/accept` responses.
+RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
+
+# Public input lifecycle state projection used by RPC surfaces.
+WireInputLifecycleState = Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
+
 @dataclass
 class WireRenderMetadata:
     """Public render metadata contract for mob member delivery."""
-    class_: str = ''
-    salience: Optional[str] = None
+    class_: WireRenderClass = None
+    salience: Optional[WireRenderSalience] = None
 
 
 @dataclass
 class MobSendResult:
     """Response payload for `mob/send`."""
-    handling_mode: str = ''
+    handling_mode: WireHandlingMode = None
     member_id: str = ''
     session_id: str = ''
 
@@ -265,7 +300,7 @@ class MobUnwireResult:
 @dataclass
 class RuntimeStateResult:
     """Response payload for `runtime/state`."""
-    state: str = ''
+    state: WireRuntimeState = None
 
 
 @dataclass
@@ -273,7 +308,7 @@ class RuntimeAcceptResult:
     """Response payload for `runtime/accept`."""
     existing_id: Optional[str] = None
     input_id: Optional[str] = None
-    outcome_type: str = ''
+    outcome_type: RuntimeAcceptOutcomeType = None
     policy: Any = None
     reason: Optional[str] = None
     state: Optional[WireInputState] = None
@@ -295,10 +330,10 @@ class RuntimeResetResult:
 @dataclass
 class WireInputStateHistoryEntry:
     """Input transition history entry for RPC-facing snapshots."""
-    from_: str = ''
+    from_: WireInputLifecycleState = None
     reason: Optional[str] = None
     timestamp: str = ''
-    to: str = ''
+    to: WireInputLifecycleState = None
 
 
 @dataclass
@@ -306,7 +341,7 @@ class WireInputState:
     """RPC-facing input state snapshot."""
     attempt_count: int = 0
     created_at: str = ''
-    current_state: str = ''
+    current_state: WireInputLifecycleState = None
     durability: Any = None
     history: list[WireInputStateHistoryEntry] = field(default_factory=list)
     idempotency_key: Optional[str] = None

@@ -226,41 +226,6 @@ class McpLiveOpResponse:
     session_id: str = ''
     status: McpLiveOpStatus = None
 
-InputStateResult = Optional[WireInputState]
-
-
-# Wire-safe content block (no `source_path` — internal only).
-WireContentBlock = dict[str, Any]
-
-# Wire-safe content input (mirrors `ContentInput`).
-WireContentInput = str | list[WireContentBlock]
-
-# Shared operation kind for live MCP operations.
-McpLiveOperation = Literal['add', 'remove', 'reload']
-
-# Shared status for live MCP operations.
-McpLiveOpStatus = Literal['staged', 'applied', 'rejected']
-
-# Target for a mob wire/unwire call.
-MobPeerTarget = dict[str, str] | dict[str, WireTrustedPeerSpec]
-
-# Public handling mode for mob member delivery.
-WireHandlingMode = Literal['queue', 'steer']
-
-# Public render class contract for mob member delivery.
-WireRenderClass = Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
-
-# Public render salience contract for mob member delivery.
-WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
-
-# Public runtime state projection used by RPC surfaces.
-WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'recovering', 'retired', 'stopped', 'destroyed']
-
-# Discriminator for `runtime/accept` responses.
-RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
-
-# Public input lifecycle state projection used by RPC surfaces.
-WireInputLifecycleState = Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
 
 @dataclass
 class WireRenderMetadata:
@@ -360,3 +325,40 @@ class WireInputState:
 class InputListResult:
     """Response payload for `input/list`."""
     input_ids: list[str] = field(default_factory=list)
+
+
+# Wire-safe content block (no `source_path` — internal only).
+WireContentBlock = dict[str, Any]
+
+# Wire-safe content input (mirrors `ContentInput`).
+WireContentInput = str | list[WireContentBlock]
+
+# Shared operation kind for live MCP operations.
+McpLiveOperation = Literal['add', 'remove', 'reload']
+
+# Shared status for live MCP operations.
+McpLiveOpStatus = Literal['staged', 'applied', 'rejected']
+
+# Target for a mob wire/unwire call.
+MobPeerTarget = dict[str, str] | dict[str, WireTrustedPeerSpec]
+
+# Public handling mode for mob member delivery.
+WireHandlingMode = Literal['queue', 'steer']
+
+# Public render class contract for mob member delivery.
+WireRenderClass = Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
+
+# Public render salience contract for mob member delivery.
+WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
+
+# Public runtime state projection used by RPC surfaces.
+WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'recovering', 'retired', 'stopped', 'destroyed']
+
+# Discriminator for `runtime/accept` responses.
+RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
+
+# Public input lifecycle state projection used by RPC surfaces.
+WireInputLifecycleState = Literal['accepted', 'queued', 'staged', 'applied', 'applied_pending_consumption', 'consumed', 'superseded', 'coalesced', 'abandoned']
+
+# Response payload for `input/state`.
+InputStateResult = Optional[WireInputState]

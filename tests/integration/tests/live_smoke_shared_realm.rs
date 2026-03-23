@@ -1476,6 +1476,10 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ordinary_init["error"].is_null(),
         "ordinary rpc surface should initialize cleanly: {ordinary_init}"
     );
+    // Intentionally agentic stress smoke: this ordinary create can take many
+    // real model turns while still validating the shared-realm routing
+    // invariant we care about here. Treat it as a correctness smoke, not a
+    // performance benchmark.
     rpc_send_line(
         &mut ordinary_rpc,
         &format!(
@@ -1484,7 +1488,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let ordinary = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 60).await?)?;
+    let ordinary = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 120).await?)?;
     assert!(
         ordinary["error"].is_null()
             && ordinary["result"]["text"]

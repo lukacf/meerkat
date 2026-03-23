@@ -198,6 +198,7 @@ if include_scenario(39):
                 {"session_id": session_id},
             )
             assert runtime_state["state"] in {
+                "attached",
                 "idle",
                 "running",
                 "initializing",

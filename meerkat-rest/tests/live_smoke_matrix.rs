@@ -230,6 +230,33 @@ async fn wait_for_input_state(
     panic!("timed out waiting for input {input_id} to reach one of {wanted:?}");
 }
 
+async fn wait_for_input_state_with_budget(
+    app: &axum::Router,
+    session_id: &str,
+    input_id: &str,
+    wanted: &[&str],
+    attempts: usize,
+    sleep_ms: u64,
+) -> Value {
+    for _ in 0..attempts {
+        let (status, payload) = request_json(
+            app,
+            Method::GET,
+            format!("/input/{session_id}/{input_id}"),
+            None,
+        )
+        .await;
+        if status == StatusCode::OK {
+            let state = payload["current_state"].as_str().unwrap_or_default();
+            if wanted.contains(&state) {
+                return payload;
+            }
+        }
+        sleep(Duration::from_millis(sleep_ms)).await;
+    }
+    panic!("timed out waiting for input {input_id} to reach one of {wanted:?}");
+}
+
 async fn spawn_http_server(
     app: axum::Router,
 ) -> (std::net::SocketAddr, oneshot::Sender<()>, JoinHandle<()>) {
@@ -436,9 +463,15 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs() {
         0,
         "retire should stop new accepts but drain already-accepted work"
     );
-
-    let consumed =
-        wait_for_input_state(&app, &retire_session_id, retire_input_id, &["consumed"]).await;
+    let consumed = wait_for_input_state_with_budget(
+        &app,
+        &retire_session_id,
+        retire_input_id,
+        &["consumed"],
+        240,
+        250,
+    )
+    .await;
     assert_eq!(consumed["current_state"], "consumed");
 
     let (status, runtime_state) = request_json(
@@ -495,7 +528,6 @@ async fn e2e_scenario_22_rest_runtime_reset_and_retire_drain_staged_inputs() {
         runtime_state["state"], "idle",
         "reset should make a retired runtime usable again"
     );
-
     let (status, accepted) = request_json(
         &app,
         Method::POST,

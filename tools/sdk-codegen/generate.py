@@ -361,18 +361,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("InputStateParams", params_schema, "Request payload for input/state.")
     append_python_dataclass("InputListParams", params_schema, "Request payload for input/list.")
     append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
-    types_content += "InputStateResult = Optional[WireInputState]\n\n"
-    append_python_alias("WireContentBlock", wire_schema, "Wire-safe content block.")
-    append_python_alias("WireContentInput", wire_schema, "Wire-safe content input.")
-    append_python_alias("McpLiveOperation", wire_schema, "Shared operation kind for live MCP operations.")
-    append_python_alias("McpLiveOpStatus", wire_schema, "Shared status for live MCP operations.")
-    append_python_alias("MobPeerTarget", wire_schema, "Target for a mob wire/unwire call.")
-    append_python_alias("WireHandlingMode", wire_schema, "Public handling mode for mob member delivery.")
-    append_python_alias("WireRenderClass", wire_schema, "Public render class contract for mob member delivery.")
-    append_python_alias("WireRenderSalience", wire_schema, "Public render salience contract for mob member delivery.")
-    append_python_alias("WireRuntimeState", wire_schema, "Public runtime state projection used by RPC surfaces.")
-    append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for runtime/accept responses.")
-    append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_dataclass("WireRenderMetadata", wire_schema, "Render metadata for mob/send.")
     append_python_dataclass("MobSendResult", wire_schema, "Response payload for mob/send.")
     append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
@@ -385,6 +373,21 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireInputStateHistoryEntry", wire_schema, "Input transition history entry.")
     append_python_dataclass("WireInputState", wire_schema, "Runtime input state snapshot.")
     append_python_dataclass("InputListResult", wire_schema, "Response payload for input/list.")
+
+    # Keep aliases after the dataclasses they reference. Unlike annotations, alias
+    # assignments are evaluated eagerly at import time.
+    append_python_alias("WireContentBlock", wire_schema, "Wire-safe content block.")
+    append_python_alias("WireContentInput", wire_schema, "Wire-safe content input.")
+    append_python_alias("McpLiveOperation", wire_schema, "Shared operation kind for live MCP operations.")
+    append_python_alias("McpLiveOpStatus", wire_schema, "Shared status for live MCP operations.")
+    append_python_alias("MobPeerTarget", wire_schema, "Target for a mob wire/unwire call.")
+    append_python_alias("WireHandlingMode", wire_schema, "Public handling mode for mob member delivery.")
+    append_python_alias("WireRenderClass", wire_schema, "Public render class contract for mob member delivery.")
+    append_python_alias("WireRenderSalience", wire_schema, "Public render salience contract for mob member delivery.")
+    append_python_alias("WireRuntimeState", wire_schema, "Public runtime state projection used by RPC surfaces.")
+    append_python_alias("RuntimeAcceptOutcomeType", wire_schema, "Discriminator for runtime/accept responses.")
+    append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
+    types_content += "\n# Response payload for `input/state`.\nInputStateResult = Optional[WireInputState]\n"
 
     (output_dir / "types.py").write_text(types_content)
 

@@ -1,21 +1,72 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use futures::stream;
 use http_body_util::BodyExt;
 use meerkat::{
     AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistentSessionService, SessionStore,
 };
-use meerkat_client::TestClient;
+use meerkat_client::types::LlmStream;
+use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use meerkat_core::MemoryConfigStore;
 use meerkat_rest::{AppState, router};
+use meerkat_runtime::SessionServiceRuntimeExt as _;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+struct FirstTurnOnlyClient {
+    calls: AtomicUsize,
+}
+
+impl FirstTurnOnlyClient {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl LlmClient for FirstTurnOnlyClient {
+    fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+        let call = self.calls.fetch_add(1, Ordering::AcqRel);
+        if call == 0 {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        } else {
+            Box::pin(stream::pending())
+        }
+    }
+
+    fn provider(&self) -> &'static str {
+        "first-turn-only"
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
-async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_surface() {
+async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions() {
     let temp_dir = TempDir::new().expect("temp dir");
     let project_root = temp_dir.path().join("project");
     std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
@@ -31,7 +82,8 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         .shell(true)
         .project_root(project_root.clone());
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
-    builder.default_llm_client = Some(Arc::new(TestClient::default()));
+    let llm = Arc::new(FirstTurnOnlyClient::new());
+    builder.default_llm_client = Some(llm.clone());
     let session_service = Arc::new(PersistentSessionService::new(builder, 100, store, None));
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -39,6 +91,7 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         store_path.join("config_state.json"),
     ));
 
+    let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
     let state = AppState {
         store_path: store_path.clone(),
         default_model: config.agent.model.clone().into(),
@@ -48,7 +101,7 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         enable_builtins: true,
         enable_shell: true,
         project_root: Some(project_root),
-        llm_client_override: Some(Arc::new(TestClient::default())),
+        llm_client_override: Some(llm.clone()),
         config_store: config_store_arc,
         event_tx,
         session_service,
@@ -68,7 +121,7 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
-        runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        runtime_adapter: runtime_adapter.clone(),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
@@ -103,6 +156,12 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         .as_str()
         .expect("session_id")
         .to_string();
+    let parsed_session_id = meerkat::SessionId::parse(&session_id).expect("parse session id");
+    assert_eq!(
+        llm.call_count(),
+        1,
+        "initial create-session turn should consume exactly one model call"
+    );
 
     let event_request = Request::builder()
         .method("POST")
@@ -127,4 +186,28 @@ async fn runtime_backed_ingress_red_ok_rest_session_create_uses_runtime_adapter_
         .to_bytes();
     let event_payload: Value = serde_json::from_slice(&event_body).expect("event json body");
     assert_eq!(event_payload, json!({ "queued": true }));
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        llm.call_count(),
+        1,
+        "queued external events must not wake a fresh runtime-backed turn immediately"
+    );
+    assert_eq!(
+        runtime_adapter
+            .runtime_state(&parsed_session_id)
+            .await
+            .expect("runtime state"),
+        meerkat_runtime::RuntimeState::Attached,
+        "queued external events should stage work without starting a new run"
+    );
+    assert!(
+        !runtime_adapter
+            .list_active_inputs(&parsed_session_id)
+            .await
+            .expect("active inputs")
+            .is_empty(),
+        "queued external events should remain staged for a later boundary"
+    );
 }

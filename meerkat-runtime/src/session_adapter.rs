@@ -1015,6 +1015,41 @@ impl RuntimeSessionAdapter {
         Ok((outcome, handle))
     }
 
+    /// Accept an input but intentionally do not wake the runtime loop.
+    ///
+    /// This is reserved for explicitly queued-only surface contracts that
+    /// stage work for the next turn boundary instead of waking an idle session
+    /// immediately.
+    pub async fn accept_input_without_wake(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+
+        let outcome = {
+            let mut driver = driver.lock().await;
+            let result = driver.as_driver_mut().accept_input(input).await?;
+            let _ = driver.take_wake_requested();
+            let process_requested = driver.take_process_requested();
+            debug_assert!(
+                !process_requested,
+                "queue-only admission unexpectedly requested immediate processing"
+            );
+            result
+        };
+
+        Ok(outcome)
+    }
+
     /// Get the shared ops lifecycle registry for a session/runtime instance.
     pub async fn ops_lifecycle_registry(
         &self,
@@ -1037,11 +1072,11 @@ impl RuntimeSessionAdapter {
         host_mode: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
-        let mode = if host_mode {
-            CommsDrainMode::PersistentHost
-        } else {
-            CommsDrainMode::Timed
-        };
+        if !host_mode {
+            return false;
+        }
+
+        let mode = CommsDrainMode::PersistentHost;
 
         let comms = match comms_runtime {
             Some(c) => c,

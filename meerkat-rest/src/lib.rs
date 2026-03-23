@@ -1810,7 +1810,7 @@ fn make_runtime_external_event_input(
     })
 }
 
-/// Admit an external event to a session through the runtime-backed path.
+/// Queue an external event into the runtime without waking an idle session.
 ///
 /// Authentication is controlled by `RKAT_WEBHOOK_SECRET` env var:
 /// - If not set: no authentication (suitable for localhost/dev)
@@ -1831,7 +1831,11 @@ async fn post_external_event(
 
     let input = make_runtime_external_event_input("webhook", "webhook", payload);
 
-    match state.runtime_adapter.accept_input(&session_id, input).await {
+    match state
+        .runtime_adapter
+        .accept_input_without_wake(&session_id, input)
+        .await
+    {
         Ok(
             meerkat_runtime::AcceptOutcome::Accepted { .. }
             | meerkat_runtime::AcceptOutcome::Deduplicated { .. },

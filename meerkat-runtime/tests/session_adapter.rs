@@ -242,6 +242,32 @@ async fn ephemeral_adapter_accept_and_query() {
 }
 
 #[tokio::test]
+async fn accept_input_without_wake_keeps_idle_runtime_idle() {
+    let adapter = RuntimeSessionAdapter::ephemeral();
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let input = make_prompt("queued-only");
+    let input_id = input.header().id.clone();
+    let outcome = adapter
+        .accept_input_without_wake(&sid, input)
+        .await
+        .unwrap();
+    assert!(outcome.is_accepted());
+
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle,
+        "queue-only admission must not wake an idle runtime"
+    );
+    assert_eq!(
+        adapter.list_active_inputs(&sid).await.unwrap(),
+        vec![input_id],
+        "queue-only admission should still stage the input for later processing"
+    );
+}
+
+#[tokio::test]
 async fn persistent_adapter_accept() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let adapter = RuntimeSessionAdapter::persistent(store);
@@ -1895,6 +1921,64 @@ async fn unregister_session_aborts_spawned_drain_and_clears_suppression() {
             state: RuntimeState::Destroyed
         })
     ));
+}
+
+#[tokio::test]
+async fn non_host_sessions_do_not_spawn_background_comms_drains() {
+    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+    use tokio::sync::Notify;
+
+    struct IdleDrainRuntime {
+        notify: Arc<Notify>,
+    }
+
+    impl IdleDrainRuntime {
+        fn new() -> Self {
+            Self {
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for IdleDrainRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
+        }
+
+        fn dismiss_received(&self) -> bool {
+            false
+        }
+
+        async fn drain_classified_inbox_interactions(
+            &self,
+        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+
+    let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
+    let spawned = adapter
+        .maybe_spawn_comms_drain(&sid, false, Some(comms))
+        .await;
+
+    assert!(
+        !spawned,
+        "non-host sessions must not leave a background comms drain alive"
+    );
+    assert!(
+        !adapter.comms_drain_suppresses_turn_boundary(&sid).await,
+        "non-host sessions should not suppress turn-boundary draining"
+    );
 }
 
 /// Test that BoundaryApplied fires with correct receipt on success.

@@ -124,6 +124,11 @@ struct RespawnSnapshot {
     restore_wiring: RestoreWiringPlan,
 }
 
+struct FinalizeSpawnOutcome {
+    receipt: super::handle::MemberSpawnReceipt,
+    failed_restore_peer_ids: Vec<MeerkatId>,
+}
+
 // ---------------------------------------------------------------------------
 // MobActor
 // ---------------------------------------------------------------------------
@@ -1802,7 +1807,8 @@ impl MobActor {
                     auto_wire_parent,
                     None,
                 )
-                .await;
+                .await
+                .map(|outcome| outcome.receipt);
             let _ = reply_tx.send(result);
             return;
         }
@@ -2005,6 +2011,7 @@ impl MobActor {
                                 restore_wiring,
                             )
                             .await
+                            .map(|outcome| outcome.receipt)
                         }
                     }
                     Err(error) => Err(error),
@@ -2179,6 +2186,7 @@ impl MobActor {
                 None,
             )
             .await
+            .map(|outcome| outcome.receipt)
         }
         .await;
 
@@ -2217,7 +2225,7 @@ impl MobActor {
         operation_id: meerkat_core::ops::OperationId,
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
-    ) -> Result<super::handle::MemberSpawnReceipt, MobError> {
+    ) -> Result<FinalizeSpawnOutcome, MobError> {
         if let Err(append_error) = self
             .events
             .append(NewMobEvent {
@@ -2340,6 +2348,7 @@ impl MobActor {
         }
 
         // Restore peer wiring from a prior respawn.
+        let mut failed_restore_peer_ids = Vec::new();
         if let Some(mut wiring) = restore_wiring {
             wiring.local_peers.sort();
             wiring.local_peers.dedup();
@@ -2354,6 +2363,7 @@ impl MobActor {
                         peer = %peer_id,
                         "failed to restore wiring after respawn"
                     );
+                    failed_restore_peer_ids.push(peer_id.clone());
                 }
             }
             wiring.external_peers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2368,17 +2378,24 @@ impl MobActor {
                         peer = %spec.name,
                         "failed to restore external wiring after respawn"
                     );
+                    failed_restore_peer_ids.push(MeerkatId::from(spec.name.clone()));
                 }
             }
         }
+
+        failed_restore_peer_ids.sort();
+        failed_restore_peer_ids.dedup();
 
         tracing::debug!(
             meerkat_id = %meerkat_id,
             "MobActor::finalize_spawn_from_pending done"
         );
-        Ok(super::handle::MemberSpawnReceipt {
-            member_ref,
-            operation_id,
+        Ok(FinalizeSpawnOutcome {
+            receipt: super::handle::MemberSpawnReceipt {
+                member_ref,
+                operation_id,
+            },
+            failed_restore_peer_ids,
         })
     }
 
@@ -2721,7 +2738,8 @@ impl MobActor {
                 );
             }
 
-            self.finalize_spawn_from_pending(
+            let finalized = self
+                .finalize_spawn_from_pending(
                 &snapshot.profile_name,
                 &meerkat_id,
                 snapshot.runtime_mode,
@@ -2738,7 +2756,20 @@ impl MobActor {
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 member_id: meerkat_id.clone(),
                 reason: error.to_string(),
-            })
+            })?;
+
+            if finalized.failed_restore_peer_ids.is_empty() {
+                Ok(finalized.receipt)
+            } else {
+                Err(MobRespawnError::TopologyRestoreFailed {
+                    receipt: super::handle::MemberRespawnReceipt {
+                        member_id: meerkat_id.clone(),
+                        old_session_id: Some(snapshot.old_session_id.clone()),
+                        new_session_id: finalized.receipt.member_ref.session_id().cloned(),
+                    },
+                    failed_peer_ids: finalized.failed_restore_peer_ids,
+                })
+            }
         }
         .await;
 

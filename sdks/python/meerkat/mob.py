@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 from .streaming import EventSubscription
 
 RenderClass = Literal[
@@ -16,7 +16,10 @@ RenderClass = Literal[
     "ops_progress",
 ]
 RenderSalience = Literal["background", "normal", "important", "urgent"]
-RenderMetadata = TypedDict("RenderMetadata", {"class": RenderClass, "salience": RenderSalience}, total=False)
+RenderMetadata = TypedDict(
+    "RenderMetadata",
+    {"class": RenderClass, "salience": NotRequired[RenderSalience]},
+)
 
 
 class Member:

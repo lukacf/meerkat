@@ -156,6 +156,7 @@ finished `0.5` system.
 | `MobHelperResultAnchorMachine` | `SchemaKernel` | Formal observation anchor for helper-facing result classes so helper outcome surfaces remain explicit in the machine registry |
 | `OpsLifecycleMachine` | `SchemaKernel` | Shared async-operation lifecycle substrate is closed once the seam is cut explicitly |
 | `PeerCommsMachine` | `SchemaKernel` | Trust/auth/normalization/request-registry semantics are drift-sensitive and must converge to catalog-backed executable authority |
+| `PeerDirectoryReachabilityMachine` | `SchemaKernel` | Resolved-peer reachability is user-visible runtime truth and should remain explicit, source-driven, and catalog-backed rather than inferred ad hoc from send errors |
 | `ExternalToolSurfaceMachine` | `SchemaKernel` | Live add/remove/reload behavior is user-visible and must converge to catalog-backed executable authority |
 | `TurnExecutionMachine` | `SchemaKernel` | The core turn loop is too central to leave on prose-plus-kernel alignment forever |
 | `FlowRunMachine` | `SchemaKernel` | Durable flow/run truth must converge to catalog-backed executable authority |
@@ -174,6 +175,7 @@ This section exists to keep the execution plan honest.
 | `MobLifecycleMachine` | `SchemaKernel` target | implement catalog/codegen workflow and generated kernel |
 | `OpsLifecycleMachine` | `BoundaryRedesign` | cut seam, then land `SchemaKernel` implementation |
 | `PeerCommsMachine` | `SchemaExtension` | land schema support for keyed reservation/request registries, trust snapshots, and normalization-driven typed effects |
+| `PeerDirectoryReachabilityMachine` | `SchemaKernel` target | implement catalog/codegen workflow and generated kernel |
 | `ExternalToolSurfaceMachine` | `SchemaExtension` | land schema support for staged async target maps, inflight/pending epochs, and typed outward lifecycle deltas |
 | `TurnExecutionMachine` | `BoundaryRedesign + SchemaExtension` | narrow `Agent`, delete host loop, and land schema support for hierarchical run-local loop transitions and rich effect payloads |
 | `FlowRunMachine` | `SchemaExtension` | land schema support for dependency/ready-set evaluation, durable step/run replay semantics, and ordered graph-derived transitions |

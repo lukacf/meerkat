@@ -1538,6 +1538,18 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
             filter: "peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage",
         },
     ];
+    const PEER_DIRECTORY_REACHABILITY: &[OwnerTestSpec] = &[
+        OwnerTestSpec {
+            package: "meerkat-comms",
+            target: "peer_directory_reachability_kernel",
+            filter: "peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot",
+        },
+        OwnerTestSpec {
+            package: "meerkat-comms",
+            target: "peer_directory_reachability_kernel",
+            filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
+        },
+    ];
     const TURN_EXECUTION: &[OwnerTestSpec] = &[
         OwnerTestSpec {
             package: "meerkat-core",
@@ -1580,6 +1592,7 @@ fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
 
     match slug {
         "peer_comms" => PEER_COMMS,
+        "peer_directory_reachability" => PEER_DIRECTORY_REACHABILITY,
         "turn_execution" => TURN_EXECUTION,
         "external_tool_surface" => EXTERNAL_TOOL_SURFACE,
         "flow_run" => FLOW_RUN,

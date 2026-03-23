@@ -24,6 +24,24 @@ impl CommsToolSurface {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
+        };
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
+        Self {
+            tool_context,
+            tool_defs,
+        }
+    }
+
+    pub fn new_with_runtime(
+        router: Arc<Router>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(runtime),
         };
         let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {

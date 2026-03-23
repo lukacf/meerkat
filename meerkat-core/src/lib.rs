@@ -67,8 +67,8 @@ pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
-    StreamScope,
+    PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use comms_drain_lifecycle_authority::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,

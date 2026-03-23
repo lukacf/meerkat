@@ -500,6 +500,22 @@ async fn apply_runtime_turn(
                 .await
                 .ok()
                 .map(|s| s.generation);
+            context
+                .runtime_adapter
+                .register_session(session_id.clone())
+                .await;
+            let ops_lifecycle = context
+                .runtime_adapter
+                .ops_lifecycle_registry(session_id)
+                .await
+                .map(|registry| {
+                    registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
+                })
+                .ok_or_else(|| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to obtain runtime ops registry for session {session_id}"
+                    )))
+                })?;
             let build = SessionBuildOptions {
                 provider: stored_metadata.as_ref().map(|meta| meta.provider),
                 output_schema: None,
@@ -519,6 +535,7 @@ async fn apply_runtime_turn(
                     .llm_client_override
                     .clone()
                     .map(encode_llm_client_override_for_service),
+                ops_lifecycle_override: Some(ops_lifecycle),
                 override_builtins: Some(tooling.builtins),
                 override_shell: Some(tooling.shell),
                 override_memory: Some(tooling.memory),
@@ -1020,6 +1037,27 @@ async fn ensure_runtime_session_registered(
     Ok(())
 }
 
+async fn ensure_runtime_session_ops_registry(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>, Response> {
+    let adapter = get_runtime_adapter(state);
+    adapter.register_session(session_id.clone()).await;
+    adapter
+        .ops_lifecycle_registry(session_id)
+        .await
+        .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("failed to obtain runtime ops registry for session: {session_id}")}),
+                ),
+            )
+                .into_response()
+        })
+}
+
 /// GET /runtime/{id}/state
 async fn runtime_state(
     State(state): State<AppState>,
@@ -1449,8 +1487,11 @@ async fn mob_member_respawn(
 ) -> Result<Json<Value>, ApiError> {
     let mob_id = meerkat_mob::MobId::from(id.as_str());
     let meerkat_id_val = meerkat_mob::MeerkatId::from(meerkat_id.as_str());
-    let initial_message =
-        body.and_then(|Json(v)| v.get("initial_message")?.as_str().map(String::from));
+    let initial_message = body
+        .and_then(|Json(v)| v.get("initial_message").cloned())
+        .map(serde_json::from_value::<ContentInput>)
+        .transpose()
+        .map_err(|e| ApiError::BadRequest(format!("invalid initial_message: {e}")))?;
     match state
         .mob_state
         .mob_respawn(&mob_id, meerkat_id_val, initial_message)
@@ -1571,7 +1612,27 @@ async fn comms_send(
             };
             Ok(Json(result))
         }
-        Err(e) => Err(ApiError::Internal(e.to_string())),
+        Err(e) => {
+            let message = match &e {
+                meerkat_core::comms::SendError::PeerNotFound(peer) => {
+                    format!(
+                        "peer_not_found_or_not_trusted: peer '{peer}' is not found or not trusted"
+                    )
+                }
+                meerkat_core::comms::SendError::PeerOffline => {
+                    let peer = req.to.as_deref().unwrap_or("<unknown>");
+                    format!("peer_unreachable: peer '{peer}' is unreachable: offline_or_no_ack")
+                }
+                meerkat_core::comms::SendError::Internal(details) if req.to.is_some() => {
+                    let peer = req.to.as_deref().unwrap_or("<unknown>");
+                    format!(
+                        "peer_unreachable: peer '{peer}' is unreachable: transport_error ({details})"
+                    )
+                }
+                _ => e.to_string(),
+            };
+            Err(ApiError::Internal(message))
+        }
     }
 }
 
@@ -1670,6 +1731,8 @@ async fn comms_peers(
                 "source": format!("{:?}", p.source),
                 "sendable_kinds": p.sendable_kinds,
                 "capabilities": p.capabilities,
+                "reachability": p.reachability,
+                "last_unreachable_reason": p.last_unreachable_reason,
                 "meta": p.meta,
             })
         })
@@ -2003,7 +2066,6 @@ async fn drain_event_forwarder(session_id: &SessionId, forwarder: tokio::task::J
 }
 
 /// Convert a `RunResult` into a `SessionResponse` (via contracts `From` impl).
-#[allow(deprecated)]
 fn run_result_to_response(
     result: meerkat_core::types::RunResult,
     realm_id: &str,
@@ -2047,6 +2109,12 @@ async fn create_session(
     // and event forwarding before the service call returns).
     let pre_session = Session::new();
     let session_id = pre_session.id().clone();
+    let ops_lifecycle = ensure_runtime_session_ops_registry(&state, &session_id)
+        .await
+        .map_err(|resp| {
+            let message = format!("failed to prepare runtime ops registry: {}", resp.status());
+            ApiError::Internal(message)
+        })?;
 
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -2096,6 +2164,7 @@ async fn create_session(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
+        ops_lifecycle_override: Some(ops_lifecycle),
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_memory: req.enable_memory,
@@ -2133,15 +2202,17 @@ async fn create_session(
     let adapter = state.runtime_adapter.clone();
 
     // Create session with Defer, then route through runtime
-    let create_result = state
-        .session_service
-        .create_session(svc_req)
-        .await
-        .map_err(|err| match err {
-            SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
-            SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
-            _ => ApiError::Agent(err.to_string()),
-        })?;
+    let create_result = match state.session_service.create_session(svc_req).await {
+        Ok(result) => result,
+        Err(err) => {
+            state.runtime_adapter.unregister_session(&session_id).await;
+            return Err(match err {
+                SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
+                SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
+                _ => ApiError::Agent(err.to_string()),
+            });
+        }
+    };
 
     // Register executor for the new session
     if let Err(_resp) = ensure_runtime_session_registered(&state, &create_result.session_id).await {
@@ -2247,7 +2318,6 @@ fn parse_label_filters(
 }
 
 /// List sessions in the active realm.
-#[allow(deprecated)]
 async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
@@ -2308,7 +2378,6 @@ async fn get_session(
 }
 
 /// Get full session history.
-#[allow(deprecated)]
 async fn get_session_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3744,7 +3813,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_run_result_to_response_carries_skill_diagnostics() {
         let session_id = SessionId::new();
         let result = meerkat_core::RunResult {

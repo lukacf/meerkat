@@ -75,12 +75,25 @@ export type ContentInput = string | ContentBlock[];
 /** Runtime handling mode for ordinary work. */
 export type HandlingMode = 'queue' | 'steer';
 
+/** Standardized rendering class for injected ordinary work. */
+export type RenderClass =
+  | 'user_prompt'
+  | 'peer_message'
+  | 'peer_request'
+  | 'peer_response'
+  | 'external_event'
+  | 'flow_step'
+  | 'continuation'
+  | 'system_notice'
+  | 'tool_scope_notice'
+  | 'ops_progress';
+
 /** Normalized rendering salience for injected work. */
 export type RenderSalience = 'background' | 'normal' | 'important' | 'urgent';
 
 /** Normalized rendering metadata for injected work. */
 export interface RenderMetadata {
-  class?: string;
+  class: RenderClass;
   salience?: RenderSalience;
 }
 
@@ -237,7 +250,7 @@ export interface SpawnSpec {
   profile: string;
   meerkat_id: string;
   runtime_mode?: 'turn_driven' | 'autonomous_host';
-  initial_message?: string;
+  initial_message?: string | ContentBlock[];
   labels?: Record<string, string>;
 }
 
@@ -253,6 +266,8 @@ export interface MobMember {
   meerkat_id: string;
   profile: string;
   member_ref: Record<string, unknown>;
+  peer_id?: string;
+  external_peer_specs?: Record<string, Record<string, unknown>>;
   runtime_mode?: string;
   state?: string;
   wired_to?: string[];
@@ -278,14 +293,17 @@ export interface EventEnvelope {
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
 
-/** Direct-session poll/subscribe event emitted by the browser runtime. */
-export interface SessionLaggedEvent {
+/** Poll/subscribe lag sentinel emitted by the browser runtime. */
+export interface SubscriptionLaggedEvent {
   type: 'lagged';
   skipped: number;
 }
 
 /** Direct-session event item. */
-export type SessionEvent = AgentEvent | SessionLaggedEvent;
+export type SessionEvent = AgentEvent | SubscriptionLaggedEvent;
+
+/** Member subscription item from the browser runtime. */
+export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
 
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
@@ -293,6 +311,9 @@ export interface AttributedEvent {
   profile: string;
   envelope: EventEnvelope;
 }
+
+/** Mob-wide subscription item from the browser runtime. */
+export type AttributedEventItem = AttributedEvent | SubscriptionLaggedEvent;
 
 /** Structural mob event from the mob event log. */
 export interface MobEvent {

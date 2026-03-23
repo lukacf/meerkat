@@ -1,10 +1,15 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use meerkat_core::comms::{
+    PeerDirectoryEntry, PeerReachability, PeerReachabilityReason, TrustedPeerSpec,
+};
 use meerkat_core::ops::OperationId;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::SessionError;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Point-in-time snapshot of a mob member's execution state.
 #[derive(Debug, Clone, Serialize)]
@@ -18,11 +23,30 @@ pub struct MobMemberSnapshot {
     pub error: Option<String>,
     /// Cumulative token usage.
     pub tokens_used: u64,
-    /// Derived convenience field: `true` when `status` is terminal (not `Active`/`Retiring`).
-    /// Canonical truth: `status` field. See `DerivedFieldEntry` in ownership ledger.
+    /// Whether the member has reached a terminal state.
     pub is_final: bool,
     /// Current session ID (if a session bridge exists).
     pub current_session_id: Option<SessionId>,
+    /// Live comms connectivity for currently wired peers, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+}
+
+/// Live connectivity summary for a member's currently wired peers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MobPeerConnectivitySnapshot {
+    pub reachable_peer_count: usize,
+    pub unknown_peer_count: usize,
+    pub unreachable_peers: Vec<MobUnreachablePeer>,
+}
+
+/// One currently wired peer that is known to be unreachable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MobUnreachablePeer {
+    pub peer: String,
+    pub reason: Option<PeerReachabilityReason>,
 }
 
 /// Execution status for a mob member.
@@ -52,14 +76,34 @@ pub struct MemberRespawnReceipt {
     pub new_session_id: Option<SessionId>,
 }
 
+impl MemberRespawnReceipt {
+    pub fn new(
+        member_id: MeerkatId,
+        old_session_id: Option<SessionId>,
+        new_session_id: Option<SessionId>,
+    ) -> Self {
+        Self {
+            member_id,
+            old_session_id,
+            new_session_id,
+        }
+    }
+}
+
 /// Receipt returned by a successful member spawn.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
-pub struct MemberSpawnReceipt {
+pub(crate) struct MemberSpawnReceipt {
     /// The member identity that was provisioned and committed into the roster.
-    pub member_ref: MemberRef,
+    pub(crate) member_ref: MemberRef,
     /// Canonical mob child operation for the spawned member lifecycle.
-    pub operation_id: OperationId,
+    pub(crate) operation_id: OperationId,
+}
+
+#[derive(Clone)]
+pub(crate) struct CanonicalOpsOwnerContext {
+    pub(crate) owner_session_id: SessionId,
+    pub(crate) ops_registry: Arc<dyn OpsLifecycleRegistry>,
 }
 
 /// Structured error for direct-Rust respawn failures.
@@ -138,6 +182,22 @@ pub struct HelperResult {
     pub session_id: Option<meerkat_core::types::SessionId>,
 }
 
+/// Target for a wire operation from a local mob member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerTarget {
+    /// Another member in the same mob roster.
+    Local(MeerkatId),
+    /// A trusted peer that lives outside the local mob roster.
+    External(TrustedPeerSpec),
+}
+
+impl From<MeerkatId> for PeerTarget {
+    fn from(value: MeerkatId) -> Self {
+        Self::Local(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanonicalMemberStatus {
     Unknown,
@@ -205,6 +265,7 @@ struct CanonicalMemberSnapshotMaterial {
     output_preview: Option<String>,
     tokens_used: u64,
     current_session_id: Option<SessionId>,
+    peer_connectivity: Option<MobPeerConnectivitySnapshot>,
 }
 
 impl CanonicalMemberSnapshotMaterial {
@@ -223,6 +284,7 @@ impl CanonicalMemberSnapshotMaterial {
             tokens_used: self.tokens_used,
             is_final,
             current_session_id: self.current_session_id.clone(),
+            peer_connectivity: self.peer_connectivity.clone(),
         }
     }
 
@@ -280,7 +342,7 @@ pub struct MobEventsView {
 pub struct SpawnMemberSpec {
     pub profile_name: ProfileName,
     pub meerkat_id: MeerkatId,
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
     /// Opaque application context passed through to the agent build pipeline.
@@ -325,8 +387,8 @@ impl SpawnMemberSpec {
         self
     }
 
-    pub fn with_initial_message(mut self, message: String) -> Self {
-        self.initial_message = Some(message);
+    pub fn with_initial_message(mut self, message: impl Into<ContentInput>) -> Self {
+        self.initial_message = Some(message.into());
         self
     }
 
@@ -387,7 +449,7 @@ impl SpawnMemberSpec {
     pub fn from_wire(
         profile: String,
         meerkat_id: String,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Self {
@@ -449,6 +511,86 @@ impl MobHandle {
     /// Snapshot of the current roster.
     pub async fn roster(&self) -> Roster {
         self.roster.read().await.snapshot()
+    }
+
+    fn derived_comms_name(&self, entry: &RosterEntry) -> String {
+        format!(
+            "{}/{}/{}",
+            self.definition.id, entry.profile, entry.meerkat_id
+        )
+    }
+
+    async fn resolve_peer_connectivity(
+        &self,
+        entry: &RosterEntry,
+        session_id: &SessionId,
+        roster_snapshot: &Roster,
+    ) -> Option<MobPeerConnectivitySnapshot> {
+        let comms = self.session_service.comms_runtime(session_id).await?;
+        let peers = comms.peers().await;
+        let peers_by_id: HashMap<&str, &PeerDirectoryEntry> = peers
+            .iter()
+            .map(|peer| (peer.peer_id.as_str(), peer))
+            .collect();
+        let peers_by_name: HashMap<&str, &PeerDirectoryEntry> = peers
+            .iter()
+            .map(|peer| (peer.name.as_str(), peer))
+            .collect();
+
+        let mut reachable_peer_count = 0usize;
+        let mut unknown_peer_count = 0usize;
+        let mut unreachable_peers = Vec::new();
+
+        for wired_peer in &entry.wired_to {
+            let matched = if let Some(spec) = entry.external_peer_specs.get(wired_peer) {
+                peers_by_id
+                    .get(spec.peer_id.as_str())
+                    .copied()
+                    .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
+            } else {
+                let local_entry = roster_snapshot.get(wired_peer);
+                let live_peer_id =
+                    match local_entry.and_then(|peer_entry| peer_entry.member_ref.session_id()) {
+                        Some(target_session_id) => self
+                            .session_service
+                            .comms_runtime(target_session_id)
+                            .await
+                            .and_then(|runtime| runtime.public_key()),
+                        None => None,
+                    };
+                live_peer_id
+                    .as_deref()
+                    .and_then(|peer_id| peers_by_id.get(peer_id).copied())
+                    .or_else(|| {
+                        local_entry
+                            .and_then(|peer_entry| peer_entry.peer_id.as_deref())
+                            .and_then(|peer_id| peers_by_id.get(peer_id).copied())
+                    })
+                    .or_else(|| {
+                        local_entry
+                            .map(|peer_entry| self.derived_comms_name(peer_entry))
+                            .and_then(|name| peers_by_name.get(name.as_str()).copied())
+                    })
+            };
+
+            match matched {
+                Some(peer) => match peer.reachability {
+                    PeerReachability::Reachable => reachable_peer_count += 1,
+                    PeerReachability::Unknown => unknown_peer_count += 1,
+                    PeerReachability::Unreachable => unreachable_peers.push(MobUnreachablePeer {
+                        peer: peer.name.as_string(),
+                        reason: peer.last_unreachable_reason,
+                    }),
+                },
+                None => unknown_peer_count += 1,
+            }
+        }
+
+        Some(MobPeerConnectivitySnapshot {
+            reachable_peer_count,
+            unknown_peer_count,
+            unreachable_peers,
+        })
     }
 
     /// List active (operational) members in the roster.
@@ -651,7 +793,7 @@ impl MobHandle {
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
     ) -> Result<MemberRef, MobError> {
         self.spawn_with_options(profile_name, meerkat_id, initial_message, None, None)
             .await
@@ -662,7 +804,7 @@ impl MobHandle {
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
         self.spawn_with_options(profile_name, meerkat_id, initial_message, None, backend)
@@ -674,7 +816,7 @@ impl MobHandle {
         &self,
         profile_name: ProfileName,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         runtime_mode: Option<crate::MobRuntimeMode>,
         backend: Option<MobBackendKind>,
     ) -> Result<MemberRef, MobError> {
@@ -682,7 +824,7 @@ impl MobHandle {
         spec.initial_message = initial_message;
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
-        Ok(self.spawn_spec_receipt(spec).await?.member_ref)
+        self.spawn_spec(spec).await
     }
 
     /// Attach an existing session by reusing the mob spawn control-plane path.
@@ -698,7 +840,7 @@ impl MobHandle {
         spec.launch_mode = crate::launch::MemberLaunchMode::Resume { session_id };
         spec.runtime_mode = runtime_mode;
         spec.backend = backend;
-        Ok(self.spawn_spec_receipt(spec).await?.member_ref)
+        self.spawn_spec(spec).await
     }
 
     /// Attach an existing session as the mob orchestrator.
@@ -725,18 +867,33 @@ impl MobHandle {
 
     /// Spawn a member from a fully-specified [`SpawnMemberSpec`].
     pub async fn spawn_spec(&self, spec: SpawnMemberSpec) -> Result<MemberRef, MobError> {
-        Ok(self.spawn_spec_receipt(spec).await?.member_ref)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::Spawn {
+                spec: Box::new(spec),
+                owner_session_id: None,
+                ops_registry: None,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))?
+            .map(|receipt| receipt.member_ref)
     }
 
-    /// Spawn a member and return the canonical lifecycle receipt.
-    pub async fn spawn_spec_receipt(
+    pub(super) async fn spawn_spec_receipt_with_owner_context(
         &self,
         spec: SpawnMemberSpec,
+        owner_context: CanonicalOpsOwnerContext,
     ) -> Result<MemberSpawnReceipt, MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(MobCommand::Spawn {
                 spec: Box::new(spec),
+                owner_session_id: Some(owner_context.owner_session_id),
+                ops_registry: Some(owner_context.ops_registry),
                 reply_tx,
             })
             .await
@@ -756,12 +913,17 @@ impl MobHandle {
         futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec(spec))).await
     }
 
-    /// Spawn multiple members and return lifecycle receipts preserving input order.
-    pub async fn spawn_many_receipts(
+    pub(super) async fn spawn_many_receipts_with_owner_context(
         &self,
         specs: Vec<SpawnMemberSpec>,
+        owner_context: CanonicalOpsOwnerContext,
     ) -> Vec<Result<MemberSpawnReceipt, MobError>> {
-        futures::future::join_all(specs.into_iter().map(|spec| self.spawn_spec_receipt(spec))).await
+        futures::future::join_all(
+            specs.into_iter().map(|spec| {
+                self.spawn_spec_receipt_with_owner_context(spec, owner_context.clone())
+            }),
+        )
+        .await
     }
 
     /// Retire a member, archiving its session and removing trust.
@@ -787,7 +949,7 @@ impl MobHandle {
     pub async fn respawn(
         &self,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
         let old_session_id_before = self
             .canonical_member_snapshot_material(&meerkat_id)
@@ -851,11 +1013,18 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Wire two members together (bidirectional trust).
-    pub async fn wire(&self, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
+    /// Wire a local member to either another local member or an external peer.
+    pub async fn wire<T>(&self, local: MeerkatId, target: T) -> Result<(), MobError>
+    where
+        T: Into<PeerTarget>,
+    {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(MobCommand::Wire { a, b, reply_tx })
+            .send(MobCommand::Wire {
+                local,
+                target: target.into(),
+                reply_tx,
+            })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
         reply_rx
@@ -863,11 +1032,18 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Unwire two members (remove bidirectional trust).
-    pub async fn unwire(&self, a: MeerkatId, b: MeerkatId) -> Result<(), MobError> {
+    /// Unwire a local member from either another local member or an external peer.
+    pub async fn unwire<T>(&self, local: MeerkatId, target: T) -> Result<(), MobError>
+    where
+        T: Into<PeerTarget>,
+    {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
-            .send(MobCommand::Unwire { a, b, reply_tx })
+            .send(MobCommand::Unwire {
+                local,
+                target: target.into(),
+                reply_tx,
+            })
             .await
             .map_err(|_| MobError::Internal("actor task dropped".into()))?;
         reply_rx
@@ -905,7 +1081,7 @@ impl MobHandle {
         self.command_tx
             .send(MobCommand::ExternalTurn {
                 meerkat_id,
-                message,
+                content: message,
                 handling_mode,
                 render_metadata,
                 reply_tx,
@@ -926,7 +1102,7 @@ impl MobHandle {
         self.command_tx
             .send(MobCommand::InternalTurn {
                 meerkat_id,
-                message,
+                content: message,
                 reply_tx,
             })
             .await
@@ -1135,11 +1311,16 @@ impl MobHandle {
     ) -> CanonicalMemberSnapshotMaterial {
         // Canonical helper-surface classification is derived only from roster
         // membership/state plus session-service activity, never side tables.
-        let (roster_state, current_session_id) = {
+        let (roster_snapshot, roster_entry, roster_state, current_session_id) = {
             let roster = self.roster.read().await;
             match roster.get(meerkat_id) {
-                Some(entry) => (Some(entry.state), entry.member_ref.session_id().cloned()),
-                None => (None, None),
+                Some(entry) => (
+                    roster.snapshot(),
+                    Some(entry.clone()),
+                    Some(entry.state),
+                    entry.member_ref.session_id().cloned(),
+                ),
+                None => (roster.snapshot(), None, None, None),
             }
         };
 
@@ -1151,6 +1332,7 @@ impl MobHandle {
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
+                peer_connectivity: None,
             },
             (Some(crate::roster::MemberState::Retiring), None) => CanonicalMemberSnapshotMaterial {
                 member_present: true,
@@ -1159,6 +1341,7 @@ impl MobHandle {
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
+                peer_connectivity: None,
             },
             (Some(crate::roster::MemberState::Active), None) => CanonicalMemberSnapshotMaterial {
                 member_present: true,
@@ -1167,6 +1350,7 @@ impl MobHandle {
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
+                peer_connectivity: None,
             },
             (Some(roster_state), Some(session_id)) => {
                 let (output_preview, tokens_used, observation) =
@@ -1201,6 +1385,13 @@ impl MobHandle {
                         crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
                     },
                 };
+                let peer_connectivity = match roster_entry.as_ref() {
+                    Some(entry) => {
+                        self.resolve_peer_connectivity(entry, &session_id, &roster_snapshot)
+                            .await
+                    }
+                    None => None,
+                };
                 CanonicalMemberSnapshotMaterial {
                     member_present: true,
                     status,
@@ -1208,6 +1399,7 @@ impl MobHandle {
                     output_preview,
                     tokens_used,
                     current_session_id: Some(session_id),
+                    peer_connectivity,
                 }
             }
         }
@@ -1291,7 +1483,7 @@ impl MobHandle {
             })?;
         let task_text = task.into();
         let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
-        spec.initial_message = Some(task_text);
+        spec.initial_message = Some(task_text.into());
         spec.runtime_mode = options.runtime_mode;
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
@@ -1324,7 +1516,7 @@ impl MobHandle {
             })?;
         let task_text = task.into();
         let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
-        spec.initial_message = Some(task_text);
+        spec.initial_message = Some(task_text.into());
         spec.runtime_mode = options.runtime_mode;
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;

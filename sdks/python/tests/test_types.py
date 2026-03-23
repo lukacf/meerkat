@@ -1,9 +1,14 @@
 import asyncio
 """Conformance tests for Meerkat Python SDK types and events."""
 
-import pytest
-import tomllib
 from pathlib import Path
+
+import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 from meerkat import (
     CONTRACT_VERSION,
@@ -791,7 +796,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         if method == "mob/flow_status":
             return {"run": {"status": "running"}}
         if method == "mob/send":
-            return {"session_id": "session-1"}
+            return {"session_id": "session-1", "member_id": "agent-a"}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -806,12 +811,15 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     await client.retire_mob_member("mob-1", "agent-a")
     await client.respawn_mob_member("mob-1", "agent-a", "hello")
     await client.wire_mob_members("mob-1", "a", "b")
-    await client.unwire_mob_members("mob-1", "a", "b")
-    await client.mob_lifecycle("mob-1", "start")
-    assert (
-        await client.send_mob_member_content("mob-1", "agent-a", "hello")
-        == "session-1"
+    await client.unwire_mob_members(
+        "mob-1",
+        "a",
+        {"external": {"name": "remote", "peer_id": "ed25519:remote", "address": "inproc://remote"}},
     )
+    await client.mob_lifecycle("mob-1", "start")
+    send_receipt = await client.send_mob_member_content("mob-1", "agent-a", "hello")
+    assert send_receipt["session_id"] == "session-1"
+    assert send_receipt["member_id"] == "agent-a"
     await client.append_mob_system_context("mob-1", "agent-a", "context")
     assert await client.list_mob_flows("mob-1") == ["incident"]
     assert await client.run_mob_flow("mob-1", "incident") == "run-1"
@@ -836,3 +844,15 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/flow_status",
         "mob/flow_cancel",
     ]
+    assert calls[7][1] == {"mob_id": "mob-1", "local": "a", "target": {"local": "b"}}
+    assert calls[8][1] == {
+        "mob_id": "mob-1",
+        "local": "a",
+        "target": {
+            "external": {
+                "name": "remote",
+                "peer_id": "ed25519:remote",
+                "address": "inproc://remote",
+            }
+        },
+    }

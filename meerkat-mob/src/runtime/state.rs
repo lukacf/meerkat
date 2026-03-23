@@ -62,6 +62,8 @@ impl std::fmt::Display for MobState {
 pub(super) enum MobCommand {
     Spawn {
         spec: Box<super::handle::SpawnMemberSpec>,
+        owner_session_id: Option<SessionId>,
+        ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     },
     SpawnProvisioned {
@@ -74,7 +76,7 @@ pub(super) enum MobCommand {
     },
     Respawn {
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<ContentInput>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
         >,
@@ -83,25 +85,25 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Wire {
-        a: MeerkatId,
-        b: MeerkatId,
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Unwire {
-        a: MeerkatId,
-        b: MeerkatId,
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ExternalTurn {
         meerkat_id: MeerkatId,
-        message: meerkat_core::types::ContentInput,
+        content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
-        message: meerkat_core::types::ContentInput,
+        content: ContentInput,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
     RunFlow {

@@ -11,7 +11,7 @@ use meerkat_core::Session;
 use meerkat_core::comms::{CommsCommand, PeerDirectoryEntry, SendError, SendReceipt};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
-use meerkat_core::types::{RunResult, SessionId};
+use meerkat_core::types::{HandlingMode, RenderMetadata, RunResult, SessionId};
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
@@ -29,11 +29,6 @@ use meerkat_client::LlmClient;
 /// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
 pub struct FactoryAgent {
     agent: DynAgent,
-    /// Canonical ops lifecycle registry shared with the agent's tool dispatcher.
-    /// Pass this to `register_session_with_ops_registry` so the session runtime
-    /// and the tool dispatcher share the same registry instance.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub ops_registry: Option<Arc<meerkat_tools::RuntimeOpsLifecycleRegistry>>,
 }
 
 impl FactoryAgent {
@@ -79,6 +74,22 @@ impl SessionAgent for FactoryAgent {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
+    }
+
+    async fn run_turn_with_events(
+        &mut self,
+        prompt: meerkat_core::types::ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if handling_mode == HandlingMode::Queue && render_metadata.is_none() {
+            return self.agent.run_with_events(prompt, event_tx).await;
+        }
+
+        self.agent
+            .run_injected_turn_with_events(prompt, handling_mode, render_metadata, event_tx)
+            .await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -232,19 +243,17 @@ impl FactoryAgentBuilder {
         }
     }
 
-    async fn resolve_config(&self) -> (Config, Option<String>) {
+    async fn resolve_config(&self) -> Config {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(store) = &self.config_store {
             match store.get().await {
-                Ok(config) => return (config, None),
+                Ok(config) => return config,
                 Err(err) => {
-                    let msg = format!("Failed to read latest config from store: {err}");
-                    tracing::warn!("{msg}");
-                    return (self.config_snapshot.clone(), Some(msg));
+                    tracing::warn!("Failed to read latest config from store: {err}");
                 }
             }
         }
-        (self.config_snapshot.clone(), None)
+        self.config_snapshot.clone()
     }
 
     /// Get a reference to the factory.
@@ -268,13 +277,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<FactoryAgent, SessionError> {
-        let fallback_tx = event_tx.clone();
-        let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx)
-            .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    e.to_string(),
-                ))
-            })?;
+        let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
 
         // Inject default LLM client if none provided.
         if build_config.llm_client_override.is_none()
@@ -297,26 +300,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             build_config.session_store_override = Some(store.clone());
         }
 
-        // Create the canonical ops lifecycle registry and inject it into the
-        // build config so the tool dispatcher (JobManager) can use it.
-        #[cfg(not(target_arch = "wasm32"))]
-        let ops_registry = {
-            let registry = std::sync::Arc::new(meerkat_tools::RuntimeOpsLifecycleRegistry::new());
-            build_config.ops_registry = Some(registry.clone());
-            Some(registry)
-        };
-        #[cfg(target_arch = "wasm32")]
-        let ops_registry: Option<()> = None;
-
-        let (config, config_error) = self.resolve_config().await;
-        if let Some(error) = config_error {
-            let _ = fallback_tx
-                .send(AgentEvent::ConfigSnapshotFallback {
-                    error,
-                    config_generation: None,
-                })
-                .await;
-        }
+        let config = self.resolve_config().await;
 
         let agent = self
             .factory
@@ -328,11 +312,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
                 ))
             })?;
 
-        Ok(FactoryAgent {
-            agent,
-            #[cfg(not(target_arch = "wasm32"))]
-            ops_registry,
-        })
+        Ok(FactoryAgent { agent })
     }
 }
 
@@ -367,9 +347,14 @@ mod tests {
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
     use meerkat_core::Config;
     use meerkat_core::comms::{InputSource, InputStreamMode};
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::service::SessionBuildOptions;
+    use meerkat_core::{ToolCallView, ToolDef, ToolDispatchOutcome, ToolError, ToolResult};
+    use meerkat_runtime::RuntimeSessionAdapter;
     use meerkat_session::ephemeral::SessionAgent;
     use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
     struct MockLlmClient {
@@ -413,6 +398,43 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RegistryBindingProbe {
+        bound: AtomicBool,
+        seen_registry: Mutex<Option<Arc<dyn OpsLifecycleRegistry>>>,
+        seen_session_id: Mutex<Option<SessionId>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentToolDispatcher for RegistryBindingProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "noop".to_string(), false).into())
+        }
+
+        fn bind_ops_lifecycle(
+            self: Arc<Self>,
+            registry: Arc<dyn OpsLifecycleRegistry>,
+            owner_session_id: SessionId,
+        ) -> Result<
+            Arc<dyn meerkat_core::AgentToolDispatcher>,
+            meerkat_core::agent::OpsLifecycleBindError,
+        > {
+            self.bound.store(true, Ordering::SeqCst);
+            *self.seen_registry.lock().expect("probe lock") = Some(registry);
+            *self.seen_session_id.lock().expect("probe lock") = Some(owner_session_id);
+            Ok(self)
+        }
+
+        fn supports_ops_lifecycle_binding(&self) -> bool {
+            true
+        }
+    }
+
     async fn build_factory_agent_with_mock(
         temp: &TempDir,
         mut build_config: AgentBuildConfig,
@@ -423,11 +445,80 @@ mod tests {
             .build_agent(build_config, &Config::default())
             .await
             .map_err(|err| format!("{err}"))?;
-        Ok(FactoryAgent {
-            agent,
-            #[cfg(not(target_arch = "wasm32"))]
-            ops_registry: None,
-        })
+        Ok(FactoryAgent { agent })
+    }
+
+    #[tokio::test]
+    async fn factory_builder_uses_runtime_session_registry_override() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "ok" }));
+
+        let probe = Arc::new(RegistryBindingProbe::default());
+        let probe_dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = probe.clone();
+        builder.default_tool_dispatcher = Some(probe_dispatcher);
+
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        runtime_adapter.register_session(session_id.clone()).await;
+        let expected_registry = runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .ok_or_else(|| "missing runtime registry".to_string())?
+            as Arc<dyn OpsLifecycleRegistry>;
+
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "hello".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                ops_lifecycle_override: Some(expected_registry.clone()),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let agent = builder
+            .build_agent(&req, event_tx)
+            .await
+            .map_err(|err| err.to_string())?;
+        drop(agent);
+
+        assert!(
+            probe.bound.load(Ordering::SeqCst),
+            "dispatcher should receive ops lifecycle binding"
+        );
+        let seen_registry = probe
+            .seen_registry
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "dispatcher did not record registry".to_string())?;
+        let seen_session_id = probe
+            .seen_session_id
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "dispatcher did not record session id".to_string())?;
+
+        assert!(
+            Arc::ptr_eq(&seen_registry, &expected_registry),
+            "factory should use runtime adapter's canonical registry, not a fresh fallback"
+        );
+        assert_eq!(seen_session_id, session_id);
+
+        Ok(())
     }
 
     fn mock_input_cmd(session_id: &SessionId, stream: InputStreamMode) -> CommsCommand {

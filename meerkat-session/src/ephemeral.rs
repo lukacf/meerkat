@@ -71,6 +71,8 @@ pub struct SessionSnapshot {
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        handling_mode: meerkat_core::types::HandlingMode,
         host_mode: bool,
         host_mode_owner: HostModeOwner,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
@@ -86,9 +88,6 @@ enum SessionCommand {
         filter: meerkat_core::ToolFilter,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
-    ReadSnapshot {
-        reply_tx: oneshot::Sender<SessionSnapshot>,
-    },
     /// Export the full session (messages + metadata) for persistence.
     ExportSession {
         reply_tx: oneshot::Sender<meerkat_core::Session>,
@@ -102,10 +101,13 @@ enum SessionCommand {
 }
 
 /// Lightweight summary updated after each turn, readable without querying the task.
+#[derive(Clone)]
 struct SessionSummaryCache {
     updated_at: SystemTime,
     message_count: usize,
     total_tokens: u64,
+    usage: Usage,
+    last_assistant_text: Option<String>,
 }
 
 /// Handle stored in the sessions map.
@@ -181,6 +183,18 @@ pub trait SessionAgent: Send {
         prompt: meerkat_core::types::ContentInput,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
+
+    /// Run the next turn with normalized handling/render metadata.
+    async fn run_turn_with_events(
+        &mut self,
+        prompt: meerkat_core::types::ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        let _ = (handling_mode, render_metadata);
+        self.run_with_events(prompt, event_tx).await
+    }
 
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
@@ -312,12 +326,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 updated_at: cache.updated_at,
                 message_count: cache.message_count,
                 is_active: false,
-                last_assistant_text: None,
+                last_assistant_text: cache.last_assistant_text.clone(),
                 labels: handle.labels.clone(),
             },
             billing: SessionUsage {
                 total_tokens: cache.total_tokens,
-                usage: Usage::default(),
+                usage: cache.usage.clone(),
             },
         }
     }
@@ -573,6 +587,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             updated_at: created_at,
             message_count: 0,
             total_tokens: 0,
+            usage: Usage::default(),
+            last_assistant_text: None,
         });
         let (session_event_tx, session_event_rx) =
             tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(EVENT_CHANNEL_CAPACITY);
@@ -660,6 +676,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
+                render_metadata: req.render_metadata,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 host_mode,
                 host_mode_owner: req.host_mode_owner,
                 event_tx: caller_event_tx,
@@ -739,6 +757,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 .command_tx
                 .send(SessionCommand::StartTurn {
                     prompt,
+                    render_metadata: req.render_metadata,
+                    handling_mode: req.handling_mode,
                     host_mode: req.host_mode,
                     host_mode_owner: req.host_mode_owner,
                     event_tx: req.event_tx,
@@ -854,37 +874,24 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             }
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::ReadSnapshot { reply_tx })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-
-        let snapshot = reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the reply channel".to_string(),
-            ))
-        })?;
-
-        let is_active = *handle.state_rx.borrow() == SessionState::Running;
+        // Serve live reads from the service-owned summary/watch state instead
+        // of round-tripping through the session task. This keeps read-side
+        // snapshots responsive on sync surfaces such as wasm exports.
+        let state = *handle.state_rx.borrow();
+        let summary = handle.summary_rx.borrow().clone();
         Ok(SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
-                created_at: snapshot.created_at,
-                updated_at: snapshot.updated_at,
-                message_count: snapshot.message_count,
-                is_active,
-                last_assistant_text: snapshot.last_assistant_text,
+                created_at: handle.created_at,
+                updated_at: summary.updated_at,
+                message_count: summary.message_count,
+                is_active: state == SessionState::Running,
+                last_assistant_text: summary.last_assistant_text,
                 labels: handle.labels.clone(),
             },
             billing: SessionUsage {
-                total_tokens: snapshot.total_tokens,
-                usage: snapshot.usage,
+                total_tokens: summary.total_tokens,
+                usage: summary.usage,
             },
         })
     }
@@ -1135,6 +1142,8 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StartTurn {
                 prompt,
+                render_metadata,
+                handling_mode,
                 host_mode,
                 host_mode_owner: requested_host_mode_owner,
                 event_tx,
@@ -1217,8 +1226,12 @@ async fn session_task<A: SessionAgent>(
                                 > + 'a,
                         >,
                     >;
-                    let run_fut: RunFut<'_> =
-                        Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()));
+                    let run_fut: RunFut<'_> = Box::pin(agent.run_turn_with_events(
+                        prompt,
+                        handling_mode,
+                        render_metadata,
+                        agent_event_tx.clone(),
+                    ));
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
                     let mut interrupted = false;
@@ -1275,6 +1288,8 @@ async fn session_task<A: SessionAgent>(
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
                 });
 
                 control.state_tx.send_replace(SessionState::Idle);
@@ -1313,6 +1328,8 @@ async fn session_task<A: SessionAgent>(
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
                 });
                 let saw_run_failed = flush_pending_agent_events(
                     &control,
@@ -1361,9 +1378,6 @@ async fn session_task<A: SessionAgent>(
                     }
                 }
             }
-            SessionCommand::ReadSnapshot { reply_tx } => {
-                let _ = reply_tx.send(agent.snapshot());
-            }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
@@ -1374,6 +1388,8 @@ async fn session_task<A: SessionAgent>(
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
                 });
                 let _ = reply_tx.send(());
             }

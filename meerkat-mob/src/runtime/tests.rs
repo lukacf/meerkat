@@ -17,13 +17,13 @@ use chrono::Utc;
 use indexmap::IndexMap;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerName, SendError, SendReceipt,
-    TrustedPeerSpec,
+    CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerName, PeerReachability,
+    PeerReachabilityReason, SendError, SendReceipt, TrustedPeerSpec,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::interaction::InteractionId;
-use meerkat_core::ops::{ToolDispatchOutcome, WaitPolicy};
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
@@ -70,6 +70,7 @@ struct MockCommsRuntime {
     behavior: std::sync::RwLock<MockCommsBehavior>,
     remove_failures_remaining: std::sync::Mutex<usize>,
     trusted_peers: RwLock<HashMap<String, TrustedPeerSpec>>,
+    peer_statuses: RwLock<HashMap<String, (PeerReachability, Option<PeerReachabilityReason>)>>,
     sent_intents: RwLock<Vec<String>>,
     inbox_notify: Arc<tokio::sync::Notify>,
 }
@@ -83,6 +84,7 @@ impl MockCommsRuntime {
                 behavior.fail_remove_trust_once,
             )),
             trusted_peers: RwLock::new(HashMap::new()),
+            peer_statuses: RwLock::new(HashMap::new()),
             sent_intents: RwLock::new(Vec::new()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -137,6 +139,18 @@ impl MockCommsRuntime {
 
     async fn sent_intents(&self) -> Vec<String> {
         self.sent_intents.read().await.clone()
+    }
+
+    async fn set_peer_status(
+        &self,
+        peer_name: &str,
+        reachability: PeerReachability,
+        reason: Option<PeerReachabilityReason>,
+    ) {
+        self.peer_statuses
+            .write()
+            .await
+            .insert(peer_name.to_string(), (reachability, reason));
     }
 }
 
@@ -242,10 +256,15 @@ impl CoreCommsRuntime for MockCommsRuntime {
 
     async fn peers(&self) -> Vec<PeerDirectoryEntry> {
         let trusted = self.trusted_peers.read().await;
+        let peer_statuses = self.peer_statuses.read().await;
         trusted
             .iter()
             .filter_map(|(peer_id, peer)| {
                 let name = PeerName::new(peer.name.clone()).ok()?;
+                let (reachability, last_unreachable_reason) = peer_statuses
+                    .get(peer.name.as_str())
+                    .copied()
+                    .unwrap_or((PeerReachability::Unknown, None));
                 Some(PeerDirectoryEntry {
                     name,
                     peer_id: peer_id.clone(),
@@ -257,6 +276,8 @@ impl CoreCommsRuntime for MockCommsRuntime {
                         "peer_response".to_string(),
                     ],
                     capabilities: serde_json::json!({}),
+                    reachability,
+                    last_unreachable_reason,
                     meta: meerkat_core::PeerMeta::default(),
                 })
             })
@@ -508,6 +529,24 @@ impl MockSessionService {
         };
         if let Some(runtime) = runtime {
             runtime.clear_public_key();
+        }
+    }
+
+    async fn set_peer_status(
+        &self,
+        session_id: &SessionId,
+        peer_name: &str,
+        reachability: PeerReachability,
+        reason: Option<PeerReachabilityReason>,
+    ) {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        if let Some(runtime) = runtime {
+            runtime
+                .set_peer_status(peer_name, reachability, reason)
+                .await;
         }
     }
 
@@ -1203,6 +1242,8 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MeerkatSpawned { .. } => "MeerkatSpawned",
             MobEventKind::MeerkatRetired { .. } => "MeerkatRetired",
             MobEventKind::PeersWired { .. } => "PeersWired",
+            MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
+            MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
             MobEventKind::PeersUnwired { .. } => "PeersUnwired",
             MobEventKind::TaskCreated { .. } => "TaskCreated",
             MobEventKind::TaskUpdated { .. } => "TaskUpdated",
@@ -2935,8 +2976,12 @@ async fn test_mob_management_tools_dispatch_to_handle() {
         )
         .await
         .expect("spawn_meerkat tool");
-    assert_eq!(spawn_outcome.async_ops.len(), 1);
-    assert_eq!(spawn_outcome.async_ops[0].wait_policy, WaitPolicy::Detached);
+    let spawn_json: serde_json::Value = serde_json::from_str(&spawn_outcome.result.text_content())
+        .expect("spawn_meerkat result JSON");
+    assert!(
+        spawn_json.get("operation_id").is_none(),
+        "app-facing mob spawn result must not expose raw operation_id"
+    );
     assert!(
         handle.get_member(&MeerkatId::from("w-2")).await.is_some(),
         "spawn_meerkat should create a new roster entry"
@@ -2955,12 +3000,17 @@ async fn test_mob_management_tools_dispatch_to_handle() {
         )
         .await
         .expect("spawn_many_meerkats tool");
-    assert_eq!(spawn_many_outcome.async_ops.len(), 2);
+    let spawn_many_json: serde_json::Value =
+        serde_json::from_str(&spawn_many_outcome.result.text_content())
+            .expect("spawn_many_meerkats result JSON");
+    let results = spawn_many_json["results"]
+        .as_array()
+        .expect("spawn_many results array");
     assert!(
-        spawn_many_outcome
-            .async_ops
+        results
             .iter()
-            .all(|op| op.wait_policy == WaitPolicy::Detached)
+            .all(|item| item.get("operation_id").is_none()),
+        "app-facing mob batch spawn results must not expose raw operation_id"
     );
     assert!(
         handle
@@ -4312,6 +4362,65 @@ async fn test_resume_reestablishes_missing_trust() {
 }
 
 #[tokio::test]
+async fn test_resume_restores_external_wiring_from_event_log() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let external = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+    handle
+        .wire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+    handle.stop().await.expect("stop");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
+    let resumed_sid = resumed
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("resumed member")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    let trusted = service.trusted_peer_names(&resumed_sid).await;
+    assert!(
+        trusted.contains(&external.name),
+        "resume should restore external trusted peers from persisted wiring events"
+    );
+    let entry = resumed
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("resumed member");
+    assert_eq!(
+        entry
+            .external_peer_specs
+            .get(&MeerkatId::from(external.name.clone()))
+            .cloned(),
+        Some(external)
+    );
+}
+
+#[tokio::test]
 async fn test_complete_archives_and_emits_mob_completed() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
@@ -5042,6 +5151,360 @@ async fn test_wire_establishes_bidirectional() {
 
     let entry_w = handle.get_member(&MeerkatId::from("w-1")).await.unwrap();
     assert!(entry_w.wired_to.contains(&MeerkatId::from("l-1")));
+}
+
+#[tokio::test]
+async fn test_member_roster_surfaces_peer_id() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let entry = handle
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member should exist");
+    assert_eq!(entry.peer_id.as_deref(), Some("ed25519:test-mob/lead/l-1"));
+}
+
+#[tokio::test]
+async fn test_member_status_projects_unreachable_peer_connectivity() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let left_id = MeerkatId::from("l-1");
+    let right_id = MeerkatId::from("w-1");
+    let left_session_id = handle
+        .spawn(ProfileName::from("lead"), left_id.clone(), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .spawn(ProfileName::from("worker"), right_id.clone(), None)
+        .await
+        .expect("spawn worker");
+    handle
+        .wire(left_id.clone(), right_id.clone())
+        .await
+        .expect("wire local peers");
+
+    let right_entry = handle
+        .get_member(&right_id)
+        .await
+        .expect("right member exists");
+    let right_name = format!(
+        "{}/{}/{}",
+        handle.mob_id(),
+        right_entry.profile,
+        right_entry.meerkat_id
+    );
+    service
+        .set_peer_status(
+            &left_session_id,
+            &right_name,
+            PeerReachability::Unreachable,
+            Some(PeerReachabilityReason::OfflineOrNoAck),
+        )
+        .await;
+
+    let snapshot = handle
+        .member_status(&left_id)
+        .await
+        .expect("member status should succeed");
+    let connectivity = snapshot
+        .peer_connectivity
+        .expect("live comms runtime should project peer connectivity");
+    assert_eq!(connectivity.reachable_peer_count, 0);
+    assert_eq!(connectivity.unknown_peer_count, 0);
+    assert_eq!(connectivity.unreachable_peers.len(), 1);
+    assert_eq!(connectivity.unreachable_peers[0].peer, right_name);
+    assert_eq!(
+        connectivity.unreachable_peers[0].reason,
+        Some(PeerReachabilityReason::OfflineOrNoAck)
+    );
+}
+
+#[tokio::test]
+async fn test_member_status_omits_peer_connectivity_without_live_comms_runtime() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let left_id = MeerkatId::from("l-1");
+    let right_id = MeerkatId::from("w-1");
+    let left_session_id = handle
+        .spawn(ProfileName::from("lead"), left_id.clone(), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .spawn(ProfileName::from("worker"), right_id.clone(), None)
+        .await
+        .expect("spawn worker");
+    handle
+        .wire(left_id.clone(), right_id.clone())
+        .await
+        .expect("wire local peers");
+    service.set_missing_comms_runtime(&left_session_id).await;
+
+    let snapshot = handle
+        .member_status(&left_id)
+        .await
+        .expect("member status should succeed");
+    assert!(
+        snapshot.peer_connectivity.is_none(),
+        "member snapshot should omit connectivity when no live comms runtime exists"
+    );
+}
+
+#[tokio::test]
+async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    let external = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+
+    handle
+        .wire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+
+    let entry_l = handle
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member should exist");
+    assert!(
+        entry_l
+            .wired_to
+            .contains(&MeerkatId::from(external.name.clone()))
+    );
+    assert_eq!(
+        entry_l
+            .external_peer_specs
+            .get(&MeerkatId::from(external.name.clone()))
+            .cloned(),
+        Some(external.clone())
+    );
+
+    let trusted = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        trusted.contains(&external.name),
+        "trusted peer list should include external peer name"
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_restores_external_wiring_from_roster_spec() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let old_sid = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    let external = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+
+    handle
+        .wire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+
+    let receipt = handle
+        .respawn(MeerkatId::from("l-1"), Some("resume".into()))
+        .await
+        .expect("respawn");
+    let new_sid = receipt
+        .new_session_id
+        .expect("respawn should produce replacement session");
+    assert_ne!(new_sid, old_sid, "respawn should replace the session");
+
+    let trusted = service.trusted_peer_names(&new_sid).await;
+    assert!(
+        trusted.contains(&external.name),
+        "respawn should restore external trusted peers from the stored roster spec"
+    );
+
+    let entry = handle
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member should exist");
+    assert_eq!(
+        entry
+            .external_peer_specs
+            .get(&MeerkatId::from(external.name.clone()))
+            .cloned(),
+        Some(external)
+    );
+}
+
+#[tokio::test]
+async fn test_unwire_external_removes_trust_and_projection() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let external = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+
+    handle
+        .wire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+    handle
+        .unwire(
+            MeerkatId::from("l-1"),
+            MeerkatId::from(external.name.clone()),
+        )
+        .await
+        .expect("unwire external");
+
+    let entry = handle
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member should exist");
+    assert!(
+        !entry
+            .wired_to
+            .contains(&MeerkatId::from(external.name.clone()))
+    );
+    assert!(
+        !entry
+            .external_peer_specs
+            .contains_key(&MeerkatId::from(external.name.clone()))
+    );
+
+    let trusted = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        !trusted.contains(&external.name),
+        "trusted peer list should not include the removed external peer"
+    );
+}
+
+#[tokio::test]
+async fn test_unwire_external_emits_external_peer_unwired_event() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let external = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+    handle
+        .wire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+
+    handle
+        .unwire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("unwire external");
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            MobEventKind::ExternalPeerUnwired { local, peer_name }
+                if local == &MeerkatId::from("l-1")
+                    && peer_name == &MeerkatId::from(external.name.clone())
+        )
+    }));
+}
+
+#[tokio::test]
+async fn test_unwire_external_is_idempotent_and_emits_single_event() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+    let external = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-b",
+        "ed25519:remote-agent-b",
+        "inproc://remote-mob/worker/agent-b",
+    )
+    .expect("valid external peer");
+    let external_name = MeerkatId::from(external.name.clone());
+
+    handle
+        .wire(
+            MeerkatId::from("l-1"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external");
+    handle
+        .unwire(MeerkatId::from("l-1"), external_name.clone())
+        .await
+        .expect("first external unwire");
+    handle
+        .unwire(MeerkatId::from("l-1"), external_name.clone())
+        .await
+        .expect("second external unwire");
+
+    let entry = handle
+        .get_member(&MeerkatId::from("l-1"))
+        .await
+        .expect("member should exist");
+    assert!(!entry.wired_to.contains(&external_name));
+    assert!(!entry.external_peer_specs.contains_key(&external_name));
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::ExternalPeerUnwired { local, peer_name }
+                    if local == &MeerkatId::from("l-1") && peer_name == &external_name
+            )
+        })
+        .count();
+    assert_eq!(count, 1, "idempotent external unwire should emit one event");
 }
 
 #[tokio::test]
@@ -6722,7 +7185,14 @@ async fn test_external_turn_not_addressable_fails() {
 #[tokio::test]
 async fn test_external_turn_unknown_meerkat_fails() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
-    let result = handle.member(&MeerkatId::from("nonexistent")).await;
+    let result = handle
+        .external_turn_for_member(
+            MeerkatId::from("nonexistent"),
+            "Hello".to_string().into(),
+            meerkat_core::types::HandlingMode::Queue,
+            None,
+        )
+        .await;
     assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
 }
 
@@ -9597,7 +10067,7 @@ async fn test_spawn_with_custom_initial_message() {
         .spawn(
             ProfileName::from("lead"),
             MeerkatId::from("l-1"),
-            Some(custom_msg.to_string()),
+            Some(custom_msg.to_string().into()),
         )
         .await
         .expect("spawn with custom message");

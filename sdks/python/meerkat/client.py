@@ -28,7 +28,7 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 from urllib.error import URLError
 import urllib.request
 
@@ -62,6 +62,21 @@ from .types import (
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
 _MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+
+RenderClass = Literal[
+    "user_prompt",
+    "peer_message",
+    "peer_request",
+    "peer_response",
+    "external_event",
+    "flow_step",
+    "continuation",
+    "system_notice",
+    "tool_scope_notice",
+    "ops_progress",
+]
+RenderSalience = Literal["background", "normal", "important", "urgent"]
+RenderMetadata = TypedDict("RenderMetadata", {"class": RenderClass, "salience": RenderSalience}, total=False)
 
 
 def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -669,7 +684,7 @@ class MeerkatClient:
         *,
         profile: str,
         meerkat_id: str,
-        initial_message: str | None = None,
+        initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
         resume_session_id: str | None = None,
@@ -693,8 +708,16 @@ class MeerkatClient:
     async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
-    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | None = None) -> dict:
-        return await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
+    async def respawn_mob_member(
+        self,
+        mob_id: str,
+        meerkat_id: str,
+        initial_message: str | list[dict] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "mob/respawn",
+            {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message},
+        )
 
     async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})
@@ -744,11 +767,21 @@ class MeerkatClient:
             "backend": backend,
         })
 
-    async def wire_mob_members(self, mob_id: str, a: str, b: str) -> None:
-        await self._request("mob/wire", {"mob_id": mob_id, "a": a, "b": b})
+    async def wire_mob_members(self, mob_id: str, local: str, target: str | dict[str, Any]) -> None:
+        payload = (
+            {"mob_id": mob_id, "local": local, "target": {"local": target}}
+            if isinstance(target, str)
+            else {"mob_id": mob_id, "local": local, "target": target}
+        )
+        await self._request("mob/wire", payload)
 
-    async def unwire_mob_members(self, mob_id: str, a: str, b: str) -> None:
-        await self._request("mob/unwire", {"mob_id": mob_id, "a": a, "b": b})
+    async def unwire_mob_members(self, mob_id: str, local: str, target: str | dict[str, Any]) -> None:
+        payload = (
+            {"mob_id": mob_id, "local": local, "target": {"local": target}}
+            if isinstance(target, str)
+            else {"mob_id": mob_id, "local": local, "target": target}
+        )
+        await self._request("mob/unwire", payload)
 
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
@@ -759,9 +792,9 @@ class MeerkatClient:
         meerkat_id: str,
         content: str | list[dict[str, Any]],
         *,
-        handling_mode: str = "queue",
-        render_metadata: dict[str, Any] | None = None,
-    ) -> str:
+        handling_mode: Literal["queue", "steer"] = "queue",
+        render_metadata: RenderMetadata | None = None,
+    ) -> dict[str, Any]:
         result = await self._request(
             "mob/send",
             {
@@ -772,7 +805,10 @@ class MeerkatClient:
                 "render_metadata": render_metadata,
             },
         )
-        return str(result.get("session_id", ""))
+        session_id = result.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/send response: missing session_id")
+        return result
 
     async def append_mob_system_context(
         self,
@@ -969,6 +1005,30 @@ class MeerkatClient:
 
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
+
+    async def runtime_state(self, session_id: str) -> dict[str, Any]:
+        return await self._request("runtime/state", {"session_id": session_id})
+
+    async def runtime_accept(
+        self,
+        session_id: str,
+        input: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._request("runtime/accept", {"session_id": session_id, "input": input})
+
+    async def runtime_retire(self, session_id: str) -> dict[str, Any]:
+        return await self._request("runtime/retire", {"session_id": session_id})
+
+    async def runtime_reset(self, session_id: str) -> dict[str, Any]:
+        return await self._request("runtime/reset", {"session_id": session_id})
+
+    async def input_state(self, session_id: str, input_id: str) -> dict[str, Any]:
+        return await self._request("input/state", {"session_id": session_id, "input_id": input_id})
+
+    async def input_list(self, session_id: str) -> list[str]:
+        result = await self._request("input/list", {"session_id": session_id})
+        input_ids = result.get("input_ids", [])
+        return [str(input_id) for input_id in input_ids]
 
     # -- Transport ---------------------------------------------------------
 

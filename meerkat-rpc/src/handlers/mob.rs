@@ -203,7 +203,7 @@ pub struct MobSpawnParams {
     pub profile: String,
     pub meerkat_id: String,
     #[serde(default)]
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
@@ -276,7 +276,7 @@ pub struct MobSpawnSpecParams {
     pub profile: String,
     pub meerkat_id: String,
     #[serde(default)]
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
     #[serde(default)]
     pub runtime_mode: Option<MobRuntimeMode>,
     #[serde(default)]
@@ -402,7 +402,7 @@ pub struct MobRespawnParams {
     pub mob_id: String,
     pub meerkat_id: String,
     #[serde(default)]
-    pub initial_message: Option<String>,
+    pub initial_message: Option<ContentInput>,
 }
 
 pub async fn handle_respawn(
@@ -464,8 +464,34 @@ fn respawn_result_response(
 #[derive(Debug, Deserialize)]
 pub struct MobWireParams {
     pub mob_id: String,
-    pub a: String,
-    pub b: String,
+    #[serde(default)]
+    pub local: Option<String>,
+    #[serde(default)]
+    pub target: Option<meerkat_mob::PeerTarget>,
+    #[serde(default)]
+    pub a: Option<String>,
+    #[serde(default)]
+    pub b: Option<String>,
+}
+
+impl MobWireParams {
+    fn resolve(self) -> Result<(MeerkatId, meerkat_mob::PeerTarget), String> {
+        match (self.local, self.target, self.a, self.b) {
+            (Some(local), Some(target), None, None) => Ok((MeerkatId::from(local), target)),
+            (None, None, Some(a), Some(b)) => Ok((
+                MeerkatId::from(a),
+                meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+            )),
+            (Some(_), Some(_), Some(_), Some(_))
+            | (Some(_), Some(_), Some(_), None)
+            | (Some(_), Some(_), None, Some(_))
+            | (Some(_), None, Some(_), Some(_))
+            | (None, Some(_), Some(_), Some(_)) => {
+                Err("provide either {local, target} or legacy {a, b}, but not both".to_string())
+            }
+            _ => Err("mob wire requires either {local, target} or legacy {a, b}".to_string()),
+        }
+    }
 }
 
 pub async fn handle_wire(
@@ -481,14 +507,11 @@ pub async fn handle_wire(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    match state
-        .mob_wire(
-            &mob_id,
-            MeerkatId::from(params.a.as_str()),
-            MeerkatId::from(params.b.as_str()),
-        )
-        .await
-    {
+    let (local, target) = match params.resolve() {
+        Ok(resolved) => resolved,
+        Err(err) => return invalid_params(id, err),
+    };
+    match state.mob_wire(&mob_id, local, target).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"wired": true})),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -507,14 +530,11 @@ pub async fn handle_unwire(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    match state
-        .mob_unwire(
-            &mob_id,
-            MeerkatId::from(params.a.as_str()),
-            MeerkatId::from(params.b.as_str()),
-        )
-        .await
-    {
+    let (local, target) = match params.resolve() {
+        Ok(resolved) => resolved,
+        Err(err) => return invalid_params(id, err),
+    };
+    match state.mob_unwire(&mob_id, local, target).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"unwired": true})),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -1015,11 +1035,11 @@ mod tests {
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()
     -> Result<(), Box<dyn std::error::Error>> {
-        let receipt = MemberRespawnReceipt {
-            member_id: MeerkatId::from("worker"),
-            old_session_id: Some(SessionId::new()),
-            new_session_id: Some(SessionId::new()),
-        };
+        let receipt = MemberRespawnReceipt::new(
+            MeerkatId::from("worker"),
+            Some(SessionId::new()),
+            Some(SessionId::new()),
+        );
         let response = respawn_result_response(
             Some(RpcId::Num(42)),
             Err(MobRespawnError::TopologyRestoreFailed {
@@ -1042,6 +1062,20 @@ mod tests {
             value["failed_peer_ids"],
             serde_json::json!(["peer-a", "peer-b"])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mob_send_params_accept_legacy_message_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "meerkat_id": "worker-1",
+            "message": "hello from legacy caller"
+        });
+        let params: MobSendParams = serde_json::from_value(value)?;
+        assert_eq!(params.mob_id, "mob-1");
+        assert_eq!(params.meerkat_id, "worker-1");
+        assert_eq!(params.content.text_content(), "hello from legacy caller");
         Ok(())
     }
 }

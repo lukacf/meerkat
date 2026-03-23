@@ -5,27 +5,30 @@
 //! # Quick Start
 //!
 //! ```text
-//! use meerkat::prelude::*;
-//! use meerkat::AgentFactory;
-//! use meerkat::AnthropicClient;
-//! use meerkat_store::{JsonlStore, StoreAdapter};
-//! use std::sync::Arc;
+//! use meerkat::{AgentFactory, Config, build_ephemeral_service};
+//! use meerkat::{CreateSessionRequest, SessionService};
+//! use meerkat_core::service::{InitialTurnPolicy, HostModeOwner};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-//!     let factory = AgentFactory::new(std::path::PathBuf::from(".rkat/sessions"));
+//!     let config = Config::load().await?;
+//!     let factory = AgentFactory::new(std::env::current_dir()?);
+//!     let service = build_ephemeral_service(factory, config, 64);
 //!
-//!     let client = Arc::new(AnthropicClient::new(api_key));
-//!     let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
-//!     let store = Arc::new(JsonlStore::new(&factory.store_path)?);
-//!     let store = Arc::new(StoreAdapter::new(store));
-//!     let tools = Arc::new(meerkat_tools::EmptyToolDispatcher::default());
-//!
-//!     let mut agent = AgentBuilder::new()
-//!         .model("claude-sonnet-4")
-//!         .build(Arc::new(llm), tools, store);
-//!     let result = agent.run("What is 2 + 2?".to_string()).await?;
+//!     let result = service.create_session(CreateSessionRequest {
+//!         model: "claude-sonnet-4-5".into(),
+//!         prompt: "What is 2 + 2?".into(),
+//!         render_metadata: None,
+//!         system_prompt: None,
+//!         max_tokens: None,
+//!         event_tx: None,
+//!         host_mode: false,
+//!         host_mode_owner: HostModeOwner::SessionService,
+//!         skill_references: None,
+//!         initial_turn: InitialTurnPolicy::RunImmediately,
+//!         build: None,
+//!         labels: None,
+//!     }).await?;
 //!     println!("{}", result.text);
 //!     Ok(())
 //! }
@@ -305,7 +308,7 @@ pub use sdk_config::SdkConfigStore;
 pub fn compose_tools_with_comms(
     base_tools: std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
     tool_usage_instructions: String,
-    runtime: &meerkat_comms::CommsRuntime,
+    runtime: std::sync::Arc<meerkat_comms::CommsRuntime>,
 ) -> Result<
     (
         std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
@@ -318,7 +321,11 @@ pub fn compose_tools_with_comms(
     let router = runtime.router_arc();
     let trusted_peers = runtime.trusted_peers_shared();
     let self_pubkey = router.keypair_arc().public_key();
-    let comms_surface = CommsToolSurface::new(router, trusted_peers.clone());
+    let comms_surface = CommsToolSurface::new_with_runtime(
+        router,
+        trusted_peers.clone(),
+        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
+    );
     let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
     let gateway = meerkat_core::ToolGatewayBuilder::new()
         .add_dispatcher(base_tools)

@@ -125,6 +125,7 @@ machines.
 | `MobHelperResultAnchorMachine` | `SchemaKernel` | `meerkat-mob` | `meerkat-machine-schema/src/catalog/mob_helper_result_anchor.rs` plus generated owner under `src/generated/` | `src/runtime/handle.rs`, `src/runtime/actor.rs` | generated Rust + generated TLA + helper-result observation tests |
 | `OpsLifecycleMachine` | `SchemaKernel` | `meerkat-runtime` | `src/machines/ops_lifecycle/` | `meerkat-core/src/ops.rs`, `meerkat-mob/src/runtime/provisioner.rs`, `meerkat-tools/src/builtin/shell/job_manager.rs` | generated Rust + generated TLA + registry tests + async-op integration tests |
 | `PeerCommsMachine` | `SchemaKernel` | `meerkat-comms` | `meerkat-machine-schema/src/catalog/peer_comms.rs` plus generated owner under `src/machines/peer_comms/` | `src/inbox.rs`, `src/runtime/comms_runtime.rs` | generated Rust + generated TLA + owner tests |
+| `PeerDirectoryReachabilityMachine` | `SchemaKernel` | `meerkat-comms` | `meerkat-machine-schema/src/catalog/peer_directory_reachability.rs` plus generated owner under `src/generated/` | `src/peer_directory_reachability_authority.rs`, `src/runtime/comms_runtime.rs`, `src/router.rs` | generated Rust + generated TLA + owner tests |
 | `ExternalToolSurfaceMachine` | `SchemaKernel` | `meerkat-mcp` | `meerkat-machine-schema/src/catalog/external_tool_surface.rs` plus generated owner under `src/machines/external_tool_surface/` | `src/router.rs`, `src/adapter.rs` | generated Rust + generated TLA + async adapter tests |
 | `TurnExecutionMachine` | `SchemaKernel` | `meerkat-core` | `meerkat-machine-schema/src/catalog/turn_execution.rs` plus generated owner under `src/agent/machines/turn_execution/` | `src/agent/state.rs`, `src/agent/runner.rs`, `src/agent/comms_impl.rs` | generated Rust + generated TLA + agent regression tests |
 | `FlowRunMachine` | `SchemaKernel` | `meerkat-mob` | `meerkat-machine-schema/src/catalog/flow_run.rs` plus generated owner under `src/runtime/machines/flow_run/` | `src/runtime/flow.rs`, `src/runtime/actor_turn_executor.rs`, `src/run.rs` | generated Rust + generated TLA + flow replay tests |
@@ -589,6 +590,10 @@ For every richer canonical machine:
 - `PeerCommsMachine`: request/response correlation, reservation lifecycle,
   inline-only vs admitted peer work, trust snapshot stickiness, and absence of
   child-lifecycle `SubagentResult` leakage
+- `PeerDirectoryReachabilityMachine`: source-driven resolved-directory
+  reconciliation, send-result reachability updates, pruning on identity
+  removal/replacement, and no directory-entry creation for unknown or
+  untrusted send targets
 - `ExternalToolSurfaceMachine`: staged add/remove/reload, pending activation,
   remove-drain completion, typed notice emission, and one canonical outward
   lifecycle delta shape

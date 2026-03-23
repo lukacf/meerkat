@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use meerkat_machine_schema::catalog::{
     flow_run_machine, mob_bundle_composition, mob_lifecycle_machine, mob_orchestrator_machine,
     ops_lifecycle_machine, ops_runtime_bundle_composition, peer_comms_machine,
-    peer_runtime_bundle_composition, runtime_control_machine, runtime_ingress_machine,
-    runtime_pipeline_composition, turn_execution_machine,
+    peer_directory_reachability_machine, peer_runtime_bundle_composition, runtime_control_machine,
+    runtime_ingress_machine, runtime_pipeline_composition, turn_execution_machine,
 };
 use meerkat_machine_schema::{
     CompositionSchemaError, EffectDisposition, FeedbackFieldBinding, FeedbackFieldSource,
@@ -95,6 +95,11 @@ fn validates_flow_run_machine_definition() {
 #[test]
 fn validates_ops_lifecycle_machine_definition() {
     assert_eq!(ops_lifecycle_machine().validate(), Ok(()));
+}
+
+#[test]
+fn validates_peer_directory_reachability_machine_definition() {
+    assert_eq!(peer_directory_reachability_machine().validate(), Ok(()));
 }
 
 #[test]

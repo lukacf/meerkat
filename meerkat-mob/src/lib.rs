@@ -72,8 +72,9 @@ pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisp
 pub use runtime::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
     MemberSessionRef, MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle,
-    MobMemberSnapshot, MobMemberStatus, MobRespawnError, MobSessionService, MobState,
-    SpawnMemberSpec, SpawnPolicy, SpawnSpec,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSessionService, MobState, MobUnreachablePeer, PeerTarget, SpawnMemberSpec, SpawnPolicy,
+    SpawnSpec,
 };
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;

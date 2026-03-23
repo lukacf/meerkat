@@ -1,5 +1,6 @@
 use crate::ids::{MeerkatId, ProfileName};
 use crate::roster::{Roster, RosterAddEntry, RosterEntry};
+use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
 
 mod sealed {
@@ -17,7 +18,14 @@ pub(crate) trait RosterMutator: sealed::Sealed {
     fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool;
     fn remove_member(&mut self, meerkat_id: &MeerkatId) -> bool;
     fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId);
+    fn wire_external_peer(
+        &mut self,
+        local: &MeerkatId,
+        peer_name: &MeerkatId,
+        spec: TrustedPeerSpec,
+    );
     fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId);
+    fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId);
 }
 
 /// Canonical authority for the roster projection.
@@ -139,7 +147,20 @@ impl RosterMutator for RosterAuthority {
         self.roster.wire(a, b);
     }
 
+    fn wire_external_peer(
+        &mut self,
+        local: &MeerkatId,
+        peer_name: &MeerkatId,
+        spec: TrustedPeerSpec,
+    ) {
+        self.roster.wire_external(local, peer_name, spec);
+    }
+
     fn unwire_members(&mut self, a: &MeerkatId, b: &MeerkatId) {
         self.roster.unwire(a, b);
+    }
+
+    fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
+        self.roster.unwire_external(local, peer_name);
     }
 }

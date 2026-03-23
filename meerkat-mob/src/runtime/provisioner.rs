@@ -13,6 +13,7 @@ use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{InputId, RunId as CoreRunId};
 use meerkat_core::ops::OperationId;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
 use meerkat_core::types::SessionId;
 #[allow(unused_imports)]
@@ -30,6 +31,8 @@ pub struct ProvisionMemberRequest {
     pub create_session: CreateSessionRequest,
     pub backend: MobBackendKind,
     pub peer_name: String,
+    pub owner_session_id: Option<SessionId>,
+    pub ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -71,6 +74,12 @@ pub trait MobProvisioner: Send + Sync {
     /// Resolve the live canonical mob-child lifecycle operation for an
     /// existing member bridge.
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId>;
+    async fn bind_member_owner_context(
+        &self,
+        member_ref: &MemberRef,
+        owner_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<(), MobError>;
 
     /// Cancel all active checkpointer gates so in-flight saves complete but
     /// subsequent checkpoints are no-ops. Call during mob stop.
@@ -98,9 +107,7 @@ impl SessionBackend {
         Self {
             session_service,
             runtime_adapter,
-            ops_adapter: Arc::new(super::ops_adapter::MobOpsAdapter::new_canonical(Arc::new(
-                meerkat_runtime::RuntimeOpsLifecycleRegistry::new(),
-            ))),
+            ops_adapter: Arc::new(super::ops_adapter::MobOpsAdapter::new()),
             runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -533,6 +540,13 @@ impl MobProvisioner for SessionBackend {
         if self.runtime_adapter.is_some() {
             let _ = self.runtime_session_state(&created.session_id).await;
         }
+        if let (Some(owner_session_id), Some(registry)) = (req.owner_session_id, req.ops_registry) {
+            self.ops_adapter.bind_session_registry(
+                created.session_id.clone(),
+                owner_session_id,
+                registry,
+            );
+        }
         let operation_id = self
             .ops_adapter
             .mark_member_provisioned(&created.session_id, &req.peer_name)
@@ -605,12 +619,14 @@ impl MobProvisioner for SessionBackend {
                 .report_member_progress(member_ref, "turn dispatched")
                 .await?;
             let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(req.handling_mode),
                 host_mode: if req.host_mode { Some(true) } else { None },
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
                 additional_instructions: req.additional_instructions.clone(),
                 ..Default::default()
             };
+            let prompt = req.prompt.clone();
             let input = Input::Prompt(PromptInput {
                 header: InputHeader {
                     id: meerkat_core::InputId::new(),
@@ -622,8 +638,12 @@ impl MobProvisioner for SessionBackend {
                     supersession_key: None,
                     correlation_id: None,
                 },
-                text: req.prompt.text_content(),
-                blocks: None,
+                text: prompt.text_content(),
+                blocks: if prompt.has_images() {
+                    Some(prompt.into_blocks())
+                } else {
+                    None
+                },
                 turn_metadata: Some(turn_metadata),
             });
             return self
@@ -649,11 +669,12 @@ impl MobProvisioner for SessionBackend {
         if self.runtime_adapter.is_some() {
             let input = meerkat_runtime::mob_adapter::create_flow_step_input(
                 step_id.as_str(),
-                &req.prompt.text_content(),
+                req.prompt.clone(),
                 &run_id.to_string(),
                 0,
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(req.handling_mode),
                         host_mode: if req.host_mode { Some(true) } else { None },
                         skill_references: req.skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
@@ -714,6 +735,22 @@ impl MobProvisioner for SessionBackend {
         self.ops_adapter
             .active_operation_id_for_session(session_id)
             .await
+    }
+
+    async fn bind_member_owner_context(
+        &self,
+        member_ref: &MemberRef,
+        owner_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<(), MobError> {
+        let Some(session_id) = member_ref.session_id().cloned() else {
+            return Err(MobError::Internal(
+                "member has no session bridge for canonical ops binding".into(),
+            ));
+        };
+        self.ops_adapter
+            .bind_session_registry(session_id, owner_session_id, ops_registry);
+        Ok(())
     }
 
     async fn cancel_all_checkpointers(&self) {
@@ -790,6 +827,8 @@ impl MultiBackendProvisioner {
         &self,
         create_session: CreateSessionRequest,
         peer_name: String,
+        owner_session_id: Option<SessionId>,
+        ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<MemberSpawnReceipt, MobError> {
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
@@ -808,6 +847,13 @@ impl MultiBackendProvisioner {
             .session_service
             .create_session(create_session)
             .await?;
+        if let (Some(owner_session_id), Some(registry)) = (owner_session_id, ops_registry) {
+            self.session.ops_adapter.bind_session_registry(
+                created.session_id.clone(),
+                owner_session_id,
+                registry,
+            );
+        }
         let operation_id = self
             .session
             .ops_adapter
@@ -862,12 +908,19 @@ impl MobProvisioner for MultiBackendProvisioner {
                         create_session: req.create_session,
                         backend: MobBackendKind::Session,
                         peer_name: req.peer_name,
+                        owner_session_id: req.owner_session_id,
+                        ops_registry: req.ops_registry,
                     })
                     .await
             }
             MobBackendKind::External => {
-                self.external_member_ref(req.create_session, req.peer_name)
-                    .await
+                self.external_member_ref(
+                    req.create_session,
+                    req.peer_name,
+                    req.owner_session_id,
+                    req.ops_registry,
+                )
+                .await
             }
         }
     }
@@ -946,6 +999,17 @@ impl MobProvisioner for MultiBackendProvisioner {
         self.session
             .ops_adapter
             .active_operation_id_for_session(session_id)
+            .await
+    }
+
+    async fn bind_member_owner_context(
+        &self,
+        member_ref: &MemberRef,
+        owner_session_id: SessionId,
+        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    ) -> Result<(), MobError> {
+        self.session
+            .bind_member_owner_context(member_ref, owner_session_id, ops_registry)
             .await
     }
 

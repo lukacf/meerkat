@@ -13,7 +13,7 @@ use crate::tokio;
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScopeRevision, ToolScopeStageError,
 };
-use crate::types::{ContentInput, Message, RunResult};
+use crate::types::{ContentInput, HandlingMode, Message, RenderMetadata, RunResult};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -519,6 +519,45 @@ where
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
         self.run_inner(user_input, Some(event_tx)).await
+    }
+
+    /// Run a turn with explicit injected-event semantics.
+    pub async fn run_injected_turn_with_events(
+        &mut self,
+        user_input: ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, AgentError> {
+        let injector = self
+            .comms_arc()
+            .and_then(|runtime| runtime.event_injector())
+            .ok_or_else(|| {
+                AgentError::ConfigError(
+                    "handling_mode/render_metadata require an event injector".to_string(),
+                )
+            })?;
+
+        injector
+            .inject(
+                user_input,
+                crate::PlainEventSource::Rpc,
+                handling_mode,
+                render_metadata,
+            )
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to inject turn into comms inbox: {error}"
+                ))
+            })?;
+
+        if !self.drain_comms_inbox().await {
+            return Err(AgentError::InternalError(
+                "injected turn was not admitted into the session".to_string(),
+            ));
+        }
+
+        self.run_pending_with_events(event_tx).await
     }
 
     /// Run the agent using the pending user message already in the session.

@@ -1,8 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
-
+from typing import Any, Literal, TypedDict
 from .streaming import EventSubscription
+
+RenderClass = Literal[
+    "user_prompt",
+    "peer_message",
+    "peer_request",
+    "peer_response",
+    "external_event",
+    "flow_step",
+    "continuation",
+    "system_notice",
+    "tool_scope_notice",
+    "ops_progress",
+]
+RenderSalience = Literal["background", "normal", "important", "urgent"]
+RenderMetadata = TypedDict("RenderMetadata", {"class": RenderClass, "salience": RenderSalience}, total=False)
 
 
 class Member:
@@ -16,9 +30,9 @@ class Member:
         self,
         content: str | list[dict[str, Any]],
         *,
-        handling_mode: str = "queue",
-        render_metadata: dict[str, Any] | None = None,
-    ) -> str:
+        handling_mode: Literal["queue", "steer"] = "queue",
+        render_metadata: RenderMetadata | None = None,
+    ) -> dict[str, Any]:
         return await self._mob._client.send_mob_member_content(
             self._mob.id,
             self.meerkat_id,
@@ -50,7 +64,7 @@ class Mob:
         *,
         profile: str,
         meerkat_id: str,
-        initial_message: str | None = None,
+        initial_message: str | list[dict] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
         resume_session_id: str | None = None,
@@ -74,7 +88,11 @@ class Mob:
     async def retire(self, meerkat_id: str) -> None:
         await self._client.retire_mob_member(self.id, meerkat_id)
 
-    async def respawn(self, meerkat_id: str, initial_message: str | None = None) -> dict[str, Any]:
+    async def respawn(
+        self,
+        meerkat_id: str,
+        initial_message: str | list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         return await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
 
     async def force_cancel(self, meerkat_id: str) -> None:
@@ -115,11 +133,11 @@ class Mob:
             fork_context=fork_context,
         )
 
-    async def wire(self, a: str, b: str) -> None:
-        await self._client.wire_mob_members(self.id, a, b)
+    async def wire(self, local: str, target: str | dict[str, Any]) -> None:
+        await self._client.wire_mob_members(self.id, local, target)
 
-    async def unwire(self, a: str, b: str) -> None:
-        await self._client.unwire_mob_members(self.id, a, b)
+    async def unwire(self, local: str, target: str | dict[str, Any]) -> None:
+        await self._client.unwire_mob_members(self.id, local, target)
 
     async def lifecycle(self, action: str) -> None:
         await self._client.mob_lifecycle(self.id, action)

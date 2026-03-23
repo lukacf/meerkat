@@ -12,8 +12,8 @@ pub use catalog::{
     mob_lifecycle_machine, mob_member_lifecycle_anchor_machine, mob_orchestrator_machine,
     mob_runtime_bridge_anchor_machine, mob_wiring_anchor_machine, ops_lifecycle_machine,
     ops_peer_bundle_composition, ops_runtime_bundle_composition, peer_comms_machine,
-    peer_runtime_bundle_composition, runtime_control_machine, runtime_ingress_machine,
-    runtime_pipeline_composition, turn_execution_machine,
+    peer_directory_reachability_machine, peer_runtime_bundle_composition, runtime_control_machine,
+    runtime_ingress_machine, runtime_pipeline_composition, turn_execution_machine,
 };
 pub use composition::{
     ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionInvariant,

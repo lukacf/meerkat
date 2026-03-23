@@ -12,6 +12,7 @@ mod mob_runtime_bridge_anchor;
 mod mob_wiring_anchor;
 mod ops_lifecycle;
 mod peer_comms;
+mod peer_directory_reachability;
 mod runtime_control;
 mod runtime_ingress;
 mod turn_execution;
@@ -44,6 +45,7 @@ pub use mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine;
 pub use mob_wiring_anchor::mob_wiring_anchor_machine;
 pub use ops_lifecycle::ops_lifecycle_machine;
 pub use peer_comms::peer_comms_machine;
+pub use peer_directory_reachability::peer_directory_reachability_machine;
 pub use runtime_control::runtime_control_machine;
 pub use runtime_ingress::runtime_ingress_machine;
 pub use turn_execution::turn_execution_machine;
@@ -55,6 +57,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         runtime_ingress_machine(),
         ops_lifecycle_machine(),
         peer_comms_machine(),
+        peer_directory_reachability_machine(),
         external_tool_surface_machine(),
         turn_execution_machine(),
         mob_lifecycle_machine(),

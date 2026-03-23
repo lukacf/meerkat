@@ -339,19 +339,19 @@ impl MobMcpState {
     pub async fn mob_wire(
         &self,
         mob_id: &MobId,
-        a: MeerkatId,
-        b: MeerkatId,
+        local: MeerkatId,
+        target: meerkat_mob::PeerTarget,
     ) -> Result<(), MobError> {
-        self.handle_for(mob_id).await?.wire(a, b).await
+        self.handle_for(mob_id).await?.wire(local, target).await
     }
 
     pub async fn mob_unwire(
         &self,
         mob_id: &MobId,
-        a: MeerkatId,
-        b: MeerkatId,
+        local: MeerkatId,
+        target: meerkat_mob::PeerTarget,
     ) -> Result<(), MobError> {
-        self.handle_for(mob_id).await?.unwire(a, b).await
+        self.handle_for(mob_id).await?.unwire(local, target).await
     }
 
     pub async fn mob_list_members(
@@ -466,7 +466,7 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
         meerkat_id: MeerkatId,
-        initial_message: Option<String>,
+        initial_message: Option<meerkat_core::types::ContentInput>,
     ) -> Result<meerkat_mob::MemberRespawnReceipt, meerkat_mob::MobRespawnError> {
         let handle = self.handle_for(mob_id).await?;
         handle.respawn(meerkat_id, initial_message).await
@@ -700,7 +700,11 @@ impl SessionService for LocalSessionService {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("{staged_sections}\n\n{}", req.prompt.text_content()).into()
+            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                text: format!("{staged_sections}\n\n"),
+            }];
+            blocks.extend(req.prompt.clone().into_blocks());
+            meerkat_core::types::ContentInput::Blocks(blocks)
         };
 
         let event_tx = self.event_txs.read().await.get(id).cloned();
@@ -1041,7 +1045,7 @@ impl MobMcpDispatcher {
                                 "properties":{
                                     "profile":{"type":"string"},
                                     "meerkat_id":{"type":"string"},
-                                    "initial_message":{"type":"string"},
+                                    "initial_message": content_input_schema(),
                                     "backend":{"type":"string","enum":["session","external"]},
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
                                     "resume_session_id":{"type":"string"},
@@ -1147,7 +1151,7 @@ impl MobMcpDispatcher {
                 &format!("Retire and re-spawn a meerkat with the same profile. \
                      Required: mob_id, meerkat_id. Optional: initial_message. \
                      Returns a receipt with old/new session IDs. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
+                json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","meerkat_id"]}),
             ),
             tool(
                 "meerkat_force_cancel",
@@ -1172,6 +1176,38 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
         name: name.to_string(),
         description: description.to_string(),
         input_schema,
+    })
+}
+
+fn content_input_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["type", "text"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "image" },
+                                "media_type": { "type": "string" },
+                                "data": { "type": "string" }
+                            },
+                            "required": ["type", "media_type", "data"]
+                        }
+                    ]
+                }
+            }
+        ]
     })
 }
 
@@ -1209,7 +1245,7 @@ struct MobSpawnMeerkatArgs {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
-    initial_message: Option<String>,
+    initial_message: Option<ContentInput>,
     #[serde(default)]
     backend: Option<MobBackendKind>,
     #[serde(default)]
@@ -1236,15 +1272,45 @@ struct RetireArgs {
 #[derive(Deserialize)]
 struct WireActionArgs {
     mob_id: String,
-    a: String,
-    b: String,
+    #[serde(default)]
+    local: Option<String>,
+    #[serde(default)]
+    target: Option<meerkat_mob::PeerTarget>,
+    #[serde(default)]
+    a: Option<String>,
+    #[serde(default)]
+    b: Option<String>,
     action: String,
+}
+
+impl WireActionArgs {
+    fn resolve(self) -> Result<(String, MeerkatId, meerkat_mob::PeerTarget, String), String> {
+        let action = self.action;
+        match (self.local, self.target, self.a, self.b) {
+            (Some(local), Some(target), None, None) => {
+                Ok((self.mob_id, MeerkatId::from(local), target, action))
+            }
+            (None, None, Some(a), Some(b)) => Ok((
+                self.mob_id,
+                MeerkatId::from(a),
+                meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+                action,
+            )),
+            (Some(_), Some(_), Some(_), Some(_))
+            | (Some(_), Some(_), Some(_), None)
+            | (Some(_), Some(_), None, Some(_))
+            | (Some(_), None, Some(_), Some(_))
+            | (None, Some(_), Some(_), Some(_)) => {
+                Err("provide either {local, target} or legacy {a, b}, but not both".to_string())
+            }
+            _ => Err("wire action requires either {local, target} or legacy {a, b}".to_string()),
+        }
+    }
 }
 #[derive(Deserialize)]
 struct MessageArgs {
     mob_id: String,
     meerkat_id: String,
-    #[serde(alias = "message")]
     content: ContentInput,
     #[serde(default)]
     handling_mode: HandlingMode,
@@ -1276,7 +1342,7 @@ struct RespawnArgs {
     mob_id: String,
     meerkat_id: String,
     #[serde(default)]
-    initial_message: Option<String>,
+    initial_message: Option<ContentInput>,
 }
 #[derive(Deserialize)]
 struct ForceCancelArgs {
@@ -1545,18 +1611,19 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: WireActionArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let mob_id = MobId::from(args.mob_id);
-                let a = MeerkatId::from(args.a);
-                let b = MeerkatId::from(args.b);
-                match args.action.as_str() {
+                let (mob_id, local, target, action) = args
+                    .resolve()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+                let mob_id = MobId::from(mob_id);
+                match action.as_str() {
                     "wire" => self
                         .state
-                        .mob_wire(&mob_id, a, b)
+                        .mob_wire(&mob_id, local, target)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
                     "unwire" => self
                         .state
-                        .mob_unwire(&mob_id, a, b)
+                        .mob_unwire(&mob_id, local, target)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
                     other => {
@@ -2149,7 +2216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_session_service_consumes_staged_context_on_next_turn() {
+    async fn local_session_service_consumes_staged_context_on_next_turn() -> Result<(), String> {
         use futures::StreamExt;
 
         let service = LocalSessionService::new();
@@ -2212,11 +2279,99 @@ mod tests {
                 assert!(prompt.contains("Remember the customer preference."));
                 assert!(prompt.contains("hello"));
             }
-            other => panic!("expected RunStarted, got {other:?}"),
+            other => return Err(format!("expected RunStarted, got {other:?}")),
         }
 
         let pending = service.pending_context.read().await;
         assert_eq!(pending.get(&session_id).map(std::vec::Vec::len), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_session_service_preserves_multimodal_prompt_when_staging_context()
+    -> Result<(), String> {
+        let service = LocalSessionService::new();
+        let run = service
+            .create_session(CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                host_mode: false,
+                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                build: None,
+                labels: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+
+        service
+            .append_system_context(
+                &session_id,
+                AppendSystemContextRequest {
+                    text: "Remember the picture.".to_string(),
+                    source: Some("mob".to_string()),
+                    idempotency_key: Some("ctx-image".to_string()),
+                },
+            )
+            .await
+            .expect("append context");
+
+        let prompt = meerkat_core::types::ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "Look at this.".to_string(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc123".to_string(),
+                source_path: None,
+            },
+        ]);
+
+        let staged_context = {
+            let mut pending = service.pending_context.write().await;
+            let entry = pending.entry(session_id.clone()).or_default();
+            std::mem::take(entry)
+        };
+
+        let effective_prompt = if staged_context.is_empty() {
+            prompt.clone()
+        } else {
+            let staged_sections = staged_context
+                .iter()
+                .map(|append| match append.source.as_deref() {
+                    Some(source) => format!("[SYSTEM CONTEXT:{source}] {}", append.text),
+                    None => format!("[SYSTEM CONTEXT] {}", append.text),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                text: format!("{staged_sections}\n\n"),
+            }];
+            blocks.extend(prompt.into_blocks());
+            meerkat_core::types::ContentInput::Blocks(blocks)
+        };
+
+        match effective_prompt {
+            meerkat_core::types::ContentInput::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 3);
+                assert!(matches!(
+                    blocks.get(1),
+                    Some(meerkat_core::types::ContentBlock::Text { text }) if text == "Look at this."
+                ));
+                assert!(matches!(
+                    blocks.get(2),
+                    Some(meerkat_core::types::ContentBlock::Image { media_type, .. }) if media_type == "image/png"
+                ));
+            }
+            other => return Err(format!("expected multimodal blocks, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[tokio::test]
@@ -2388,7 +2543,6 @@ mod tests {
                 ..SessionTooling::default()
             },
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -2421,7 +2575,6 @@ mod tests {
                 ..SessionTooling::default()
             },
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -2459,7 +2612,6 @@ mod tests {
                 ..SessionTooling::default()
             },
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -2602,7 +2754,7 @@ timeout_ms = 1000
         let _ = call_tool(
             &d,
             "meerkat_message",
-            json!({"mob_id": mob_id, "meerkat_id":"lead", "message":"ping"}),
+            json!({"mob_id": mob_id, "meerkat_id":"lead", "content":"ping"}),
         )
         .await;
         let listed = call_tool(&d, "meerkat_list", json!({"mob_id": mob_id})).await;
@@ -2706,7 +2858,7 @@ timeout_ms = 1000
         call_tool(
             &d,
             "meerkat_message",
-            json!({"mob_id": mob_id, "meerkat_id":"lead", "message":"status"}),
+            json!({"mob_id": mob_id, "meerkat_id":"lead", "content":"status"}),
         )
         .await;
         let status = call_tool(&d, "mob_list", json!({"mob_id": mob_id})).await;

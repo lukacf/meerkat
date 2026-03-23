@@ -11,6 +11,7 @@ pub mod mob_runtime_bridge_anchor;
 pub mod mob_wiring_anchor;
 pub mod ops_lifecycle;
 pub mod peer_comms;
+pub mod peer_directory_reachability;
 pub mod runtime_control;
 pub mod runtime_ingress;
 pub mod turn_execution;
@@ -24,6 +25,7 @@ pub fn all_kernels() -> Vec<GeneratedMachineKernel> {
         runtime_ingress::kernel(),
         ops_lifecycle::kernel(),
         peer_comms::kernel(),
+        peer_directory_reachability::kernel(),
         external_tool_surface::kernel(),
         turn_execution::kernel(),
         mob_lifecycle::kernel(),

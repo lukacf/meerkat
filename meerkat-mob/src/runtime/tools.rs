@@ -1,5 +1,8 @@
 use super::*;
+use meerkat_core::SessionId;
+use meerkat_core::agent::OpsLifecycleBindError;
 use meerkat_core::ops::AsyncOpRef;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 
 // ---------------------------------------------------------------------------
 // Mob tool dispatcher
@@ -49,6 +52,8 @@ pub(super) fn compose_external_tools_for_profile(
 struct MobToolDispatcher {
     handle: MobHandle,
     tools: Arc<[Arc<ToolDef>]>,
+    owner_session_id: Option<SessionId>,
+    ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
 impl MobToolDispatcher {
@@ -63,7 +68,7 @@ impl MobToolDispatcher {
                     "properties": {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
-                        "initial_message": {"type": "string"},
+                        "initial_message": content_input_schema(),
                         "resume_session_id": {"type": "string", "description": "Deprecated: use launch_mode.resume instead"},
                         "backend": {"type": "string", "enum": ["session", "external"]},
                         "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
@@ -97,7 +102,7 @@ impl MobToolDispatcher {
                                 "properties": {
                                     "profile": {"type": "string"},
                                     "meerkat_id": {"type": "string"},
-                                    "initial_message": {"type": "string"},
+                                    "initial_message": content_input_schema(),
                                     "resume_session_id": {"type": "string"},
                                     "backend": {"type": "string", "enum": ["session", "external"]},
                                     "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
@@ -138,7 +143,7 @@ impl MobToolDispatcher {
             ));
             defs.push(tool_def(
                 TOOL_LIST_MEERKATS,
-                "List all active meerkats. Response includes meerkat_id, profile, member_ref, session_id, wired_to.",
+                "List all active meerkats. Response includes meerkat_id, profile, member_ref, peer_id, session_id, wired_to, external_peer_specs.",
                 json!({
                     "type": "object",
                     "properties": {}
@@ -261,6 +266,8 @@ impl MobToolDispatcher {
         Self {
             handle,
             tools: defs.into(),
+            owner_session_id: None,
+            ops_registry: None,
         }
     }
 
@@ -297,12 +304,44 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
     })
 }
 
+fn content_input_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["type", "text"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "image" },
+                                "media_type": { "type": "string" },
+                                "data": { "type": "string" }
+                            },
+                            "required": ["type", "media_type", "data"]
+                        }
+                    ]
+                }
+            }
+        ]
+    })
+}
+
 #[derive(Deserialize)]
 struct SpawnMeerkatArgs {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
-    initial_message: Option<String>,
+    initial_message: Option<ContentInput>,
     #[serde(default)]
     resume_session_id: Option<meerkat_core::types::SessionId>,
     #[serde(default)]
@@ -416,20 +455,43 @@ impl AgentToolDispatcher for MobToolDispatcher {
                 if let Some(auto_wire) = args.auto_wire_parent {
                     spec = spec.with_auto_wire_parent(auto_wire);
                 }
-                let receipt = self
-                    .handle
-                    .spawn_spec_receipt(spec)
-                    .await
-                    .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result_with_async_ops(
-                    call,
-                    json!({
-                        "member_ref": receipt.member_ref,
-                        "session_id": receipt.member_ref.session_id(),
-                        "operation_id": receipt.operation_id,
-                    }),
-                    vec![AsyncOpRef::detached(receipt.operation_id)],
-                )
+                let (result, async_ops) = match (&self.owner_session_id, &self.ops_registry) {
+                    (Some(owner_session_id), Some(ops_registry)) => {
+                        let receipt = self
+                            .handle
+                            .spawn_spec_receipt_with_owner_context(
+                                spec,
+                                super::handle::CanonicalOpsOwnerContext {
+                                    owner_session_id: owner_session_id.clone(),
+                                    ops_registry: Arc::clone(ops_registry),
+                                },
+                            )
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
+                        (
+                            json!({
+                                "member_ref": receipt.member_ref,
+                                "session_id": receipt.member_ref.session_id(),
+                            }),
+                            vec![AsyncOpRef::detached(receipt.operation_id)],
+                        )
+                    }
+                    _ => {
+                        let member_ref = self
+                            .handle
+                            .spawn_spec(spec)
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
+                        (
+                            json!({
+                                "member_ref": member_ref,
+                                "session_id": member_ref.session_id(),
+                            }),
+                            Vec::new(),
+                        )
+                    }
+                };
+                Self::encode_result_with_async_ops(call, result, async_ops)
             }
             TOOL_SPAWN_MANY_MEERKATS => {
                 let args: SpawnManyMeerkatsArgs = call
@@ -463,27 +525,60 @@ impl AgentToolDispatcher for MobToolDispatcher {
                         spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let receipts = self.handle.spawn_many_receipts(specs).await;
-                let async_ops = receipts
-                    .iter()
-                    .filter_map(|result| result.as_ref().ok())
-                    .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
-                    .collect::<Vec<_>>();
-                let results = receipts
-                    .into_iter()
-                    .map(|result| match result {
-                        Ok(receipt) => json!({
-                            "ok": true,
-                            "member_ref": receipt.member_ref,
-                            "session_id": receipt.member_ref.session_id(),
-                            "operation_id": receipt.operation_id,
-                        }),
-                        Err(error) => json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    })
-                    .collect::<Vec<_>>();
+                let (results, async_ops) = match (&self.owner_session_id, &self.ops_registry) {
+                    (Some(owner_session_id), Some(ops_registry)) => {
+                        let receipts = self
+                            .handle
+                            .spawn_many_receipts_with_owner_context(
+                                specs,
+                                super::handle::CanonicalOpsOwnerContext {
+                                    owner_session_id: owner_session_id.clone(),
+                                    ops_registry: Arc::clone(ops_registry),
+                                },
+                            )
+                            .await;
+                        let async_ops = receipts
+                            .iter()
+                            .filter_map(|result| result.as_ref().ok())
+                            .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
+                            .collect::<Vec<_>>();
+                        let results = receipts
+                            .into_iter()
+                            .map(|result| match result {
+                                Ok(receipt) => json!({
+                                    "ok": true,
+                                    "member_ref": receipt.member_ref,
+                                    "session_id": receipt.member_ref.session_id(),
+                                }),
+                                Err(error) => json!({
+                                    "ok": false,
+                                    "error": error.to_string(),
+                                }),
+                            })
+                            .collect::<Vec<_>>();
+                        (results, async_ops)
+                    }
+                    _ => {
+                        let results = self
+                            .handle
+                            .spawn_many(specs)
+                            .await
+                            .into_iter()
+                            .map(|result| match result {
+                                Ok(member_ref) => json!({
+                                    "ok": true,
+                                    "member_ref": member_ref,
+                                    "session_id": member_ref.session_id(),
+                                }),
+                                Err(error) => json!({
+                                    "ok": false,
+                                    "error": error.to_string(),
+                                }),
+                            })
+                            .collect::<Vec<_>>();
+                        (results, Vec::new())
+                    }
+                };
                 Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
             TOOL_RETIRE_MEERKAT => {
@@ -526,8 +621,10 @@ impl AgentToolDispatcher for MobToolDispatcher {
                             "profile": entry.profile,
                             "runtime_mode": entry.runtime_mode,
                             "member_ref": entry.member_ref,
+                            "peer_id": entry.peer_id,
                             "session_id": entry.session_id(),
                             "wired_to": entry.wired_to,
+                            "external_peer_specs": entry.external_peer_specs,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -638,6 +735,27 @@ impl AgentToolDispatcher for MobToolDispatcher {
             }
             _ => Err(ToolError::not_found(call.name)),
         }
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        if Arc::strong_count(&self) != 1 {
+            return Err(OpsLifecycleBindError::SharedOwnership);
+        }
+        let this = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        Ok(Arc::new(Self {
+            handle: this.handle,
+            tools: this.tools,
+            owner_session_id: Some(owner_session_id),
+            ops_registry: Some(registry),
+        }))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        true
     }
 }
 

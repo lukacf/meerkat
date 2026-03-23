@@ -7,6 +7,7 @@ use crate::definition::MobDefinition;
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -186,6 +187,20 @@ pub enum MobEventKind {
         a: MeerkatId,
         /// Second meerkat.
         b: MeerkatId,
+    },
+    /// Trust was established from a local member to an external peer.
+    ExternalPeerWired {
+        /// Local meerkat that trusts the external peer.
+        local: MeerkatId,
+        /// Full trusted-peer specification for replay/respawn restore.
+        spec: TrustedPeerSpec,
+    },
+    /// Trust was removed from a local member to an external peer.
+    ExternalPeerUnwired {
+        /// Local meerkat removing trust.
+        local: MeerkatId,
+        /// External peer name that was removed from the local projection.
+        peer_name: MeerkatId,
     },
     /// Bidirectional trust was removed between two meerkats.
     PeersUnwired {
@@ -416,10 +431,31 @@ mod tests {
     }
 
     #[test]
+    fn test_external_peer_wired_roundtrip() {
+        roundtrip(&MobEventKind::ExternalPeerWired {
+            local: MeerkatId::from("agent-1"),
+            spec: TrustedPeerSpec::new(
+                "remote-mob/worker/agent-2",
+                "ed25519:remote-agent-2",
+                "inproc://remote-mob/worker/agent-2",
+            )
+            .expect("valid trusted peer spec"),
+        });
+    }
+
+    #[test]
     fn test_peers_unwired_roundtrip() {
         roundtrip(&MobEventKind::PeersUnwired {
             a: MeerkatId::from("agent-1"),
             b: MeerkatId::from("agent-2"),
+        });
+    }
+
+    #[test]
+    fn test_external_peer_unwired_roundtrip() {
+        roundtrip(&MobEventKind::ExternalPeerUnwired {
+            local: MeerkatId::from("agent-1"),
+            peer_name: MeerkatId::from("remote-mob/worker/agent-2"),
         });
     }
 

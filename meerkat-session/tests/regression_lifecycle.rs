@@ -13,7 +13,9 @@ use meerkat_core::service::{
     InitialTurnPolicy, SessionError, SessionQuery, SessionService, SessionServiceControlExt,
     StartTurnRequest, TurnToolOverlay,
 };
-use meerkat_core::types::{HandlingMode, RunResult, SessionId, Usage};
+use meerkat_core::types::{
+    HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
+};
 use meerkat_core::{CommsRuntime, HostModePollOutcome};
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -34,6 +36,18 @@ struct MockAgent {
     should_fail: bool,
     total_input_tokens: u64,
     total_output_tokens: u64,
+    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecordedTurnMetadata {
+    handling_mode: HandlingMode,
+    render_metadata: Option<RenderMetadata>,
+}
+
+struct RecordingTurnAgent {
+    session_id: SessionId,
+    recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
 }
 
@@ -388,6 +402,124 @@ impl SessionAgentBuilder for FailingMockAgentBuilder {
     }
 }
 
+struct RecordingTurnAgentBuilder {
+    recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for RecordingTurnAgentBuilder {
+    type Agent = RecordingTurnAgent;
+
+    async fn build_agent(
+        &self,
+        _req: &CreateSessionRequest,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RecordingTurnAgent, SessionError> {
+        Ok(RecordingTurnAgent {
+            session_id: SessionId::new(),
+            recorded: Arc::clone(&self.recorded),
+            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        })
+    }
+}
+
+#[async_trait]
+impl SessionAgent for RecordingTurnAgent {
+    async fn run_with_events(
+        &mut self,
+        _prompt: meerkat_core::types::ContentInput,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        Ok(RunResult {
+            text: "recorded".to_string(),
+            session_id: self.session_id.clone(),
+            usage: Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        })
+    }
+
+    async fn run_turn_with_events(
+        &mut self,
+        _prompt: meerkat_core::types::ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.recorded
+            .lock()
+            .expect("recorded-turn lock poisoned")
+            .push(RecordedTurnMetadata {
+                handling_mode,
+                render_metadata,
+            });
+        Ok(RunResult {
+            text: "recorded".to_string(),
+            session_id: self.session_id.clone(),
+            usage: Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        })
+    }
+
+    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+    fn set_flow_tool_overlay(
+        &mut self,
+        _overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    fn cancel(&mut self) {}
+
+    fn session_id(&self) -> SessionId {
+        self.session_id.clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            created_at: SystemTime::now(),
+            updated_at: SystemTime::now(),
+            message_count: 0,
+            total_tokens: 0,
+            usage: Usage::default(),
+            last_assistant_text: Some("recorded".to_string()),
+        }
+    }
+
+    fn session_clone(&self) -> meerkat_core::Session {
+        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
+        session
+            .set_system_context_state(
+                self.system_context_state
+                    .lock()
+                    .expect("system-context lock poisoned")
+                    .clone(),
+            )
+            .expect("serialize system-context state");
+        session
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        _appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        Arc::clone(&self.system_context_state)
+    }
+}
+
 struct HostModeAgentBuilder {
     comms_runtime: Arc<TestHostCommsRuntime>,
     host_polls: Arc<AtomicUsize>,
@@ -433,6 +565,15 @@ fn make_slow_service(delay_ms: u64) -> Arc<EphemeralSessionService<SlowMockAgent
 
 fn make_failing_service() -> Arc<EphemeralSessionService<FailingMockAgentBuilder>> {
     Arc::new(EphemeralSessionService::new(FailingMockAgentBuilder, 10))
+}
+
+fn make_recording_service(
+    recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
+) -> Arc<EphemeralSessionService<RecordingTurnAgentBuilder>> {
+    Arc::new(EphemeralSessionService::new(
+        RecordingTurnAgentBuilder { recorded },
+        10,
+    ))
 }
 
 fn create_req(prompt: &str) -> CreateSessionRequest {
@@ -857,6 +998,35 @@ async fn concurrent_turn_on_busy_session_returns_busy() {
     assert_eq!(err.code(), "SESSION_BUSY");
 }
 
+#[tokio::test]
+async fn read_during_active_turn_returns_cached_view() {
+    let service = make_slow_service(200);
+
+    let created = service
+        .create_session(create_req_deferred("read during active turn"))
+        .await
+        .unwrap();
+    let sid = created.session_id;
+
+    let svc = service.clone();
+    let sid2 = sid.clone();
+    let turn = tokio::spawn(async move { svc.start_turn(&sid2, turn_req("Slow")).await });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let view = tokio::time::timeout(tokio::time::Duration::from_millis(50), service.read(&sid))
+        .await
+        .expect("read should not wait for the running turn")
+        .expect("read should succeed while the turn is active");
+
+    assert!(
+        view.state.is_active,
+        "live read should reflect that the session is currently running",
+    );
+
+    turn.await.unwrap().unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // 8. Event stream emits RunStarted and RunCompleted
 // ---------------------------------------------------------------------------
@@ -1131,6 +1301,52 @@ async fn inject_context_duplicate_idempotent() {
         second.status,
         AppendSystemContextStatus::Duplicate,
         "second append with same key should be duplicate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 15. start_turn forwards handling/render metadata
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn start_turn_forwards_handling_mode_and_render_metadata() {
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<RecordedTurnMetadata>::new()));
+    let service = make_recording_service(Arc::clone(&recorded));
+    let created = service
+        .create_session(create_req_deferred("record"))
+        .await
+        .expect("create session");
+
+    service
+        .start_turn(
+            &created.session_id,
+            StartTurnRequest {
+                prompt: "steer me".into(),
+                render_metadata: Some(RenderMetadata {
+                    class: RenderClass::ExternalEvent,
+                    salience: RenderSalience::Urgent,
+                }),
+                handling_mode: HandlingMode::Steer,
+                event_tx: None,
+                host_mode: false,
+                host_mode_owner: HostModeOwner::SessionService,
+                skill_references: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+        )
+        .await
+        .expect("start turn");
+
+    let recorded = recorded.lock().expect("recorded-turn lock poisoned");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].handling_mode, HandlingMode::Steer);
+    assert_eq!(
+        recorded[0].render_metadata,
+        Some(RenderMetadata {
+            class: RenderClass::ExternalEvent,
+            salience: RenderSalience::Urgent,
+        })
     );
 }
 

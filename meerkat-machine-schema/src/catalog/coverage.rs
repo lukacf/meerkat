@@ -19,6 +19,7 @@ use super::{
     mob_wiring_anchor::mob_wiring_anchor_machine,
     ops_lifecycle::ops_lifecycle_machine,
     peer_comms::peer_comms_machine,
+    peer_directory_reachability::peer_directory_reachability_machine,
     runtime_control::runtime_control_machine,
     runtime_ingress::runtime_ingress_machine,
     turn_execution::turn_execution_machine,
@@ -268,6 +269,35 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "request-response-correlation",
                     "reservation/request state remains consistent across peer traffic",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &peer_directory_reachability_machine(),
+            &[
+                anchor(
+                    "peer_directory_reachability_authority",
+                    "meerkat-comms/src/peer_directory_reachability_authority.rs",
+                    "canonical transient reachability authority and reconcile/send-result reducer",
+                ),
+                anchor(
+                    "comms_runtime_directory_projection",
+                    "meerkat-comms/src/runtime/comms_runtime.rs",
+                    "runtime-owned resolved peer directory projection and send-result integration",
+                ),
+            ],
+            &[
+                scenario(
+                    "reconcile-directory",
+                    "resolved peer directory snapshot is reconciled into transient reachability state",
+                ),
+                scenario(
+                    "send-success-marks-reachable",
+                    "successful delivery marks an already resolved peer reachable",
+                ),
+                scenario(
+                    "send-failure-marks-unreachable",
+                    "offline or transport failures mark a resolved peer unreachable without inventing unknown peers",
                 ),
             ],
         ),
@@ -1264,6 +1294,15 @@ fn machine_scenario_ids(machine: &str, item_name: &str, all_scenarios: &[String]
                 hints.extend(["submit", "peer", "queue"]);
             } else {
                 hints.extend(["peer", "trust", "submit"]);
+            }
+        }
+        "PeerDirectoryReachabilityMachine" => {
+            if normalized.contains("reconcile") || normalized.contains("directory") {
+                hints.extend(["reconcile", "directory"]);
+            } else if normalized.contains("succeed") || normalized.contains("reachable") {
+                hints.extend(["success", "reachable"]);
+            } else {
+                hints.extend(["failure", "unreachable", "send"]);
             }
         }
         "ExternalToolSurfaceMachine" => {

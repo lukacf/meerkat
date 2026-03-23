@@ -484,7 +484,7 @@ impl MobBuilder {
                 "You have been spawned as '{}' (role: {}) in mob '{}'.",
                 entry.meerkat_id, entry.profile, definition.id
             );
-            let req = build::to_create_session_request(&config, prompt);
+            let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
             let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
         }
@@ -500,15 +500,19 @@ impl MobBuilder {
                 Some(key) => key,
                 None => continue,
             };
+            let _ = roster.set_peer_id(&entry.meerkat_id, Some(key_a.clone()));
             let name_a = format!("{}/{}/{}", definition.id, entry.profile, entry.meerkat_id);
 
             for peer_id in &entry.wired_to {
+                let Some(peer_entry) = roster.get(peer_id).cloned() else {
+                    if let Some(spec) = entry.external_peer_specs.get(peer_id) {
+                        comms_a.add_trusted_peer(spec.clone()).await?;
+                    }
+                    continue;
+                };
                 if entry.meerkat_id.as_str() >= peer_id.as_str() {
                     continue;
                 }
-                let Some(peer_entry) = roster.get(peer_id).cloned() else {
-                    continue;
-                };
                 let Some(comms_b) = provisioner.comms_runtime(&peer_entry.member_ref).await else {
                     continue;
                 };

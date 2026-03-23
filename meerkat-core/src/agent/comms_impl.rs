@@ -332,7 +332,7 @@ mod tests {
     use crate::agent::{
         AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult,
     };
-    use crate::comms::{PeerDirectoryEntry, PeerDirectorySource, PeerName};
+    use crate::comms::{PeerDirectoryEntry, PeerDirectorySource, PeerName, PeerReachability};
     use crate::error::{AgentError, LlmFailureReason};
     use crate::session::Session;
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef};
@@ -539,6 +539,8 @@ mod tests {
                     source: PeerDirectorySource::Inproc,
                     sendable_kinds: vec!["message".to_string(), "request".to_string()],
                     capabilities: serde_json::json!({}),
+                    reachability: PeerReachability::Unknown,
+                    last_unreachable_reason: None,
                     meta: crate::peer_meta::PeerMeta::default(),
                 })
                 .collect()

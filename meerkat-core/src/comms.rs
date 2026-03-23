@@ -440,6 +440,21 @@ pub enum PeerDirectorySource {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerReachability {
+    Unknown,
+    Reachable,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerReachabilityReason {
+    OfflineOrNoAck,
+    TransportError,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDirectoryEntry {
     pub name: PeerName,
@@ -448,6 +463,8 @@ pub struct PeerDirectoryEntry {
     pub source: PeerDirectorySource,
     pub sendable_kinds: Vec<String>,
     pub capabilities: serde_json::Value,
+    pub reachability: PeerReachability,
+    pub last_unreachable_reason: Option<PeerReachabilityReason>,
     /// Supplementary discovery metadata (description, labels).
     pub meta: crate::PeerMeta,
 }
@@ -563,6 +580,8 @@ mod tests {
             source: PeerDirectorySource::Inproc,
             sendable_kinds: vec!["peer_message".to_string()],
             capabilities: Value::Object(serde_json::Map::default()),
+            reachability: PeerReachability::Unknown,
+            last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
         };
         assert_eq!(entry.name.as_str(), "agent");

@@ -21,6 +21,7 @@ impl CommsToolState {
             tool_context: Arc::new(ToolContext {
                 router,
                 trusted_peers,
+                runtime: None,
             }),
         }
     }

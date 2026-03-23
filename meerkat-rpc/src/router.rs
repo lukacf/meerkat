@@ -493,7 +493,6 @@ impl MethodRouter {
     }
 
     #[cfg(feature = "mob")]
-    #[allow(deprecated)]
     async fn try_read_mob_session_history(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -853,7 +852,6 @@ impl MethodRouter {
         &self.runtime
     }
 
-    #[allow(deprecated)]
     async fn handle_session_read(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -912,7 +910,6 @@ impl MethodRouter {
         }
     }
 
-    #[allow(deprecated)]
     async fn handle_session_history(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -1160,7 +1157,39 @@ impl MethodRouter {
                 };
                 RpcResponse::success(id, result)
             }
-            Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+            Err(e) => {
+                let normalized = match &e {
+                    meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
+                        "code": "peer_not_found_or_not_trusted",
+                        "peer": peer,
+                        "message": format!("peer '{peer}' is not found or not trusted"),
+                    }),
+                    meerkat_core::comms::SendError::PeerOffline => {
+                        let peer = params.to.as_deref().unwrap_or("<unknown>");
+                        json!({
+                            "code": "peer_unreachable",
+                            "peer": peer,
+                            "reason": "offline_or_no_ack",
+                            "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
+                        })
+                    }
+                    meerkat_core::comms::SendError::Internal(details) if params.to.is_some() => {
+                        let peer = params.to.as_deref().unwrap_or("<unknown>");
+                        json!({
+                            "code": "peer_unreachable",
+                            "peer": peer,
+                            "reason": "transport_error",
+                            "message": format!("peer '{peer}' is unreachable: transport_error"),
+                            "details": details,
+                        })
+                    }
+                    _ => json!({
+                        "code": "send_failed",
+                        "message": e.to_string(),
+                    }),
+                };
+                RpcResponse::error(id, error::INTERNAL_ERROR, normalized.to_string())
+            }
         }
     }
 
@@ -1220,6 +1249,9 @@ impl MethodRouter {
                     "source": format!("{:?}", p.source),
                     "sendable_kinds": p.sendable_kinds,
                     "capabilities": p.capabilities,
+                    "reachability": p.reachability,
+                    "last_unreachable_reason": p.last_unreachable_reason,
+                    "meta": p.meta,
                 })
             })
             .collect();
@@ -3510,7 +3542,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": &mob_id,
                     "meerkat_id": "lead-1",
-                    "message": "do work while retiring"
+                    "content": "do work while retiring"
                 }),
             ))
             .await

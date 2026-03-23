@@ -11,6 +11,7 @@ use meerkat_client::{
     DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClient, LlmClientAdapter,
     LlmClientFactory, LlmProvider, ProviderResolver,
 };
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
 /// Default system prompt for wasm32 builds.
@@ -41,6 +42,7 @@ use meerkat_core::{
 };
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::{SessionId, SessionMeta};
+use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
 #[cfg(all(feature = "memory-store", not(feature = "jsonl-store")))]
@@ -48,13 +50,10 @@ use meerkat_store::MemoryStore;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_store::SessionFilter;
 use meerkat_store::{SessionStore, StoreAdapter};
-
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::BuiltinDispatcherConfig;
 use meerkat_tools::CompositeDispatcherError;
 use meerkat_tools::EmptyToolDispatcher;
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_tools::RuntimeOpsLifecycleRegistry;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::FileTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
@@ -166,22 +165,13 @@ pub fn encode_llm_client_override_for_service(
 ///
 /// Accepts the current typed wrapper and the legacy `Arc<dyn LlmClient>` payload
 /// to preserve compatibility with older callers.
-///
-/// Returns `Err` if the value is present but cannot be downcast to a known type —
-/// this indicates a malformed override that must not be silently ignored.
 pub fn decode_llm_client_override_from_service(
     value: &Arc<dyn std::any::Any + Send + Sync>,
-) -> Result<Arc<dyn LlmClient>, BuildAgentError> {
+) -> Option<Arc<dyn LlmClient>> {
     if let Some(typed) = value.as_ref().downcast_ref::<ErasedLlmClientOverride>() {
-        return Ok(typed.0.clone());
+        return Some(typed.0.clone());
     }
-    if let Some(legacy) = value.as_ref().downcast_ref::<Arc<dyn LlmClient>>() {
-        return Ok(legacy.clone());
-    }
-    Err(BuildAgentError::MalformedOverride {
-        field: "llm_client_override".into(),
-        detail: "value is not a recognized LlmClient wrapper type".into(),
-    })
+    value.as_ref().downcast_ref::<Arc<dyn LlmClient>>().cloned()
 }
 
 /// Full configuration for building an agent via [`AgentFactory::build_agent()`].
@@ -202,8 +192,6 @@ pub struct AgentBuildConfig {
     pub hooks_override: HookRunOverrides,
     /// Whether to enable comms host mode.
     pub host_mode: bool,
-    /// Which layer owns the background host-mode drain lifecycle.
-    pub host_mode_owner: meerkat_core::service::HostModeOwner,
     /// Name for the comms participant (required when `host_mode` is `true`).
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (flows to `InprocRegistry` and `peers()` output).
@@ -220,6 +208,12 @@ pub struct AgentBuildConfig {
     pub provider_params: Option<serde_json::Value>,
     /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Canonical async-op registry for the owning session.
+    ///
+    /// Runtime-backed callers should provide the registry from the real
+    /// owning runtime/session rather than letting the factory allocate a
+    /// fresh fallback registry.
+    pub ops_lifecycle_override: Option<Arc<dyn OpsLifecycleRegistry>>,
     /// Per-build override for factory-level `enable_builtins`.
     /// When `Some`, takes precedence over `AgentFactory::enable_builtins`.
     pub override_builtins: Option<bool>,
@@ -289,11 +283,6 @@ pub struct AgentBuildConfig {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Optional session checkpointer for host-mode persistence.
     pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
-    /// Canonical ops lifecycle registry for this session. When provided,
-    /// background shell tools use this registry for operation tracking
-    /// instead of a local throwaway registry.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -320,6 +309,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("llm_client_override", &self.llm_client_override.is_some())
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field(
+                "ops_lifecycle_override",
+                &self.ops_lifecycle_override.is_some(),
+            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
@@ -364,7 +357,6 @@ impl AgentBuildConfig {
             structured_output_retries: 2,
             hooks_override: HookRunOverrides::default(),
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
             comms_name: None,
             peer_meta: None,
             resume_session: None,
@@ -373,6 +365,7 @@ impl AgentBuildConfig {
             llm_client_override: None,
             provider_params: None,
             external_tools: None,
+            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -393,38 +386,27 @@ impl AgentBuildConfig {
             wait_for_mcp: false,
             shell_env: None,
             checkpointer: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            ops_registry: None,
         }
     }
 
     /// Build config from a service `CreateSessionRequest` + event channel.
-    ///
-    /// Returns `Err` if embedded build options contain malformed overrides.
     pub fn from_create_session_request(
         req: &CreateSessionRequest,
         event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<Self, BuildAgentError> {
+    ) -> Self {
         let mut build = Self::new(req.model.clone());
         build.system_prompt = req.system_prompt.clone();
         build.max_tokens = req.max_tokens;
         build.host_mode = req.host_mode;
-        build.host_mode_owner = req.host_mode_owner;
         if let Some(options) = &req.build {
-            build.apply_session_build_options(options)?;
+            build.apply_session_build_options(options);
         }
         build.event_tx = Some(event_tx);
-        Ok(build)
+        build
     }
 
     /// Merge `SessionBuildOptions` into this build config.
-    ///
-    /// Returns `Err` if any override field fails to decode from its transport
-    /// representation — malformed overrides are not silently dropped.
-    pub fn apply_session_build_options(
-        &mut self,
-        build: &SessionBuildOptions,
-    ) -> Result<(), BuildAgentError> {
+    pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
         self.provider = build.provider;
         self.output_schema = build.output_schema.clone();
         self.structured_output_retries = build.structured_output_retries;
@@ -438,8 +420,8 @@ impl AgentBuildConfig {
         self.llm_client_override = build
             .llm_client_override
             .as_ref()
-            .map(decode_llm_client_override_from_service)
-            .transpose()?;
+            .and_then(decode_llm_client_override_from_service);
+        self.ops_lifecycle_override = build.ops_lifecycle_override.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
@@ -456,7 +438,6 @@ impl AgentBuildConfig {
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
-        Ok(())
     }
 
     /// Convert build options to the service transport representation.
@@ -476,6 +457,7 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            ops_lifecycle_override: self.ops_lifecycle_override.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
             override_memory: self.override_memory,
@@ -518,10 +500,6 @@ pub enum BuildAgentError {
     #[error("Comms runtime failed: {0}")]
     #[cfg(feature = "comms")]
     Comms(String),
-
-    /// A session build override could not be decoded from the transport representation.
-    #[error("Malformed override for '{field}': {detail}")]
-    MalformedOverride { field: String, detail: String },
 
     /// Configuration error.
     #[error("Config error: {0}")]
@@ -903,18 +881,18 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
         image_tool_results: bool,
-        ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
-        CompositeDispatcher::new(
+        CompositeDispatcher::new_with_ops_lifecycle(
             store,
             config,
             project_root,
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
             image_tool_results,
-            ops_registry,
         )
     }
 
@@ -928,6 +906,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         self.build_builtin_dispatcher_with_skills(
             store,
@@ -936,6 +915,7 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
             None,
         )
         .await
@@ -952,6 +932,7 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
         #[cfg_attr(not(feature = "skills"), allow(unused_variables))] skill_engine: Option<
             Arc<meerkat_core::skills::SkillRuntime>,
         >,
@@ -963,10 +944,10 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
             skill_engine,
             // Public API defaults to true (all tools visible).
             true,
-            None,
         )
         .await
     }
@@ -982,11 +963,11 @@ impl AgentFactory {
         shell_config: Option<ShellConfig>,
         external: Option<Arc<dyn AgentToolDispatcher>>,
         session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
         #[cfg_attr(not(feature = "skills"), allow(unused_variables))] skill_engine: Option<
             Arc<meerkat_core::skills::SkillRuntime>,
         >,
         image_tool_results: bool,
-        #[cfg(not(target_arch = "wasm32"))] ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -995,6 +976,7 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
             image_tool_results,
         } = BuiltinDispatcherConfig {
             store,
@@ -1003,6 +985,7 @@ impl AgentFactory {
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
             image_tool_results,
         };
 
@@ -1015,8 +998,8 @@ impl AgentFactory {
                 shell_config,
                 external,
                 session_id,
+                ops_lifecycle,
                 image_tool_results,
-                ops_registry,
             )
             .await?;
 
@@ -1189,7 +1172,7 @@ impl AgentFactory {
             )
             .await
             .map_err(BuildAgentError::Comms)?;
-            Some(runtime)
+            Some(Arc::new(runtime))
         } else {
             None
         };
@@ -1215,7 +1198,7 @@ impl AgentFactory {
             if let Some(ref meta) = build_config.peer_meta {
                 runtime.set_peer_meta(meta.clone());
             }
-            Some(runtime)
+            Some(Arc::new(runtime))
         } else {
             None
         };
@@ -1227,6 +1210,13 @@ impl AgentFactory {
         // when the model cannot process image blocks in tool results).
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
             .is_none_or(|p| p.image_tool_results);
+
+        let session = build_config.resume_session.clone().unwrap_or_default();
+        let session_id = session.id().to_string();
+        let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> = build_config
+            .ops_lifecycle_override
+            .clone()
+            .unwrap_or_else(|| Arc::new(RuntimeOpsLifecycleRegistry::new()));
 
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).
@@ -1246,8 +1236,9 @@ impl AgentFactory {
                         effective_shell,
                         skill_engine.clone(),
                         build_config.shell_env.take(),
+                        session_id.clone(),
+                        Arc::clone(&ops_lifecycle),
                         image_tool_results,
-                        build_config.ops_registry,
                     )
                     .await?
                 }
@@ -1323,7 +1314,7 @@ impl AgentFactory {
                 // inbox_notify fires on ALL inbox traffic (not just actionable),
                 // which may wake wait slightly more often, but preserves the
                 // interrupt contract for send_request/wait workflows.
-                let notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime)
+                let notify = CoreCommsRuntimeTrait::actionable_input_notify(runtime.as_ref())
                     .ok()
                     .or_else(|| Some(runtime.inbox_notify()));
 
@@ -1409,14 +1400,23 @@ impl AgentFactory {
             }
         }
 
+        if tools.supports_ops_lifecycle_binding() {
+            tools = tools
+                .bind_ops_lifecycle(Arc::clone(&ops_lifecycle), session.id().clone())
+                .map_err(|e| {
+                    BuildAgentError::Config(format!("Ops lifecycle binding failed: {e}"))
+                })?;
+        }
+
         // 9a. Compose tools with comms (after wait binding, so the gateway
         // wraps the already-bound dispatcher).
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
-            let composed = compose_tools_with_comms(tools, tool_usage_instructions, runtime)
-                .map_err(|e| {
-                    BuildAgentError::Config(format!("Failed to compose comms tools: {e}"))
-                })?;
+            let composed =
+                compose_tools_with_comms(tools, tool_usage_instructions, Arc::clone(runtime))
+                    .map_err(|e| {
+                        BuildAgentError::Config(format!("Failed to compose comms tools: {e}"))
+                    })?;
             tools = composed.0;
             tool_usage_instructions = composed.1;
         }
@@ -1634,9 +1634,7 @@ impl AgentFactory {
             builder = builder.output_schema(schema);
         }
         let _is_resumed = build_config.resume_session.is_some();
-        if let Some(session) = build_config.resume_session {
-            builder = builder.resume_session(session);
-        }
+        builder = builder.resume_session(session);
         #[cfg(feature = "comms")]
         let comms_enabled = comms_runtime.is_some();
         #[cfg(not(feature = "comms"))]
@@ -1644,9 +1642,7 @@ impl AgentFactory {
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
             builder =
-                builder.with_comms_runtime(
-                    Arc::new(runtime) as Arc<dyn meerkat_core::agent::CommsRuntime>
-                );
+                builder.with_comms_runtime(runtime as Arc<dyn meerkat_core::agent::CommsRuntime>);
         }
         if let Some(engine) = hook_engine {
             builder = builder.with_hook_engine(engine);
@@ -1718,6 +1714,7 @@ impl AgentFactory {
         if let Some(cp) = build_config.checkpointer {
             builder = builder.with_checkpointer(cp);
         }
+        builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
 
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
@@ -1751,7 +1748,6 @@ impl AgentFactory {
                 active_skills: active_skill_ids,
             },
             host_mode: build_config.host_mode,
-            host_mode_owner: build_config.host_mode_owner,
             comms_name: build_config.comms_name,
             peer_meta: build_config.peer_meta,
             realm_id: build_config.realm_id,
@@ -1782,8 +1778,9 @@ impl AgentFactory {
         effective_shell: bool,
         skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>>,
         shell_env: Option<std::collections::HashMap<String, String>>,
+        session_id: String,
+        ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
         image_tool_results: bool,
-        ops_registry: Option<Arc<RuntimeOpsLifecycleRegistry>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -1839,10 +1836,10 @@ impl AgentFactory {
                 self.project_root.clone(),
                 shell_config,
                 external,
-                None,
+                Some(session_id),
+                Some(ops_lifecycle),
                 skill_engine,
                 image_tool_results,
-                ops_registry,
             )
             .await?;
 

@@ -24,6 +24,25 @@ impl CommsToolDispatcher<NoOpDispatcher> {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
+        };
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
+        Self {
+            tool_context,
+            inner: None,
+            tool_defs,
+        }
+    }
+
+    pub fn new_with_runtime(
+        router: Arc<Router>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(runtime),
         };
         let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
@@ -43,6 +62,7 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
         };
         let mut tools = comms_tool_defs();
         tools.extend(inner.tools().iter().map(Arc::clone));
@@ -132,6 +152,28 @@ impl DynCommsToolDispatcher {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
+        };
+        let mut tools = comms_tool_defs();
+        tools.extend(inner.tools().iter().map(Arc::clone));
+        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
+        Self {
+            tool_context,
+            inner,
+            tool_defs,
+        }
+    }
+
+    pub fn new_with_runtime(
+        router: Arc<Router>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        inner: Arc<dyn AgentToolDispatcher>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(runtime),
         };
         let mut tools = comms_tool_defs();
         tools.extend(inner.tools().iter().map(Arc::clone));
@@ -167,9 +209,14 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
 
 pub fn wrap_with_comms(
     tools: Arc<dyn AgentToolDispatcher>,
-    runtime: &CommsRuntime,
+    runtime: Arc<CommsRuntime>,
 ) -> Arc<dyn AgentToolDispatcher> {
     let router = runtime.router_arc();
     let trusted_peers = runtime.trusted_peers_shared();
-    Arc::new(DynCommsToolDispatcher::new(router, trusted_peers, tools))
+    Arc::new(DynCommsToolDispatcher::new_with_runtime(
+        router,
+        trusted_peers,
+        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
+        tools,
+    ))
 }

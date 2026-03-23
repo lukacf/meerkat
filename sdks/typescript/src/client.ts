@@ -45,7 +45,12 @@ import {
   type McpRemoveParams,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
-import { Mob } from "./mob.js";
+import {
+  Mob,
+  type MobHandlingMode,
+  type MobPeerTarget,
+  type MobRenderMetadata,
+} from "./mob.js";
 import { parseCoreEvent } from "./events.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { EventSubscription } from "./subscription.js";
@@ -602,6 +607,15 @@ export class MeerkatClient {
       meerkatId: String(member.meerkat_id ?? member.meerkatId ?? ""),
       profile: String(member.profile_name ?? member.profile ?? ""),
       memberRef: (member.member_ref as Record<string, unknown> | undefined),
+      peerId: member.peer_id != null ? String(member.peer_id) : undefined,
+      externalPeerSpecs:
+        member.external_peer_specs && typeof member.external_peer_specs === "object"
+          ? Object.fromEntries(
+              Object.entries(member.external_peer_specs as Record<string, unknown>).map(
+                ([key, value]) => [key, (value ?? {}) as Record<string, unknown>],
+              ),
+            )
+          : undefined,
       runtimeMode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
       state: member.state != null ? String(member.state) : undefined,
       wiredTo: Array.isArray(member.wired_to)
@@ -623,7 +637,7 @@ export class MeerkatClient {
     options: {
       profile: string;
       meerkatId: string;
-      initialMessage?: string;
+      initialMessage?: string | ContentBlock[];
       runtimeMode?: string;
       backend?: string;
       resumeSessionId?: string;
@@ -650,24 +664,96 @@ export class MeerkatClient {
     await this.request("mob/retire", { mob_id: mobId, meerkat_id: meerkatId });
   }
 
-  async respawnMobMember(mobId: string, meerkatId: string, initialMessage?: string): Promise<Record<string, unknown>> {
-    return this.request("mob/respawn", { mob_id: mobId, meerkat_id: meerkatId, initial_message: initialMessage }) as Promise<Record<string, unknown>>;
+  async respawnMobMember(
+    mobId: string,
+    meerkatId: string,
+    initialMessage?: string | ContentBlock[],
+  ): Promise<{
+    status: "completed" | "topology_restore_failed";
+    receipt: Record<string, unknown>;
+    failedPeerIds?: string[];
+  }> {
+    const result = await this.request("mob/respawn", {
+      mob_id: mobId,
+      meerkat_id: meerkatId,
+      initial_message: initialMessage,
+    });
+    const status = String(result.status ?? "completed");
+    const rawFailed = Array.isArray(result.failed_peer_ids)
+      ? result.failed_peer_ids
+      : [];
+    const receipt = result.receipt as Record<string, unknown> | undefined;
+    if (!receipt || typeof receipt !== "object") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/respawn response: missing receipt",
+      );
+    }
+    return {
+      status: status === "topology_restore_failed" ? "topology_restore_failed" : "completed",
+      receipt,
+      failedPeerIds: rawFailed.map((peerId) => String(peerId)),
+    };
   }
 
   async forceCancelMobMember(mobId: string, meerkatId: string): Promise<void> {
     await this.request("mob/force_cancel", { mob_id: mobId, meerkat_id: meerkatId });
   }
 
-  async mobMemberStatus(mobId: string, meerkatId: string): Promise<Record<string, unknown>> {
-    return this.request("mob/member_status", { mob_id: mobId, meerkat_id: meerkatId });
+  async mobMemberStatus(
+    mobId: string,
+    meerkatId: string,
+  ): Promise<{
+    status: string;
+    outputPreview?: string;
+    error?: string;
+    tokensUsed: number;
+    isFinal: boolean;
+    currentSessionId?: string;
+    peerConnectivity?: {
+      reachablePeerCount: number;
+      unknownPeerCount: number;
+      unreachablePeers: Array<{ peer: string; reason?: string }>;
+    };
+  }> {
+    const result = await this.request("mob/member_status", { mob_id: mobId, meerkat_id: meerkatId });
+    const rawConnectivity =
+      result.peer_connectivity && typeof result.peer_connectivity === "object"
+        ? (result.peer_connectivity as Record<string, unknown>)
+        : undefined;
+    return {
+      status: String(result.status ?? "unknown"),
+      outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
+      error: result.error != null ? String(result.error) : undefined,
+      tokensUsed: Number(result.tokens_used ?? 0),
+      isFinal: Boolean(result.is_final),
+      currentSessionId:
+        result.current_session_id != null ? String(result.current_session_id) : undefined,
+      peerConnectivity: rawConnectivity
+        ? {
+            reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
+            unknownPeerCount: Number(rawConnectivity.unknown_peer_count ?? 0),
+            unreachablePeers: Array.isArray(rawConnectivity.unreachable_peers)
+              ? rawConnectivity.unreachable_peers.map((peer) => {
+                  const rawPeer =
+                    peer && typeof peer === "object" ? (peer as Record<string, unknown>) : {};
+                  return {
+                    peer: String(rawPeer.peer ?? ""),
+                    reason: rawPeer.reason != null ? String(rawPeer.reason) : undefined,
+                  };
+                })
+              : [],
+          }
+        : undefined,
+    };
   }
 
   async spawnMobHelper(
     mobId: string,
     prompt: string,
     options?: { meerkatId?: string; profileName?: string; runtimeMode?: string; backend?: string },
-  ): Promise<Record<string, unknown>> {
-    return this.request("mob/spawn_helper", {
+  ): Promise<{ output?: string; tokensUsed: number; sessionId?: string }> {
+    const result = await this.request("mob/spawn_helper", {
       mob_id: mobId,
       prompt,
       meerkat_id: options?.meerkatId,
@@ -675,6 +761,11 @@ export class MeerkatClient {
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
+    return {
+      output: result.output != null ? String(result.output) : undefined,
+      tokensUsed: Number(result.tokens_used ?? 0),
+      sessionId: result.session_id != null ? String(result.session_id) : undefined,
+    };
   }
 
   async forkMobHelper(
@@ -688,8 +779,8 @@ export class MeerkatClient {
       runtimeMode?: string;
       backend?: string;
     },
-  ): Promise<Record<string, unknown>> {
-    return this.request("mob/fork_helper", {
+  ): Promise<{ output?: string; tokensUsed: number; sessionId?: string }> {
+    const result = await this.request("mob/fork_helper", {
       mob_id: mobId,
       source_member_id: sourceMemberId,
       prompt,
@@ -699,22 +790,63 @@ export class MeerkatClient {
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
+    return {
+      output: result.output != null ? String(result.output) : undefined,
+      tokensUsed: Number(result.tokens_used ?? 0),
+      sessionId: result.session_id != null ? String(result.session_id) : undefined,
+    };
   }
 
-  async wireMobMembers(mobId: string, a: string, b: string): Promise<void> {
-    await this.request("mob/wire", { mob_id: mobId, a, b });
+  async wireMobMembers(mobId: string, a: string, b: MobPeerTarget): Promise<void> {
+    const target =
+      typeof b === "string"
+        ? { local: a, target: { local: b } }
+        : { local: a, target: b };
+    await this.request("mob/wire", { mob_id: mobId, ...target });
   }
 
-  async unwireMobMembers(mobId: string, a: string, b: string): Promise<void> {
-    await this.request("mob/unwire", { mob_id: mobId, a, b });
+  async unwireMobMembers(mobId: string, a: string, b: MobPeerTarget): Promise<void> {
+    const target =
+      typeof b === "string"
+        ? { local: a, target: { local: b } }
+        : { local: a, target: b };
+    await this.request("mob/unwire", { mob_id: mobId, ...target });
   }
 
   async mobLifecycle(mobId: string, action: 'stop' | 'resume' | 'complete' | 'reset' | 'destroy'): Promise<void> {
     await this.request("mob/lifecycle", { mob_id: mobId, action });
   }
 
-  async sendMobMessage(mobId: string, meerkatId: string, message: string): Promise<void> {
-    await this.request("mob/send", { mob_id: mobId, meerkat_id: meerkatId, message });
+  async sendMobMemberContent(
+    mobId: string,
+    meerkatId: string,
+    content: string | ContentBlock[],
+    options?: {
+      handlingMode?: MobHandlingMode;
+      renderMetadata?: MobRenderMetadata;
+    },
+  ): Promise<{ memberId: string; sessionId: string; handlingMode: MobHandlingMode }> {
+    const result = await this.request("mob/send", {
+      mob_id: mobId,
+      meerkat_id: meerkatId,
+      content,
+      handling_mode: options?.handlingMode ?? "queue",
+      render_metadata: options?.renderMetadata,
+    });
+    const sessionId = result.session_id;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/send response: missing session_id",
+      );
+    }
+    return {
+      memberId: String(result.member_id ?? meerkatId),
+      sessionId,
+      handlingMode: String(
+        result.handling_mode ?? options?.handlingMode ?? "queue",
+      ) as MobHandlingMode,
+    };
   }
 
   async appendMobSystemContext(
@@ -962,6 +1094,36 @@ export class MeerkatClient {
     sessionId: string,
   ): Promise<Record<string, unknown>> {
     return this.request("comms/peers", { session_id: sessionId });
+  }
+
+  async runtimeState(sessionId: string): Promise<Record<string, unknown>> {
+    return this.request("runtime/state", { session_id: sessionId });
+  }
+
+  async runtimeAccept(
+    sessionId: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("runtime/accept", { session_id: sessionId, input });
+  }
+
+  async runtimeRetire(sessionId: string): Promise<Record<string, unknown>> {
+    return this.request("runtime/retire", { session_id: sessionId });
+  }
+
+  async runtimeReset(sessionId: string): Promise<Record<string, unknown>> {
+    return this.request("runtime/reset", { session_id: sessionId });
+  }
+
+  async inputState(sessionId: string, inputId: string): Promise<Record<string, unknown>> {
+    return this.request("input/state", { session_id: sessionId, input_id: inputId });
+  }
+
+  async inputList(sessionId: string): Promise<string[]> {
+    const result = await this.request("input/list", { session_id: sessionId });
+    return Array.isArray(result.input_ids)
+      ? result.input_ids.map((inputId) => String(inputId))
+      : [];
   }
 
   // -- Transport ----------------------------------------------------------

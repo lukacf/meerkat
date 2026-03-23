@@ -55,6 +55,12 @@ fn write_system_context_state(
     })
 }
 
+type OpsLifecycleRegistryArc = Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>;
+type OpsLifecycleProviderFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<OpsLifecycleRegistryArc>> + Send + 'a>,
+>;
+type OpsLifecycleProvider = dyn Fn(&SessionId) -> OpsLifecycleProviderFuture<'_> + Send + Sync;
+
 /// Shared gate between the checkpointer and archive.
 ///
 /// The `Mutex` provides mutual exclusion so that `checkpoint()` cannot
@@ -128,23 +134,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// Optional provider for ops lifecycle registries used during lazy session
     /// rebuilds. When set, lazy-rebuilt sessions bind to the canonical registry
     /// instead of allocating an orphaned fallback.
-    ops_lifecycle_provider: Option<
-        Arc<
-            dyn Fn(
-                    &SessionId,
-                ) -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<
-                                Output = Option<
-                                    Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-                                >,
-                            > + Send
-                            + '_,
-                    >,
-                > + Send
-                + Sync,
-        >,
-    >,
+    ops_lifecycle_provider: Option<Arc<OpsLifecycleProvider>>,
 }
 
 /// Extract session labels from a metadata map.
@@ -421,24 +411,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// appends for a session not currently live), this provider supplies the
     /// canonical ops lifecycle registry so the rebuilt agent's async ops are
     /// visible to the runtime adapter.
-    pub fn set_ops_lifecycle_provider(
-        &mut self,
-        provider: Arc<
-            dyn Fn(
-                    &SessionId,
-                ) -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<
-                                Output = Option<
-                                    Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-                                >,
-                            > + Send
-                            + '_,
-                    >,
-                > + Send
-                + Sync,
-        >,
-    ) {
+    pub fn set_ops_lifecycle_provider(&mut self, provider: Arc<OpsLifecycleProvider>) {
         self.ops_lifecycle_provider = Some(provider);
     }
 

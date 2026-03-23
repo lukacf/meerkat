@@ -142,7 +142,7 @@ pub struct WireInputState {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum InputStateResult {
-    Found(WireInputState),
+    Found(Box<WireInputState>),
     Missing(()),
 }
 

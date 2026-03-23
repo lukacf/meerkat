@@ -360,3 +360,4 @@ class WireInputState:
 class InputListResult:
     """Response payload for `input/list`."""
     input_ids: list[str] = field(default_factory=list)
+

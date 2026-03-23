@@ -489,50 +489,77 @@ impl MobBuilder {
             let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
         }
 
-        // Re-establish trust from projected wiring (idempotent upsert).
+        // Re-establish trust from projected wiring and prune stale trust so
+        // live comms truth matches the canonical roster projection.
         let entries = roster.list().cloned().collect::<Vec<_>>();
         for entry in &entries {
             let comms_a = match provisioner.comms_runtime(&entry.member_ref).await {
                 Some(comms) => comms,
-                None => continue,
+                None if entry.wired_to.is_empty() => continue,
+                None => {
+                    return Err(MobError::WiringError(format!(
+                        "resume requires comms runtime for wired member '{}'",
+                        entry.meerkat_id
+                    )));
+                }
             };
-            let key_a = match comms_a.public_key() {
-                Some(key) => key,
-                None => continue,
-            };
+            let key_a = comms_a.public_key().ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "resume requires public key for wired member '{}'",
+                    entry.meerkat_id
+                ))
+            })?;
             let _ = roster.set_peer_id(&entry.meerkat_id, Some(key_a.clone()));
-            let name_a = format!("{}/{}/{}", definition.id, entry.profile, entry.meerkat_id);
+            let mut desired_specs = Vec::new();
 
             for peer_id in &entry.wired_to {
                 if let Some(spec) = entry.external_peer_specs.get(peer_id) {
-                    comms_a.add_trusted_peer(spec.clone()).await?;
+                    desired_specs.push(spec.clone());
                     continue;
                 }
-                let Some(peer_entry) = roster.get(peer_id).cloned() else {
-                    continue;
-                };
-                if entry.meerkat_id.as_str() >= peer_id.as_str() {
-                    continue;
-                }
-                let Some(comms_b) = provisioner.comms_runtime(&peer_entry.member_ref).await else {
-                    continue;
-                };
-                let Some(key_b) = comms_b.public_key() else {
-                    continue;
-                };
+                let peer_entry = roster.get(peer_id).cloned().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "resume wiring target '{}' missing for '{}'",
+                        peer_id, entry.meerkat_id
+                    ))
+                })?;
+                let comms_b = provisioner
+                    .comms_runtime(&peer_entry.member_ref)
+                    .await
+                    .ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "resume requires comms runtime for '{}' -> '{}'",
+                            entry.meerkat_id, peer_id
+                        ))
+                    })?;
+                let key_b = comms_b.public_key().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "resume requires public key for '{}' -> '{}'",
+                        entry.meerkat_id, peer_id
+                    ))
+                })?;
                 let name_b = format!(
                     "{}/{}/{}",
                     definition.id, peer_entry.profile, peer_entry.meerkat_id
                 );
+                desired_specs.push(
+                    provisioner
+                        .trusted_peer_spec(&peer_entry.member_ref, &name_b, &key_b)
+                        .await?,
+                );
+            }
 
-                let spec_b = provisioner
-                    .trusted_peer_spec(&peer_entry.member_ref, &name_b, &key_b)
-                    .await?;
-                let spec_a = provisioner
-                    .trusted_peer_spec(&entry.member_ref, &name_a, &key_a)
-                    .await?;
-                comms_a.add_trusted_peer(spec_b).await?;
-                comms_b.add_trusted_peer(spec_a).await?;
+            let desired_peer_ids = desired_specs
+                .iter()
+                .map(|spec| spec.peer_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            for peer in comms_a.peers().await {
+                if !desired_peer_ids.contains(&peer.peer_id) {
+                    let _ = comms_a.remove_trusted_peer(&peer.peer_id).await?;
+                }
+            }
+            for spec in desired_specs {
+                comms_a.add_trusted_peer(spec).await?;
             }
         }
         // Notify orchestrator that the mob resumed.

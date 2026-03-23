@@ -110,6 +110,14 @@ export interface McpReloadParams {
   session_id: string;
 }
 
+export interface MobSendParams {
+  content: unknown;
+  handling_mode?: "queue" | "steer";
+  meerkat_id: string;
+  mob_id: string;
+  render_metadata?: WireRenderMetadata;
+}
+
 export interface MobWireParams {
   local: string;
   mob_id: string;
@@ -155,6 +163,19 @@ export interface McpLiveOpResponse {
   server_name?: string;
   session_id: string;
   status: "staged" | "applied" | "rejected";
+}
+
+export type InputStateResult = WireInputState | null;
+
+export interface WireRenderMetadata {
+  class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
+  salience?: "background" | "normal" | "important" | "urgent";
+}
+
+export interface MobSendResult {
+  handling_mode: "queue" | "steer";
+  member_id: string;
+  session_id: string;
 }
 
 export interface WireTrustedPeerSpec {

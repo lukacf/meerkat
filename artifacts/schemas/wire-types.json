@@ -44,6 +44,129 @@
     "title": "InputListResult",
     "type": "object"
   },
+  "InputStateResult": {
+    "$defs": {
+      "WireInputLifecycleState": {
+        "description": "Public input lifecycle state projection used by RPC surfaces.",
+        "enum": [
+          "accepted",
+          "queued",
+          "staged",
+          "applied",
+          "applied_pending_consumption",
+          "consumed",
+          "superseded",
+          "coalesced",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WireInputState": {
+        "description": "RPC-facing input state snapshot.",
+        "properties": {
+          "attempt_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "current_state": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "durability": true,
+          "history": {
+            "items": {
+              "$ref": "#/$defs/WireInputStateHistoryEntry"
+            },
+            "type": "array"
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_id": {
+            "type": "string"
+          },
+          "last_boundary_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persisted_input": true,
+          "policy": true,
+          "reconstruction_source": true,
+          "recovery_count": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_outcome": true,
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input_id",
+          "current_state",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "WireInputStateHistoryEntry": {
+        "description": "Input transition history entry for RPC-facing snapshots.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/WireInputLifecycleState"
+          }
+        },
+        "required": [
+          "timestamp",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "$ref": "#/$defs/WireInputState"
+      },
+      {
+        "type": "null"
+      }
+    ],
+    "description": "Response payload for `input/state`.",
+    "title": "InputStateResult"
+  },
   "McpLiveOpResponse": {
     "$defs": {
       "McpLiveOpStatus": {
@@ -178,6 +301,38 @@
       }
     ],
     "title": "MobPeerTarget"
+  },
+  "MobSendResult": {
+    "$defs": {
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/send`.",
+    "properties": {
+      "handling_mode": {
+        "$ref": "#/$defs/WireHandlingMode"
+      },
+      "member_id": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "member_id",
+      "session_id",
+      "handling_mode"
+    ],
+    "title": "MobSendResult",
+    "type": "object"
   },
   "MobUnwireResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -806,6 +961,16 @@
     "description": "Wire-safe content input (mirrors `ContentInput`).",
     "title": "WireContentInput"
   },
+  "WireHandlingMode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public handling mode for mob member delivery.",
+    "enum": [
+      "queue",
+      "steer"
+    ],
+    "title": "WireHandlingMode",
+    "type": "string"
+  },
   "WireInputLifecycleState": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Public input lifecycle state projection used by RPC surfaces.",
@@ -1084,6 +1249,88 @@
       }
     ],
     "title": "WireProviderMeta"
+  },
+  "WireRenderClass": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public render class contract for mob member delivery.",
+    "enum": [
+      "user_prompt",
+      "peer_message",
+      "peer_request",
+      "peer_response",
+      "external_event",
+      "flow_step",
+      "continuation",
+      "system_notice",
+      "tool_scope_notice",
+      "ops_progress"
+    ],
+    "title": "WireRenderClass",
+    "type": "string"
+  },
+  "WireRenderMetadata": {
+    "$defs": {
+      "WireRenderClass": {
+        "description": "Public render class contract for mob member delivery.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "WireRenderSalience": {
+        "description": "Public render salience contract for mob member delivery.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public render metadata contract for mob member delivery.",
+    "properties": {
+      "class": {
+        "$ref": "#/$defs/WireRenderClass"
+      },
+      "salience": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireRenderSalience"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "class"
+    ],
+    "title": "WireRenderMetadata",
+    "type": "object"
+  },
+  "WireRenderSalience": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public render salience contract for mob member delivery.",
+    "enum": [
+      "background",
+      "normal",
+      "important",
+      "urgent"
+    ],
+    "title": "WireRenderSalience",
+    "type": "string"
   },
   "WireRuntimeState": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

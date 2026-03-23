@@ -237,6 +237,174 @@
     "title": "McpRemoveParams",
     "type": "object"
   },
+  "MobSendParams": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      },
+      "WireRenderClass": {
+        "description": "Public render class contract for mob member delivery.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "WireRenderMetadata": {
+        "description": "Public render metadata contract for mob member delivery.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/WireRenderClass"
+          },
+          "salience": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireRenderSalience"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "WireRenderSalience": {
+        "description": "Public render salience contract for mob member delivery.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `mob/send`.",
+    "properties": {
+      "content": {
+        "$ref": "#/$defs/WireContentInput"
+      },
+      "handling_mode": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireHandlingMode"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "meerkat_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "render_metadata": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireRenderMetadata"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "mob_id",
+      "meerkat_id",
+      "content"
+    ],
+    "title": "MobSendParams",
+    "type": "object"
+  },
   "MobUnwireParams": {
     "$defs": {
       "MobPeerTarget": {

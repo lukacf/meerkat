@@ -911,6 +911,8 @@ pub struct SessionDetailsResponse {
 pub struct ErrorResponse {
     pub error: String,
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 /// Build the REST API router
@@ -1616,29 +1618,58 @@ async fn comms_send(
             };
             Ok(Json(result))
         }
-        Err(e) => {
-            let message = match &e {
-                meerkat_core::comms::SendError::PeerNotFound(peer) => {
-                    format!(
-                        "peer_not_found_or_not_trusted: peer '{peer}' is not found or not trusted"
-                    )
-                }
-                meerkat_core::comms::SendError::PeerOffline => {
-                    let peer = req.to.as_deref().unwrap_or("<unknown>");
-                    format!("peer_unreachable: peer '{peer}' is unreachable: offline_or_no_ack")
-                }
-                meerkat_core::comms::SendError::Internal(details)
-                    if req.to.is_some() && is_transport_internal(details) =>
-                {
-                    let peer = req.to.as_deref().unwrap_or("<unknown>");
-                    format!(
-                        "peer_unreachable: peer '{peer}' is unreachable: transport_error ({details})"
-                    )
-                }
-                _ => e.to_string(),
-            };
-            Err(ApiError::Internal(message))
+        Err(e) => Err(normalize_rest_comms_send_error(req.to.as_deref(), &e)),
+    }
+}
+
+fn normalize_rest_comms_send_error(
+    peer_name: Option<&str>,
+    error: &meerkat_core::comms::SendError,
+) -> ApiError {
+    match error {
+        meerkat_core::comms::SendError::PeerNotFound(peer) => ApiError::InternalWithData {
+            message: format!(
+                "peer_not_found_or_not_trusted: peer '{peer}' is not found or not trusted"
+            ),
+            code: "peer_not_found_or_not_trusted".to_string(),
+            details: json!({
+                "code": "peer_not_found_or_not_trusted",
+                "peer": peer,
+                "message": format!("peer '{peer}' is not found or not trusted"),
+            }),
+        },
+        meerkat_core::comms::SendError::PeerOffline => {
+            let peer = peer_name.unwrap_or("<unknown>");
+            ApiError::InternalWithData {
+                message: format!(
+                    "peer_unreachable: peer '{peer}' is unreachable: offline_or_no_ack"
+                ),
+                code: "peer_unreachable".to_string(),
+                details: json!({
+                    "code": "peer_unreachable",
+                    "peer": peer,
+                    "reason": "offline_or_no_ack",
+                    "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
+                }),
+            }
         }
+        meerkat_core::comms::SendError::Internal(details) if is_transport_internal(details) => {
+            let peer = peer_name.unwrap_or("<unknown>");
+            ApiError::InternalWithData {
+                message: format!(
+                    "peer_unreachable: peer '{peer}' is unreachable: transport_error ({details})"
+                ),
+                code: "peer_unreachable".to_string(),
+                details: json!({
+                    "code": "peer_unreachable",
+                    "peer": peer,
+                    "reason": "transport_error",
+                    "message": format!("peer '{peer}' is unreachable: transport_error"),
+                    "details": details,
+                }),
+            }
+        }
+        other => ApiError::Internal(other.to_string()),
     }
 }
 
@@ -3024,21 +3055,38 @@ pub enum ApiError {
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
-    DuplicateInput { existing_id: String },
+    DuplicateInput {
+        existing_id: String,
+    },
     Configuration(String),
     Agent(String),
     Internal(String),
+    InternalWithData {
+        message: String,
+        code: String,
+        details: Value,
+    },
     ServiceUnavailable(String),
     Gone(String),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code, message) = match self {
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg),
-            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg),
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg),
+        let (status, code, message, details) = match self {
+            ApiError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST".to_string(),
+                msg,
+                None,
+            ),
+            ApiError::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED".to_string(),
+                msg,
+                None,
+            ),
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND".to_string(), msg, None),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT".to_string(), msg, None),
             ApiError::DuplicateInput { existing_id } => {
                 let body = Json(serde_json::json!({
                     "error": "duplicate_input",
@@ -3049,20 +3097,45 @@ impl IntoResponse for ApiError {
             }
             ApiError::Configuration(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "CONFIGURATION_ERROR",
+                "CONFIGURATION_ERROR".to_string(),
                 msg,
+                None,
             ),
-            ApiError::Agent(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "AGENT_ERROR", msg),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", msg),
-            ApiError::ServiceUnavailable(msg) => {
-                (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", msg)
-            }
-            ApiError::Gone(msg) => (StatusCode::GONE, "GONE", msg),
+            ApiError::Agent(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "AGENT_ERROR".to_string(),
+                msg,
+                None,
+            ),
+            ApiError::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR".to_string(),
+                msg,
+                None,
+            ),
+            ApiError::InternalWithData {
+                message,
+                code,
+                details,
+            } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                code,
+                message,
+                Some(details),
+            ),
+            ApiError::ServiceUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE".to_string(),
+                msg,
+                None,
+            ),
+            ApiError::Gone(msg) => (StatusCode::GONE, "GONE".to_string(), msg, None),
         };
 
         let body = Json(ErrorResponse {
             error: message,
-            code: code.to_string(),
+            code,
+            details,
         });
 
         (status, body).into_response()
@@ -3134,10 +3207,36 @@ mod tests {
         let err = ErrorResponse {
             error: "test error".to_string(),
             code: "TEST_ERROR".to_string(),
+            details: None,
         };
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("test error"));
         assert!(json.contains("TEST_ERROR"));
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_rest_comms_send_error_includes_structured_details() {
+        let err = normalize_rest_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::PeerOffline,
+        );
+        match err {
+            ApiError::InternalWithData {
+                message,
+                code,
+                details,
+            } => {
+                assert!(message.starts_with("peer_unreachable:"));
+                assert_eq!(code, "peer_unreachable");
+                assert_eq!(details.get("peer").and_then(Value::as_str), Some("peer-a"));
+                assert_eq!(
+                    details.get("reason").and_then(Value::as_str),
+                    Some("offline_or_no_ack")
+                );
+            }
+            other => panic!("expected structured internal error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

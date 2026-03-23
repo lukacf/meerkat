@@ -89,6 +89,10 @@
       "name": "mob/spawn"
     },
     {
+      "description": "Spawn multiple new mob members",
+      "name": "mob/spawn_many"
+    },
+    {
       "description": "Retire a mob member",
       "name": "mob/retire"
     },
@@ -106,7 +110,9 @@
     },
     {
       "description": "Deliver content to a mob member",
-      "name": "mob/send"
+      "name": "mob/send",
+      "params_type": "MobSendParams",
+      "result_type": "MobSendResult"
     },
     {
       "description": "Append system context for a mob member",
@@ -184,7 +190,7 @@
       "description": "Get the state of a specific runtime input",
       "name": "input/state",
       "params_type": "InputStateParams",
-      "result_type": "WireInputState"
+      "result_type": "InputStateResult"
     },
     {
       "description": "List active runtime inputs for a session",

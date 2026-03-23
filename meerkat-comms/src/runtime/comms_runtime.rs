@@ -1248,7 +1248,17 @@ impl CommsRuntime {
                 }
                 Ok(envelope_id)
             }
-            Err(crate::router::SendError::PeerNotFound(peer)) => Err(SendError::PeerNotFound(peer)),
+            Err(crate::router::SendError::PeerNotFound(peer)) => {
+                if let Some(resolved_peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().record_send_failed(
+                        &resolved_peer.reachability_key(),
+                        PeerReachabilityReason::OfflineOrNoAck,
+                    );
+                    Err(SendError::PeerOffline)
+                } else {
+                    Err(SendError::PeerNotFound(peer))
+                }
+            }
             Err(crate::router::SendError::PeerOffline) => {
                 if let Some(peer) = resolved_peer.as_ref() {
                     self.peer_directory_reachability.lock().record_send_failed(
@@ -2591,6 +2601,52 @@ mod tests {
                 .iter()
                 .all(|entry| entry.name.as_str() != missing_name),
             "unknown attempted target must not become a directory entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_core_peers_resolved_peer_not_found_marks_peer_unreachable() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender =
+            CommsRuntime::inproc_only(&format!("resolved-missing-sender-{suffix}")).unwrap();
+        let missing_name = format!("resolved-missing-peer-{suffix}");
+        let missing_key = Keypair::generate().public_key().to_peer_id();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                &missing_name,
+                missing_key,
+                format!("inproc://{missing_name}"),
+            )
+            .expect("valid trusted peer"),
+        )
+        .await
+        .expect("add trusted peer");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(missing_name.clone()).expect("valid peer name"),
+                body: "hello".to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SendError::PeerOffline)),
+            "resolved missing peer should surface as unreachable, got: {result:?}"
+        );
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let entry = peers
+            .iter()
+            .find(|listed| listed.name.as_str() == missing_name)
+            .expect("trusted peer should remain listed after failed send");
+        assert_eq!(entry.reachability, PeerReachability::Unreachable);
+        assert_eq!(
+            entry.last_unreachable_reason,
+            Some(PeerReachabilityReason::OfflineOrNoAck)
         );
     }
 

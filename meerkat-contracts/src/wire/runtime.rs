@@ -137,6 +137,15 @@ pub struct WireInputState {
     pub updated_at: String,
 }
 
+/// Response payload for `input/state`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum InputStateResult {
+    Found(WireInputState),
+    Missing(()),
+}
+
 /// Response payload for `runtime/accept`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

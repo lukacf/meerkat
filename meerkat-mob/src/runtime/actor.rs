@@ -3192,13 +3192,6 @@ impl MobActor {
             (ea, eb, a_has_b_edge, b_has_a_edge)
         };
 
-        // Idempotent no-op only when both directed projections are already absent.
-        if !a_has_b_edge && !b_has_a_edge {
-            self.edge_locks.remove(a.as_str(), b.as_str()).await;
-            self.debug_assert_roster_edge_symmetric(&a, &b, "handle_unwire/noop")
-                .await;
-            return Ok(());
-        }
         if a_has_b_edge != b_has_a_edge {
             tracing::warn!(
                 a = %a,
@@ -3238,6 +3231,16 @@ impl MobActor {
             .provisioner
             .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
             .await?;
+
+        if !a_has_b_edge && !b_has_a_edge {
+            let _ = comms_a.remove_trusted_peer(&key_b).await?;
+            let _ = comms_b.remove_trusted_peer(&key_a).await?;
+            self.edge_locks.remove(a.as_str(), b.as_str()).await;
+            self.debug_assert_roster_edge_symmetric(&a, &b, "handle_unwire/noop")
+                .await;
+            return Ok(());
+        }
+
         let mut rollback = LifecycleRollback::new("unwire");
 
         // Notify both peers BEFORE removing trust (need trust to send).
@@ -3364,7 +3367,7 @@ impl MobActor {
             )));
         }
 
-        if !already_wired && stored_spec.is_none() {
+        if !already_wired && stored_spec.is_none() && spec_hint.is_none() {
             return Ok(());
         }
 

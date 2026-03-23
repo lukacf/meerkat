@@ -680,6 +680,19 @@ impl MockSessionService {
             let _ = from_runtime.remove_trusted_peer(&to_key).await;
         }
     }
+
+    async fn force_add_trust_from_spec(&self, session_id: &SessionId, spec: TrustedPeerSpec) {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        if let Some(runtime) = runtime {
+            runtime
+                .add_trusted_peer(spec)
+                .await
+                .expect("force add trusted peer");
+        }
+    }
 }
 
 #[async_trait]
@@ -4358,6 +4371,58 @@ async fn test_resume_reestablishes_missing_trust() {
     assert!(
         trusted_2.contains(&test_comms_name("worker", "w-1")),
         "resume should restore trust from w-2 to w-1"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_prunes_stale_trust_not_present_in_roster() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let sid_1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let _sid_2 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    handle.stop().await.expect("stop");
+
+    let stale = TrustedPeerSpec::new(
+        "remote-mob/worker/stale-peer",
+        "ed25519:stale-peer",
+        "inproc://remote-mob/worker/stale-peer",
+    )
+    .expect("valid stale peer");
+    service
+        .force_add_trust_from_spec(&sid_1, stale.clone())
+        .await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
+    let resumed_sid_1 = resumed
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("w-1")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    let trusted = service.trusted_peer_names(&resumed_sid_1).await;
+    assert!(
+        !trusted.contains(&stale.name),
+        "resume should prune stale trust that is not present in the roster projection"
     );
 }
 
@@ -10793,6 +10858,117 @@ async fn test_unwire_updates_peers_and_sends_retired_notifications() {
             .iter()
             .any(|entry| entry.name.as_str() == test_comms_name("lead", "l-1")),
         "unwire should remove lead from worker peers()"
+    );
+}
+
+#[tokio::test]
+async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
+
+    let sid_a = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_b = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .wire(MeerkatId::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("wire");
+    handle
+        .unwire(MeerkatId::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("initial unwire");
+
+    let comms_a = service.real_comms(&sid_a).await.expect("comms for l-1");
+    let comms_b = service.real_comms(&sid_b).await.expect("comms for w-1");
+    let name_a = test_comms_name("lead", "l-1");
+    let name_b = test_comms_name("worker", "w-1");
+    let key_a = comms_a.public_key();
+    let key_b = comms_b.public_key();
+    comms_a
+        .add_trusted_peer(
+            TrustedPeerSpec::new(&name_b, key_b.to_peer_id(), format!("inproc://{name_b}"))
+                .expect("valid worker trusted spec"),
+        )
+        .await
+        .expect("re-add stale trust on lead");
+    comms_b
+        .add_trusted_peer(
+            TrustedPeerSpec::new(&name_a, key_a.to_peer_id(), format!("inproc://{name_a}"))
+                .expect("valid lead trusted spec"),
+        )
+        .await
+        .expect("re-add stale trust on worker");
+
+    handle
+        .unwire(MeerkatId::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("idempotent stale-trust cleanup unwire");
+
+    let peers_a = CoreCommsRuntime::peers(&*comms_a).await;
+    let peers_b = CoreCommsRuntime::peers(&*comms_b).await;
+    assert!(
+        !peers_a.iter().any(|entry| entry.name.as_str() == name_b),
+        "idempotent unwire should prune stale trust from lead"
+    );
+    assert!(
+        !peers_b.iter().any(|entry| entry.name.as_str() == name_a),
+        "idempotent unwire should prune stale trust from worker"
+    );
+}
+
+#[tokio::test]
+async fn test_unwire_external_prunes_stale_trust_when_projection_is_already_absent() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
+
+    let sid = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let spec = TrustedPeerSpec::new(
+        "remote-mob/worker/agent-x",
+        meerkat_comms::Keypair::generate().public_key().to_peer_id(),
+        "inproc://remote-mob/worker/agent-x",
+    )
+    .expect("valid external peer");
+    handle
+        .wire(MeerkatId::from("l-1"), PeerTarget::External(spec.clone()))
+        .await
+        .expect("wire external");
+    handle
+        .unwire(MeerkatId::from("l-1"), PeerTarget::External(spec.clone()))
+        .await
+        .expect("initial external unwire");
+
+    let comms = service.real_comms(&sid).await.expect("comms for l-1");
+    comms
+        .add_trusted_peer(spec.clone())
+        .await
+        .expect("re-add stale external trust");
+
+    handle
+        .unwire(MeerkatId::from("l-1"), PeerTarget::External(spec.clone()))
+        .await
+        .expect("idempotent external stale-trust cleanup");
+
+    let peers = CoreCommsRuntime::peers(&*comms).await;
+    assert!(
+        !peers.iter().any(|entry| entry.name.as_str() == spec.name),
+        "idempotent external unwire should prune stale trust"
     );
 }
 

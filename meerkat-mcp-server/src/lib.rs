@@ -1344,9 +1344,7 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_comms_send" => {
             let input: MeerkatCommsSendInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_comms_send(state, input)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_comms_send(state, input).await
         }
         #[cfg(feature = "comms")]
         "meerkat_comms_peers" => {
@@ -2098,14 +2096,23 @@ fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value 
 async fn handle_meerkat_comms_send(
     state: &MeerkatMcpState,
     input: MeerkatCommsSendInput,
-) -> Result<Value, String> {
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+) -> Result<Value, ToolCallError> {
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
     let comms = state
         .service
         .comms_runtime(&session_id)
         .await
-        .ok_or_else(|| format!("Session not found or comms not enabled: {session_id}"))?;
+        .ok_or_else(|| {
+            ToolCallError::new(
+                -32603,
+                format!("Session not found or comms not enabled: {session_id}"),
+                Some(json!({
+                    "code": "session_not_found_or_comms_disabled",
+                    "session_id": session_id.to_string(),
+                })),
+            )
+        })?;
     let request = meerkat_core::comms::CommsCommandRequest {
         kind: input.kind,
         to: input.to,
@@ -2123,7 +2130,14 @@ async fn handle_meerkat_comms_send(
     };
     let cmd = request.parse(&session_id).map_err(|errors| {
         let details = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
-        format!("Command validation failed: {details:?}")
+        ToolCallError::new(
+            -32602,
+            "Invalid comms command",
+            Some(json!({
+                "code": "invalid_comms_command",
+                "validation_errors": details,
+            })),
+        )
     })?;
     let receipt = comms
         .send(cmd)
@@ -2169,24 +2183,53 @@ async fn handle_meerkat_comms_peers(
 fn normalize_mcp_comms_send_error(
     peer_name: Option<&str>,
     error: &meerkat_core::comms::SendError,
-) -> String {
+) -> ToolCallError {
     match error {
-        meerkat_core::comms::SendError::PeerNotFound(peer) => {
-            format!("peer_not_found_or_not_trusted: peer '{peer}' is not found or not trusted")
-        }
-        meerkat_core::comms::SendError::PeerOffline => format!(
-            "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
-            peer_name.unwrap_or("<unknown>")
+        meerkat_core::comms::SendError::PeerNotFound(peer) => ToolCallError::new(
+            -32603,
+            format!("peer_not_found_or_not_trusted: peer '{peer}' is not found or not trusted"),
+            Some(json!({
+                "code": "peer_not_found_or_not_trusted",
+                "peer": peer,
+            })),
+        ),
+        meerkat_core::comms::SendError::PeerOffline => ToolCallError::new(
+            -32603,
+            format!(
+                "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
+                peer_name.unwrap_or("<unknown>")
+            ),
+            Some(json!({
+                "code": "peer_unreachable",
+                "peer": peer_name.unwrap_or("<unknown>"),
+                "reason": "offline_or_no_ack",
+            })),
         ),
         meerkat_core::comms::SendError::Internal(details)
             if peer_name.is_some() && is_transport_internal(details) =>
         {
-            format!(
-                "peer_unreachable: peer '{}' is unreachable: transport_error ({details})",
-                peer_name.unwrap_or("<unknown>")
+            ToolCallError::new(
+                -32603,
+                format!(
+                    "peer_unreachable: peer '{}' is unreachable: transport_error ({details})",
+                    peer_name.unwrap_or("<unknown>")
+                ),
+                Some(json!({
+                    "code": "peer_unreachable",
+                    "peer": peer_name.unwrap_or("<unknown>"),
+                    "reason": "transport_error",
+                    "details": details,
+                })),
             )
         }
-        other => other.to_string(),
+        other => ToolCallError::new(
+            -32603,
+            other.to_string(),
+            Some(json!({
+                "code": "send_failed",
+                "message": other.to_string(),
+            })),
+        ),
     }
 }
 
@@ -3276,6 +3319,27 @@ mod tests {
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert!(!input.host_mode);
         assert!(input.comms_name.is_none());
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_mcp_comms_send_error_includes_structured_details() {
+        let err = normalize_mcp_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::PeerOffline,
+        );
+        assert_eq!(err.code, -32603);
+        assert!(err.message.starts_with("peer_unreachable:"));
+        let data = err.data.expect("structured error data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some("peer_unreachable")
+        );
+        assert_eq!(data.get("peer").and_then(Value::as_str), Some("peer-a"));
+        assert_eq!(
+            data.get("reason").and_then(Value::as_str),
+            Some("offline_or_no_ack")
+        );
     }
 
     #[cfg(feature = "comms")]

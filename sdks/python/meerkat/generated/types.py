@@ -151,6 +151,16 @@ class McpReloadParams:
 
 
 @dataclass
+class MobSendParams:
+    """Request payload for `mob/send`."""
+    content: Any = None
+    handling_mode: Optional[str] = None
+    meerkat_id: str = ''
+    mob_id: str = ''
+    render_metadata: Optional[WireRenderMetadata] = None
+
+
+@dataclass
 class MobWireParams:
     """Request payload for `mob/wire`."""
     local: str = ''
@@ -213,6 +223,23 @@ class McpLiveOpResponse:
     server_name: Optional[str] = None
     session_id: str = ''
     status: str = ''
+
+InputStateResult = Optional[WireInputState]
+
+
+@dataclass
+class WireRenderMetadata:
+    """Public render metadata contract for mob member delivery."""
+    class_: str = ''
+    salience: Optional[str] = None
+
+
+@dataclass
+class MobSendResult:
+    """Response payload for `mob/send`."""
+    handling_mode: str = ''
+    member_id: str = ''
+    session_id: str = ''
 
 
 @dataclass

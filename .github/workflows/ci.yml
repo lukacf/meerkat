@@ -6,6 +6,7 @@ on:
       - main
       - ci/**
       - feat/**
+      - feature/**
   pull_request:
   workflow_dispatch:
 

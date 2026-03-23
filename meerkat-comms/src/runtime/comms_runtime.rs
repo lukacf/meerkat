@@ -1268,8 +1268,9 @@ impl CommsRuntime {
                 }
                 Err(SendError::PeerOffline)
             }
-            Err(error @ crate::router::SendError::Transport(_))
-            | Err(error @ crate::router::SendError::Io(_)) => {
+            Err(
+                error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
+            ) => {
                 if let Some(peer) = resolved_peer.as_ref() {
                     self.peer_directory_reachability.lock().record_send_failed(
                         &peer.reachability_key(),

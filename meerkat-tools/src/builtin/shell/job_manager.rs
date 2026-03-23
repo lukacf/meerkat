@@ -386,7 +386,7 @@ impl JobManager {
         );
         self.canonical_job_ops
             .lock()
-            .expect("canonical shell job index lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id.clone(), operation_id);
         self.cancel_notifiers
             .lock()
@@ -555,7 +555,7 @@ impl JobManager {
         );
         self.canonical_job_ops
             .lock()
-            .expect("canonical shell job index lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id.clone(), operation_id.clone());
         cancel_notifiers
             .lock()
@@ -844,7 +844,7 @@ impl JobManager {
         if removed {
             self.canonical_job_ops
                 .lock()
-                .expect("canonical shell job index lock poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(job_id);
             self.handles.lock().await.remove(job_id);
             self.cancel_notifiers.lock().await.remove(job_id);
@@ -857,7 +857,7 @@ impl JobManager {
     pub fn canonical_operation_for_job(&self, job_id: &JobId) -> Option<OperationId> {
         self.canonical_job_ops
             .lock()
-            .expect("canonical shell job index lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(job_id)
             .cloned()
     }
@@ -881,7 +881,7 @@ impl JobManager {
         let mut canonical_job_ops_guard = self
             .canonical_job_ops
             .lock()
-            .expect("canonical shell job index lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // First pass: collect job IDs older than TTL
         let expired_jobs: Vec<JobId> = completed_at_guard
@@ -1355,7 +1355,7 @@ mod tests {
         manager
             .canonical_job_ops
             .lock()
-            .expect("canonical shell job index lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id.clone(), operation_id);
 
         let summaries = manager.list_jobs().await;

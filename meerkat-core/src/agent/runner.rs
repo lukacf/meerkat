@@ -171,7 +171,9 @@ where
             return Ok(HostModePollOutcome::Dismissed);
         }
 
-        let drained = self.drain_comms_inbox().await;
+        // The host-mode pump IS the designated drain owner — bypass the
+        // delegation guard so pending peer traffic is actually processed.
+        let drained = self.drain_comms_inbox_unconditional().await;
         if !drained {
             return if self
                 .comms_arc()
@@ -551,7 +553,10 @@ where
                 ))
             })?;
 
-        if !self.drain_comms_inbox().await {
+        // Injected-turn admission is the designated drain owner for this
+        // turn — bypass the delegation guard so the just-injected message
+        // is admitted regardless of comms_drain_active state.
+        if !self.drain_comms_inbox_unconditional().await {
             return Err(AgentError::InternalError(
                 "injected turn was not admitted into the session".to_string(),
             ));

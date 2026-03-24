@@ -617,8 +617,9 @@ impl LlmClient for AnthropicClient {
             let stream_result = if (200..=299).contains(&status_code) {
                 Ok(response.bytes_stream())
             } else {
+                let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
+                Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);

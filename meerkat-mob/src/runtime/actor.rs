@@ -3894,33 +3894,47 @@ impl MobActor {
                         entry.meerkat_id
                     ))
                 })?;
-                let injector = self
-                    .provisioner
-                    .interaction_event_injector(session_id)
-                    .await
-                    .ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "missing event injector for autonomous member '{}'",
-                            entry.meerkat_id
-                        ))
-                    })?;
-                let session_id = session_id.clone();
-                // EventInjector now carries full ContentInput plus normalized
-                // handling/render metadata for autonomous host members.
-                injector
-                    .inject(
-                        content,
-                        meerkat_core::PlainEventSource::Rpc,
-                        handling_mode,
-                        render_metadata,
-                    )
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "autonomous dispatch inject failed for '{}': {}",
-                            entry.meerkat_id, error
-                        ))
-                    })?;
-                Ok(session_id)
+
+                let loop_dead = {
+                    let loops = self.autonomous_host_loops.lock().await;
+                    loops
+                        .get(&entry.meerkat_id)
+                        .map_or(true, |h| h.is_finished())
+                };
+
+                if loop_dead {
+                    tracing::info!(
+                        meerkat_id = %entry.meerkat_id,
+                        "autonomous host loop exited, restarting for incoming message"
+                    );
+                    self.start_autonomous_host_loop(&entry.meerkat_id, &entry.member_ref, content)
+                        .await?;
+                } else {
+                    let injector = self
+                        .provisioner
+                        .interaction_event_injector(session_id)
+                        .await
+                        .ok_or_else(|| {
+                            MobError::Internal(format!(
+                                "missing event injector for autonomous member '{}'",
+                                entry.meerkat_id
+                            ))
+                        })?;
+                    injector
+                        .inject(
+                            content,
+                            meerkat_core::PlainEventSource::Rpc,
+                            handling_mode,
+                            render_metadata,
+                        )
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "autonomous dispatch inject failed for '{}': {}",
+                                entry.meerkat_id, error
+                            ))
+                        })?;
+                }
+                Ok(session_id.clone())
             }
             crate::MobRuntimeMode::TurnDriven => {
                 let session_id = entry.member_ref.session_id().cloned().ok_or_else(|| {

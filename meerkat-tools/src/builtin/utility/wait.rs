@@ -49,6 +49,15 @@ impl WaitTool {
             interrupt_rx: Some(rx),
         }
     }
+
+    /// Returns a clone of the interrupt receiver, if one is configured.
+    ///
+    /// Used to carry forward interrupt wiring across dispatcher rebuilds
+    /// (e.g., ops-lifecycle rebinding creates a fresh `CompositeDispatcher`
+    /// and must re-apply the interrupt receiver from the old dispatcher).
+    pub fn interrupt_receiver(&self) -> Option<WaitInterruptReceiver> {
+        self.interrupt_rx.clone()
+    }
 }
 
 impl Default for WaitTool {

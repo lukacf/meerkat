@@ -13,7 +13,10 @@ use std::time::Duration;
 #[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize)]
 pub enum LlmError {
     // === Retryable Errors ===
-    #[error("Rate limited, retry after {retry_after_ms:?}ms")]
+    #[error("Rate limited{}", match .retry_after_ms {
+        Some(ms) => format!(", retry after {ms}ms"),
+        None => String::new(),
+    })]
     RateLimited { retry_after_ms: Option<u64> },
 
     #[error("Server overloaded (503)")]
@@ -81,19 +84,41 @@ impl LlmError {
     }
 
     /// Create from HTTP status code and message
-    pub fn from_http_status(status: u16, message: String) -> Self {
+    pub fn from_http_status(status: u16, message: String, retry_after_ms: Option<u64>) -> Self {
         match status {
             401 => Self::AuthenticationFailed { message },
             403 => Self::InvalidApiKey,
             404 => Self::ModelNotFound { model: message },
-            429 => Self::RateLimited {
-                retry_after_ms: None,
-            },
+            429 => Self::RateLimited { retry_after_ms },
             503 => Self::ServerOverloaded,
             s if s >= 500 => Self::ServerError { status: s, message },
             s if s >= 400 => Self::InvalidRequest { message },
             _ => Self::Unknown { message },
         }
+    }
+
+    pub fn from_http_response(
+        status: u16,
+        message: String,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Self {
+        let retry_after_ms = headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(Self::parse_retry_after);
+        Self::from_http_status(status, message, retry_after_ms)
+    }
+
+    pub fn parse_retry_after(value: &str) -> Option<u64> {
+        if let Ok(secs) = value.trim().parse::<u64>() {
+            return Some(secs * 1000);
+        }
+        if let Ok(secs) = value.trim().parse::<f64>()
+            && secs > 0.0
+        {
+            return Some((secs * 1000.0) as u64);
+        }
+        None
     }
 
     pub fn failure_reason(&self) -> LlmFailureReason {
@@ -239,19 +264,19 @@ mod tests {
     #[test]
     fn test_from_http_status() {
         assert!(matches!(
-            LlmError::from_http_status(401, "".to_string()),
+            LlmError::from_http_status(401, "".to_string(), None),
             LlmError::AuthenticationFailed { .. }
         ));
         assert!(matches!(
-            LlmError::from_http_status(429, "".to_string()),
+            LlmError::from_http_status(429, "".to_string(), None),
             LlmError::RateLimited { .. }
         ));
         assert!(matches!(
-            LlmError::from_http_status(503, "".to_string()),
+            LlmError::from_http_status(503, "".to_string(), None),
             LlmError::ServerOverloaded
         ));
         assert!(matches!(
-            LlmError::from_http_status(500, "".to_string()),
+            LlmError::from_http_status(500, "".to_string(), None),
             LlmError::ServerError { status: 500, .. }
         ));
     }
@@ -283,5 +308,87 @@ mod tests {
             reason,
             LlmFailureReason::NetworkTimeout { duration_ms: 30000 }
         );
+    }
+
+    // -- Retry-After parsing tests (PR #156 port) --
+
+    #[test]
+    fn test_parse_retry_after_integer_seconds() {
+        assert_eq!(LlmError::parse_retry_after("120"), Some(120_000));
+        assert_eq!(LlmError::parse_retry_after("1"), Some(1_000));
+    }
+
+    #[test]
+    fn test_parse_retry_after_fractional_seconds() {
+        assert_eq!(LlmError::parse_retry_after("0.5"), Some(500));
+        assert_eq!(LlmError::parse_retry_after("1.5"), Some(1_500));
+    }
+
+    #[test]
+    fn test_parse_retry_after_with_whitespace() {
+        assert_eq!(LlmError::parse_retry_after("  30  "), Some(30_000));
+    }
+
+    #[test]
+    fn test_parse_retry_after_invalid() {
+        assert_eq!(LlmError::parse_retry_after("not-a-number"), None);
+    }
+
+    #[test]
+    fn test_parse_retry_after_negative() {
+        assert_eq!(LlmError::parse_retry_after("-5"), None);
+    }
+
+    #[test]
+    fn test_from_http_status_429_with_retry_after() {
+        let err = LlmError::from_http_status(429, "rate limited".to_string(), Some(5000));
+        assert!(matches!(
+            err,
+            LlmError::RateLimited {
+                retry_after_ms: Some(5000)
+            }
+        ));
+    }
+
+    #[test]
+    fn test_from_http_status_429_without_retry_after() {
+        let err = LlmError::from_http_status(429, "rate limited".to_string(), None);
+        assert!(matches!(
+            err,
+            LlmError::RateLimited {
+                retry_after_ms: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_from_http_status_non_429_ignores_retry_after() {
+        let err = LlmError::from_http_status(500, "server error".to_string(), Some(5000));
+        assert!(matches!(err, LlmError::ServerError { status: 500, .. }));
+    }
+
+    #[test]
+    fn test_from_http_response_extracts_retry_after_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
+        let err = LlmError::from_http_response(429, "rate limited".to_string(), &headers);
+        assert!(matches!(
+            err,
+            LlmError::RateLimited {
+                retry_after_ms: Some(30_000)
+            }
+        ));
+    }
+
+    #[test]
+    fn test_from_http_response_no_header_returns_none() {
+        let headers = reqwest::header::HeaderMap::new();
+        let err = LlmError::from_http_response(429, "rate limited".to_string(), &headers);
+        assert!(matches!(
+            err,
+            LlmError::RateLimited {
+                retry_after_ms: None
+            }
+        ));
     }
 }

@@ -88,19 +88,7 @@ where
             // 1. Budget gate at loop entry
             self.budget.check()?;
 
-            // 2. Retry delay (capped by remaining duration)
-            if attempt > 0 {
-                let delay = self.retry_policy.delay_for_attempt(attempt);
-                let capped_delay = match self.budget.remaining_duration() {
-                    Some(remaining) => delay.min(remaining),
-                    None => delay,
-                };
-                tokio::time::sleep(capped_delay).await;
-                // Re-check budget after sleep
-                self.budget.check()?;
-            }
-
-            // 3. Compute effective timeout for this call
+            // 2. Compute effective timeout for this call
             let effective_call_timeout = self.resolve_effective_call_timeout();
             let remaining_turn = self.budget.remaining_duration();
 
@@ -188,12 +176,22 @@ where
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
+                        let hint = e.retry_after_hint();
+                        let computed = self.retry_policy.delay_for_attempt(attempt + 1);
+                        let delay = compute_retry_delay(hint, computed, e.is_rate_limited());
+                        let capped = match self.budget.remaining_duration() {
+                            Some(remaining) => delay.min(remaining),
+                            None => delay,
+                        };
                         tracing::warn!(
-                            "LLM call failed (attempt {}), retrying: {}",
+                            "LLM call failed (attempt {}), retrying in {}ms: {}",
                             attempt + 1,
+                            capped.as_millis(),
                             e
                         );
                         attempt += 1;
+                        tokio::time::sleep(capped).await;
+                        self.budget.check()?;
                         continue;
                     }
                     return Err(e);
@@ -1497,6 +1495,19 @@ impl ToolCallOwned {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 fn fallback_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
+}
+
+/// Compute retry delay using server hint, policy, and rate-limit floor.
+fn compute_retry_delay(
+    hint: Option<std::time::Duration>,
+    computed: std::time::Duration,
+    is_rate_limited: bool,
+) -> std::time::Duration {
+    match hint {
+        Some(h) if h > computed => h,
+        _ if is_rate_limited => computed.max(std::time::Duration::from_secs(30)),
+        _ => computed,
+    }
 }
 
 #[cfg(test)]
@@ -2881,5 +2892,51 @@ mod tests {
             result.err()
         );
         assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    // -- Retry delay hint tests (PR #156 port) --
+
+    use std::time::Duration;
+
+    #[test]
+    fn compute_retry_delay_uses_computed_for_non_rate_limited() {
+        let delay = super::compute_retry_delay(None, Duration::from_millis(500), false);
+        assert_eq!(delay, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_30s_floor_for_rate_limited_without_hint() {
+        let delay = super::compute_retry_delay(None, Duration::from_millis(500), true);
+        assert_eq!(delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_hint_when_greater_than_computed() {
+        let delay = super::compute_retry_delay(
+            Some(Duration::from_secs(60)),
+            Duration::from_millis(500),
+            true,
+        );
+        assert_eq!(delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_30s_floor_when_hint_below_floor() {
+        let delay = super::compute_retry_delay(
+            Some(Duration::from_millis(100)),
+            Duration::from_millis(500),
+            true,
+        );
+        assert_eq!(delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_computed_when_greater_than_hint() {
+        let delay = super::compute_retry_delay(
+            Some(Duration::from_secs(60)),
+            Duration::from_secs(90),
+            true,
+        );
+        assert_eq!(delay, Duration::from_secs(90));
     }
 }

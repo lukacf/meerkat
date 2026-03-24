@@ -78,16 +78,24 @@ where
     ///
     /// Routes on the stored `PeerInputClass` from ingress classification —
     /// no downstream re-classification.
+    /// Turn-boundary drain: skips when a dedicated comms drain task is active
+    /// (the session service is the sole inbox consumer in that case).
     pub(super) async fn drain_comms_inbox(&mut self) -> bool {
-        // When a dedicated comms drain task is active, suppress turn-boundary
-        // draining so the session service is the sole inbox consumer.
         if self
             .comms_drain_active
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return false;
         }
+        self.drain_comms_inbox_unconditional().await
+    }
 
+    /// Drain the comms inbox regardless of the `comms_drain_active` flag.
+    ///
+    /// Used by callers that ARE the designated drain owner: host-mode pump
+    /// and injected-turn admission. These must bypass the delegation guard
+    /// because they are the very task the guard is deferring to.
+    pub(super) async fn drain_comms_inbox_unconditional(&mut self) -> bool {
         use crate::interaction::PeerInputClass;
 
         let comms = match &self.comms_runtime {

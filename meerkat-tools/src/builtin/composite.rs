@@ -55,6 +55,9 @@ pub struct CompositeDispatcher {
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     allowed_tools: HashSet<String>,
+    /// Stashed interrupt receiver for carry-forward across dispatcher rebuilds.
+    /// Set by `bind_wait_interrupt`, re-applied by `bind_ops_lifecycle`.
+    wait_interrupt_rx: Option<meerkat_core::wait_interrupt::WaitInterruptReceiver>,
 }
 
 impl CompositeDispatcher {
@@ -189,6 +192,7 @@ impl CompositeDispatcher {
             image_tool_results: _image_tool_results,
             job_manager,
             allowed_tools,
+            wait_interrupt_rx: None,
         })
     }
 
@@ -239,6 +243,7 @@ impl CompositeDispatcher {
             session_id,
             image_tool_results: true,
             allowed_tools,
+            wait_interrupt_rx: None,
         })
     }
 
@@ -445,13 +450,16 @@ impl AgentToolDispatcher for CompositeDispatcher {
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
         // Swap the wait tool with an interrupt-aware version
         use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_interrupt(rx));
+        let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
         for tool in &mut owned.builtin_tools {
             if tool.name() == "wait" {
                 *tool = new_wait;
                 break;
             }
         }
+        // Stash the receiver for carry-forward across dispatcher rebuilds
+        // (e.g., bind_ops_lifecycle creates a fresh CompositeDispatcher).
+        owned.wait_interrupt_rx = Some(rx);
         Ok(Arc::new(owned))
     }
 
@@ -481,6 +489,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 return Err(OpsLifecycleBindError::Unsupported);
             }
 
+            // Carry forward interrupt receiver so comms-driven wait interrupts
+            // survive the ops-lifecycle rebuild.
+            let interrupt_rx = owned.wait_interrupt_rx.take();
+
             #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
             let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
                 Arc::clone(&owned.task_store),
@@ -493,6 +505,18 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 owned.image_tool_results,
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
+
+            // Re-apply the interrupt receiver on the new wait tool.
+            if let Some(rx) = interrupt_rx {
+                use crate::builtin::utility::WaitTool;
+                let new_wait = Arc::new(WaitTool::with_interrupt(rx));
+                for tool in &mut rebound.builtin_tools {
+                    if tool.name() == "wait" {
+                        *tool = new_wait;
+                        break;
+                    }
+                }
+            }
 
             #[cfg(feature = "skills")]
             if let Some(skill_tools) = owned.skill_tools.take() {

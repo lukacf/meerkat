@@ -288,6 +288,26 @@ impl AgentError {
                 | Self::MaxTurnsReached { .. }
         )
     }
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Self::Llm {
+                reason: LlmFailureReason::RateLimited { .. },
+                ..
+            }
+        )
+    }
+
+    pub fn retry_after_hint(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Llm {
+                reason: LlmFailureReason::RateLimited { retry_after },
+                ..
+            } => *retry_after,
+            _ => None,
+        }
+    }
+
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::Llm { reason, .. } => match reason {
@@ -375,6 +395,58 @@ mod tests {
     fn test_auth_error_not_recoverable() {
         let err = AgentError::llm("anthropic", LlmFailureReason::AuthError, "bad key");
         assert!(!err.is_recoverable());
+    }
+
+    // -- Rate-limit helper tests (PR #156 port) --
+
+    #[test]
+    fn test_is_rate_limited_true_for_rate_limit_error() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::RateLimited {
+                retry_after: Some(std::time::Duration::from_secs(30)),
+            },
+            "rate limited",
+        );
+        assert!(err.is_rate_limited());
+    }
+
+    #[test]
+    fn test_is_rate_limited_false_for_other_errors() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 5000 },
+            "timeout",
+        );
+        assert!(!err.is_rate_limited());
+
+        let err = AgentError::llm("anthropic", LlmFailureReason::AuthError, "bad key");
+        assert!(!err.is_rate_limited());
+    }
+
+    #[test]
+    fn test_retry_after_hint_returns_duration_for_rate_limit() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::RateLimited {
+                retry_after: Some(std::time::Duration::from_secs(60)),
+            },
+            "rate limited",
+        );
+        assert_eq!(
+            err.retry_after_hint(),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn test_retry_after_hint_returns_none_for_non_rate_limit() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 5000 },
+            "timeout",
+        );
+        assert_eq!(err.retry_after_hint(), None);
     }
 
     #[test]

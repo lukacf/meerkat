@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(name = "rkat-rpc")]
+#[command(name = "rkat-rpc", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Meerkat JSON-RPC stdio server")]
 struct Cli {
     /// Explicit realm ID to join.

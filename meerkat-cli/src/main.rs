@@ -489,7 +489,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "rkat")]
+#[command(name = "rkat", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
 #[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
 #[command(

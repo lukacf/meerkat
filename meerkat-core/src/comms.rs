@@ -215,7 +215,11 @@ impl CommsCommandRequest {
                     Ok(CommsCommand::PeerRequest {
                         to,
                         intent,
-                        params: self.params.clone().unwrap_or_default(),
+                        params: match (&self.params, &self.body) {
+                            (Some(p), _) => p.clone(),
+                            (None, Some(body)) => serde_json::json!({ "body": body }),
+                            (None, None) => serde_json::Value::Object(Default::default()),
+                        },
                         stream,
                     })
                 } else {
@@ -551,6 +555,7 @@ pub enum SendAndStreamError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use serde_json::Value;
@@ -602,5 +607,88 @@ mod tests {
         assert_eq!(spec.peer_id, "ed25519:abc");
         assert_eq!(spec.address, "inproc://alice");
         Ok(())
+    }
+
+    // -- peer_request body→params promotion tests (PR #156 port) --
+
+    fn peer_request_cmd(
+        params: Option<Value>,
+        body: Option<String>,
+    ) -> Result<CommsCommand, Vec<CommsCommandValidationError>> {
+        let req = CommsCommandRequest {
+            kind: "peer_request".to_string(),
+            to: Some("bob".to_string()),
+            body,
+            blocks: None,
+            intent: Some("greet".to_string()),
+            params,
+            in_reply_to: None,
+            status: None,
+            result: None,
+            source: None,
+            stream: None,
+            allow_self_session: None,
+            handling_mode: None,
+        };
+        req.parse(&crate::types::SessionId::new())
+    }
+
+    #[test]
+    fn peer_request_with_params_only() {
+        let cmd = peer_request_cmd(Some(serde_json::json!({"key": "value"})), None).unwrap();
+        match cmd {
+            CommsCommand::PeerRequest { params, .. } => {
+                assert_eq!(params["key"], "value");
+            }
+            other => panic!("expected PeerRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_request_with_body_only_promotes_to_params() {
+        let cmd = peer_request_cmd(None, Some("hello world".to_string())).unwrap();
+        match cmd {
+            CommsCommand::PeerRequest { params, .. } => {
+                assert_eq!(
+                    params["body"], "hello world",
+                    "body should be promoted into params.body when params is absent"
+                );
+            }
+            other => panic!("expected PeerRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_request_with_both_prefers_params() {
+        let cmd = peer_request_cmd(
+            Some(serde_json::json!({"explicit": true})),
+            Some("ignored body".to_string()),
+        )
+        .unwrap();
+        match cmd {
+            CommsCommand::PeerRequest { params, .. } => {
+                assert_eq!(params["explicit"], true);
+                assert!(
+                    params.get("body").is_none(),
+                    "body should not be promoted when params is present"
+                );
+            }
+            other => panic!("expected PeerRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_request_with_neither_gives_empty_object() {
+        let cmd = peer_request_cmd(None, None).unwrap();
+        match cmd {
+            CommsCommand::PeerRequest { params, .. } => {
+                assert!(params.is_object(), "params should be an object");
+                assert!(
+                    params.as_object().unwrap().is_empty(),
+                    "params should be empty when both body and params are absent"
+                );
+            }
+            other => panic!("expected PeerRequest, got {other:?}"),
+        }
     }
 }

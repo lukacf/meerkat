@@ -25,11 +25,10 @@ pub enum MobPeerTarget {
 /// Request payload for `mob/wire`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MobWireParams {
     pub mob_id: String,
-    #[serde(alias = "local")]
     pub member: String,
-    #[serde(alias = "target")]
     pub peer: MobPeerTarget,
 }
 
@@ -43,11 +42,10 @@ pub struct MobWireResult {
 /// Request payload for `mob/unwire`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MobUnwireParams {
     pub mob_id: String,
-    #[serde(alias = "local")]
     pub member: String,
-    #[serde(alias = "target")]
     pub peer: MobPeerTarget,
 }
 
@@ -107,6 +105,7 @@ pub struct WireRenderMetadata {
 /// Request payload for `mob/send`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MobSendParams {
     pub mob_id: String,
     pub meerkat_id: String,
@@ -124,4 +123,42 @@ pub struct MobSendResult {
     pub member_id: String,
     pub session_id: String,
     pub handling_mode: WireHandlingMode,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mob_wire_params_reject_legacy_local_target_shape() {
+        let err = serde_json::from_value::<MobWireParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "local": "member-a",
+            "target": { "local": "member-b" }
+        }))
+        .expect_err("legacy local/target shape must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field `local`") || msg.contains("missing field `member`"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn mob_send_params_reject_unknown_legacy_message_field() {
+        let err = serde_json::from_value::<MobSendParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "meerkat_id": "alpha",
+            "content": "hello",
+            "message": "legacy hello"
+        }))
+        .expect_err("legacy message field must be rejected");
+
+        assert!(
+            err.to_string().contains("unknown field `message`"),
+            "unexpected error: {err}"
+        );
+    }
 }

@@ -3910,6 +3910,48 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_send_rejects_legacy_message_shape() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "mob/send",
+            serde_json::json!({
+                "mob_id": "mob-1",
+                "meerkat_id": "worker-1",
+                "message": "legacy payload"
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("unknown field `message`"),
+            "legacy mob/send payloads should be rejected after the 0.5 clean cut"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_wire_rejects_legacy_endpoint_shapes() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "mob/wire",
+            serde_json::json!({
+                "mob_id": "mob-1",
+                "local": "worker-a",
+                "target": { "local": "worker-b" }
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("unknown field `local`"),
+            "legacy mob/wire payloads should be rejected after the 0.5 clean cut"
+        );
+    }
+
     #[tokio::test]
     async fn deferred_session_runtime_endpoints_register_pending_session() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;

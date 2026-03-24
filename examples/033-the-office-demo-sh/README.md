@@ -51,7 +51,9 @@ open http://127.0.0.1:4174
 cd web && npm install && npm run dev
 ```
 
-`npm run dev`/`npm run build` auto-sync the paired WASM runtime bundle from `@rkat/web` into `web/public/meerkat-pkg`.
+`npm run dev`/`npm run build` auto-sync the paired WASM runtime bundle from the
+repo-local `sdks/web` package (falling back to the installed `@rkat/web`
+package only if needed) into `web/public/meerkat-pkg`.
 
 ## Usage
 

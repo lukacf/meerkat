@@ -658,6 +658,34 @@ where
                             })?;
                             return self.build_result(turn_count, tool_call_count).await;
                         }
+                        Err(AgentError::TokenBudgetExceeded { used, limit }) => {
+                            // Token budget exhausted during LLM call — same
+                            // terminal path as loop-top budget check.
+                            emit_event!(AgentEvent::BudgetWarning {
+                                budget_type: BudgetType::Tokens,
+                                used,
+                                limit,
+                                percent: 1.0,
+                            });
+                            self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(AgentError::ToolCallBudgetExceeded { count, limit }) => {
+                            // Tool-call budget exhausted during LLM call — same
+                            // terminal path as loop-top budget check.
+                            emit_event!(AgentEvent::BudgetWarning {
+                                budget_type: BudgetType::ToolCalls,
+                                used: count as u64,
+                                limit: limit as u64,
+                                percent: 1.0,
+                            });
+                            self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
                         Err(e @ AgentError::Llm { .. }) => {
                             // Exhausted hard LLM-call failure — route through
                             // machine-owned FatalFailure and preserve diagnostics.
@@ -1545,7 +1573,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -1710,7 +1738,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -1772,7 +1800,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -1973,7 +2001,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -2025,7 +2053,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -2750,5 +2778,101 @@ mod tests {
             seen,
             vec![vec!["visible".to_string()], vec!["visible".to_string()]]
         );
+    }
+
+    /// Mock LLM client that returns high usage, causing budget exhaustion
+    /// after recording on the caller side.
+    struct HighUsageLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for HighUsageLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage {
+                    input_tokens: 500,
+                    output_tokens: 500,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                },
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// Regression test: token budget exhaustion detected after LLM-call usage
+    /// recording must route through the machine authority's BudgetExhausted
+    /// terminal path (SurfaceResultClass::Success), not escape as a raw
+    /// AgentError::TokenBudgetExceeded.
+    ///
+    /// Before the fix, budget errors from inside call_llm_with_retry bypassed
+    /// the machine authority entirely (Dogma §4: same semantic condition, one
+    /// canonical terminal path).
+    #[tokio::test]
+    async fn token_budget_exhausted_after_llm_call_routes_through_authority() {
+        // Budget allows exactly 100 tokens — the first LLM call reports 1000,
+        // so usage recording at the call site pushes the budget over the limit.
+        // The next loop-top budget.check() fires TokenBudgetExceeded, which
+        // must be routed to BudgetExhausted -> Success, not raw Err.
+        let mut agent = build_agent(Arc::new(HighUsageLlmClient)).await;
+        agent.config.max_turns = Some(10);
+        agent.state = LoopState::CallingLlm;
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: Some(100),
+            max_duration: None,
+            max_tool_calls: None,
+        });
+
+        // Must be Ok (Success via BudgetExhausted), not Err(TokenBudgetExceeded).
+        let result = agent.run_loop(None).await;
+        assert!(
+            result.is_ok(),
+            "token budget exhaustion must route through BudgetExhausted (Success), \
+             not escape as raw AgentError: {:?}",
+            result.err()
+        );
+        assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    /// Regression test: tool-call budget exhaustion detected anywhere in the
+    /// agent loop must route through BudgetExhausted, producing Success.
+    #[tokio::test]
+    async fn tool_call_budget_exhausted_routes_through_authority() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(10);
+        agent.state = LoopState::CallingLlm;
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: None,
+            max_duration: None,
+            max_tool_calls: Some(0),
+        });
+
+        let result = agent.run_loop(None).await;
+        assert!(
+            result.is_ok(),
+            "tool-call budget exhaustion must route through BudgetExhausted (Success), \
+             not escape as raw AgentError: {:?}",
+            result.err()
+        );
+        assert_eq!(agent.state, LoopState::Completed);
     }
 }

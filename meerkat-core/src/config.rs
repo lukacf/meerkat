@@ -1070,21 +1070,16 @@ pub struct BudgetConfig {
 /// - omitted key => `Inherit`
 /// - `call_timeout = "disabled"` => `Disabled`
 /// - `call_timeout = "45s"` => `Value(45s)`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CallTimeoutOverride {
     /// Inherit the lower-layer or profile-derived default.
+    #[default]
     Inherit,
     /// Explicitly disable call timeout (no timeout applied regardless of profile).
     Disabled,
     /// Explicitly set the call timeout to this duration.
     Value(Duration),
-}
-
-impl Default for CallTimeoutOverride {
-    fn default() -> Self {
-        Self::Inherit
-    }
 }
 
 impl Serialize for CallTimeoutOverride {
@@ -2162,10 +2157,10 @@ call_timeout = "disabled"
 
     #[test]
     fn retry_config_from_toml_omitted_is_inherit() {
-        let toml_str = r#"
+        let toml_str = r"
 [retry]
 max_retries = 2
-"#;
+";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.retry.call_timeout_override,
@@ -2206,10 +2201,10 @@ max_retries = 2
 
     #[test]
     fn config_merge_preserves_call_timeout_override() {
-        let toml_base = r#"
+        let toml_base = r"
 [retry]
 max_retries = 2
-"#;
+";
         let toml_overlay = r#"
 [retry]
 call_timeout = "30s"

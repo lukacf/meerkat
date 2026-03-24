@@ -2274,7 +2274,7 @@ impl AgentLlmClient for OverlayProbeLlmClient {
         "overlay-probe"
     }
 
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "mock-model"
     }
 }

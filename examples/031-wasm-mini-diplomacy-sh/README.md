@@ -62,11 +62,14 @@ JS detects quiescence → extracts orders → resolves combat → narrator flow
 ## Prerequisites
 
 ```bash
-cargo build -p meerkat-cli      # builds rkat
+cargo build -p meerkat-cli       # builds rkat for repo-local runs
 cargo install wasm-pack          # if not already installed
 node --version                   # 20+
 npm --version
 ```
+
+`./examples.sh` will automatically prefer the repo-local `../../target/debug/rkat`
+or `../../target/release/rkat` when present.
 
 ## Build & Run
 
@@ -87,23 +90,17 @@ python3 -m http.server 4173 --directory web/dist
 open http://127.0.0.1:4173
 ```
 
-### Manual WASM rebuild (after Rust changes)
+### Rebuild after Rust changes
 
 ```bash
-RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-  wasm-pack build meerkat-web-runtime --target web \
-  --out-dir ../examples/031-wasm-mini-diplomacy-sh/.work/runtime/pkg --dev
-
-# Copy to dist
-cp .work/runtime/pkg/meerkat_web_runtime.js web/dist/runtime.js
-cp .work/runtime/pkg/meerkat_web_runtime_bg.wasm web/dist/meerkat_web_runtime_bg.wasm
-
-# Rebuild web bundle
-cd web && npm run build
-# Re-copy WASM (Vite wipes dist/)
-cp ../.work/runtime/pkg/meerkat_web_runtime.js dist/runtime.js
-cp ../.work/runtime/pkg/meerkat_web_runtime_bg.wasm dist/meerkat_web_runtime_bg.wasm
+cargo build -p meerkat-cli
+cd examples/031-wasm-mini-diplomacy-sh
+./examples.sh
 ```
+
+That path stays aligned with the current 0.5 browser packaging flow because it
+rebuilds the runtime through `rkat mob web build` instead of teaching a separate
+direct `wasm-pack` recipe.
 
 ## Usage
 
@@ -127,7 +124,7 @@ cp ../.work/runtime/pkg/meerkat_web_runtime_bg.wasm dist/meerkat_web_runtime_bg.
 | `web/src/main.ts` | Game engine, mob definitions, event streaming, UI |
 | `web/src/styles.css` | Slack-like DM interface, territory map styling |
 | `examples.sh` | Build script (mobpack → WASM → Vite) |
-| `../../meerkat-web-runtime/src/lib.rs` | 25 WASM exports powering the runtime |
+| `../../meerkat-web-runtime/src/lib.rs` | WASM exports powering the runtime |
 | `../../meerkat-mob/src/runtime/flow.rs` | Flow engine (narrator uses this) |
 | `../../meerkat-comms/src/router.rs` | Cross-namespace inproc routing |
 

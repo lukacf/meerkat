@@ -2,7 +2,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use meerkat::SessionService;
-use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
+use meerkat_core::service::{
+    CreateSessionRequest, HostModeOwner, InitialTurnPolicy, SessionBuildOptions,
+};
 
 use crate::state::ForceState;
 use super::ToolCallError;
@@ -36,7 +38,7 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
 
     let req = CreateSessionRequest {
         model,
-        prompt,
+        prompt: prompt.into(),
         render_metadata: None,
         system_prompt: Some(
             "You are a helpful technical advisor. Give clear, concise opinions. \
@@ -46,6 +48,7 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
         max_tokens: None,
         event_tx: None,
         host_mode: false,
+        host_mode_owner: HostModeOwner::SessionService,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build,

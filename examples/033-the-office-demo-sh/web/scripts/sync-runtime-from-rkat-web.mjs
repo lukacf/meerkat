@@ -36,13 +36,24 @@ const destDirs = [
   path.join(webDir, "dist", "meerkat-pkg"),
 ];
 
-for (const destDir of destDirs) {
-  fs.mkdirSync(destDir, { recursive: true });
-  for (const file of runtimeFiles) {
-    const src = path.join(sourceDir, file);
-    const dest = path.join(destDir, file);
-    fs.copyFileSync(src, dest);
+function syncDirectory(source, dest) {
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (entry.name === ".gitignore") continue;
+    const src = path.join(source, entry.name);
+    const dst = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      syncDirectory(src, dst);
+    } else {
+      fs.copyFileSync(src, dst);
+    }
   }
+}
+
+for (const destDir of destDirs) {
+  syncDirectory(sourceDir, destDir);
 }
 
 console.log(

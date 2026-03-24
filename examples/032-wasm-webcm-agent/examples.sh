@@ -22,6 +22,7 @@ if [[ "${1:-}" == "--clean" ]]; then
   echo "Cleaning cached WebCM and meerkat-pkg artifacts..."
   rm -f "${PUBLIC_DIR}/webcm.mjs" "${PUBLIC_DIR}/webcm.wasm"
   rm -rf "${MEERKAT_PKG}"
+  rm -rf "${WEB_DIR}/dist"
   echo "Done. Re-downloading and rebuilding."
 fi
 
@@ -39,35 +40,31 @@ else
   echo "WebCM already downloaded"
 fi
 
-# ── Build meerkat WASM runtime (for mob mode) ────────────────────────────────
+# ── Build and sync current meerkat WASM runtime (for mob mode) ───────────────
 
-if [[ ! -f "${MEERKAT_PKG}/meerkat_web_runtime_bg.wasm" ]]; then
-  echo "Building meerkat-web-runtime for wasm32..."
-  REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-  SDK_WASM_DIR="${REPO_ROOT}/sdks/web/wasm"
+echo "Building and syncing current meerkat-web-runtime for wasm32..."
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+SDK_WASM_DIR="${REPO_ROOT}/sdks/web/wasm"
 
-  # Build via sdks/web's build:wasm script (handles --out-dir and .gitignore cleanup)
-  if [[ -f "${REPO_ROOT}/sdks/web/package.json" ]]; then
-    (cd "${REPO_ROOT}/sdks/web" && npm run build:wasm)
-  else
-    RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
-      wasm-pack build "${REPO_ROOT}/meerkat-web-runtime" \
-        --target web \
-        --out-dir "${PWD}/${MEERKAT_PKG}" \
-        --dev
-  fi
-
-  # Copy from sdks/web/wasm if built there
-  if [[ -d "${SDK_WASM_DIR}" && -f "${SDK_WASM_DIR}/meerkat_web_runtime_bg.wasm" ]]; then
-    mkdir -p "${MEERKAT_PKG}"
-    cp "${SDK_WASM_DIR}/meerkat_web_runtime.js" "${MEERKAT_PKG}/"
-    cp "${SDK_WASM_DIR}/meerkat_web_runtime_bg.wasm" "${MEERKAT_PKG}/"
-  fi
-
-  echo "Meerkat WASM runtime built to ${MEERKAT_PKG}/"
+# Build via sdks/web's build:wasm script (handles --out-dir and .gitignore cleanup)
+if [[ -f "${REPO_ROOT}/sdks/web/package.json" ]]; then
+  (cd "${REPO_ROOT}/sdks/web" && npm run build:wasm)
+  rm -rf "${MEERKAT_PKG}"
+  mkdir -p "${MEERKAT_PKG}"
+  cp -R "${SDK_WASM_DIR}/." "${MEERKAT_PKG}/"
+  rm -f "${MEERKAT_PKG}/.gitignore"
 else
-  echo "Meerkat WASM runtime already built"
+  rm -rf "${MEERKAT_PKG}"
+  mkdir -p "${MEERKAT_PKG}"
+  RUSTFLAGS='--cfg getrandom_backend="wasm_js"' \
+    wasm-pack build "${REPO_ROOT}/meerkat-web-runtime" \
+      --target web \
+      --out-dir "${PWD}/${MEERKAT_PKG}" \
+      --dev
+  rm -f "${MEERKAT_PKG}/.gitignore"
 fi
+
+echo "Meerkat WASM runtime synced to ${MEERKAT_PKG}/"
 
 # ── Install deps and build ──────────────────────────────────────────────────
 

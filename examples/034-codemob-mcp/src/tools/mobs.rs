@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use meerkat_core::types::ContentInput;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
@@ -154,7 +155,7 @@ impl UserMobConfig {
                         StepId::from(step.id.as_str()),
                         FlowStepSpec {
                             role: ProfileName::from(step.role.as_str()),
-                            message: msg,
+                            message: ContentInput::from(msg),
                             depends_on: step.depends_on.iter().map(|s| StepId::from(s.as_str())).collect(),
                             dispatch_mode: DispatchMode::default(),
                             collection_policy: CollectionPolicy::default(),

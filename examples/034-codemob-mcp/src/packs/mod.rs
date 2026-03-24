@@ -28,6 +28,7 @@ use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
+use meerkat_core::types::ContentInput;
 use serde_json::Value;
 
 // ── Pack trait ───────────────────────────────────────────────────────────────
@@ -143,7 +144,7 @@ pub fn turn_driven_profile(
 pub fn flow_step(role: &str, message: String, depends_on: &[&str], timeout_ms: u64) -> FlowStepSpec {
     FlowStepSpec {
         role: ProfileName::from(role),
-        message,
+        message: ContentInput::from(message),
         depends_on: depends_on.iter().map(|s| StepId::from(*s)).collect(),
         dispatch_mode: DispatchMode::default(),
         collection_policy: CollectionPolicy::default(),

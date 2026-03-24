@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "futures",
@@ -2039,6 +2039,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-hooks",
  "meerkat-models",
+ "meerkat-runtime",
  "meerkat-session",
  "meerkat-skills",
  "meerkat-store",
@@ -2053,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2074,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "base64",
@@ -2106,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2118,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2146,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2165,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "meerkat-machine-schema",
  "serde",
@@ -2174,14 +2175,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "indexmap",
 ]
 
 [[package]]
 name = "meerkat-mob"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2210,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "futures",
@@ -2229,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "schemars",
  "serde",
@@ -2238,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2256,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "futures",
@@ -2279,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "gix",
@@ -2301,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2318,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.4.11"
+version = "0.4.13"
 dependencies = [
  "async-trait",
  "base64",
@@ -2332,7 +2333,6 @@ dependencies = [
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-models",
  "meerkat-runtime",
  "meerkat-skills",
  "nix",

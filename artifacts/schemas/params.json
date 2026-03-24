@@ -238,6 +238,7 @@
     "type": "object"
   },
   "MobSendParams": {
+    "additionalProperties": false,
     "$defs": {
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
@@ -406,6 +407,7 @@
     "type": "object"
   },
   "MobUnwireParams": {
+    "additionalProperties": false,
     "$defs": {
       "MobPeerTarget": {
         "description": "Target for a mob wire/unwire call.",
@@ -479,6 +481,7 @@
     "type": "object"
   },
   "MobWireParams": {
+    "additionalProperties": false,
     "$defs": {
       "MobPeerTarget": {
         "description": "Target for a mob wire/unwire call.",

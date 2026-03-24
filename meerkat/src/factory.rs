@@ -1649,11 +1649,11 @@ impl AgentFactory {
         // 12a. Resolve effective call-timeout override: build > config > Inherit
         let effective_call_timeout_override = {
             let build_override = build_config.call_timeout_override;
-            if !build_override.is_inherit() {
-                build_override
-            } else {
+            if build_override.is_inherit() {
                 // Fall through to config-level override
                 config.retry.call_timeout_override.clone()
+            } else {
+                build_override
             }
         };
 

@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-34 fully functional examples covering every Meerkat surface and feature,
+33 examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -83,7 +83,7 @@ branch.
 | 014 | [semantic-memory-rs](014-semantic-memory-rs/) | Rust | Persistent, searchable memory across sessions |
 | 015 | [session-persistence-rs](015-session-persistence-rs/) | Rust | Session persistence patterns and store implementations, including JSONL, in-memory, and redb-backed stores |
 
-### Multi-Agent — Sub-Agents, Comms & Mobs
+### Multi-Agent — Comms & Mobs
 
 | # | Example | Surface | Description |
 |---|---------|---------|-------------|
@@ -115,7 +115,7 @@ branch.
 | Feature | Examples |
 |---------|----------|
 | **Custom Tools** | 006, 025 |
-| **Built-in Tools** | 016, 025 |
+| **Built-in Tools** | 025 |
 | **Streaming** | 005, 007 |
 | **Sessions** | 004, 007, 015, 022, 023 |
 | **Budget & Retry** | 009 |
@@ -125,7 +125,6 @@ branch.
 | **Compaction** | 013 |
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
-| **Sub-Agents** | 016 |
 | **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 034 |
 | **Mobpack** | 028, 029, 030, 031, 034 |
 | **WASM Web Build** | 029, 030, 031, 032 |
@@ -192,7 +191,7 @@ export GEMINI_API_KEY=...           # Optional (examples 021, 034)
 │             LLM ↔ Tools ↔ Events ↔ Budget ↔ Retry              │
 │                                                                 │
 │  Features:  Skills  │  Hooks  │  Sessions  │  Memory            │
-│             Comms   │  Sub-Agents  │  Mobs  │  MCP              │
+│             Comms   │  Mobs  │  MCP  │  WASM Web Build         │
 │                                                                 │
 │  Providers: Anthropic  │  OpenAI  │  Gemini                     │
 │                                                                 │

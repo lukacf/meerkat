@@ -1,5 +1,5 @@
 # Legacy Surface Scan Report
-Generated: "2026-03-23T21:15:07Z"
+Generated: "2026-03-24T09:09:49Z"
 
 Terms:
 - event/push
@@ -46,17 +46,17 @@ docs/reference/comms-redesign-v6-hard-cut.md:355:- `event/push` helper path usag
 docs/reference/comms-redesign-v6-hard-cut.md:425:- Refactor: remove `event/push` fully.
 docs/reference/comms-redesign-v6-hard-cut.md:437:- Refactor: delete old event/push code paths.
 docs/reference/comms-redesign-v6-hard-cut.md:466:- RPC initialize method list must not include `event/push`.
-docs/examples/comms.mdx:140:    let injector = service.event_injector(&session_id).await
-docs/examples/comms.mdx:249:    let injector = service.event_injector(&session_id).await
-docs/rust/advanced.mdx:213:Public comms injection is a delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues an external event for the session's active host-mode owner path to consume.
-docs/rust/advanced.mdx:216:use meerkat::{EventInjector, PlainEventSource};
-docs/rust/advanced.mdx:218:let injector = service.event_injector(&session_id).await
-docs/rust/advanced.mdx:253:    let injector = service.event_injector(&session_id).await.unwrap();
 docs/guides/comms.mdx:59:    plain -->|"EventInjector"| INBOX
 docs/guides/comms.mdx:736:**Delivery** — the service's `event_injector()` returns an `Arc<dyn EventInjector>`. Use `inject()` to push an external event into the session inbox:
 docs/guides/comms.mdx:739:use meerkat_core::{EventInjector, PlainEventSource};
 docs/guides/comms.mdx:741:let injector = service.event_injector(&session_id).await
 docs/guides/comms.mdx:761:- **Comms must be enabled.** Without comms, `event_injector()` returns `None`.
+docs/rust/advanced.mdx:214:Public comms injection is a delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues an external event for the session's active host-mode owner path to consume.
+docs/rust/advanced.mdx:217:use meerkat::{EventInjector, PlainEventSource};
+docs/rust/advanced.mdx:219:let injector = service.event_injector(&session_id).await
+docs/rust/advanced.mdx:254:    let injector = service.event_injector(&session_id).await.unwrap();
+docs/examples/comms.mdx:140:    let injector = service.event_injector(&session_id).await
+docs/examples/comms.mdx:249:    let injector = service.event_injector(&session_id).await
 docs/architecture/0.5/meerkat_surface_cutover_matrix.md:51:| REST | session routes already runtime-backed | legacy `/sessions/{id}/event` injector path | make `POST /sessions/{id}/external-events` canonical and keep low-level runtime admission explicit | no REST route uses `EventInjector` as an execution path and `/sessions/{id}/event` is gone |
 docs/architecture/0.5/meerkat_surface_cutover_matrix.md:52:| JSON-RPC | `session/*` and `turn/*` already runtime-backed | `event/push` injector path | make `session/external_event` canonical and keep `runtime/accept` authoritative | no RPC method has an execution side path outside runtime admission and `event/push` is gone |
 docs/architecture/0.5/meerkat_surface_cutover_matrix.md:121:- `event/push`
@@ -64,9 +64,11 @@ docs/architecture/0.5/meerkat_surface_cutover_matrix.md:128:3. delete `event/pus
 docs/architecture/0.5/meerkat_surface_cutover_matrix.md:135:- `event/push` is deleted
 docs/architecture/0.5/meerkat_surface_cutover_matrix.md:222:- REST `EventInjector` path and `/sessions/{id}/event`
 docs/architecture/0.5/meerkat_surface_cutover_matrix.md:223:- RPC `event/push`
-docs/architecture/0.5/meerkat_0_5_architecture_outline.md:407:| JSON-RPC | mostly converged | keep high-level methods stable, with one canonical external-event name | replace legacy `event/push` with `session/external_event`; keep `runtime/*` low-level methods canonical |
-docs/architecture/0.5/meerkat_0_5_architecture_outline.md:534:- JSON-RPC still has a legacy `event/push` method implemented through the
-docs/architecture/0.5/meerkat_0_5_architecture_outline.md:542:- `event/push` is deleted after at most one early-adapter phase
+docs/architecture/0.5/rct/rct-theory.md:55:- prove `event/push` no longer owns a side execution path
+docs/architecture/0.5/rct/spec.yaml:63:    text: "Mob delivery is member-directed: MemberHandle::send(...) is canonical and MobHandle::send_message(...) is deleted from the target architecture."
+docs/architecture/0.5/rct/spec.yaml:433:    text: "REST external-event contract: the shipped route and payload admit runtime-backed external events without preserving an EventInjector execution path."
+docs/architecture/0.5/rct/spec.yaml:437:    text: "JSON-RPC external-event contract: session/external_event admits runtime-backed external events without preserving a second runtime and event/push is deleted after at most one early-adapter phase."
+docs/architecture/0.5/rct/gaps-and-contradictions.md:20:| `GAP-005` | JSON-RPC `event/push` end-state was under-decided | `session/external_event` is the canonical high-level RPC convenience method, `runtime/accept` remains authoritative, and `event/push` is deleted after at most one early-adapter phase | `meerkat_surface_cutover_matrix.md`, `meerkat_0_5_implementation_plan.md`, `rct/spec.yaml` |
 docs/architecture/0.5/meerkat_0_5_implementation_plan.md:100:  `event/push` is deleted.
 docs/architecture/0.5/meerkat_0_5_implementation_plan.md:317:| `meerkat-cli/src/stdin_events.rs` | `EventInjector`-based stdin ingress | runtime `ExternalEvent` adapter or delete | refactor/delete |
 docs/architecture/0.5/meerkat_0_5_implementation_plan.md:319:| `meerkat-rpc/src/router.rs` | RPC surface registry | runtime methods authoritative; no `event/push` bypass | refactor |
@@ -75,18 +77,16 @@ docs/architecture/0.5/meerkat_0_5_implementation_plan.md:493:| `G1.1` | Cut CLI 
 docs/architecture/0.5/meerkat_0_5_implementation_plan.md:495:| `G1.3` | Make `session/external_event` the canonical JSON-RPC convenience method, then remove `event/push`. | `meerkat-rpc/src/router.rs`, `meerkat-rpc/src/handlers/event.rs`, `meerkat-rpc/src/handlers/runtime.rs`, `meerkat-rpc/src/session_runtime.rs`, `meerkat-rpc/tests/*`, `docs/api/rpc.mdx` | `B2.2`, `D3.2` | runtime methods are authoritative, `session/external_event` is live, and `event/push` is gone or zero-semantics immediately before deletion | `handlers/event.rs` is deleted; allowlist entry removed |
 docs/architecture/0.5/meerkat_0_5_implementation_plan.md:543:| JSON-RPC | `meerkat-rpc/src/router.rs`, `meerkat-rpc/src/handlers/event.rs`, `meerkat-rpc/src/session_runtime.rs` | `session/external_event` becomes the canonical high-level method over runtime admission | `event/push` removed; runtime methods authoritative | RPC e2e tests + schema refresh if contract changes |
 docs/architecture/0.5/meerkat_0_5_implementation_plan.md:619:| `Phase 5 surface closure` | CLI `EventInjector` ingress, REST injector path, RPC `event/push`, MCP direct create/start-turn flow, and WASM direct authoritative session owner are deleted |
+docs/architecture/0.5/meerkat_0_5_architecture_outline.md:407:| JSON-RPC | mostly converged | keep high-level methods stable, with one canonical external-event name | replace legacy `event/push` with `session/external_event`; keep `runtime/*` low-level methods canonical |
+docs/architecture/0.5/meerkat_0_5_architecture_outline.md:534:- JSON-RPC still has a legacy `event/push` method implemented through the
+docs/architecture/0.5/meerkat_0_5_architecture_outline.md:542:- `event/push` is deleted after at most one early-adapter phase
 docs/architecture/0.5/rct/checklist.yaml:1204:    deletion_checkpoint: CLI EventInjector-style ingress is deleted
 docs/architecture/0.5/rct/checklist.yaml:1216:      no EventInjector execution path survives.
 docs/architecture/0.5/rct/checklist.yaml:1233:      remove event/push with schema/docs/changelog updates.
 docs/architecture/0.5/rct/checklist.yaml:1248:    deletion_checkpoint: event/push stops being an injector path and is deleted by
-docs/architecture/0.5/rct/gaps-and-contradictions.md:20:| `GAP-005` | JSON-RPC `event/push` end-state was under-decided | `session/external_event` is the canonical high-level RPC convenience method, `runtime/accept` remains authoritative, and `event/push` is deleted after at most one early-adapter phase | `meerkat_surface_cutover_matrix.md`, `meerkat_0_5_implementation_plan.md`, `rct/spec.yaml` |
-docs/architecture/0.5/rct/rct-theory.md:55:- prove `event/push` no longer owns a side execution path
-docs/architecture/0.5/rct/spec.yaml:63:    text: "Mob delivery is member-directed: MemberHandle::send(...) is canonical and MobHandle::send_message(...) is deleted from the target architecture."
-docs/architecture/0.5/rct/spec.yaml:433:    text: "REST external-event contract: the shipped route and payload admit runtime-backed external events without preserving an EventInjector execution path."
-docs/architecture/0.5/rct/spec.yaml:437:    text: "JSON-RPC external-event contract: session/external_event admits runtime-backed external events without preserving a second runtime and event/push is deleted after at most one early-adapter phase."
 .claude/skills/meerkat-platform/references/mobs.md:284:mob_list_members / mob_send_message / mob_events(mob_id, after_cursor: u32, limit: u32) / mob_status / mob_list
-sdks/web/wasm/meerkat_web_runtime.js:451: * (including comms send_message/peers), turn completions, etc.
-sdks/web/wasm/meerkat_web_runtime.d.ts:177: * (including comms send_message/peers), turn completions, etc.
+sdks/web/wasm/meerkat_web_runtime.js:496: * (including comms send_message/peers), turn completions, etc.
+sdks/web/wasm/meerkat_web_runtime.d.ts:192: * (including comms send_message/peers), turn completions, etc.
 CHANGELOG.md:14:- JSON-RPC canonical external-event ingress now uses `session/external_event`, and the runtime-backed admission path is advertised in the RPC contract artifacts/docs instead of the removed `event/push` behavior.
 CHANGELOG.md:23:- **Mob multimodal content silently discarded** — `MobHandle::send_message` took `String`, flattening multimodal `ContentInput` (images + text) to plain text before it reached the session service. Threaded `ContentInput` end-to-end through `MobHandle`, `MobCommand`, actor dispatch, `SpawnMemberSpec`, and `to_create_session_request`. TurnDriven mode now passes `ContentInput` directly to `StartTurnRequest`; AutonomousHost mode extracts text at the `EventInjector` boundary (known limitation).
 CHANGELOG.md:182:- **Clean-cut comms/observability split** — removed mixed public interaction-stream APIs across Rust SDK, CLI, REST, RPC, MCP, WASM, and both Python/TypeScript SDKs. Public comms now exposes delivery (`inject`, `send_message`, `comms/send`) and explicit observation surfaces separately; interaction-scoped comms stream helpers remain runtime-internal only.
@@ -102,7 +102,7 @@ meerkat/src/service_factory.rs:162:        self.agent.comms_arc()?.event_injecto
 meerkat/src/service_factory.rs:166:    fn interaction_event_injector(
 meerkat/src/service_factory.rs:168:    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
 meerkat/src/service_factory.rs:169:        self.agent.comms_arc()?.interaction_event_injector()
-meerkat/src/factory.rs:1317:                // interrupt contract for send_request/wait workflows.
+meerkat/src/factory.rs:1340:                // interrupt contract for send_request/wait workflows.
 meerkat-cli/src/main.rs:2654:    async fn event_injector(
 meerkat-cli/src/main.rs:2657:    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
 meerkat-cli/src/main.rs:2658:        self.inner.event_injector(session_id).await
@@ -117,18 +117,17 @@ meerkat-core/src/service/mod.rs:569:            .and_then(|runtime| runtime.even
 meerkat-core/src/service/mod.rs:574:    async fn interaction_event_injector(
 meerkat-core/src/service/mod.rs:577:    ) -> Option<Arc<dyn crate::event_injector::SubscribableInjector>> {
 meerkat-core/src/service/mod.rs:580:            .and_then(|runtime| runtime.interaction_event_injector())
-meerkat-core/src/agent.rs:432:    fn event_injector(&self) -> Option<Arc<dyn crate::EventInjector>> {
-meerkat-core/src/agent.rs:438:    fn interaction_event_injector(
-meerkat-core/src/agent.rs:440:    ) -> Option<Arc<dyn crate::event_injector::SubscribableInjector>> {
-meerkat-core/src/agent.rs:466:    /// Returns the event sender if a subscriber was registered (via `inject_with_subscription`).
-meerkat-core/src/agent.rs:468:    fn interaction_subscriber(
-meerkat-core/src/agent.rs:480:        self.interaction_subscriber(_id)
+meerkat-core/src/agent.rs:439:    fn event_injector(&self) -> Option<Arc<dyn crate::EventInjector>> {
+meerkat-core/src/agent.rs:445:    fn interaction_event_injector(
+meerkat-core/src/agent.rs:447:    ) -> Option<Arc<dyn crate::event_injector::SubscribableInjector>> {
+meerkat-core/src/agent.rs:473:    /// Returns the event sender if a subscriber was registered (via `inject_with_subscription`).
+meerkat-core/src/agent.rs:475:    fn interaction_subscriber(
+meerkat-core/src/agent.rs:487:        self.interaction_subscriber(_id)
 meerkat-core/src/gateway.rs:849:            &["send", "send_request", "send_response", "peers"],
 meerkat-core/src/gateway.rs:876:        assert!(names.contains(&"send_request"));
 meerkat-core/src/gateway.rs:877:        assert!(names.contains(&"send_response"));
 meerkat-core/src/agent/runner.rs:534:            .and_then(|runtime| runtime.event_injector())
-meerkat-core/src/lib.rs:30:pub mod event_injector;
-meerkat-core/src/lib.rs:107:pub use event_injector::{EventInjector, EventInjectorError};
+meerkat-core/src/interaction.rs:98:    /// Includes responses: a `send_request` + `wait` workflow needs the
 meerkat-core/src/event_injector.rs:3://! Surfaces (REST, CLI, RPC) use `EventInjector` to push external events
 meerkat-core/src/event_injector.rs:5://! `meerkat-comms` provides the concrete implementation (`CommsEventInjector`)
 meerkat-core/src/event_injector.rs:17:pub enum EventInjectorError {
@@ -152,45 +151,20 @@ meerkat-core/src/event_injector.rs:154:        let injector: Arc<dyn EventInject
 meerkat-core/src/event_injector.rs:166:    fn test_event_injector_error_display() {
 meerkat-core/src/event_injector.rs:167:        assert_eq!(EventInjectorError::Full.to_string(), "inbox full");
 meerkat-core/src/event_injector.rs:168:        assert_eq!(EventInjectorError::Closed.to_string(), "inbox closed");
-meerkat-core/src/interaction.rs:98:    /// Includes responses: a `send_request` + `wait` workflow needs the
-meerkat-comms/src/router.rs:334:    pub async fn send_request(
-meerkat-comms/src/router.rs:344:    pub async fn send_response(
-meerkat-comms/src/mcp/tools.rs:450:            handle_tools_call(&ctx, "send_request", &json!({}))
-meerkat-comms/src/agent/types.rs:181:        /// The request ID (for send_response).
-meerkat-comms/src/agent/types.rs:390:                     To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
-meerkat-comms/src/agent/types.rs:757:        assert!(text.contains("send_response"));
-meerkat-comms/src/runtime/comms_runtime.rs:223:    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
-meerkat-comms/src/runtime/comms_runtime.rs:224:        Some(self.event_injector())
-meerkat-comms/src/runtime/comms_runtime.rs:227:    fn interaction_event_injector(
-meerkat-comms/src/runtime/comms_runtime.rs:229:    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
-meerkat-comms/src/runtime/comms_runtime.rs:230:        Some(self.interaction_event_injector())
-meerkat-comms/src/runtime/comms_runtime.rs:301:                        let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
-meerkat-comms/src/runtime/comms_runtime.rs:310:                            .map_err(map_event_injector_error)?;
-meerkat-comms/src/runtime/comms_runtime.rs:539:    fn interaction_subscriber(
-meerkat-comms/src/runtime/comms_runtime.rs:623:                                     To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
-meerkat-comms/src/runtime/comms_runtime.rs:734:fn map_event_injector_error(error: meerkat_core::event_injector::EventInjectorError) -> SendError {
-meerkat-comms/src/runtime/comms_runtime.rs:736:        meerkat_core::event_injector::EventInjectorError::Full => {
-meerkat-comms/src/runtime/comms_runtime.rs:739:        meerkat_core::event_injector::EventInjectorError::Closed => SendError::InputClosed,
-meerkat-comms/src/runtime/comms_runtime.rs:779:    subscriber_registry: crate::event_injector::SubscriberRegistry,
-meerkat-comms/src/runtime/comms_runtime.rs:844:            subscriber_registry: crate::event_injector::new_subscriber_registry(),
-meerkat-comms/src/runtime/comms_runtime.rs:936:            subscriber_registry: crate::event_injector::new_subscriber_registry(),
-meerkat-comms/src/runtime/comms_runtime.rs:1334:    pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
-meerkat-comms/src/runtime/comms_runtime.rs:1335:        Arc::new(crate::CommsEventInjector::new(
-meerkat-comms/src/runtime/comms_runtime.rs:1342:    pub fn interaction_event_injector(
-meerkat-comms/src/runtime/comms_runtime.rs:1344:    ) -> Arc<dyn meerkat_core::event_injector::SubscribableInjector> {
-meerkat-comms/src/runtime/comms_runtime.rs:1345:        Arc::new(crate::CommsEventInjector::new(
-meerkat-comms/src/runtime/comms_runtime.rs:1604:    use crate::event_injector::CommsEventInjector;
-meerkat-comms/src/runtime/comms_runtime.rs:1608:    use meerkat_core::event_injector::SubscribableInjector;
-meerkat-comms/src/runtime/comms_runtime.rs:1832:        let injector = CommsEventInjector::new(
-meerkat-comms/src/runtime/comms_runtime.rs:1837:            .inject_with_subscription(
-meerkat-comms/src/runtime/comms_runtime.rs:1850:        let first = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
-meerkat-comms/src/runtime/comms_runtime.rs:1852:        let second = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
-meerkat-comms/src/runtime/comms_runtime.rs:1862:        let injector = CommsEventInjector::new(
-meerkat-comms/src/runtime/comms_runtime.rs:1867:            .inject_with_subscription(
-meerkat-comms/src/runtime/comms_runtime.rs:2011:    fn test_interaction_subscriber_correlation_miss_returns_none() {
-meerkat-comms/src/runtime/comms_runtime.rs:2014:        let sender = CoreCommsRuntime::interaction_subscriber(&runtime, &random);
+meerkat-core/src/lib.rs:30:pub mod event_injector;
+meerkat-core/src/lib.rs:109:pub use event_injector::{EventInjector, EventInjectorError};
+meerkat-comms/tests/e2e.rs:361:        .send_request("peer-b", "review-pr".to_string(), json!({"pr": 42}))
 meerkat-comms/src/lib.rs:27:pub mod event_injector;
 meerkat-comms/src/lib.rs:34:pub use event_injector::CommsEventInjector;
+meerkat-comms/tests/router_integration.rs:450:async fn integration_real_send_request() {
+meerkat-comms/tests/router_integration.rs:503:        .send_request(
+meerkat-comms/tests/router_integration.rs:515:async fn integration_real_send_response() {
+meerkat-comms/tests/router_integration.rs:561:        .send_response(
+meerkat-comms/tests/router_integration.rs:574:async fn integration_real_send_response_no_ack_wait() {
+meerkat-comms/tests/router_integration.rs:606:        .send_response(
+meerkat-comms/tests/router_integration.rs:615:    assert!(result.is_ok(), "send_response should succeed");
+meerkat-comms/tests/router_integration.rs:618:        "send_response should not wait for ack, took {elapsed:?}"
+meerkat-comms/tests/router_integration.rs:773:        .send_request(
 meerkat-comms/src/event_injector.rs:1://! Concrete `EventInjector` implementation wrapping `InboxSender`.
 meerkat-comms/src/event_injector.rs:8:use meerkat_core::event_injector::{EventInjector, EventInjectorError};
 meerkat-comms/src/event_injector.rs:14:/// `inject_with_subscription()` and removed (one-shot) by
@@ -231,20 +205,43 @@ meerkat-comms/src/event_injector.rs:269:        use meerkat_core::event_injector
 meerkat-comms/src/event_injector.rs:275:        let injector = CommsEventInjector::new(sender, registry.clone());
 meerkat-comms/src/event_injector.rs:276:        let result = injector.inject_with_subscription(
 meerkat-comms/src/event_injector.rs:283:        assert!(matches!(result, Err(EventInjectorError::Closed)));
+meerkat-comms/src/router.rs:334:    pub async fn send_request(
+meerkat-comms/src/router.rs:344:    pub async fn send_response(
 meerkat-comms/src/types.rs:148:        /// Set by `inject_with_subscription`, `None` for untracked events.
-meerkat-comms/tests/e2e.rs:361:        .send_request("peer-b", "review-pr".to_string(), json!({"pr": 42}))
-meerkat-comms/tests/router_integration.rs:450:async fn integration_real_send_request() {
-meerkat-comms/tests/router_integration.rs:503:        .send_request(
-meerkat-comms/tests/router_integration.rs:515:async fn integration_real_send_response() {
-meerkat-comms/tests/router_integration.rs:561:        .send_response(
-meerkat-comms/tests/router_integration.rs:574:async fn integration_real_send_response_no_ack_wait() {
-meerkat-comms/tests/router_integration.rs:606:        .send_response(
-meerkat-comms/tests/router_integration.rs:615:    assert!(result.is_ok(), "send_response should succeed");
-meerkat-comms/tests/router_integration.rs:618:        "send_response should not wait for ack, took {elapsed:?}"
-meerkat-comms/tests/router_integration.rs:773:        .send_request(
-meerkat-rpc/src/session_runtime.rs:2204:    pub async fn event_injector(
-meerkat-rpc/src/session_runtime.rs:2207:    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
-meerkat-rpc/src/session_runtime.rs:2208:        self.service.event_injector(session_id).await
+meerkat-comms/src/mcp/tools.rs:450:            handle_tools_call(&ctx, "send_request", &json!({}))
+meerkat-comms/src/runtime/comms_runtime.rs:223:    fn event_injector(&self) -> Option<Arc<dyn meerkat_core::EventInjector>> {
+meerkat-comms/src/runtime/comms_runtime.rs:224:        Some(self.event_injector())
+meerkat-comms/src/runtime/comms_runtime.rs:227:    fn interaction_event_injector(
+meerkat-comms/src/runtime/comms_runtime.rs:229:    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
+meerkat-comms/src/runtime/comms_runtime.rs:230:        Some(self.interaction_event_injector())
+meerkat-comms/src/runtime/comms_runtime.rs:301:                        let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
+meerkat-comms/src/runtime/comms_runtime.rs:310:                            .map_err(map_event_injector_error)?;
+meerkat-comms/src/runtime/comms_runtime.rs:539:    fn interaction_subscriber(
+meerkat-comms/src/runtime/comms_runtime.rs:623:                                     To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
+meerkat-comms/src/runtime/comms_runtime.rs:734:fn map_event_injector_error(error: meerkat_core::event_injector::EventInjectorError) -> SendError {
+meerkat-comms/src/runtime/comms_runtime.rs:736:        meerkat_core::event_injector::EventInjectorError::Full => {
+meerkat-comms/src/runtime/comms_runtime.rs:739:        meerkat_core::event_injector::EventInjectorError::Closed => SendError::InputClosed,
+meerkat-comms/src/runtime/comms_runtime.rs:779:    subscriber_registry: crate::event_injector::SubscriberRegistry,
+meerkat-comms/src/runtime/comms_runtime.rs:844:            subscriber_registry: crate::event_injector::new_subscriber_registry(),
+meerkat-comms/src/runtime/comms_runtime.rs:936:            subscriber_registry: crate::event_injector::new_subscriber_registry(),
+meerkat-comms/src/runtime/comms_runtime.rs:1334:    pub fn event_injector(&self) -> Arc<dyn meerkat_core::EventInjector> {
+meerkat-comms/src/runtime/comms_runtime.rs:1335:        Arc::new(crate::CommsEventInjector::new(
+meerkat-comms/src/runtime/comms_runtime.rs:1342:    pub fn interaction_event_injector(
+meerkat-comms/src/runtime/comms_runtime.rs:1344:    ) -> Arc<dyn meerkat_core::event_injector::SubscribableInjector> {
+meerkat-comms/src/runtime/comms_runtime.rs:1345:        Arc::new(crate::CommsEventInjector::new(
+meerkat-comms/src/runtime/comms_runtime.rs:1604:    use crate::event_injector::CommsEventInjector;
+meerkat-comms/src/runtime/comms_runtime.rs:1608:    use meerkat_core::event_injector::SubscribableInjector;
+meerkat-comms/src/runtime/comms_runtime.rs:1832:        let injector = CommsEventInjector::new(
+meerkat-comms/src/runtime/comms_runtime.rs:1837:            .inject_with_subscription(
+meerkat-comms/src/runtime/comms_runtime.rs:1850:        let first = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
+meerkat-comms/src/runtime/comms_runtime.rs:1852:        let second = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
+meerkat-comms/src/runtime/comms_runtime.rs:1862:        let injector = CommsEventInjector::new(
+meerkat-comms/src/runtime/comms_runtime.rs:1867:            .inject_with_subscription(
+meerkat-comms/src/runtime/comms_runtime.rs:2011:    fn test_interaction_subscriber_correlation_miss_returns_none() {
+meerkat-comms/src/runtime/comms_runtime.rs:2014:        let sender = CoreCommsRuntime::interaction_subscriber(&runtime, &random);
+meerkat-comms/src/agent/types.rs:181:        /// The request ID (for send_response).
+meerkat-comms/src/agent/types.rs:390:                     To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
+meerkat-comms/src/agent/types.rs:757:        assert!(text.contains("send_response"));
 meerkat-rpc/tests/regression_rpc.rs:101:async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json::Value) {
 meerkat-rpc/tests/regression_rpc.rs:138:    send_request(writer, &req).await;
 meerkat-rpc/tests/regression_rpc.rs:197:    send_request(&mut writer, &read_req).await;
@@ -300,10 +297,6 @@ meerkat-rpc/tests/integration_server.rs:618:    send_request(&mut writer, &creat
 meerkat-rpc/tests/integration_server.rs:645:    send_request(&mut writer, &req).await;
 meerkat-rpc/tests/integration_server.rs:672:    send_request(&mut writer, &create_req).await;
 meerkat-rpc/tests/integration_server.rs:704:    send_request(&mut writer, &turn_req).await;
-meerkat-rpc/tests/runtime_backed_ingress.rs:85:async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json::Value) {
-meerkat-rpc/tests/runtime_backed_ingress.rs:112:    send_request(
-meerkat-rpc/tests/runtime_backed_ingress.rs:129:    send_request(
-meerkat-rpc/tests/runtime_backed_ingress.rs:150:    send_request(
 meerkat-rpc/tests/e2e_smoke.rs:78:async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json::Value) {
 meerkat-rpc/tests/e2e_smoke.rs:151:    send_request(&mut writer, &init_req).await;
 meerkat-rpc/tests/e2e_smoke.rs:173:    send_request(&mut writer, &create_req).await;
@@ -352,6 +345,13 @@ meerkat-rpc/tests/e2e_regression.rs:597:    send_request(
 meerkat-rpc/tests/e2e_regression.rs:618:    send_request(
 meerkat-rpc/tests/e2e_regression.rs:640:    send_request(
 meerkat-rpc/tests/e2e_regression.rs:663:    send_request(
+meerkat-rpc/tests/runtime_backed_ingress.rs:85:async fn send_request(writer: &mut tokio::io::DuplexStream, request: &serde_json::Value) {
+meerkat-rpc/tests/runtime_backed_ingress.rs:112:    send_request(
+meerkat-rpc/tests/runtime_backed_ingress.rs:129:    send_request(
+meerkat-rpc/tests/runtime_backed_ingress.rs:150:    send_request(
+meerkat-rpc/src/session_runtime.rs:2204:    pub async fn event_injector(
+meerkat-rpc/src/session_runtime.rs:2207:    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
+meerkat-rpc/src/session_runtime.rs:2208:        self.service.event_injector(session_id).await
 meerkat-session/src/persistent.rs:913:    async fn event_injector(
 meerkat-session/src/persistent.rs:916:    ) -> Option<std::sync::Arc<dyn meerkat_core::EventInjector>> {
 meerkat-session/src/persistent.rs:917:        self.inner.event_injector(session_id).await

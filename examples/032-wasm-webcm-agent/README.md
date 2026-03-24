@@ -16,7 +16,7 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 
 - **Node.js** (v18+) and npm
 - **curl** (for downloading the WebCM bundle)
-- **wasm-pack** (builds `meerkat-web-runtime` WASM bundle)
+- **wasm-pack** (used by the repo-local `sdks/web` WASM build step)
 - At least one API key: **Anthropic**, **OpenAI**, or **Gemini** (all three for full multi-provider demo)
 
 ## Quick start
@@ -28,8 +28,9 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 # Click "Boot VM & Start"
 ```
 
-The script downloads the WebCM RISC-V emulator (~30 MB), builds the Meerkat
-WASM runtime, installs npm dependencies, and starts the Vite dev server.
+The script downloads the WebCM RISC-V emulator (~30 MB), rebuilds the current
+repo-local Meerkat WASM runtime, syncs it into `web/public/meerkat-pkg/`,
+installs npm dependencies, and starts the Vite dev server.
 
 Use `./examples.sh --clean` to force a fresh download/rebuild.
 

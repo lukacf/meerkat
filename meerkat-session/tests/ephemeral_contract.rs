@@ -386,7 +386,7 @@ impl AgentLlmClient for RecordingLlmClient {
         "recording-mock"
     }
 
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "mock-model"
     }
 }
@@ -580,7 +580,7 @@ impl AgentLlmClient for CompactionTrackingLlmClient {
         "compaction-mock"
     }
 
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "mock-model"
     }
 }

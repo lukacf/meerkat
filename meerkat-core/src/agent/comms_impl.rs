@@ -416,7 +416,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -447,7 +447,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }

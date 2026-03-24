@@ -41,6 +41,10 @@ export ANTHROPIC_API_KEY=sk-...
 cargo install rkat wasm-pack
 ```
 
+If you are running from this repo checkout instead of a global install, the
+script will automatically prefer `../../target/debug/rkat` or
+`../../target/release/rkat` when present.
+
 ## Run
 ```bash
 ./examples.sh

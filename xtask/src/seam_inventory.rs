@@ -101,12 +101,6 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "TurnExecutionMachine",
-            "DrainCommsInbox",
-            SeamClassification::OwnerRealizationOnly,
-            "Shell executes comms drain mechanics; no feedback expected by this machine",
-        ),
-        (
-            "TurnExecutionMachine",
             "CheckCompaction",
             SeamClassification::OwnerRealizationOnly,
             "Shell checks compaction threshold; no feedback expected by this machine",

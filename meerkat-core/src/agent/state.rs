@@ -252,8 +252,6 @@ where
 
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects that the authority emits on CallingLlm entry.
-    /// DrainCommsInbox is a no-op: runtime-backed ingress is now the sole
-    /// comms admission path.
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
@@ -262,10 +260,6 @@ where
     ) {
         for effect in &transition.effects {
             match effect {
-                TurnExecutionEffect::DrainCommsInbox => {
-                    // No-op: direct agent drain deleted; comms admission
-                    // flows through runtime ingress exclusively.
-                }
                 TurnExecutionEffect::CheckCompaction => {
                     let current_boundary_index = self.compaction_cadence.session_boundary_index;
                     if let Some(ref compactor) = self.compactor {

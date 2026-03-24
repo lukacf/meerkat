@@ -68,7 +68,6 @@ enum SessionCommand {
         prompt: meerkat_core::types::ContentInput,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         handling_mode: meerkat_core::types::HandlingMode,
-        host_mode: bool,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
@@ -694,14 +693,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         turn_lock.store(true, Ordering::Release);
 
         // Run the first turn
-        let host_mode = req.host_mode;
         let (result_tx, result_rx) = oneshot::channel();
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
                 render_metadata: req.render_metadata,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
-                host_mode,
                 event_tx: caller_event_tx,
                 result_tx,
                 skill_references: req.skill_references,
@@ -789,7 +786,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     prompt,
                     render_metadata: req.render_metadata,
                     handling_mode: req.handling_mode,
-                    host_mode: req.host_mode,
                     event_tx: req.event_tx,
                     result_tx,
                     skill_references: req.skill_references,
@@ -1170,7 +1166,6 @@ async fn session_task<A: SessionAgent>(
                 prompt,
                 render_metadata,
                 handling_mode,
-                host_mode: _,
                 event_tx,
                 result_tx,
                 skill_references,

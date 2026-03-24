@@ -575,14 +575,6 @@ where
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
     pub(crate) silent_comms_intents: Vec<String>,
-    /// Runtime policy for inline peer lifecycle context injection.
-    /// Consumed by runtime-backed drain path via AgentBuildConfig.
-    #[allow(dead_code)]
-    pub(crate) inline_peer_notification_policy: InlinePeerNotificationPolicy,
-    /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
-    /// Consumed by runtime-backed drain path via AgentBuildConfig.
-    #[allow(dead_code)]
-    pub(crate) peer_notification_suppression_active: bool,
     /// Optional shared lifecycle registry for async operations.
     ///
     /// When set, the agent loop waits on the exact turn-local operation IDs

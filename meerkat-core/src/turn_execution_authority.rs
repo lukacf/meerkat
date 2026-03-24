@@ -272,15 +272,10 @@ pub enum TurnExecutionEffect {
     RunCancelled {
         run_id: RunId,
     },
-    /// Drain the comms inbox before the next LLM call.
-    ///
-    /// Emitted on transitions that re-enter CallingLlm (BoundaryContinue,
-    /// RetryRequested, ExtractionRetry). Shell executes the drain instead
-    /// of checking `state == CallingLlm`.
-    DrainCommsInbox,
     /// Check whether compaction should run before the next LLM call.
     ///
-    /// Emitted on the same transitions as DrainCommsInbox.
+    /// Emitted on transitions that re-enter CallingLlm (BoundaryContinue,
+    /// RetryRequested, ExtractionRetry).
     CheckCompaction,
 }
 
@@ -633,7 +628,6 @@ impl TurnExecutionAuthority {
                 match fields.primitive_kind {
                     TurnPrimitiveKind::ConversationTurn => {
                         // ConversationTurn -> CallingLlm (no boundary/cancel checks)
-                        effects.push(TurnExecutionEffect::DrainCommsInbox);
                         effects.push(TurnExecutionEffect::CheckCompaction);
                         CallingLlm
                     }
@@ -818,7 +812,6 @@ impl TurnExecutionAuthority {
                     });
                     Cancelled
                 } else {
-                    effects.push(TurnExecutionEffect::DrainCommsInbox);
                     effects.push(TurnExecutionEffect::CheckCompaction);
                     CallingLlm
                 }
@@ -890,7 +883,6 @@ impl TurnExecutionAuthority {
                     return Err(Self::invalid(phase, input));
                 }
                 fields.extraction_attempts += 1;
-                effects.push(TurnExecutionEffect::DrainCommsInbox);
                 effects.push(TurnExecutionEffect::CheckCompaction);
                 CallingLlm
             }
@@ -932,7 +924,6 @@ impl TurnExecutionAuthority {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
-                effects.push(TurnExecutionEffect::DrainCommsInbox);
                 effects.push(TurnExecutionEffect::CheckCompaction);
                 CallingLlm
             }
@@ -1348,9 +1339,8 @@ mod tests {
         assert_eq!(t.next_phase, TurnPhase::CallingLlm);
         assert!(auth.vision_enabled());
         assert!(auth.image_tool_results_enabled());
-        assert_eq!(t.effects.len(), 2);
-        assert!(matches!(t.effects[0], TurnExecutionEffect::DrainCommsInbox));
-        assert!(matches!(t.effects[1], TurnExecutionEffect::CheckCompaction));
+        assert_eq!(t.effects.len(), 1);
+        assert!(matches!(t.effects[0], TurnExecutionEffect::CheckCompaction));
     }
 
     #[test]

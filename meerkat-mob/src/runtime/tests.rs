@@ -11658,6 +11658,51 @@ async fn test_resume_startup_host_loop_failure_enters_stopped_state() {
     );
 }
 
+#[tokio::test]
+async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn autonomous lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle.stop().await.expect("stop");
+    service.archive(&sid_l).await.expect("archive lead");
+    service.delete_persisted_session(&sid_l).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await
+        .expect("partial resume should succeed");
+
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(
+        resumed.status(),
+        MobState::Running,
+        "Broken autonomous members must be skipped during host-loop startup so partial resume stays running"
+    );
+    let snapshot = resumed
+        .member_status(&MeerkatId::from("l-1"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+}
+
 // -----------------------------------------------------------------------
 // Behavioral wire test: wire() enables PeerRequest communication
 //

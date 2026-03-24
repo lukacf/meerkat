@@ -721,13 +721,23 @@ impl MobActor {
     }
 
     async fn start_autonomous_host_loops_from_roster(&self) -> Result<(), MobError> {
+        let broken_members = self
+            .restore_diagnostics
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
         let entries = {
             let roster = self.roster.read().await;
             roster.list().cloned().collect::<Vec<_>>()
         };
         let autonomous_entries = entries
             .into_iter()
-            .filter(|entry| entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost)
+            .filter(|entry| {
+                entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                    && !broken_members.contains(&entry.meerkat_id)
+            })
             .collect::<Vec<_>>();
         if autonomous_entries.is_empty() {
             return Ok(());

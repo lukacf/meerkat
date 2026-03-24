@@ -1644,7 +1644,8 @@ mod scenario_22_runtime_host_comms {
             _run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            self.turn_count.fetch_add(1, Ordering::Relaxed);
+            let turn_num = self.turn_count.load(Ordering::Relaxed) + 1;
+            let start = std::time::Instant::now();
 
             let prompt = match &primitive {
                 RunPrimitive::StagedInput(staged) => staged
@@ -1666,6 +1667,10 @@ mod scenario_22_runtime_host_comms {
                 },
                 _ => String::new(),
             };
+            eprintln!(
+                "[scenario 22] executor apply turn={turn_num} prompt={:?}",
+                &prompt[..prompt.len().min(80)]
+            );
 
             let turn_req = StartTurnRequest {
                 prompt: prompt.into(),
@@ -1685,7 +1690,15 @@ mod scenario_22_runtime_host_comms {
                 .map_err(|e| CoreExecutorError::ApplyFailed {
                     reason: e.to_string(),
                 })?;
-            let _ = result;
+
+            // Increment AFTER LLM call completes — proves the full round-trip
+            self.turn_count.fetch_add(1, Ordering::Relaxed);
+            let elapsed = start.elapsed();
+            eprintln!(
+                "[scenario 22] executor turn={turn_num} done in {:.1}s, text={:?}",
+                elapsed.as_secs_f64(),
+                &result.text[..result.text.len().min(100)]
+            );
 
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceipt {
@@ -1697,7 +1710,7 @@ mod scenario_22_runtime_host_comms {
                     sequence: 0,
                 },
                 session_snapshot: None,
-                run_result: None,
+                run_result: Some(result),
             })
         }
 
@@ -1825,7 +1838,8 @@ mod scenario_22_runtime_host_comms {
         eprintln!("[scenario 22] Injected into A's inbox: {send_result:?}");
 
         // --- Wait for runtime-backed comms admission ---
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+        let comms_inject_time = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let t = turn_count.load(Ordering::Relaxed);
@@ -1838,9 +1852,23 @@ mod scenario_22_runtime_host_comms {
             }
         }
 
+        let comms_elapsed = comms_inject_time.elapsed();
+        let final_turns = turn_count.load(Ordering::Relaxed);
         eprintln!(
-            "[scenario 22] PASS: {} turns via runtime-backed comms path",
-            turn_count.load(Ordering::Relaxed)
+            "[scenario 22] PASS: {final_turns} turns, comms round-trip {:.1}s",
+            comms_elapsed.as_secs_f64()
+        );
+        assert!(
+            final_turns >= 2,
+            "Expected at least 2 executor turns (initial + comms-driven)"
+        );
+        // A real LLM round-trip takes >=0.5s even for the fastest model.
+        // If the comms-driven turn completed in <0.3s, the LLM was never called.
+        assert!(
+            comms_elapsed.as_secs_f64() > 0.3,
+            "Comms-driven turn completed in {:.2}s — suspiciously fast, \
+             LLM may not have been called",
+            comms_elapsed.as_secs_f64()
         );
     }
 }

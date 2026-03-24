@@ -60,7 +60,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
 - `RunCancelled`(run_id: RunId)
-- `DrainCommsInbox`
 - `CheckCompaction`
 
 ## Invariants
@@ -99,7 +98,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_active`
   - `conversation_turn`
-- Emits: `DrainCommsInbox`, `CheckCompaction`
+- Emits: `CheckCompaction`
 - To: `CallingLlm`
 
 ### `PrimitiveAppliedImmediateAppend`
@@ -193,7 +192,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_active`
   - `conversation_turn`
   - `cancel_after_boundary_not_requested`
-- Emits: `DrainCommsInbox`, `CheckCompaction`
+- Emits: `CheckCompaction`
 - To: `CallingLlm`
 
 ### `BoundaryContinueCancelsAfterBoundary`
@@ -244,7 +243,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ExtractionRetry`(run_id)
 - Guards:
   - `run_matches_active`
-- Emits: `DrainCommsInbox`, `CheckCompaction`
+- Emits: `CheckCompaction`
 - To: `CallingLlm`
 
 ### `ExtractionExhausted`
@@ -281,7 +280,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RetryRequested`(run_id)
 - Guards:
   - `run_matches_active`
-- Emits: `DrainCommsInbox`, `CheckCompaction`
+- Emits: `CheckCompaction`
 - To: `CallingLlm`
 
 ### `FatalFailureFromApplyingPrimitive`

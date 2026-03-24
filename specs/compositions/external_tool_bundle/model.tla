@@ -2053,7 +2053,7 @@ turn_execution_PrimitiveAppliedConversationTurn(arg_run_id, arg_admitted_content
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedConversationTurn"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedConversationTurn"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "PrimitiveAppliedConversationTurn"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "PrimitiveAppliedConversationTurn", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
        /\ UNCHANGED << obligation_surface_completion, obligation_surface_snapshot_alignment >>
        /\ model_step_count' = model_step_count + 1
@@ -2326,7 +2326,7 @@ turn_execution_BoundaryContinue(arg_run_id) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryContinue"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryContinue"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BoundaryContinue"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "BoundaryContinue", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
        /\ UNCHANGED << obligation_surface_completion, obligation_surface_snapshot_alignment >>
        /\ model_step_count' = model_step_count + 1
@@ -2459,7 +2459,7 @@ turn_execution_ExtractionRetry(arg_run_id) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionRetry"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionRetry"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ExtractionRetry"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "ExtractionRetry", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
        /\ UNCHANGED << obligation_surface_completion, obligation_surface_snapshot_alignment >>
        /\ model_step_count' = model_step_count + 1
@@ -2564,7 +2564,7 @@ turn_execution_RetryRequested(arg_run_id) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "DrainCommsInbox", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RetryRequested"], [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RetryRequested"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "turn_execution", variant |-> "CheckCompaction", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "RetryRequested"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "turn_execution", transition |-> "RetryRequested", actor |-> "turn_executor", step |-> (model_step_count + 1), from_phase |-> turn_execution_phase, to_phase |-> "CallingLlm"]}
        /\ UNCHANGED << obligation_surface_completion, obligation_surface_snapshot_alignment >>
        /\ model_step_count' = model_step_count + 1

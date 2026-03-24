@@ -17,15 +17,14 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, mode, suppresses_turn_boundary_drain
+VARIABLES phase, model_step_count, mode
 
-vars == << phase, model_step_count, mode, suppresses_turn_boundary_drain >>
+vars == << phase, model_step_count, mode >>
 
 Init ==
     /\ phase = "Inactive"
     /\ model_step_count = 0
     /\ mode = None
-    /\ suppresses_turn_boundary_drain = FALSE
 
 TerminalStutter ==
     /\ phase = "Stopped"
@@ -36,14 +35,13 @@ EnsureRunningFromInactive(arg_mode) ==
     /\ phase' = "Starting"
     /\ model_step_count' = model_step_count + 1
     /\ mode' = Some(arg_mode)
-    /\ suppresses_turn_boundary_drain' = TRUE
 
 
 TaskSpawnedFromStarting ==
     /\ phase = "Starting"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << mode, suppresses_turn_boundary_drain >>
+    /\ UNCHANGED << mode >>
 
 
 TaskExitedFromStartingRespawnable(reason) ==
@@ -52,7 +50,6 @@ TaskExitedFromStartingRespawnable(reason) ==
     /\ (mode = Some("PersistentHost"))
     /\ phase' = "ExitedRespawnable"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -61,7 +58,6 @@ TaskExitedFromStartingStopped(reason) ==
     /\ ((reason # "Failed") \/ (mode # Some("PersistentHost")))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -71,7 +67,6 @@ TaskExitedFromRunningRespawnable(reason) ==
     /\ (mode = Some("PersistentHost"))
     /\ phase' = "ExitedRespawnable"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -80,7 +75,6 @@ TaskExitedFromRunningStopped(reason) ==
     /\ ((reason # "Failed") \/ (mode # Some("PersistentHost")))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -88,7 +82,6 @@ StopRequestedFromRunning ==
     /\ phase = "Running"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -96,7 +89,6 @@ StopRequestedFromStarting ==
     /\ phase = "Starting"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -105,14 +97,13 @@ EnsureRunningFromExitedRespawnable(arg_mode) ==
     /\ phase' = "Starting"
     /\ model_step_count' = model_step_count + 1
     /\ mode' = Some(arg_mode)
-    /\ suppresses_turn_boundary_drain' = TRUE
 
 
 StopRequestedFromExitedRespawnable ==
     /\ phase = "ExitedRespawnable"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << mode, suppresses_turn_boundary_drain >>
+    /\ UNCHANGED << mode >>
 
 
 EnsureRunningFromStopped(arg_mode) ==
@@ -120,14 +111,12 @@ EnsureRunningFromStopped(arg_mode) ==
     /\ phase' = "Starting"
     /\ model_step_count' = model_step_count + 1
     /\ mode' = Some(arg_mode)
-    /\ suppresses_turn_boundary_drain' = TRUE
 
 
 AbortObservedFromActive ==
     /\ phase = "Running" \/ phase = "Starting"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ suppresses_turn_boundary_drain' = FALSE
     /\ UNCHANGED << mode >>
 
 
@@ -147,7 +136,6 @@ Next ==
     \/ TerminalStutter
 
 active_implies_mode_set == (((phase # "Starting") /\ (phase # "Running")) \/ (mode # None))
-active_implies_suppression == (((phase # "Starting") /\ (phase # "Running")) \/ (suppresses_turn_boundary_drain = TRUE))
 
 CiStateConstraint == /\ model_step_count <= 6
 DeepStateConstraint == /\ model_step_count <= 8
@@ -155,6 +143,5 @@ DeepStateConstraint == /\ model_step_count <= 8
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []active_implies_mode_set
-THEOREM Spec => []active_implies_suppression
 
 =============================================================================

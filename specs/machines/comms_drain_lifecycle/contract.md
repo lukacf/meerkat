@@ -8,7 +8,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## State
 - Phase enum: `Inactive | Starting | Running | ExitedRespawnable | Stopped`
 - `mode`: `Option<CommsDrainMode>`
-- `suppresses_turn_boundary_drain`: `Bool`
 
 ## Inputs
 - `EnsureRunning`(mode: CommsDrainMode)
@@ -19,18 +18,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `SpawnDrainTask`(mode: CommsDrainMode)
-- `SetTurnBoundaryDrainSuppressed`(active: Bool)
 - `AbortDrainTask`
 
 ## Invariants
 - `active_implies_mode_set`
-- `active_implies_suppression`
 
 ## Transitions
 ### `EnsureRunningFromInactive`
 - From: `Inactive`
 - On: `EnsureRunning`(mode)
-- Emits: `SpawnDrainTask`, `SetTurnBoundaryDrainSuppressed`
+- Emits: `SpawnDrainTask`
 - To: `Starting`
 
 ### `TaskSpawnedFromStarting`
@@ -44,7 +41,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `reason_is_failed`
   - `mode_is_persistent_host`
-- Emits: `SetTurnBoundaryDrainSuppressed`
 - To: `ExitedRespawnable`
 
 ### `TaskExitedFromStartingStopped`
@@ -52,7 +48,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `TaskExited`(reason)
 - Guards:
   - `not_respawnable`
-- Emits: `SetTurnBoundaryDrainSuppressed`
 - To: `Stopped`
 
 ### `TaskExitedFromRunningRespawnable`
@@ -61,7 +56,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `reason_is_failed`
   - `mode_is_persistent_host`
-- Emits: `SetTurnBoundaryDrainSuppressed`
 - To: `ExitedRespawnable`
 
 ### `TaskExitedFromRunningStopped`
@@ -69,25 +63,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `TaskExited`(reason)
 - Guards:
   - `not_respawnable`
-- Emits: `SetTurnBoundaryDrainSuppressed`
 - To: `Stopped`
 
 ### `StopRequestedFromRunning`
 - From: `Running`
 - On: `StopRequested`()
-- Emits: `AbortDrainTask`, `SetTurnBoundaryDrainSuppressed`
+- Emits: `AbortDrainTask`
 - To: `Stopped`
 
 ### `StopRequestedFromStarting`
 - From: `Starting`
 - On: `StopRequested`()
-- Emits: `AbortDrainTask`, `SetTurnBoundaryDrainSuppressed`
+- Emits: `AbortDrainTask`
 - To: `Stopped`
 
 ### `EnsureRunningFromExitedRespawnable`
 - From: `ExitedRespawnable`
 - On: `EnsureRunning`(mode)
-- Emits: `SpawnDrainTask`, `SetTurnBoundaryDrainSuppressed`
+- Emits: `SpawnDrainTask`
 - To: `Starting`
 
 ### `StopRequestedFromExitedRespawnable`
@@ -98,13 +91,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `EnsureRunningFromStopped`
 - From: `Stopped`
 - On: `EnsureRunning`(mode)
-- Emits: `SpawnDrainTask`, `SetTurnBoundaryDrainSuppressed`
+- Emits: `SpawnDrainTask`
 - To: `Starting`
 
 ### `AbortObservedFromActive`
 - From: `Running`, `Starting`
 - On: `AbortObserved`()
-- Emits: `SetTurnBoundaryDrainSuppressed`
 - To: `Stopped`
 
 ## Coverage
@@ -114,6 +106,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-runtime/src/comms_drain.rs` — comms drain task spawn and loop implementation
 
 ### Scenarios
-- `spawn-run-exit` — drain task spawns, runs, and exits cleanly with suppression lifecycle
+- `spawn-run-exit` — drain task spawns, runs, and exits cleanly
 - `persistent-respawn` — persistent-host drain respawns after transient failure
-- `stop-abort` — drain task is stopped or aborted and suppression is lifted
+- `stop-abort` — drain task is stopped or aborted

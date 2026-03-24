@@ -106,7 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_tokens: Some(1024),
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::SessionService,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -129,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{InitialTurnPolicy, HostModeOwner, HandlingMode};
+use meerkat_core::service::{InitialTurnPolicy, HandlingMode};
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -140,7 +139,6 @@ let result = service.create_session(CreateSessionRequest {
     max_tokens: None,
     event_tx: None,
     host_mode: false,
-    host_mode_owner: HostModeOwner::SessionService,
     skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     build: None,
@@ -156,7 +154,6 @@ let result = service.start_turn(&session_id, StartTurnRequest {
     handling_mode: HandlingMode::Queue,
     event_tx: None,
     host_mode: false,
-    host_mode_owner: HostModeOwner::SessionService,
     skill_references: None,
     flow_tool_overlay: None,
     additional_instructions: None,

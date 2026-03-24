@@ -19,7 +19,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | Family | Kind | Path | Type / Trait | Methods |
 | --- | --- | --- | --- | --- |
 | runtime-control-plane | trait-impl | `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter` / `RuntimeControlPlane` | `ingest`, `publish_event`, `retire`, `recycle`, `reset`, `recover`, `destroy` |
-| runtime-session-adapter | public-inherent | `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter` | `set_comms_drain_control`, `register_session`, `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session`, `interrupt_current_run`, `stop_runtime_executor`, `accept_input_and_run`, `accept_input_with_completion`, `maybe_spawn_comms_drain`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
+| runtime-session-adapter | public-inherent | `meerkat-runtime/src/session_adapter.rs` | `RuntimeSessionAdapter` | `register_session`, `set_session_silent_intents`, `register_session_with_executor`, `ensure_session_with_executor`, `unregister_session`, `interrupt_current_run`, `stop_runtime_executor`, `accept_input_and_run`, `accept_input_with_completion`, `maybe_spawn_comms_drain`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
 | mcp-router | public-inherent | `meerkat-mcp/src/router.rs` | `McpRouter` | `set_removal_timeout`, `add_server`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `take_lifecycle_actions`, `take_external_updates`, `progress_removals`, `call_tool`, `shutdown` |
 | mcp-router-adapter | public-inherent | `meerkat-mcp/src/adapter.rs` | `McpRouterAdapter` | `refresh_tools`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `poll_lifecycle_actions`, `progress_removals`, `wait_until_ready`, `shutdown` |
 | mob-handle | public-inherent | `meerkat-mob/src/runtime/handle.rs` | `MobHandle` | `spawn`, `spawn_with_backend`, `spawn_with_options`, `attach_existing_session`, `attach_existing_session_as_orchestrator`, `attach_existing_session_as_member`, `spawn_spec`, `spawn_many`, `retire`, `respawn`, `retire_all`, `wire`, `unwire`, `internal_turn`, `run_flow`, `run_flow_with_stream`, `cancel_flow`, `stop`, `resume`, `complete`, `reset`, `destroy`, `task_create`, `task_update`, `set_spawn_policy`, `shutdown`, `force_cancel_member`, `wait_one`, `wait_all`, `spawn_helper`, `fork_helper` |
@@ -48,7 +48,6 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Path | Symbol | Boundary | Status | Anchor |
 | --- | --- | --- | --- | --- |
-| `meerkat-runtime/src/session_adapter.rs` | `set_comms_drain_control` | `public-inherent` | `closed` | `registered-session contract + CommsDrainLifecycleMachine` |
 | `meerkat-runtime/src/session_adapter.rs` | `register_session` | `public-inherent` | `closed` | `RuntimeSessionAdapter registration + recovery publication contract` |
 | `meerkat-runtime/src/session_adapter.rs` | `set_session_silent_intents` | `public-inherent` | `closed` | `RuntimeIngressMachine + RuntimeControlMachine policy truth` |
 | `meerkat-runtime/src/session_adapter.rs` | `register_session_with_executor` | `public-inherent` | `closed` | `RuntimeSessionAdapter registration + attachment publication contract` |

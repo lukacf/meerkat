@@ -320,9 +320,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RunCancelled`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`
-- `DrainCommsInbox`
-  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
-  - scenarios: `conversation-run`
 - `CheckCompaction`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`

@@ -266,10 +266,6 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
-                    name: "DrainCommsInbox".into(),
-                    fields: vec![],
-                },
-                VariantSchema {
                     name: "CheckCompaction".into(),
                     fields: vec![],
                 },
@@ -675,16 +671,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     },
                 ],
                 to: "CallingLlm".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "DrainCommsInbox".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "CheckCompaction".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "CheckCompaction".into(),
+                    fields: IndexMap::new(),
+                }],
             },
             TransitionSchema {
                 name: "PrimitiveAppliedImmediateAppend".into(),
@@ -1283,16 +1273,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 ],
                 updates: vec![],
                 to: "CallingLlm".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "DrainCommsInbox".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "CheckCompaction".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "CheckCompaction".into(),
+                    fields: IndexMap::new(),
+                }],
             },
             TransitionSchema {
                 name: "BoundaryContinueCancelsAfterBoundary".into(),
@@ -1476,16 +1460,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     amount: 1,
                 }],
                 to: "CallingLlm".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "DrainCommsInbox".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "CheckCompaction".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "CheckCompaction".into(),
+                    fields: IndexMap::new(),
+                }],
             },
             TransitionSchema {
                 name: "ExtractionExhausted".into(),
@@ -1598,16 +1576,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
                 updates: vec![],
                 to: "CallingLlm".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "DrainCommsInbox".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "CheckCompaction".into(),
-                        fields: IndexMap::new(),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "CheckCompaction".into(),
+                    fields: IndexMap::new(),
+                }],
             },
             TransitionSchema {
                 name: "FatalFailureFromApplyingPrimitive".into(),
@@ -3223,7 +3195,6 @@ pub fn turn_execution_machine() -> MachineSchema {
                     ],
                 },
             ),
-            disposition("DrainCommsInbox", EffectDisposition::Local),
             disposition("CheckCompaction", EffectDisposition::Local),
         ],
     }

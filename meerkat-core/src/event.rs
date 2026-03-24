@@ -89,6 +89,7 @@ pub fn compare_event_envelopes<T>(a: &EventEnvelope<T>, b: &EventEnvelope<T>) ->
 }
 
 /// Payload for tool configuration change notifications.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolConfigChangedPayload {
     pub operation: ToolConfigChangeOperation,
@@ -100,6 +101,7 @@ pub struct ToolConfigChangedPayload {
 }
 
 /// Operation kind for live tool configuration changes.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolConfigChangeOperation {
@@ -206,6 +208,7 @@ impl ExternalToolDelta {
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -405,6 +408,7 @@ pub enum AgentEvent {
 }
 
 /// Scope attribution frame for multi-agent streaming.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -420,6 +424,7 @@ pub enum StreamScopeFrame {
 }
 
 /// Attributed stream event wrapper for multi-agent streaming.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopedAgentEvent {
     pub scope_id: String,
@@ -483,6 +488,7 @@ impl ScopedAgentEvent {
 }
 
 /// Type of budget being tracked
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetType {
@@ -727,6 +733,177 @@ mod tests {
             let json2 = serde_json::to_value(&roundtrip).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    #[test]
+    fn test_agent_event_type_mapping_is_total_for_all_variants() {
+        let events = vec![
+            AgentEvent::RunStarted {
+                session_id: SessionId::new(),
+                prompt: "Hello".to_string(),
+            },
+            AgentEvent::RunCompleted {
+                session_id: SessionId::new(),
+                result: "Done".to_string(),
+                usage: Usage::default(),
+            },
+            AgentEvent::RunFailed {
+                session_id: SessionId::new(),
+                error: "failed".to_string(),
+            },
+            AgentEvent::HookStarted {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+            },
+            AgentEvent::HookCompleted {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                duration_ms: 1,
+            },
+            AgentEvent::HookFailed {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                error: "failed".to_string(),
+            },
+            AgentEvent::HookDenied {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                reason_code: HookReasonCode::PolicyViolation,
+                message: "nope".to_string(),
+                payload: None,
+            },
+            AgentEvent::HookRewriteApplied {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                patch: HookPatch::AssistantText {
+                    text: "patched".to_string(),
+                },
+            },
+            AgentEvent::HookPatchPublished {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                envelope: HookPatchEnvelope {
+                    revision: crate::hooks::HookRevision(1),
+                    hook_id: crate::hooks::HookId("hook-1".to_string()),
+                    point: HookPoint::RunStarted,
+                    patch: HookPatch::AssistantText {
+                        text: "patched".to_string(),
+                    },
+                    published_at: chrono::Utc::now(),
+                },
+            },
+            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::ReasoningDelta {
+                delta: "think".to_string(),
+            },
+            AgentEvent::ReasoningComplete {
+                content: "done".to_string(),
+            },
+            AgentEvent::TextDelta {
+                delta: "chunk".to_string(),
+            },
+            AgentEvent::TextComplete {
+                content: "done".to_string(),
+            },
+            AgentEvent::ToolCallRequested {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                args: serde_json::json!({}),
+            },
+            AgentEvent::ToolResultReceived {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                is_error: false,
+            },
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+            AgentEvent::ToolExecutionStarted {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+            },
+            AgentEvent::ToolExecutionCompleted {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                result: "ok".to_string(),
+                is_error: false,
+                duration_ms: 1,
+                has_images: false,
+            },
+            AgentEvent::ToolExecutionTimedOut {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                timeout_ms: 1000,
+            },
+            AgentEvent::CompactionStarted {
+                input_tokens: 1,
+                estimated_history_tokens: 2,
+                message_count: 3,
+            },
+            AgentEvent::CompactionCompleted {
+                summary_tokens: 1,
+                messages_before: 3,
+                messages_after: 1,
+            },
+            AgentEvent::CompactionFailed {
+                error: "failed".to_string(),
+            },
+            AgentEvent::BudgetWarning {
+                budget_type: BudgetType::Time,
+                used: 1,
+                limit: 2,
+                percent: 50.0,
+            },
+            AgentEvent::Retrying {
+                attempt: 1,
+                max_attempts: 2,
+                error: "retry".to_string(),
+                delay_ms: 100,
+            },
+            AgentEvent::SkillsResolved {
+                skills: vec![],
+                injection_bytes: 0,
+            },
+            AgentEvent::SkillResolutionFailed {
+                reference: "skill".to_string(),
+                error: "missing".to_string(),
+            },
+            AgentEvent::InteractionComplete {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                result: "ok".to_string(),
+            },
+            AgentEvent::InteractionFailed {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                error: "failed".to_string(),
+            },
+            AgentEvent::StreamTruncated {
+                reason: "lag".to_string(),
+            },
+            AgentEvent::ToolConfigChanged {
+                payload: ToolConfigChangedPayload {
+                    operation: ToolConfigChangeOperation::Reload,
+                    target: "external".to_string(),
+                    status: "applied".to_string(),
+                    persisted: true,
+                    applied_at_turn: Some(1),
+                },
+            },
+        ];
+
+        let mut kinds = std::collections::BTreeSet::new();
+        for event in events {
+            let kind = agent_event_type(&event);
+            assert!(
+                !kind.is_empty(),
+                "event type mapping returned empty discriminator"
+            );
+            kinds.insert(kind);
+        }
+        assert!(
+            kinds.len() >= 31,
+            "expected at least one discriminator per covered event variant"
+        );
     }
 
     #[test]

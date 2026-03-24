@@ -5,7 +5,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { MeerkatRuntime, Session, isKnownEvent } from "@rkat/web";
+import { MeerkatRuntime, Session, isKnownEvent, KNOWN_AGENT_EVENT_TYPES } from "@rkat/web";
 import * as rawWasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 
 async function makeNodeCompatibleWasmModule() {
@@ -219,6 +219,18 @@ test("isKnownEvent recognizes the full current canonical event surface", () => {
       reason: "backpressure",
     }),
     true,
+  );
+});
+
+test("web known event types stay aligned with the canonical contracts artifact", async () => {
+  const eventsJsonPath = new URL("../../../artifacts/schemas/events.json", import.meta.url);
+  const raw = JSON.parse(await readFile(eventsJsonPath, "utf8"));
+  const canonicalTypes = raw.WireEvent?.known_event_types;
+
+  assert.ok(Array.isArray(canonicalTypes), "contracts events.json must expose known_event_types");
+  assert.deepEqual(
+    [...KNOWN_AGENT_EVENT_TYPES].sort(),
+    [...canonicalTypes].sort(),
   );
 });
 

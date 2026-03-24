@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::types::ContentBlock;
 
 /// Unique identifier for an interaction.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct InteractionId(pub Uuid);
+pub struct InteractionId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
 
 impl std::fmt::Display for InteractionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -49,6 +49,10 @@ def _python_identifier(name: str) -> str:
     return f"{name}_" if keyword.iskeyword(name) else name
 
 
+def _pascal_case(name: str) -> str:
+    return "".join(part.capitalize() for part in name.split("_"))
+
+
 def _python_type_from_schema(root: dict[str, Any], field_schema: Any) -> tuple[str, bool]:
     """Return (python_type, optional)."""
     if field_schema is True:
@@ -623,6 +627,155 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     (output_dir / "index.ts").write_text(index_content)
 
 
+def _web_events_ts_type(root: dict[str, Any], schema: Any) -> str:
+    if schema is True:
+        return "unknown"
+    if schema is False or not isinstance(schema, dict):
+        return "unknown"
+    if "const" in schema:
+        return json.dumps(schema["const"])
+    if "$ref" in schema:
+        ref_name = _resolve_schema_ref_name(str(schema["$ref"]))
+        if ref_name:
+            return ref_name
+        return "unknown"
+    if "enum" in schema and isinstance(schema["enum"], list):
+        return " | ".join(json.dumps(value) for value in schema["enum"])
+    for key in ("anyOf", "oneOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list) and variants:
+            variant_types: list[str] = []
+            for variant in variants:
+                inner = _web_events_ts_type(root, variant)
+                if inner not in variant_types:
+                    variant_types.append(inner)
+            return " | ".join(variant_types) if variant_types else "unknown"
+
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        non_null = [item for item in schema_type if item != "null"]
+        if not non_null:
+            return "null"
+        if len(non_null) == 1:
+            base = _web_events_ts_type(root, {**schema, "type": non_null[0]})
+            return f"{base} | null" if "null" in schema_type else base
+        variant_types: list[str] = []
+        for item in non_null:
+            inner = _web_events_ts_type(root, {**schema, "type": item})
+            if inner not in variant_types:
+                variant_types.append(inner)
+        if "null" in schema_type and "null" not in variant_types:
+            variant_types.append("null")
+        return " | ".join(variant_types)
+
+    if schema_type == "string":
+        return "string"
+    if schema_type in {"integer", "number"}:
+        return "number"
+    if schema_type == "boolean":
+        return "boolean"
+    if schema_type == "array":
+        item_type = _web_events_ts_type(root, schema.get("items"))
+        return f"{item_type}[]"
+    if schema_type == "object":
+        properties = schema.get("properties")
+        required = set(schema.get("required", []))
+        if isinstance(properties, dict):
+            lines = ["{"]
+            for field_name, field_schema in properties.items():
+                field_type = _web_events_ts_type(root, field_schema)
+                optional = "?" if field_name not in required else ""
+                lines.append(f"  {field_name}{optional}: {field_type};")
+            additional = schema.get("additionalProperties", False)
+            if additional is True:
+                lines.append("  [key: string]: unknown;")
+            elif isinstance(additional, dict):
+                additional_type = _web_events_ts_type(root, additional)
+                lines.append(f"  [key: string]: {additional_type};")
+            lines.append("}")
+            return "\n".join(lines)
+        return "Record<string, unknown>"
+    return "unknown"
+
+
+def generate_web_event_types(schemas: dict, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    events_schema = schemas.get("events", {})
+    agent_schema = events_schema.get("AgentEvent", {})
+    wire_event = events_schema.get("WireEvent", {})
+    defs = agent_schema.get("$defs", {})
+    known_event_types = wire_event.get("known_event_types", [])
+    variants = agent_schema.get("oneOf", [])
+
+    def is_simple_object_literal(type_string: str) -> bool:
+        stripped = type_string.strip()
+        return stripped.startswith("{") and stripped.endswith("}") and " | " not in stripped
+
+    def object_literal_body(type_string: str) -> str:
+        stripped = type_string.strip()
+        return stripped[1:-1].strip()
+
+    lines: list[str] = [
+        "// Generated raw event types for @rkat/web",
+        "// Source: artifacts/schemas/events.json",
+        "",
+    ]
+
+    for def_name, def_schema in defs.items():
+        alias_type = _web_events_ts_type(agent_schema, def_schema)
+        if is_simple_object_literal(alias_type):
+            lines.append(f"export interface {def_name} {{")
+            body = object_literal_body(alias_type)
+            if body:
+                lines.extend(f"  {line}" if not line.startswith("  ") else line for line in body.splitlines())
+            lines.append("}")
+        else:
+            lines.append(f"export type {def_name} = {alias_type};")
+        lines.append("")
+
+    event_interface_names: list[str] = []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        properties = variant.get("properties", {})
+        event_type = (
+            properties.get("type", {}).get("const")
+            if isinstance(properties.get("type"), dict)
+            else None
+        )
+        if not isinstance(event_type, str):
+            continue
+        interface_name = f"{_pascal_case(event_type)}Event"
+        event_interface_names.append(interface_name)
+        lines.append(f"export interface {interface_name} {{")
+        required = set(variant.get("required", []))
+        for field_name, field_schema in properties.items():
+            field_type = _web_events_ts_type(agent_schema, field_schema)
+            optional = "?" if field_name not in required else ""
+            lines.append(f"  {field_name}{optional}: {field_type};")
+        lines.append("}")
+        lines.append("")
+
+    if known_event_types:
+        known_items = ",\n  ".join(json.dumps(value) for value in known_event_types)
+        lines.append("export const KNOWN_AGENT_EVENT_TYPES = [")
+        lines.append(f"  {known_items}")
+        lines.append("] as const;")
+        lines.append("")
+        lines.append(
+            "export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];"
+        )
+        lines.append("")
+
+    if event_interface_names:
+        union = " |\n  ".join(event_interface_names)
+        lines.append("export type AgentEvent =")
+        lines.append(f"  {union};")
+        lines.append("")
+
+    (output_dir / "events.ts").write_text("\n".join(lines))
+
+
 def load_available_capabilities(artifacts_dir: Path) -> set[str]:
     """Load available capability IDs from capabilities.json."""
     caps_file = artifacts_dir / "capabilities.json"
@@ -689,6 +842,11 @@ def main():
     ts_output = output_root / "sdks" / "typescript" / "src" / "generated"
     generate_typescript_types(schemas, ts_output, has_comms=has_comms, has_skills=has_skills)
     print(f"Generated TypeScript types in {ts_output}")
+
+    # Generate web event types from the canonical contracts artifact.
+    web_events_output = output_root / "sdks" / "web" / "src" / "generated"
+    generate_web_event_types(schemas, web_events_output)
+    print(f"Generated web event types in {web_events_output}")
 
 
 if __name__ == "__main__":

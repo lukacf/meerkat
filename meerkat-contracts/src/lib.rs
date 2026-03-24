@@ -5,6 +5,7 @@
 
 pub mod capability;
 pub mod error;
+pub mod event_catalog;
 pub mod protocol;
 pub mod rest_catalog;
 pub mod rpc_catalog;
@@ -21,6 +22,7 @@ pub use capability::{
     CapabilityStatus, build_capabilities,
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
+pub use event_catalog::KNOWN_AGENT_EVENT_TYPES;
 pub use protocol::Protocol;
 pub use rest_catalog::{
     RestOperationDescriptor, RestPathDescriptor, rest_documented_paths, rest_path_catalog,

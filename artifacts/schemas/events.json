@@ -1,6 +1,2213 @@
 {
+  "AgentEvent": {
+    "$defs": {
+      "BudgetType": {
+        "description": "Type of budget being tracked",
+        "enum": [
+          "tokens",
+          "time",
+          "tool_calls"
+        ],
+        "type": "string"
+      },
+      "HookId": {
+        "description": "Stable identifier for a configured hook.",
+        "type": "string"
+      },
+      "HookPatch": {
+        "description": "Typed patch intents used by rewrite hooks.",
+        "oneOf": [
+          {
+            "description": "Mutate effective LLM request parameters.",
+            "properties": {
+              "max_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "patch_type": {
+                "const": "llm_request",
+                "type": "string"
+              },
+              "provider_params": true,
+              "temperature": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "patch_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace assistant text content in the latest model response.",
+            "properties": {
+              "patch_type": {
+                "const": "assistant_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace serialized tool arguments.",
+            "properties": {
+              "args": true,
+              "patch_type": {
+                "const": "tool_args",
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mutate tool result payload before it is persisted.",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "patch_type": {
+                "const": "tool_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mutate final run output text.",
+            "properties": {
+              "patch_type": {
+                "const": "run_result",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "text"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HookPatchEnvelope": {
+        "description": "Stable envelope emitted for async patch publication.",
+        "properties": {
+          "hook_id": {
+            "$ref": "#/$defs/HookId"
+          },
+          "patch": {
+            "$ref": "#/$defs/HookPatch"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "published_at": {
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/$defs/HookRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "hook_id",
+          "point",
+          "patch",
+          "published_at"
+        ],
+        "type": "object"
+      },
+      "HookPoint": {
+        "description": "Hook points available in V1.",
+        "enum": [
+          "run_started",
+          "run_completed",
+          "run_failed",
+          "pre_llm_request",
+          "post_llm_response",
+          "pre_tool_execution",
+          "post_tool_execution",
+          "turn_boundary"
+        ],
+        "type": "string"
+      },
+      "HookReasonCode": {
+        "description": "Typed reason codes for guardrail denials.",
+        "enum": [
+          "policy_violation",
+          "safety_violation",
+          "schema_violation",
+          "timeout",
+          "runtime_error"
+        ],
+        "type": "string"
+      },
+      "HookRevision": {
+        "description": "Monotonic patch revision metadata.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SkillId": {
+        "description": "Skill identifier — newtype for type safety.\n\nThe canonical format is a slash-delimited path: `{collection-path}/{name}`.\nExamples: `\"extraction/email-extractor\"`, `\"a/b/c\"`, `\"pdf-processing\"`.",
+        "type": "string"
+      },
+      "StopReason": {
+        "description": "Why the model stopped generating",
+        "oneOf": [
+          {
+            "const": "end_turn",
+            "description": "Model finished naturally",
+            "type": "string"
+          },
+          {
+            "const": "tool_use",
+            "description": "Model wants to call tools",
+            "type": "string"
+          },
+          {
+            "const": "max_tokens",
+            "description": "Hit max output tokens",
+            "type": "string"
+          },
+          {
+            "const": "stop_sequence",
+            "description": "Hit a stop sequence",
+            "type": "string"
+          },
+          {
+            "const": "content_filter",
+            "description": "Blocked by content filter",
+            "type": "string"
+          },
+          {
+            "const": "cancelled",
+            "description": "Request was cancelled",
+            "type": "string"
+          }
+        ]
+      },
+      "ToolConfigChangeOperation": {
+        "description": "Operation kind for live tool configuration changes.",
+        "enum": [
+          "add",
+          "remove",
+          "reload"
+        ],
+        "type": "string"
+      },
+      "ToolConfigChangedPayload": {
+        "description": "Payload for tool configuration change notifications.",
+        "properties": {
+          "applied_at_turn": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operation": {
+            "$ref": "#/$defs/ToolConfigChangeOperation"
+          },
+          "persisted": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "target",
+          "status",
+          "persisted"
+        ],
+        "type": "object"
+      },
+      "Usage": {
+        "description": "Token usage statistics",
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
+    "oneOf": [
+      {
+        "description": "Agent run started",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "run_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Agent run completed successfully",
+        "properties": {
+          "result": {
+            "type": "string"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "run_completed",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/$defs/Usage"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "result",
+          "usage"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Agent run failed",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "run_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Hook invocation started.",
+        "properties": {
+          "hook_id": {
+            "type": "string"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "type": {
+            "const": "hook_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Hook invocation completed.",
+        "properties": {
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hook_id": {
+            "type": "string"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "type": {
+            "const": "hook_completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point",
+          "duration_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Hook invocation failed.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "hook_id": {
+            "type": "string"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "type": {
+            "const": "hook_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Hook denied an action.",
+        "properties": {
+          "hook_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": true,
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "reason_code": {
+            "$ref": "#/$defs/HookReasonCode"
+          },
+          "type": {
+            "const": "hook_denied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point",
+          "reason_code",
+          "message"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A rewrite patch was applied synchronously.",
+        "properties": {
+          "hook_id": {
+            "type": "string"
+          },
+          "patch": {
+            "$ref": "#/$defs/HookPatch"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "type": {
+            "const": "hook_rewrite_applied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point",
+          "patch"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A background patch was published for downstream surfaces.",
+        "properties": {
+          "envelope": {
+            "$ref": "#/$defs/HookPatchEnvelope"
+          },
+          "hook_id": {
+            "type": "string"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "type": {
+            "const": "hook_patch_published",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "hook_id",
+          "point",
+          "envelope"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "New turn started (calling LLM)",
+        "properties": {
+          "turn_number": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "turn_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "turn_number"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Streaming reasoning/thinking from the model",
+        "properties": {
+          "delta": {
+            "type": "string"
+          },
+          "type": {
+            "const": "reasoning_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "delta"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Reasoning/thinking complete for this block",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "type": {
+            "const": "reasoning_complete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Streaming text from the model",
+        "properties": {
+          "delta": {
+            "type": "string"
+          },
+          "type": {
+            "const": "text_delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "delta"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Text generation complete for this turn",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "type": {
+            "const": "text_complete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Model requested a tool call",
+        "properties": {
+          "args": true,
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_call_requested",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "args"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Tool result received (injected into conversation)",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "is_error": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_result_received",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "is_error"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Turn completed",
+        "properties": {
+          "stop_reason": {
+            "$ref": "#/$defs/StopReason"
+          },
+          "type": {
+            "const": "turn_completed",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/$defs/Usage"
+          }
+        },
+        "required": [
+          "type",
+          "stop_reason",
+          "usage"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Starting tool execution",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_execution_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Tool execution completed",
+        "properties": {
+          "duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "has_images": {
+            "default": false,
+            "description": "Whether the tool result contains image content blocks.",
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_error": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "type": {
+            "const": "tool_execution_completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "result",
+          "is_error",
+          "duration_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Tool execution timed out",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "tool_execution_timed_out",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "name",
+          "timeout_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Context compaction started.",
+        "properties": {
+          "estimated_history_tokens": {
+            "description": "Estimated total history tokens before compaction.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_tokens": {
+            "description": "Input tokens from the last LLM call that triggered compaction.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message_count": {
+            "description": "Number of messages before compaction.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "compaction_started",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "input_tokens",
+          "estimated_history_tokens",
+          "message_count"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Context compaction completed successfully.",
+        "properties": {
+          "messages_after": {
+            "description": "Messages after compaction.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages_before": {
+            "description": "Messages before compaction.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "summary_tokens": {
+            "description": "Tokens consumed by the summary.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "compaction_completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "summary_tokens",
+          "messages_before",
+          "messages_after"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "type": {
+            "const": "compaction_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Budget warning (approaching limits)",
+        "properties": {
+          "budget_type": {
+            "$ref": "#/$defs/BudgetType"
+          },
+          "limit": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "percent": {
+            "format": "float",
+            "type": "number"
+          },
+          "type": {
+            "const": "budget_warning",
+            "type": "string"
+          },
+          "used": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "budget_type",
+          "used",
+          "limit",
+          "percent"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Retrying after error",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delay_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "max_attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "retrying",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "attempt",
+          "max_attempts",
+          "error",
+          "delay_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Skills resolved for this turn.",
+        "properties": {
+          "injection_bytes": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/$defs/SkillId"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "skills_resolved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "skills",
+          "injection_bytes"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A skill reference could not be resolved.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "type": {
+            "const": "skill_resolution_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reference",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "An interaction completed successfully (terminal event for tap subscribers).",
+        "properties": {
+          "interaction_id": {
+            "$ref": "#/$defs/InteractionId"
+          },
+          "result": {
+            "type": "string"
+          },
+          "type": {
+            "const": "interaction_complete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "interaction_id",
+          "result"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "An interaction failed (terminal event for tap subscribers).",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "interaction_id": {
+            "$ref": "#/$defs/InteractionId"
+          },
+          "type": {
+            "const": "interaction_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "interaction_id",
+          "error"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "const": "stream_truncated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Live tool configuration changed for this session.",
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/ToolConfigChangedPayload"
+          },
+          "type": {
+            "const": "tool_config_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "AgentEvent"
+  },
+  "ScopedAgentEvent": {
+    "$defs": {
+      "AgentEvent": {
+        "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
+        "oneOf": [
+          {
+            "description": "Agent run started",
+            "properties": {
+              "prompt": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "run_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Agent run completed successfully",
+            "properties": {
+              "result": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "run_completed",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "result",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Agent run failed",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "run_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook invocation started.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook invocation completed.",
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hook_id": {
+                "type": "string"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook invocation failed.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "hook_id": {
+                "type": "string"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Hook denied an action.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "payload": true,
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "reason_code": {
+                "$ref": "#/$defs/HookReasonCode"
+              },
+              "type": {
+                "const": "hook_denied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "reason_code",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A rewrite patch was applied synchronously.",
+            "properties": {
+              "hook_id": {
+                "type": "string"
+              },
+              "patch": {
+                "$ref": "#/$defs/HookPatch"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_rewrite_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "patch"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background patch was published for downstream surfaces.",
+            "properties": {
+              "envelope": {
+                "$ref": "#/$defs/HookPatchEnvelope"
+              },
+              "hook_id": {
+                "type": "string"
+              },
+              "point": {
+                "$ref": "#/$defs/HookPoint"
+              },
+              "type": {
+                "const": "hook_patch_published",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "hook_id",
+              "point",
+              "envelope"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "New turn started (calling LLM)",
+            "properties": {
+              "turn_number": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "turn_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_number"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Streaming reasoning/thinking from the model",
+            "properties": {
+              "delta": {
+                "type": "string"
+              },
+              "type": {
+                "const": "reasoning_delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "delta"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reasoning/thinking complete for this block",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "type": {
+                "const": "reasoning_complete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Streaming text from the model",
+            "properties": {
+              "delta": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text_delta",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "delta"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Text generation complete for this turn",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text_complete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Model requested a tool call",
+            "properties": {
+              "args": true,
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_call_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Tool result received (injected into conversation)",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_result_received",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "is_error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Turn completed",
+            "properties": {
+              "stop_reason": {
+                "$ref": "#/$defs/StopReason"
+              },
+              "type": {
+                "const": "turn_completed",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/Usage"
+              }
+            },
+            "required": [
+              "type",
+              "stop_reason",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Starting tool execution",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_execution_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Tool execution completed",
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "has_images": {
+                "default": false,
+                "description": "Whether the tool result contains image content blocks.",
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "result": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_execution_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "result",
+              "is_error",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Tool execution timed out",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "tool_execution_timed_out",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "timeout_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Context compaction started.",
+            "properties": {
+              "estimated_history_tokens": {
+                "description": "Estimated total history tokens before compaction.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "input_tokens": {
+                "description": "Input tokens from the last LLM call that triggered compaction.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "message_count": {
+                "description": "Number of messages before compaction.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "compaction_started",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input_tokens",
+              "estimated_history_tokens",
+              "message_count"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Context compaction completed successfully.",
+            "properties": {
+              "messages_after": {
+                "description": "Messages after compaction.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "messages_before": {
+                "description": "Messages before compaction.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "summary_tokens": {
+                "description": "Tokens consumed by the summary.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "compaction_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "summary_tokens",
+              "messages_before",
+              "messages_after"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Context compaction failed (non-fatal — agent continues with uncompacted history).",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "type": {
+                "const": "compaction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Budget warning (approaching limits)",
+            "properties": {
+              "budget_type": {
+                "$ref": "#/$defs/BudgetType"
+              },
+              "limit": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "percent": {
+                "format": "float",
+                "type": "number"
+              },
+              "type": {
+                "const": "budget_warning",
+                "type": "string"
+              },
+              "used": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "budget_type",
+              "used",
+              "limit",
+              "percent"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Retrying after error",
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "delay_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "error": {
+                "type": "string"
+              },
+              "max_attempts": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "retrying",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "attempt",
+              "max_attempts",
+              "error",
+              "delay_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Skills resolved for this turn.",
+            "properties": {
+              "injection_bytes": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "skills": {
+                "items": {
+                  "$ref": "#/$defs/SkillId"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "skills_resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "skills",
+              "injection_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A skill reference could not be resolved.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "reference": {
+                "type": "string"
+              },
+              "type": {
+                "const": "skill_resolution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reference",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An interaction completed successfully (terminal event for tap subscribers).",
+            "properties": {
+              "interaction_id": {
+                "$ref": "#/$defs/InteractionId"
+              },
+              "result": {
+                "type": "string"
+              },
+              "type": {
+                "const": "interaction_complete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interaction_id",
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An interaction failed (terminal event for tap subscribers).",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "interaction_id": {
+                "$ref": "#/$defs/InteractionId"
+              },
+              "type": {
+                "const": "interaction_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interaction_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Some streaming events were dropped due to channel backpressure.\nBest-effort marker — the terminal event is authoritative.",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "const": "stream_truncated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Live tool configuration changed for this session.",
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ToolConfigChangedPayload"
+              },
+              "type": {
+                "const": "tool_config_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "payload"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BudgetType": {
+        "description": "Type of budget being tracked",
+        "enum": [
+          "tokens",
+          "time",
+          "tool_calls"
+        ],
+        "type": "string"
+      },
+      "HookId": {
+        "description": "Stable identifier for a configured hook.",
+        "type": "string"
+      },
+      "HookPatch": {
+        "description": "Typed patch intents used by rewrite hooks.",
+        "oneOf": [
+          {
+            "description": "Mutate effective LLM request parameters.",
+            "properties": {
+              "max_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "patch_type": {
+                "const": "llm_request",
+                "type": "string"
+              },
+              "provider_params": true,
+              "temperature": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "patch_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace assistant text content in the latest model response.",
+            "properties": {
+              "patch_type": {
+                "const": "assistant_text",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replace serialized tool arguments.",
+            "properties": {
+              "args": true,
+              "patch_type": {
+                "const": "tool_args",
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "args"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mutate tool result payload before it is persisted.",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "patch_type": {
+                "const": "tool_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mutate final run output text.",
+            "properties": {
+              "patch_type": {
+                "const": "run_result",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "patch_type",
+              "text"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HookPatchEnvelope": {
+        "description": "Stable envelope emitted for async patch publication.",
+        "properties": {
+          "hook_id": {
+            "$ref": "#/$defs/HookId"
+          },
+          "patch": {
+            "$ref": "#/$defs/HookPatch"
+          },
+          "point": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "published_at": {
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/$defs/HookRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "hook_id",
+          "point",
+          "patch",
+          "published_at"
+        ],
+        "type": "object"
+      },
+      "HookPoint": {
+        "description": "Hook points available in V1.",
+        "enum": [
+          "run_started",
+          "run_completed",
+          "run_failed",
+          "pre_llm_request",
+          "post_llm_response",
+          "pre_tool_execution",
+          "post_tool_execution",
+          "turn_boundary"
+        ],
+        "type": "string"
+      },
+      "HookReasonCode": {
+        "description": "Typed reason codes for guardrail denials.",
+        "enum": [
+          "policy_violation",
+          "safety_violation",
+          "schema_violation",
+          "timeout",
+          "runtime_error"
+        ],
+        "type": "string"
+      },
+      "HookRevision": {
+        "description": "Monotonic patch revision metadata.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SkillId": {
+        "description": "Skill identifier — newtype for type safety.\n\nThe canonical format is a slash-delimited path: `{collection-path}/{name}`.\nExamples: `\"extraction/email-extractor\"`, `\"a/b/c\"`, `\"pdf-processing\"`.",
+        "type": "string"
+      },
+      "StopReason": {
+        "description": "Why the model stopped generating",
+        "oneOf": [
+          {
+            "const": "end_turn",
+            "description": "Model finished naturally",
+            "type": "string"
+          },
+          {
+            "const": "tool_use",
+            "description": "Model wants to call tools",
+            "type": "string"
+          },
+          {
+            "const": "max_tokens",
+            "description": "Hit max output tokens",
+            "type": "string"
+          },
+          {
+            "const": "stop_sequence",
+            "description": "Hit a stop sequence",
+            "type": "string"
+          },
+          {
+            "const": "content_filter",
+            "description": "Blocked by content filter",
+            "type": "string"
+          },
+          {
+            "const": "cancelled",
+            "description": "Request was cancelled",
+            "type": "string"
+          }
+        ]
+      },
+      "StreamScopeFrame": {
+        "description": "Scope attribution frame for multi-agent streaming.",
+        "oneOf": [
+          {
+            "description": "Top-level primary session scope.",
+            "properties": {
+              "scope": {
+                "const": "primary",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Mob member scope for flow dispatch turns.",
+            "properties": {
+              "flow_run_id": {
+                "type": "string"
+              },
+              "member_ref": {
+                "type": "string"
+              },
+              "scope": {
+                "const": "mob_member",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope",
+              "flow_run_id",
+              "member_ref",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolConfigChangeOperation": {
+        "description": "Operation kind for live tool configuration changes.",
+        "enum": [
+          "add",
+          "remove",
+          "reload"
+        ],
+        "type": "string"
+      },
+      "ToolConfigChangedPayload": {
+        "description": "Payload for tool configuration change notifications.",
+        "properties": {
+          "applied_at_turn": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "operation": {
+            "$ref": "#/$defs/ToolConfigChangeOperation"
+          },
+          "persisted": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "target",
+          "status",
+          "persisted"
+        ],
+        "type": "object"
+      },
+      "Usage": {
+        "description": "Token usage statistics",
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Attributed stream event wrapper for multi-agent streaming.",
+    "properties": {
+      "event": {
+        "$ref": "#/$defs/AgentEvent"
+      },
+      "scope_id": {
+        "type": "string"
+      },
+      "scope_path": {
+        "items": {
+          "$ref": "#/$defs/StreamScopeFrame"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "scope_id",
+      "scope_path",
+      "event"
+    ],
+    "title": "ScopedAgentEvent",
+    "type": "object"
+  },
   "WireEvent": {
     "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
+    "known_event_types": [
+      "run_started",
+      "run_completed",
+      "run_failed",
+      "hook_started",
+      "hook_completed",
+      "hook_failed",
+      "hook_denied",
+      "hook_rewrite_applied",
+      "hook_patch_published",
+      "turn_started",
+      "reasoning_delta",
+      "reasoning_complete",
+      "text_delta",
+      "text_complete",
+      "tool_call_requested",
+      "tool_result_received",
+      "turn_completed",
+      "tool_execution_started",
+      "tool_execution_completed",
+      "tool_execution_timed_out",
+      "compaction_started",
+      "compaction_completed",
+      "compaction_failed",
+      "budget_warning",
+      "retrying",
+      "skills_resolved",
+      "skill_resolution_failed",
+      "interaction_complete",
+      "interaction_failed",
+      "stream_truncated",
+      "tool_config_changed"
+    ],
     "known_payloads": {
       "tool_config_changed": {
         "properties": {
@@ -46,6 +2253,6 @@
         "type": "object"
       }
     },
-    "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types"
+    "note": "AgentEvent schema is emitted above. known_event_types stays as a lightweight canonical inventory for surface drift checks."
   }
 }

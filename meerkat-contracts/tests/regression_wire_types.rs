@@ -8,8 +8,9 @@
 //! These catch silent renames and accidental field removals.
 
 use meerkat_contracts::{
-    ContractVersion, CoreCreateParams, ErrorCode, WireError, WireEvent, WireRunResult,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
+    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, WireError, WireEvent,
+    WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireUsage,
 };
 use meerkat_core::{
     AgentEvent, BudgetType, HookPatch, HookPoint, HookReasonCode, RunResult, SessionId, StopReason,
@@ -537,6 +538,179 @@ fn agent_event_all_variants_roundtrip() {
 // ---------------------------------------------------------------------------
 // 10. RunResult -> WireRunResult conversion
 // ---------------------------------------------------------------------------
+
+#[test]
+fn documented_event_catalog_covers_core_agent_event_discriminators() {
+    let events = vec![
+        AgentEvent::RunStarted {
+            session_id: SessionId::new(),
+            prompt: "hello".to_string(),
+        },
+        AgentEvent::RunCompleted {
+            session_id: SessionId::new(),
+            result: "done".to_string(),
+            usage: Usage::default(),
+        },
+        AgentEvent::RunFailed {
+            session_id: SessionId::new(),
+            error: "nope".to_string(),
+        },
+        AgentEvent::HookStarted {
+            hook_id: "hook-1".to_string(),
+            point: HookPoint::RunStarted,
+        },
+        AgentEvent::HookCompleted {
+            hook_id: "hook-1".to_string(),
+            point: HookPoint::RunStarted,
+            duration_ms: 1,
+        },
+        AgentEvent::HookFailed {
+            hook_id: "hook-1".to_string(),
+            point: HookPoint::RunStarted,
+            error: "boom".to_string(),
+        },
+        AgentEvent::HookDenied {
+            hook_id: "hook-1".to_string(),
+            point: HookPoint::RunStarted,
+            reason_code: HookReasonCode::RuntimeError,
+            message: "denied".to_string(),
+            payload: None,
+        },
+        AgentEvent::HookRewriteApplied {
+            hook_id: "hook-1".to_string(),
+            point: HookPoint::RunStarted,
+            patch: HookPatch::AssistantText {
+                text: "patched".to_string(),
+            },
+        },
+        AgentEvent::HookPatchPublished {
+            hook_id: "hook-1".to_string(),
+            point: HookPoint::RunStarted,
+            envelope: serde_json::from_value(serde_json::json!({
+                "revision": 1,
+                "hook_id": "hook-1",
+                "point": "run_started",
+                "patch": {
+                    "patch_type": "assistant_text",
+                    "text": "patched"
+                },
+                "published_at": "2026-03-24T00:00:00Z"
+            }))
+            .unwrap(),
+        },
+        AgentEvent::TurnStarted { turn_number: 1 },
+        AgentEvent::ReasoningDelta {
+            delta: "think".to_string(),
+        },
+        AgentEvent::ReasoningComplete {
+            content: "done".to_string(),
+        },
+        AgentEvent::TextDelta {
+            delta: "chunk".to_string(),
+        },
+        AgentEvent::TextComplete {
+            content: "done".to_string(),
+        },
+        AgentEvent::ToolCallRequested {
+            id: "tool-1".to_string(),
+            name: "search".to_string(),
+            args: serde_json::json!({}),
+        },
+        AgentEvent::ToolResultReceived {
+            id: "tool-1".to_string(),
+            name: "search".to_string(),
+            is_error: false,
+        },
+        AgentEvent::TurnCompleted {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+        AgentEvent::ToolExecutionStarted {
+            id: "tool-1".to_string(),
+            name: "search".to_string(),
+        },
+        AgentEvent::ToolExecutionCompleted {
+            id: "tool-1".to_string(),
+            name: "search".to_string(),
+            result: "ok".to_string(),
+            is_error: false,
+            duration_ms: 1,
+            has_images: false,
+        },
+        AgentEvent::ToolExecutionTimedOut {
+            id: "tool-1".to_string(),
+            name: "search".to_string(),
+            timeout_ms: 1000,
+        },
+        AgentEvent::CompactionStarted {
+            input_tokens: 1,
+            estimated_history_tokens: 2,
+            message_count: 3,
+        },
+        AgentEvent::CompactionCompleted {
+            summary_tokens: 1,
+            messages_before: 3,
+            messages_after: 1,
+        },
+        AgentEvent::CompactionFailed {
+            error: "failed".to_string(),
+        },
+        AgentEvent::BudgetWarning {
+            budget_type: BudgetType::Time,
+            used: 1,
+            limit: 2,
+            percent: 50.0,
+        },
+        AgentEvent::Retrying {
+            attempt: 1,
+            max_attempts: 2,
+            error: "retry".to_string(),
+            delay_ms: 100,
+        },
+        AgentEvent::SkillsResolved {
+            skills: vec![],
+            injection_bytes: 0,
+        },
+        AgentEvent::SkillResolutionFailed {
+            reference: "skill".to_string(),
+            error: "missing".to_string(),
+        },
+        AgentEvent::InteractionComplete {
+            interaction_id: serde_json::from_value(serde_json::json!(
+                "550e8400-e29b-41d4-a716-446655440000"
+            ))
+            .unwrap(),
+            result: "ok".to_string(),
+        },
+        AgentEvent::InteractionFailed {
+            interaction_id: serde_json::from_value(serde_json::json!(
+                "550e8400-e29b-41d4-a716-446655440001"
+            ))
+            .unwrap(),
+            error: "failed".to_string(),
+        },
+        AgentEvent::StreamTruncated {
+            reason: "lag".to_string(),
+        },
+        AgentEvent::ToolConfigChanged {
+            payload: ToolConfigChangedPayload {
+                operation: ToolConfigChangeOperation::Reload,
+                target: "external".to_string(),
+                status: "applied".to_string(),
+                persisted: true,
+                applied_at_turn: Some(1),
+            },
+        },
+    ];
+
+    for event in events {
+        let kind = meerkat_core::agent_event_type(&event);
+        assert!(
+            KNOWN_AGENT_EVENT_TYPES.contains(&kind),
+            "documented event catalog missing {kind}"
+        );
+    }
+}
 
 #[test]
 fn wire_run_result_from_run_result_conversion() {

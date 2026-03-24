@@ -126,13 +126,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&models)?,
     )?;
 
-    // Events — WireEvent embeds AgentEvent which lacks JsonSchema.
-    // Emit a structural description, NOT a consumable JSON Schema.
-    // Codegen should not parse these for type generation.
+    // Events — includes canonical event type inventory plus schema-ready
+    // payload definitions where available.
     let events = serde_json::json!({
+        "AgentEvent": schema_for!(meerkat_core::AgentEvent),
+        "ScopedAgentEvent": schema_for!(meerkat_core::ScopedAgentEvent),
         "WireEvent": {
             "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
-            "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types",
+            "known_event_types": crate::KNOWN_AGENT_EVENT_TYPES,
             "known_payloads": {
                 "tool_config_changed": {
                     "type": "object",
@@ -151,7 +152,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                         }
                     }
                 }
-            }
+            },
+            "note": "AgentEvent schema is emitted above. known_event_types stays as a lightweight canonical inventory for surface drift checks."
         }
     });
     fs::write(

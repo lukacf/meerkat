@@ -19,6 +19,7 @@ use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, Sche
 ///
 /// Supports text and images for multimodal agent interactions.
 #[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -558,8 +559,9 @@ fn is_wrapped_schema(obj: &Map<String, Value>) -> bool {
 }
 
 /// Unique identifier for a session (UUID v7 for time-ordering)
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionId(pub Uuid);
+pub struct SessionId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
 
 impl SessionId {
     /// Create a new session ID using UUID v7
@@ -826,6 +828,7 @@ impl ToolResult {
 }
 
 /// Why the model stopped generating
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -858,6 +861,7 @@ pub enum SecurityMode {
 }
 
 /// Token usage statistics
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct Usage {

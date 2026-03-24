@@ -39,6 +39,7 @@ pub struct CompositeDispatcher {
     #[cfg(feature = "skills")]
     skill_tools: Option<SkillToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     builtin_config: BuiltinToolConfig,
     #[allow(dead_code)]
     task_store: Arc<dyn TaskStore>,
@@ -48,6 +49,7 @@ pub struct CompositeDispatcher {
     shell_config: Option<ShellConfig>,
     #[allow(dead_code)]
     session_id: Option<String>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     image_tool_results: bool,
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
@@ -210,7 +212,7 @@ impl CompositeDispatcher {
         )));
         builtin_tools.push(Arc::new(TaskUpdateTool::with_session_opt(
             task_store.clone(),
-            session_id,
+            session_id.clone(),
         )));
 
         // Add utility tools
@@ -464,6 +466,8 @@ impl AgentToolDispatcher for CompositeDispatcher {
     ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
         let mut owned =
             Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        #[allow(clippy::redundant_clone)]
+        // clone needed on non-wasm32 where owner_session_id is reused
         let rebound_external = match owned.external.take() {
             Some(external) if external.supports_ops_lifecycle_binding() => {
                 Some(external.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?)

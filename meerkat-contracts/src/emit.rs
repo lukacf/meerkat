@@ -6,6 +6,7 @@
 #[cfg(feature = "schema")]
 pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use schemars::schema_for;
+    use serde_json::{Map, Value};
     use std::fs;
 
     fs::create_dir_all(output_dir)?;
@@ -174,59 +175,37 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     // REST OpenAPI — endpoint listing snapshot, not a full OpenAPI spec.
     // Request/response body schemas are intentionally omitted, but the path
     // inventory should stay aligned with the live router surface.
+    let rest_paths: Map<String, Value> = crate::rest_path_catalog()
+        .into_iter()
+        .map(|path| {
+            let operations = path
+                .operations
+                .into_iter()
+                .map(|operation| {
+                    let mut operation_map = Map::new();
+                    operation_map.insert(
+                        "summary".to_string(),
+                        Value::String(operation.summary.to_string()),
+                    );
+                    if let Some(description) = operation.description {
+                        operation_map.insert(
+                            "description".to_string(),
+                            Value::String(description.to_string()),
+                        );
+                    }
+                    (operation.method.to_string(), Value::Object(operation_map))
+                })
+                .collect();
+            (path.path.to_string(), Value::Object(operations))
+        })
+        .collect();
     let rest_openapi = serde_json::json!({
         "openapi": "3.0.0",
         "info": {
             "title": "Meerkat REST API",
             "version": crate::version::ContractVersion::CURRENT.to_string(),
         },
-        "paths": {
-            "/sessions": {
-                "get": {"summary": "List sessions"},
-                "post": {"summary": "Create and run a new session"}
-            },
-            "/sessions/{id}": {
-                "get": {"summary": "Get session details"},
-                "delete": {"summary": "Archive a session"}
-            },
-            "/sessions/{id}/history": {"get": {"summary": "Get full session history"}},
-            "/sessions/{id}/interrupt": {"post": {"summary": "Interrupt a running session"}},
-            "/sessions/{id}/system_context": {"post": {"summary": "Append system context to a session"}},
-            "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
-            "/sessions/{id}/external-events": {"post": {"summary": "Queue a runtime-backed external event"}},
-            "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
-            "/comms/send": {"post": {"summary": "Send a comms message"}},
-            "/comms/peers": {"get": {"summary": "List resolved comms peers"}},
-            "/sessions/{id}/mcp/add": {"post": {
-                "summary": "Stage live MCP server addition",
-                "description": "Requires mcp_live capability. Check GET /capabilities.",
-            }},
-            "/sessions/{id}/mcp/remove": {"post": {
-                "summary": "Stage live MCP server removal",
-                "description": "Requires mcp_live capability. Check GET /capabilities.",
-            }},
-            "/sessions/{id}/mcp/reload": {"post": {
-                "summary": "Stage live MCP server reload",
-                "description": "Requires mcp_live capability. Check GET /capabilities.",
-            }},
-            "/skills": {"get": {"summary": "List available skills"}},
-            "/skills/{id}": {"get": {"summary": "Inspect a skill"}},
-            "/capabilities": {"get": {"summary": "Get runtime capabilities"}},
-            "/models/catalog": {"get": {"summary": "Get the compiled-in model catalog"}},
-            "/runtime/{id}/state": {"get": {"summary": "Get runtime state"}},
-            "/runtime/{id}/accept": {"post": {"summary": "Accept a runtime input"}},
-            "/runtime/{id}/retire": {"post": {"summary": "Retire a runtime"}},
-            "/runtime/{id}/reset": {"post": {"summary": "Reset a runtime"}},
-            "/input/{id}/list": {"get": {"summary": "List runtime inputs for a session"}},
-            "/input/{session_id}/{input_id}": {"get": {"summary": "Get a runtime input state"}},
-            "/mob/prefabs": {"get": {"summary": "List mob prefabs"}},
-            "/mob/tools": {"get": {"summary": "List mob tools"}},
-            "/mob/call": {"post": {"summary": "Invoke a mob tool call"}},
-            "/mob/{id}/events": {"get": {"summary": "SSE mob event stream"}},
-            "/mob/{id}/spawn-helper": {"post": {"summary": "Spawn a helper member in a mob"}},
-            "/mob/{id}/fork-helper": {"post": {"summary": "Fork a helper member in a mob"}},
-            "/health": {"get": {"summary": "Health check"}},
-        }
+        "paths": Value::Object(rest_paths),
     });
     fs::write(
         output_dir.join("rest-openapi.json"),

@@ -151,6 +151,10 @@ export class Session {
 }
 
 function isRuntimeNotInitializedError(error: unknown): boolean {
+  const code = extractErrorCode(error);
+  if (code?.toLowerCase() === 'not_initialized') {
+    return true;
+  }
   const message =
     error instanceof Error
       ? error.message
@@ -158,4 +162,19 @@ function isRuntimeNotInitializedError(error: unknown): boolean {
         ? error
         : '';
   return /not_initialized/i.test(message);
+}
+
+function extractErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const record = error as { code?: unknown; cause?: unknown };
+  if (typeof record.code === 'string') {
+    return record.code;
+  }
+  if (record.cause && typeof record.cause === 'object') {
+    const causeCode = (record.cause as { code?: unknown }).code;
+    if (typeof causeCode === 'string') {
+      return causeCode;
+    }
+  }
+  return undefined;
 }

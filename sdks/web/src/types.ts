@@ -391,6 +391,13 @@ export interface MobEvent {
  * Matches Rust `AgentEvent` with `#[serde(tag = "type", rename_all = "snake_case")]`.
  */
 export type AgentEvent =
+  | RunStartedEvent
+  | HookStartedEvent
+  | HookCompletedEvent
+  | HookFailedEvent
+  | HookDeniedEvent
+  | HookRewriteAppliedEvent
+  | HookPatchPublishedEvent
   | TextDeltaEvent
   | TextCompleteEvent
   | ToolCallRequestedEvent
@@ -401,9 +408,28 @@ export type AgentEvent =
   | RunFailedEvent
   | ToolExecutionStartedEvent
   | ToolExecutionCompletedEvent
+  | ToolExecutionTimedOutEvent
+  | CompactionStartedEvent
+  | CompactionCompletedEvent
+  | CompactionFailedEvent
+  | BudgetWarningEvent
+  | RetryingEvent
+  | SkillsResolvedEvent
+  | SkillResolutionFailedEvent
+  | InteractionCompleteEvent
+  | InteractionFailedEvent
+  | StreamTruncatedEvent
+  | ToolConfigChangedEvent
   | ReasoningDeltaEvent
   | ReasoningCompleteEvent;
 
+export interface RunStartedEvent { type: 'run_started'; session_id: string; prompt: string }
+export interface HookStartedEvent { type: 'hook_started'; hook_id: string; point: string }
+export interface HookCompletedEvent { type: 'hook_completed'; hook_id: string; point: string; duration_ms: number }
+export interface HookFailedEvent { type: 'hook_failed'; hook_id: string; point: string; error: string }
+export interface HookDeniedEvent { type: 'hook_denied'; hook_id: string; point: string; reason_code: string; message: string; payload?: unknown }
+export interface HookRewriteAppliedEvent { type: 'hook_rewrite_applied'; hook_id: string; point: string; patch: unknown }
+export interface HookPatchPublishedEvent { type: 'hook_patch_published'; hook_id: string; point: string; envelope: unknown }
 export interface TextDeltaEvent { type: 'text_delta'; delta: string }
 export interface TextCompleteEvent { type: 'text_complete'; content: string }
 export interface ToolCallRequestedEvent { type: 'tool_call_requested'; id: string; name: string; args: unknown }
@@ -414,15 +440,46 @@ export interface RunCompletedEvent { type: 'run_completed'; session_id: string; 
 export interface RunFailedEvent { type: 'run_failed'; session_id: string; error: string }
 export interface ToolExecutionStartedEvent { type: 'tool_execution_started'; id: string; name: string }
 export interface ToolExecutionCompletedEvent { type: 'tool_execution_completed'; id: string; name: string; result: string; is_error: boolean; duration_ms: number }
+export interface ToolExecutionTimedOutEvent { type: 'tool_execution_timed_out'; id: string; name: string; timeout_ms: number }
+export interface CompactionStartedEvent { type: 'compaction_started'; input_tokens: number; estimated_history_tokens: number; message_count: number }
+export interface CompactionCompletedEvent { type: 'compaction_completed'; summary_tokens: number; messages_before: number; messages_after: number }
+export interface CompactionFailedEvent { type: 'compaction_failed'; error: string }
+export interface BudgetWarningEvent { type: 'budget_warning'; budget_type: string; used: number; limit: number; percent: number }
+export interface RetryingEvent { type: 'retrying'; attempt: number; max_attempts: number; error: string; delay_ms: number }
+export interface SkillsResolvedEvent { type: 'skills_resolved'; skills: string[]; injection_bytes: number }
+export interface SkillResolutionFailedEvent { type: 'skill_resolution_failed'; reference: string; error: string }
+export interface InteractionCompleteEvent { type: 'interaction_complete'; interaction_id: string; result: string }
+export interface InteractionFailedEvent { type: 'interaction_failed'; interaction_id: string; error: string }
+export interface StreamTruncatedEvent { type: 'stream_truncated'; reason: string }
+export interface ToolConfigChangedEvent {
+  type: 'tool_config_changed';
+  payload: {
+    operation: string;
+    target: string;
+    status: string;
+    persisted: boolean;
+    applied_at_turn?: number | null;
+  };
+}
 export interface ReasoningDeltaEvent { type: 'reasoning_delta'; delta: string }
 export interface ReasoningCompleteEvent { type: 'reasoning_complete'; content: string }
 
 /** Type guard for known event types. */
 export function isKnownEvent(event: { type: string }): event is AgentEvent {
   return [
+    'run_started',
+    'hook_started',
+    'hook_completed',
+    'hook_failed',
+    'hook_denied',
+    'hook_rewrite_applied',
+    'hook_patch_published',
     'text_delta', 'text_complete', 'tool_call_requested', 'tool_result_received',
     'turn_started', 'turn_completed', 'run_completed', 'run_failed',
-    'tool_execution_started', 'tool_execution_completed',
+    'tool_execution_started', 'tool_execution_completed', 'tool_execution_timed_out',
+    'compaction_started', 'compaction_completed', 'compaction_failed',
+    'budget_warning', 'retrying', 'skills_resolved', 'skill_resolution_failed',
+    'interaction_complete', 'interaction_failed', 'stream_truncated', 'tool_config_changed',
     'reasoning_delta', 'reasoning_complete',
   ].includes(event.type);
 }

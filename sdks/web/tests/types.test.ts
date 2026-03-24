@@ -116,6 +116,20 @@ const spawnSpec: SpawnSpec = {
 
 function handleEvent(event: AgentEvent): string {
   switch (event.type) {
+    case 'run_started':
+      return event.prompt;
+    case 'hook_started':
+      return `${event.hook_id}:${event.point}`;
+    case 'hook_completed':
+      return `${event.hook_id}:${event.duration_ms}`;
+    case 'hook_failed':
+      return event.error;
+    case 'hook_denied':
+      return `${event.reason_code}:${event.message}`;
+    case 'hook_rewrite_applied':
+      return event.hook_id;
+    case 'hook_patch_published':
+      return event.hook_id;
     case 'text_delta':
       return event.delta;
     case 'text_complete':
@@ -136,6 +150,30 @@ function handleEvent(event: AgentEvent): string {
       return `exec:${event.name}`;
     case 'tool_execution_completed':
       return `done:${event.name}:${event.duration_ms}ms`;
+    case 'tool_execution_timed_out':
+      return `timeout:${event.name}:${event.timeout_ms}`;
+    case 'compaction_started':
+      return `compact:${event.input_tokens}`;
+    case 'compaction_completed':
+      return `compact:${event.summary_tokens}`;
+    case 'compaction_failed':
+      return event.error;
+    case 'budget_warning':
+      return `${event.budget_type}:${event.percent}`;
+    case 'retrying':
+      return `${event.attempt}/${event.max_attempts}`;
+    case 'skills_resolved':
+      return `${event.skills.length}`;
+    case 'skill_resolution_failed':
+      return event.reference;
+    case 'interaction_complete':
+      return event.result;
+    case 'interaction_failed':
+      return event.error;
+    case 'stream_truncated':
+      return event.reason;
+    case 'tool_config_changed':
+      return event.payload.target;
     case 'reasoning_delta':
       return event.delta;
     case 'reasoning_complete':

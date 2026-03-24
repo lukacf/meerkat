@@ -5,8 +5,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { MeerkatRuntime } from "@rkat/web";
-import { Session } from "@rkat/web";
+import { MeerkatRuntime, Session, isKnownEvent } from "@rkat/web";
 import * as rawWasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 
 async function makeNodeCompatibleWasmModule() {
@@ -146,6 +145,81 @@ test("Session.destroy becomes idempotent after the runtime has already been dest
   assert.doesNotThrow(() => session.destroy());
   assert.equal(destroyAttempts, 1);
   assert.throws(() => session.getState(), /destroyed/i);
+});
+
+test("Session.destroy treats typed not_initialized errors as idempotent teardown", () => {
+  let destroyAttempts = 0;
+  const session = new Session(
+    9,
+    async () => "{}",
+    () => JSON.stringify({
+      handle: 9,
+      session_id: "sess_runtime_code_gone",
+      mob_id: "",
+      model: "claude-sonnet-4-5",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      run_counter: 0,
+      message_count: 0,
+      is_active: false,
+      last_assistant_text: null,
+    }),
+    () => {
+      destroyAttempts += 1;
+      const error = new Error("runtime not initialized");
+      error.code = "not_initialized";
+      throw error;
+    },
+    () => "[]",
+    () => JSON.stringify({ handle: 9, status: "staged" }),
+  );
+
+  assert.doesNotThrow(() => session.destroy());
+  assert.equal(session.isDestroyed, true);
+  assert.equal(destroyAttempts, 1);
+  assert.doesNotThrow(() => session.destroy());
+  assert.equal(destroyAttempts, 1);
+});
+
+test("isKnownEvent recognizes the full current canonical event surface", () => {
+  assert.equal(isKnownEvent({ type: "run_started", session_id: "s", prompt: "p" }), true);
+  assert.equal(
+    isKnownEvent({
+      type: "hook_started",
+      hook_id: "hook-1",
+      point: "before_tool",
+    }),
+    true,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: "budget_warning",
+      budget_type: "time",
+      used: 10,
+      limit: 20,
+      percent: 50,
+    }),
+    true,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: "tool_config_changed",
+      payload: {
+        operation: "reload",
+        target: "external",
+        status: "applied",
+        persisted: true,
+        applied_at_turn: 4,
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isKnownEvent({
+      type: "stream_truncated",
+      reason: "backpressure",
+    }),
+    true,
+  );
 });
 
 test("MeerkatRuntime opens and closes a public mob subscription through the shipped package surface", async () => {

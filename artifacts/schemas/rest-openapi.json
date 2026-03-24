@@ -20,6 +20,17 @@
         "summary": "Send a comms message"
       }
     },
+    "/config": {
+      "get": {
+        "summary": "Read config"
+      },
+      "patch": {
+        "summary": "Merge-patch config"
+      },
+      "put": {
+        "summary": "Replace config"
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health check"
@@ -58,6 +69,21 @@
     "/mob/{id}/fork-helper": {
       "post": {
         "summary": "Fork a helper member in a mob"
+      }
+    },
+    "/mob/{id}/members/{meerkat_id}/cancel": {
+      "post": {
+        "summary": "Force-cancel a mob member"
+      }
+    },
+    "/mob/{id}/members/{meerkat_id}/respawn": {
+      "post": {
+        "summary": "Respawn a mob member with topology restore"
+      }
+    },
+    "/mob/{id}/members/{meerkat_id}/status": {
+      "get": {
+        "summary": "Get live status for a mob member"
       }
     },
     "/mob/{id}/spawn-helper": {

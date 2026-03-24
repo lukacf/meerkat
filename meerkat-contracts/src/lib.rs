@@ -6,6 +6,7 @@
 pub mod capability;
 pub mod error;
 pub mod protocol;
+pub mod rest_catalog;
 pub mod rpc_catalog;
 pub mod session_locator;
 pub mod version;
@@ -21,6 +22,9 @@ pub use capability::{
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use protocol::Protocol;
+pub use rest_catalog::{
+    RestOperationDescriptor, RestPathDescriptor, rest_documented_paths, rest_path_catalog,
+};
 pub use rpc_catalog::{
     RpcMethodCatalogOptions, RpcMethodDescriptor, RpcNotificationDescriptor, rpc_method_catalog,
     rpc_method_names, rpc_notification_catalog, rpc_notification_names,

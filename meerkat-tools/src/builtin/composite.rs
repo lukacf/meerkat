@@ -506,16 +506,18 @@ impl AgentToolDispatcher for CompositeDispatcher {
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
 
-            // Re-apply the interrupt receiver on the new wait tool.
+            // Re-apply the interrupt receiver on the new wait tool and stash
+            // it for any future rebuilds.
             if let Some(rx) = interrupt_rx {
                 use crate::builtin::utility::WaitTool;
-                let new_wait = Arc::new(WaitTool::with_interrupt(rx));
+                let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
                 for tool in &mut rebound.builtin_tools {
                     if tool.name() == "wait" {
                         *tool = new_wait;
                         break;
                     }
                 }
+                rebound.wait_interrupt_rx = Some(rx);
             }
 
             #[cfg(feature = "skills")]

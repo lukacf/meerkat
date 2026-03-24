@@ -247,8 +247,15 @@ impl SurfaceRequestExecutor {
     }
 
     pub async fn shutdown_and_abort_stragglers(&self) {
-        self.cancel_all().await;
-        tokio::time::sleep(self.shutdown_grace).await;
+        let has_entries = !self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        if has_entries {
+            self.cancel_all().await;
+            tokio::time::sleep(self.shutdown_grace).await;
+        }
 
         let remaining: Vec<(String, Arc<RequestEntry>)> = self
             .entries

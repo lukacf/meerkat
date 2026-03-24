@@ -267,27 +267,41 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
                 }
 
                 Some(response) = self.long_running_rx.recv() => {
-                    let cancel_wins = self.request_executor.cancel_requested(&response.request_key);
-                    let terminal = if cancel_wins {
-                        RequestTerminal::RespondWithoutPublish(request_cancelled_response(request_id_from_response(&response.terminal)))
-                    } else {
-                        response.terminal
+                    // Late cancel must not override committed work: if the task
+                    // produced a Publish terminal, the work already ran and the
+                    // client must learn the result. Only suppress uncommitted
+                    // (RespondWithoutPublish) terminals when cancel was requested.
+                    let terminal = match response.terminal {
+                        RequestTerminal::Publish(_) => response.terminal,
+                        RequestTerminal::RespondWithoutPublish(ref _resp)
+                            if self.request_executor.cancel_requested(&response.request_key) =>
+                        {
+                            RequestTerminal::RespondWithoutPublish(
+                                request_cancelled_response(request_id_from_response(&response.terminal)),
+                            )
+                        }
+                        other => other,
                     };
 
                     match terminal {
                         RequestTerminal::Publish(rpc_response) => {
-                            if self.response_tx.send(rpc_response).await.is_ok() {
-                                self.request_executor.mark_published(&response.request_key);
-                                self.request_executor.remove_published(&response.request_key);
-                            } else {
-                                self.request_executor.finish_unpublished(&response.request_key).await;
-                                break;
+                            // Defer ownership publication until the response is
+                            // actually written to the transport (not just enqueued).
+                            match self.transport.write_response(&rpc_response).await {
+                                Ok(()) => {
+                                    self.request_executor.mark_published(&response.request_key);
+                                    self.request_executor.remove_published(&response.request_key);
+                                }
+                                Err(_) => {
+                                    self.request_executor.finish_unpublished(&response.request_key).await;
+                                    break;
+                                }
                             }
                         }
                         RequestTerminal::RespondWithoutPublish(rpc_response) => {
-                            let send_result = self.response_tx.send(rpc_response).await;
+                            let write_result = self.transport.write_response(&rpc_response).await;
                             self.request_executor.finish_unpublished(&response.request_key).await;
-                            if send_result.is_err() {
+                            if write_result.is_err() {
                                 break;
                             }
                         }

@@ -281,13 +281,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(completion) = completion_rx.recv() => {
-                let cancel_wins = request_executor.cancel_requested(&completion.request_key);
-                let terminal = if cancel_wins {
-                    RequestTerminal::RespondWithoutPublish(
-                        request_cancelled_response(request_id_from_terminal(&completion.terminal))
-                    )
-                } else {
-                    completion.terminal
+                // Late cancel must not override committed work: if the task
+                // produced a Publish terminal, the work already ran and the
+                // client must learn the result. Only suppress uncommitted
+                // (RespondWithoutPublish) terminals when cancel was requested.
+                let terminal = match completion.terminal {
+                    RequestTerminal::Publish(_) => completion.terminal,
+                    RequestTerminal::RespondWithoutPublish(ref _resp)
+                        if request_executor.cancel_requested(&completion.request_key) =>
+                    {
+                        RequestTerminal::RespondWithoutPublish(
+                            request_cancelled_response(request_id_from_terminal(&completion.terminal)),
+                        )
+                    }
+                    other => other,
                 };
 
                 match terminal {

@@ -2471,6 +2471,19 @@ async fn handle_meerkat_resume(
 
     // Resolve settings from stored metadata, falling back to input overrides
     let stored_metadata = session.session_metadata();
+
+    // Capture override presence before fields are consumed by or_else.
+    let has_model_override = input.model.is_some();
+    let has_provider_override = input.provider.is_some();
+    let has_provider_params_override = input.provider_params.is_some();
+    let has_hooks_override = input.hooks_override.is_some();
+    let has_memory_override = input.enable_memory.is_some();
+    let has_mob_override = input.enable_mob.is_some();
+    let has_budget_override = input.budget_limits.is_some();
+    let has_skills_override = input.preload_skills.is_some();
+    let has_max_tokens_override = input.max_tokens.is_some();
+    let has_callback_tools = !input.tools.is_empty();
+
     let enable_builtins = input.enable_builtins
         || stored_metadata
             .as_ref()
@@ -2487,7 +2500,12 @@ async fn handle_meerkat_resume(
     let enable_mob = input
         .enable_mob
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.tooling.mob));
-    let enable_memory = input.enable_memory;
+    let enable_memory = input.enable_memory.or_else(|| {
+        stored_metadata
+            .as_ref()
+            .map(|meta| meta.tooling.memory)
+            .filter(|&v| v)
+    });
     let host_mode_requested =
         input.host_mode || stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
     let host_mode = resolve_host_mode(host_mode_requested)?;
@@ -2582,7 +2600,11 @@ async fn handle_meerkat_resume(
         comms_name,
         resume_session: Some(session),
         budget_limits: input.budget_limits.clone().map(Into::into),
-        provider_params: input.provider_params.clone(),
+        provider_params: input.provider_params.clone().or_else(|| {
+            stored_metadata
+                .as_ref()
+                .and_then(|m| m.provider_params.clone())
+        }),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         llm_client_override: None,
@@ -2591,7 +2613,13 @@ async fn handle_meerkat_resume(
         override_shell: Some(enable_builtins && enable_shell),
         override_memory: enable_memory,
         override_mob: enable_mob,
-        preload_skills,
+        preload_skills: if preload_skills.is_some() {
+            preload_skills
+        } else {
+            stored_metadata
+                .as_ref()
+                .and_then(|m| m.tooling.active_skills.clone())
+        },
         peer_meta: input
             .peer_meta
             .clone()
@@ -2617,10 +2645,23 @@ async fn handle_meerkat_resume(
         shell_env: None,
     };
 
+    // Rebuild the session whenever any config-affecting input is set.
+    // start_turn cannot apply these; they only take effect through the
+    // full create_session → build pipeline.
     let needs_rebuild = existing_adapter.is_none()
         || input.system_prompt.is_some()
         || input.output_schema.is_some()
-        || input.structured_output_retries != default_structured_output_retries();
+        || input.structured_output_retries != default_structured_output_retries()
+        || has_model_override
+        || has_provider_override
+        || has_provider_params_override
+        || has_hooks_override
+        || has_memory_override
+        || has_mob_override
+        || has_budget_override
+        || has_skills_override
+        || has_max_tokens_override
+        || has_callback_tools;
 
     let result = if needs_rebuild {
         let req = CreateSessionRequest {

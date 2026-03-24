@@ -4556,6 +4556,80 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
 }
 
 #[tokio::test]
+async fn test_wire_broken_member_returns_restore_failed_error() {
+    let service = Arc::new(MockSessionService::new());
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn broken candidate");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+    match resumed.resume().await {
+        Ok(()) => {}
+        Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        Err(error) => {
+            panic!("broken members should still allow mob lifecycle resume: {error}")
+        }
+    }
+
+    resumed
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn healthy worker");
+
+    let error = resumed
+        .wire(MeerkatId::from("w-2"), MeerkatId::from("w-1"))
+        .await
+        .expect_err("wiring to Broken member must be rejected");
+
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, old_sid);
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_retire_broken_member_succeeds_and_removes_it() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
@@ -7626,6 +7700,83 @@ async fn test_auto_wire_orchestrator_not_wired_to_self() {
 }
 
 #[tokio::test]
+async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
+    let service = Arc::new(MockSessionService::new());
+    let mut definition = sample_definition_with_auto_wire();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle.stop().await.expect("stop");
+    service.archive(&sid_l).await.expect("archive orchestrator");
+    service.delete_persisted_session(&sid_l).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should succeed");
+
+    let lead = resumed
+        .member_status(&MeerkatId::from("l-1"))
+        .await
+        .expect("broken orchestrator");
+    assert_eq!(lead.status, crate::runtime::handle::MobMemberStatus::Broken);
+    match resumed.resume().await {
+        Ok(()) => {}
+        Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        Err(error) => {
+            panic!("resume should leave the mob runnable for spawn checks: {error}")
+        }
+    }
+
+    let sid_w = resumed
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker should ignore broken orchestrator")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let worker = resumed
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("spawned worker entry");
+    assert!(
+        worker.wired_to.is_empty(),
+        "auto-wire must not target broken orchestrators"
+    );
+    let trusted = service.trusted_peer_names(&sid_w).await;
+    assert!(
+        !trusted.contains(&test_comms_name("lead", "l-1")),
+        "spawn must not install trust to a broken orchestrator"
+    );
+}
+
+#[tokio::test]
 async fn test_auto_wire_failure_is_returned_to_spawn_caller() {
     let (handle, service) = create_test_mob(sample_definition_with_auto_wire()).await;
     service
@@ -8023,6 +8174,81 @@ async fn test_role_wiring_fan_out() {
     // Need to re-read since roster may have been updated after w-3 spawn
     let entry_1 = handle.get_member(&MeerkatId::from("w-1")).await.unwrap();
     assert!(entry_1.wired_to.contains(&MeerkatId::from("w-3")));
+}
+
+#[tokio::test]
+async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
+    let service = Arc::new(MockSessionService::new());
+    let mut definition = sample_definition_with_role_wiring();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid_w1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle.stop().await.expect("stop");
+    service.archive(&sid_w1).await.expect("archive w-1");
+    service.delete_persisted_session(&sid_w1).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should succeed");
+
+    let broken = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        broken.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    match resumed.resume().await {
+        Ok(()) => {}
+        Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        Err(error) => {
+            panic!("resume should leave the mob runnable for spawn checks: {error}")
+        }
+    }
+
+    let sid_w2 = resumed
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn should ignore broken role peers")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let worker = resumed
+        .get_member(&MeerkatId::from("w-2"))
+        .await
+        .expect("spawned worker");
+    assert!(
+        !worker.wired_to.contains(&MeerkatId::from("w-1")),
+        "role wiring must not target broken peers"
+    );
+    let trusted = service.trusted_peer_names(&sid_w2).await;
+    assert!(
+        !trusted.contains(&test_comms_name("worker", "w-1")),
+        "spawn must not install trust to broken role peers"
+    );
 }
 
 #[tokio::test]

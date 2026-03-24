@@ -786,7 +786,8 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
 
 #[cfg(feature = "skills")]
 #[tokio::test]
-async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surface() {
+async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surface_cannot_load_them()
+{
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
@@ -835,13 +836,12 @@ async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surf
         .session()
         .session_metadata()
         .expect("session should have metadata");
-    assert!(
-        metadata
-            .tooling
-            .active_skills
-            .as_ref()
-            .is_none_or(Vec::is_empty),
-        "resume should not keep persisted active skills that are unavailable on the current surface"
+    assert_eq!(
+        metadata.tooling.active_skills,
+        Some(vec![meerkat_core::skills::SkillId(
+            "nonexistent-legacy-skill".into(),
+        )]),
+        "resume may drop unavailable skills from the live surface projection, but it must not rewrite durable session behavior truth"
     );
 }
 

@@ -27,7 +27,7 @@ use meerkat_core::service::SessionService;
 use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolDef, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(not(target_arch = "wasm32"))]

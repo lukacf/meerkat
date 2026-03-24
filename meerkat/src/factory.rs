@@ -1822,14 +1822,11 @@ impl AgentFactory {
             metadata.max_tokens = max_tokens;
             metadata.provider = provider;
             metadata.provider_params = build_config.provider_params;
-            metadata.tooling = SessionTooling {
-                builtins: effective_builtins,
-                shell: effective_shell,
-                comms: comms_enabled,
-                mob: build_config.override_mob.unwrap_or(self.enable_mob),
-                memory: effective_memory,
-                active_skills: active_skill_ids,
-            };
+            metadata.tooling.builtins = effective_builtins;
+            metadata.tooling.shell = effective_shell;
+            metadata.tooling.comms = comms_enabled;
+            metadata.tooling.mob = build_config.override_mob.unwrap_or(self.enable_mob);
+            metadata.tooling.memory = effective_memory;
             metadata.host_mode = build_config.host_mode;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;

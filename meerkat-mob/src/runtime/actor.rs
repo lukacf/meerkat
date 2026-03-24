@@ -15,7 +15,7 @@ use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
@@ -2411,12 +2411,20 @@ impl MobActor {
 
         // auto_wire_parent: wire to the orchestrator profile members.
         if auto_wire_parent && let Some(ref orchestrator) = self.definition.orchestrator {
+            let broken_members = self
+                .restore_diagnostics
+                .read()
+                .await
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>();
             let orchestrator_ids = {
                 let roster = self.roster.read().await;
                 roster
                     .by_profile(&orchestrator.profile)
                     .filter(|entry| {
                         entry.state == crate::roster::MemberState::Active
+                            && !broken_members.contains(&entry.meerkat_id)
                             && entry.meerkat_id != *meerkat_id
                     })
                     .map(|entry| entry.meerkat_id.clone())
@@ -2491,6 +2499,13 @@ impl MobActor {
         meerkat_id: &MeerkatId,
     ) -> Vec<MeerkatId> {
         let mut targets = Vec::new();
+        let broken_members = self
+            .restore_diagnostics
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
 
         if self.definition.wiring.auto_wire_orchestrator
             && let Some(orchestrator) = &self.definition.orchestrator
@@ -2500,7 +2515,10 @@ impl MobActor {
                 let roster = self.roster.read().await;
                 roster
                     .by_profile(&orchestrator.profile)
-                    .filter(|entry| entry.state == crate::roster::MemberState::Active)
+                    .filter(|entry| {
+                        entry.state == crate::roster::MemberState::Active
+                            && !broken_members.contains(&entry.meerkat_id)
+                    })
                     .map(|entry| entry.meerkat_id.clone())
                     .collect::<Vec<_>>()
             };
@@ -2526,6 +2544,7 @@ impl MobActor {
                         .by_profile(target_profile)
                         .filter(|entry| {
                             entry.state == crate::roster::MemberState::Active
+                                && !broken_members.contains(&entry.meerkat_id)
                                 && entry.meerkat_id != *meerkat_id
                         })
                         .map(|entry| entry.meerkat_id.clone())
@@ -4702,6 +4721,9 @@ impl MobActor {
 
     /// Internal wire operation (used by handle_wire and auto_wire/role_wiring).
     async fn do_wire(&self, a: &MeerkatId, b: &MeerkatId) -> Result<(), MobError> {
+        self.ensure_member_not_broken(a).await?;
+        self.ensure_member_not_broken(b).await?;
+
         if a == b {
             return Err(MobError::WiringError(format!(
                 "wire requires distinct members (got '{a}')"

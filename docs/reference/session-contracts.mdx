@@ -33,8 +33,8 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 - Returns `RunResult` with `session_id`.
 - `InitialTurnPolicy::RunImmediately` executes the first turn inline (default).
 - `InitialTurnPolicy::Defer` registers the session without running a turn.
-- Supports host mode where enabled.
-- Host mode is a lifecycle contract, not just a surface convenience: whichever
+- Supports keep-alive mode where enabled.
+- Keep-alive mode is a lifecycle contract, not just a surface convenience: whichever
   owner path is active must keep inbox draining and turn-boundary suppression
   aligned with the canonical drain lifecycle truth.
 
@@ -44,7 +44,7 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 
 - At most one in-flight turn per session.
 - Concurrent attempts return `SESSION_BUSY`.
-- If `host_mode = true`, the turn must preserve the session's host-mode drain
+- If `keep_alive = true`, the turn must preserve the session's keep-alive drain
   ownership semantics after the turn completes. Direct and runtime-backed
   service paths are not allowed to diverge on that contract.
 

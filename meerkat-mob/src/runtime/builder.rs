@@ -429,6 +429,7 @@ impl MobBuilder {
             .await?;
         let active_ids = active_sessions
             .iter()
+            .filter(|summary| summary.is_active)
             .map(|s| s.session_id.clone())
             .collect::<std::collections::HashSet<_>>();
 

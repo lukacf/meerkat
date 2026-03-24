@@ -297,7 +297,7 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
-        host_mode: bool = False,
+        keep_alive: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -323,7 +323,7 @@ class MeerkatClient:
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
@@ -348,7 +348,7 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
-        host_mode: bool = False,
+        keep_alive: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -378,7 +378,7 @@ class MeerkatClient:
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
@@ -414,7 +414,7 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
-        host_mode: bool = False,
+        keep_alive: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -444,7 +444,7 @@ class MeerkatClient:
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
@@ -926,7 +926,7 @@ class MeerkatClient:
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
-        host_mode: bool | None = None,
+        keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
         max_tokens: int | None = None,
@@ -943,8 +943,8 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
-        if host_mode is not None:
-            params["host_mode"] = host_mode
+        if keep_alive is not None:
+            params["keep_alive"] = keep_alive
         if model is not None:
             params["model"] = model
         if provider is not None:
@@ -1266,7 +1266,7 @@ class MeerkatClient:
         enable_shell: bool = False,
         enable_memory: bool = False,
         enable_mob: bool = False,
-        host_mode: bool = False,
+        keep_alive: bool = False,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -1298,8 +1298,8 @@ class MeerkatClient:
             params["enable_memory"] = True
         if enable_mob:
             params["enable_mob"] = True
-        if host_mode:
-            params["host_mode"] = True
+        if keep_alive:
+            params["keep_alive"] = True
         if comms_name:
             params["comms_name"] = comms_name
         if peer_meta is not None:

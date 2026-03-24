@@ -148,7 +148,7 @@ Create and run a new session.
   },
   "structured_output_retries": 2,
   "verbose": false,
-  "host_mode": false,
+  "keep_alive": false,
   "comms_name": null,
   "peer_meta": null,
   "hooks_override": null,
@@ -209,8 +209,8 @@ Create and run a new session.
   Enable verbose event logging (server-side).
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Run in host mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool" default="false">
+  Run in keep-alive mode for inter-agent comms (requires `comms_name`).
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -454,8 +454,8 @@ Continue an existing session.
   Enable verbose event logging.
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Enable host mode for this turn.
+<ParamField body="keep_alive" type="bool" default="false">
+  Enable keep-alive mode for this turn.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="from session">
@@ -828,7 +828,7 @@ All errors are returned as JSON with an HTTP status code:
 
 | HTTP Status | Code | When |
 |-------------|------|------|
-| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, host_mode without comms |
+| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, keep_alive without comms |
 | 403 | `HOOK_DENIED` | Hook blocked the operation |
 | 404 | `SESSION_NOT_FOUND` | Session does not exist |
 | 404 | `SKILL_NOT_FOUND` | Requested skill does not exist |
@@ -860,7 +860,7 @@ All errors are returned as JSON with an HTTP status code:
 ## Notes
 
 <Note>
-Host mode requires `host_mode: true` and a `comms_name`. If `host_mode` is
+Keep-alive mode requires `keep_alive: true` and a `comms_name`. If `keep_alive` is
 requested but the binary was not compiled with comms support, the server
 returns a `BAD_REQUEST` error.
 </Note>

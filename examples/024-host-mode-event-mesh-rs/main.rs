@@ -19,7 +19,7 @@
 //! full conversation history across turns -- each new message builds on prior
 //! context.
 //!
-//! With the `comms` feature, the agent loop (`run_host_mode_inner`) goes
+//! With the `comms` feature, the agent loop (`run_keep_alive_inner`) goes
 //! further: after the initial prompt it enters a poll loop, draining its comms
 //! inbox and processing peer messages/requests as they arrive, until the budget
 //! is exhausted or a DISMISS signal is received. This example demonstrates the
@@ -254,14 +254,14 @@ Configuration:
   # Python SDK
   result = await client.create_session(
       "Process incoming events",
-      host_mode=True,
+      keep_alive=True,
       comms_name="processor",
   )
 
   # TypeScript SDK
   const result = await client.createSession({{
       prompt: "Process incoming events",
-      host_mode: true,
+      keep_alive: true,
       comms_name: "processor",
   }});
 

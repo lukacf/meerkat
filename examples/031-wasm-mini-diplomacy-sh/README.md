@@ -6,7 +6,7 @@ Flagship browser example: **9 autonomous AI agents** across 3 factions wage a te
 
 This is primarily a **smoke test for the Meerkat WASM platform**, exercising:
 
-- **Autonomous host mode on WASM** — agents run continuous host loops, wake on comms messages, make LLM calls, all inside `wasm32-unknown-unknown`
+- **Autonomous keep-alive mode on WASM** — agents run continuous keep-alive loops, wake on comms messages, make LLM calls, all inside `wasm32-unknown-unknown`
 - **Multi-mob orchestration** — 4 mobs (3 factions + narrator) created and managed via `MobMcpState`
 - **Cross-mob comms** — ambassadors in different mobs discover each other and negotiate via `InprocRegistry` cross-namespace routing
 - **Flow engine on WASM** — narrator mob uses a `turn_driven` flow for structured JSON output

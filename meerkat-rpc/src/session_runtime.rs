@@ -1899,10 +1899,9 @@ impl SessionRuntime {
             build_config.preload_skills = meta.tooling.active_skills.clone();
         }
 
-        // Apply caller-requested keep_alive override (from turn/start params).
-        if keep_alive {
-            build_config.keep_alive = true;
-        }
+        // Apply caller-requested keep_alive override unconditionally.
+        // This allows an explicit keep_alive=false to clear a persisted true.
+        build_config.keep_alive = keep_alive;
 
         // Inject default LLM client if available.
         if let Some(ref client) = self.default_llm_client {

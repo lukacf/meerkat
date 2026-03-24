@@ -15,7 +15,7 @@ processes three turns that simulate real-time event injection:
 
 Each turn streams `AgentEvent`s and the agent maintains full conversation
 context across all turns — demonstrating the reactive processing pattern
-that host mode enables.
+that keep-alive mode enables.
 
 ## Concepts
 - `EphemeralSessionService` — in-memory session lifecycle with dedicated tokio tasks

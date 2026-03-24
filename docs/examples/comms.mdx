@@ -1,12 +1,12 @@
 ---
 title: "Comms & mobs"
-description: "Inter-agent messaging, host mode, external event injection, and mob orchestration."
+description: "Inter-agent messaging, keep-alive mode, external event injection, and mob orchestration."
 icon: "tower-broadcast"
 ---
 
 For the full guide, see [Comms](/guides/comms) and the `0.5` mob orchestration architecture notes.
 
-## Host mode
+## Keep-alive mode
 
 Enable the comms listener so the agent stays alive after its initial prompt, waiting for incoming messages and external events.
 
@@ -23,7 +23,7 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
       "method": "session/create",
       "params": {
         "prompt": "You are a coordinator.",
-        "host_mode": true,
+        "keep_alive": true,
         "comms_name": "agent-a"
       }
     }
@@ -35,7 +35,7 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "You are a coordinator.",
-        "host_mode": true,
+        "keep_alive": true,
         "comms_name": "agent-a"
       }'
     ```
@@ -44,7 +44,7 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
     ```json
     {
       "prompt": "You are a coordinator.",
-      "host_mode": true,
+      "keep_alive": true,
       "comms_name": "agent-a"
     }
     ```
@@ -54,7 +54,7 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
     ```python
     session = await client.create_session(
         "You are a coordinator.",
-        host_mode=True,
+        keep_alive=True,
         comms_name="agent-a",
     )
     ```
@@ -62,7 +62,7 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
   <Tab title="TypeScript">
     ```typescript
     const session = await client.createSession("You are a coordinator.", {
-      hostMode: true,
+      keepAlive: true,
       commsName: "agent-a",
     });
     ```
@@ -75,7 +75,7 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        host_mode: true,
+        keep_alive: true,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
@@ -125,13 +125,13 @@ Push an event into a running session's comms inbox.
   </Tab>
   <Tab title="Python">
     ```python
-    session = await client.create_session("...", host_mode=True, comms_name="agent-a")
+    session = await client.create_session("...", keep_alive=True, comms_name="agent-a")
     await session.send(payload={"alert": "build failed"}, source="ci-pipeline")
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const session = await client.createSession("...", { hostMode: true, commsName: "agent-a" });
+    const session = await client.createSession("...", { keepAlive: true, commsName: "agent-a" });
     await session.send({ payload: { alert: "build failed" }, source: "ci-pipeline" });
     ```
   </Tab>

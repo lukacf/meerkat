@@ -115,8 +115,8 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `options.enableShell` | `boolean` | `false` | Enable the shell tool (requires `enableBuiltins`). |
 | `options.enableMemory` | `boolean` | `false` | Enable semantic memory (memory_search tool + compaction indexing). |
 | `options.enableMob` | `boolean` | `false` | Enable mob orchestration helpers. |
-| `options.hostMode` | `boolean` | `false` | Run in host mode for inter-agent comms. |
-| `options.commsName` | `string` | `undefined` | Agent name for comms (required when `hostMode` is `true`). |
+| `options.keepAlive` | `boolean` | `false` | Run in keep-alive mode for inter-agent comms. |
+| `options.commsName` | `string` | `undefined` | Agent name for comms (required when `keepAlive` is `true`). |
 | `options.peerMeta` | `Record<string, unknown>` | `undefined` | Metadata advertised to peer comms surfaces. |
 | `options.budgetLimits` | `Record<string, unknown>` | `undefined` | Runtime budget limits for the session. |
 | `options.providerParams` | `Record<string, unknown>` | `undefined` | Provider-specific parameters (e.g. thinking config). |

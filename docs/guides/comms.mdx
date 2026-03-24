@@ -29,7 +29,7 @@ The comms system provides:
 graph TD
     subgraph agent["Agent loop (meerkat-core)"]
         DRAIN["drain_comms_inbox()"]
-        HOST["run_host_mode()"]
+        HOST["run_keep_alive()"]
     end
 
     subgraph runtime["CommsRuntime (meerkat-comms)"]
@@ -408,7 +408,7 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--no-comms` | Disable inter-agent communication entirely |
-| `--host` | Run in host mode (stay alive for comms messages and events after initial prompt) |
+| `--host` | Run in keep-alive mode (stay alive for comms messages and events after initial prompt) |
 | `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--host`) |
 
 <Note>
@@ -434,7 +434,7 @@ Via the Rust SDK:
 use meerkat_core::PeerMeta;
 
 let build_config = AgentBuildConfig {
-    host_mode: true,
+    keep_alive: true,
     comms_name: Some("reviewer".to_string()),
     peer_meta: Some(PeerMeta::default()
         .with_description("Reviews pull requests for style issues")
@@ -474,10 +474,10 @@ rkat run --comms-name monitor --host --stdin "You are a monitoring agent."
     The agent processes the initial prompt normally.
   </Step>
   <Step title="Enter wait loop">
-    After the first run completes, the session enters host mode and the active owner path keeps the inbox consumer alive.
+    After the first run completes, the session enters keep-alive mode and the active owner path keeps the inbox consumer alive.
   </Step>
   <Step title="Handle incoming messages and events">
-    When comms messages or external events arrive, they flow into the same inbox. The currently active host-mode owner path drains that inbox and turns those items into new session turns. Runtime-backed and direct session-service paths use different owner mechanics, but they are expected to follow the same drain-lifecycle truth.
+    When comms messages or external events arrive, they flow into the same inbox. The currently active keep-alive owner path drains that inbox and turns those items into new session turns. Runtime-backed and direct session-service paths use different owner mechanics, but they are expected to follow the same drain-lifecycle truth.
   </Step>
   <Step title="Exit conditions">
     The agent exits when it receives a `DISMISS` message, its budget is exhausted, or it encounters a graceful error.
@@ -518,7 +518,7 @@ let factory = AgentFactory::new(store_path)
 
 let build_config = AgentBuildConfig {
     model: "claude-sonnet-4-5".to_string(),
-    host_mode: true,
+    keep_alive: true,
     comms_name: Some("my-agent".to_string()),
     peer_meta: Some(PeerMeta::default()
         .with_description("Coordinates peer agents")),
@@ -528,7 +528,7 @@ let build_config = AgentBuildConfig {
 let agent = factory.build_agent(build_config, &config).await?;
 ```
 
-The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `host_mode` and `peer_meta` in `SessionMetadata`.
+The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `keep_alive` and `peer_meta` in `SessionMetadata`.
 </Accordion>
 
 <Accordion title="Using CommsAgent directly">
@@ -588,10 +588,10 @@ let prepared = bootstrap.prepare().await?;
 The important architectural split is:
 
 1. `CommsRuntime` and the inbox own **delivery**
-2. the active host-mode/drain lifecycle path owns **consumption**
+2. the active keep-alive/drain lifecycle path owns **consumption**
 3. formatted message injection into the session is a projection of that lifecycle truth
 
-Historically this was described as "turn-boundary inbox draining." That is no longer the right mental model for the architecture as a whole. Turn-boundary consumption is still one local projection path, but runtime-backed and direct session-service host mode both have to follow the same canonical drain lifecycle contract.
+Historically this was described as "turn-boundary inbox draining." That is no longer the right mental model for the architecture as a whole. Turn-boundary consumption is still one local projection path, but runtime-backed and direct session-service keep-alive mode both have to follow the same canonical drain lifecycle contract.
 
 ### Message injection format
 
@@ -757,7 +757,7 @@ This makes the public contract explicit: comms delivers work, and observability 
 
 **Requirements:**
 
-- The agent must be running in **host mode** if you expect inbox events to be drained promptly.
+- The agent must be running in **keep-alive mode** if you expect inbox events to be drained promptly.
 - **Comms must be enabled.** Without comms, `event_injector()` returns `None`.
 - Observation subscriptions are independent of delivery — configure them separately.
 
@@ -778,4 +778,4 @@ The current implementation does not include nonce-based replay prevention.
 
 - [Built-in tools reference](/reference/builtin-tools) - comms tool parameter details
 - [Configuration: comms](/concepts/configuration) - config file settings
-- [Examples: comms](/examples/comms) - host mode and messaging across surfaces
+- [Examples: comms](/examples/comms) - keep-alive mode and messaging across surfaces

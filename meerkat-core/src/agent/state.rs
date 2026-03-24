@@ -259,80 +259,73 @@ where
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) {
         for effect in &transition.effects {
-            match effect {
-                TurnExecutionEffect::CheckCompaction => {
-                    let current_boundary_index = self.compaction_cadence.session_boundary_index;
-                    if let Some(ref compactor) = self.compactor {
-                        let ctx = crate::agent::compact::build_compaction_context(
+            if let TurnExecutionEffect::CheckCompaction = effect {
+                let current_boundary_index = self.compaction_cadence.session_boundary_index;
+                if let Some(ref compactor) = self.compactor {
+                    let ctx = crate::agent::compact::build_compaction_context(
+                        self.session.messages(),
+                        self.last_input_tokens,
+                        self.compaction_cadence.last_compaction_boundary_index,
+                        current_boundary_index,
+                    );
+                    if compactor.should_compact(&ctx) {
+                        let outcome = crate::agent::compact::run_compaction(
+                            self.client.as_ref(),
+                            compactor,
                             self.session.messages(),
                             self.last_input_tokens,
-                            self.compaction_cadence.last_compaction_boundary_index,
                             current_boundary_index,
-                        );
-                        if compactor.should_compact(&ctx) {
-                            let outcome = crate::agent::compact::run_compaction(
-                                self.client.as_ref(),
-                                compactor,
-                                self.session.messages(),
-                                self.last_input_tokens,
-                                current_boundary_index,
-                                event_tx,
-                                &self.event_tap,
-                            )
-                            .await;
+                            event_tx,
+                            &self.event_tap,
+                        )
+                        .await;
 
-                            if let Ok(outcome) = outcome {
-                                *self.session.messages_mut() = outcome.new_messages;
-                                self.session.record_usage(outcome.summary_usage.clone());
-                                self.budget.record_usage(&outcome.summary_usage);
-                                self.last_input_tokens = 0;
-                                self.compaction_cadence.last_compaction_boundary_index =
-                                    Some(outcome.session_boundary_index);
+                        if let Ok(outcome) = outcome {
+                            *self.session.messages_mut() = outcome.new_messages;
+                            self.session.record_usage(outcome.summary_usage.clone());
+                            self.budget.record_usage(&outcome.summary_usage);
+                            self.last_input_tokens = 0;
+                            self.compaction_cadence.last_compaction_boundary_index =
+                                Some(outcome.session_boundary_index);
 
-                                if let Some(ref memory_store) = self.memory_store {
-                                    let store = std::sync::Arc::clone(memory_store);
-                                    let session_id = self.session.id().clone();
-                                    let discarded = outcome.discarded;
-                                    tokio::spawn(async move {
-                                        for message in &discarded {
-                                            let content = message.as_indexable_text();
-                                            if !content.is_empty() {
-                                                let metadata = crate::memory::MemoryMetadata {
-                                                    session_id: session_id.clone(),
-                                                    turn: Some(turn_count),
-                                                    indexed_at: crate::time_compat::SystemTime::now(
-                                                    ),
-                                                };
-                                                if let Err(e) =
-                                                    store.index(&content, metadata).await
-                                                {
-                                                    tracing::warn!(
-                                                        "failed to index compaction discard into memory: {e}"
-                                                    );
-                                                }
+                            if let Some(ref memory_store) = self.memory_store {
+                                let store = std::sync::Arc::clone(memory_store);
+                                let session_id = self.session.id().clone();
+                                let discarded = outcome.discarded;
+                                tokio::spawn(async move {
+                                    for message in &discarded {
+                                        let content = message.as_indexable_text();
+                                        if !content.is_empty() {
+                                            let metadata = crate::memory::MemoryMetadata {
+                                                session_id: session_id.clone(),
+                                                turn: Some(turn_count),
+                                                indexed_at: crate::time_compat::SystemTime::now(),
+                                            };
+                                            if let Err(e) = store.index(&content, metadata).await {
+                                                tracing::warn!(
+                                                    "failed to index compaction discard into memory: {e}"
+                                                );
                                             }
                                         }
-                                    });
-                                }
+                                    }
+                                });
                             }
                         }
                     }
-                    self.compaction_cadence.session_boundary_index = self
-                        .compaction_cadence
-                        .session_boundary_index
-                        .saturating_add(1);
-                    let cadence = self.compaction_cadence.clone();
-                    if let Err(error) = crate::agent::compact::persist_compaction_cadence(
-                        self.session_mut(),
-                        &cadence,
-                    ) {
-                        tracing::warn!(
-                            error = %error,
-                            "failed to persist session compaction cadence metadata"
-                        );
-                    }
                 }
-                _ => {}
+                self.compaction_cadence.session_boundary_index = self
+                    .compaction_cadence
+                    .session_boundary_index
+                    .saturating_add(1);
+                let cadence = self.compaction_cadence.clone();
+                if let Err(error) =
+                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to persist session compaction cadence metadata"
+                    );
+                }
             }
         }
     }

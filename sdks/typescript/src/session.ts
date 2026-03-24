@@ -147,7 +147,7 @@ export interface DeferredTurnOptions {
   skillRefs?: SkillRef[];
   skillReferences?: string[];
   flowToolOverlay?: TurnToolOverlay;
-  hostMode?: boolean;
+  keepAlive?: boolean;
   model?: string;
   provider?: string;
   maxTokens?: number;

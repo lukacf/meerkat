@@ -240,7 +240,7 @@ Start a new Meerkat agent session with the given prompt.
     "enable_shell": false,
     "shell_timeout_secs": 30
   },
-  "host_mode": false,
+  "keep_alive": false,
   "comms_name": null,
   "hooks_override": null
 }
@@ -314,8 +314,8 @@ Start a new Meerkat agent session with the given prompt.
   Default shell command timeout.
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Run in host mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool" default="false">
+  Run in keep-alive mode for inter-agent comms (requires `comms_name`).
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -376,7 +376,7 @@ tool calls. The call waits for the resumed turn to complete and returns the same
   ],
   "enable_builtins": false,
   "builtin_config": null,
-  "host_mode": false,
+  "keep_alive": false,
   "comms_name": null,
   "model": null,
   "max_tokens": null,
@@ -441,8 +441,8 @@ tool calls. The call waits for the resumed turn to complete and returns the same
   Builtin tool config.
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Enable host mode.
+<ParamField body="keep_alive" type="bool" default="false">
+  Enable keep-alive mode.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="from session">

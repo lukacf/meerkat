@@ -114,7 +114,7 @@ class CapabilitiesResponse:
 @dataclass
 class CommsParams:
     """Comms parameters (available because comms capability is compiled)."""
-    host_mode: bool = False
+    keep_alive: bool = False
     comms_name: Optional[str] = None
 
     peer_meta: Optional[dict[str, Any]] = None

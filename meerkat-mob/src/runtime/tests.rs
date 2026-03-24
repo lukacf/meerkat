@@ -2292,6 +2292,179 @@ impl SessionAgentBuilder for PersistentMockBuilder {
     }
 }
 
+struct PersistedListingSessionService {
+    inner: Arc<MockSessionService>,
+}
+
+impl PersistedListingSessionService {
+    fn new(inner: Arc<MockSessionService>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl SessionService for PersistedListingSessionService {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        self.inner.create_session(req).await
+    }
+
+    async fn start_turn(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        self.inner.start_turn(id, req).await
+    }
+
+    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.interrupt(id).await
+    }
+
+    async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+        self.inner.read(id).await
+    }
+
+    async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+        let live_sessions = self.inner.live_session_data.read().await;
+        let mut summaries = live_sessions
+            .values()
+            .map(|session| SessionSummary {
+                session_id: session.id().clone(),
+                created_at: session.created_at(),
+                updated_at: session.updated_at(),
+                message_count: session.messages().len(),
+                total_tokens: session.total_tokens(),
+                is_active: true,
+                labels: Default::default(),
+            })
+            .collect::<Vec<_>>();
+        let live_ids = summaries
+            .iter()
+            .map(|summary| summary.session_id.clone())
+            .collect::<HashSet<_>>();
+        drop(live_sessions);
+
+        let persisted = self.inner.persisted_sessions.read().await;
+        for session in persisted.values() {
+            if live_ids.contains(session.id()) {
+                continue;
+            }
+            summaries.push(SessionSummary {
+                session_id: session.id().clone(),
+                created_at: session.created_at(),
+                updated_at: session.updated_at(),
+                message_count: session.messages().len(),
+                total_tokens: session.total_tokens(),
+                is_active: false,
+                labels: Default::default(),
+            });
+        }
+        Ok(summaries)
+    }
+
+    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.inner.archive(id).await
+    }
+
+    async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
+        SessionService::subscribe_session_events(&*self.inner, id).await
+    }
+}
+
+#[async_trait]
+impl SessionServiceCommsExt for PersistedListingSessionService {
+    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
+        self.inner.comms_runtime(session_id).await
+    }
+
+    async fn event_injector(&self, session_id: &SessionId) -> Option<Arc<dyn EventInjector>> {
+        self.inner.event_injector(session_id).await
+    }
+
+    async fn interaction_event_injector(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SubscribableInjector>> {
+        self.inner.interaction_event_injector(session_id).await
+    }
+}
+
+#[async_trait]
+impl SessionServiceHistoryExt for PersistedListingSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: meerkat_core::service::SessionHistoryQuery,
+    ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
+        self.inner.read_history(id, query).await
+    }
+}
+
+#[async_trait]
+impl SessionServiceControlExt for PersistedListingSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        self.inner.append_system_context(id, req).await
+    }
+}
+
+#[async_trait]
+impl MobSessionService for PersistedListingSessionService {
+    async fn subscribe_session_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<EventStream, StreamError> {
+        SessionService::subscribe_session_events(&*self.inner, session_id).await
+    }
+
+    fn supports_persistent_sessions(&self) -> bool {
+        self.inner.supports_persistent_sessions()
+    }
+
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        self.inner.runtime_adapter()
+    }
+
+    async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
+        self.inner.session_belongs_to_mob(session_id, mob_id).await
+    }
+
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        self.inner.load_persisted_session(session_id).await
+    }
+
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        self.inner
+            .apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
+            .await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.inner.discard_live_session(session_id).await
+    }
+
+    async fn cancel_all_checkpointers(&self) {
+        self.inner.cancel_all_checkpointers().await
+    }
+
+    async fn rearm_all_checkpointers(&self) {
+        self.inner.rearm_all_checkpointers().await
+    }
+}
+
 async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> MobHandle {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
     let service = Arc::new(meerkat_session::PersistentSessionService::new(
@@ -4429,6 +4602,52 @@ async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
     assert!(
         !trusted_by_left.contains(&test_comms_name("worker", "w-2")),
         "healthy members must prune trust to broken peers during partial resume"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_restores_missing_live_session_even_when_list_reports_inactive_persisted_summary()
+ {
+    let inner = Arc::new(MockSessionService::new());
+    let service = Arc::new(PersistedListingSessionService::new(inner.clone()));
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle.stop().await.expect("stop");
+    inner.archive(&sid).await.expect("archive session");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect(
+            "resume should restore from persisted snapshot, not treat inactive summary as live",
+        );
+
+    let snapshot = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("member status after resume");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    assert_eq!(snapshot.current_session_id, Some(sid.clone()));
+    assert!(
+        inner.comms_runtime(&sid).await.is_some(),
+        "resume should recreate the live session bridge for persisted-but-inactive sessions"
     );
 }
 
@@ -11922,6 +12141,32 @@ async fn create_test_mob_with_real_comms(
         .expect("create mob");
 
     (handle, service)
+}
+
+#[tokio::test]
+async fn test_member_status_keeps_idle_live_session_active() {
+    let (handle, _service) = create_test_mob_with_real_comms(sample_definition()).await;
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-1"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn lead");
+
+    let snapshot = handle
+        .member_status(&MeerkatId::from("l-1"))
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "idle live sessions should remain Active rather than Completed"
+    );
+    assert!(!snapshot.is_final);
 }
 
 #[tokio::test]

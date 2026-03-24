@@ -219,7 +219,7 @@ export interface SessionOptions {
   enableShell?: boolean;
   enableMemory?: boolean;
   enableMob?: boolean;
-  hostMode?: boolean;
+  keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;

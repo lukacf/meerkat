@@ -82,7 +82,7 @@ export interface CapabilitiesResponse {
 }
 
 export interface CommsParams {
-  host_mode: boolean;
+  keep_alive: boolean;
   comms_name?: string;
   peer_meta?: Record<string, unknown>;
 }

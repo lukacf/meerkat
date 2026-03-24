@@ -992,7 +992,7 @@ export class MeerkatClient {
       skillRefs?: SkillRef[];
       skillReferences?: string[];
       flowToolOverlay?: TurnToolOverlay;
-      hostMode?: boolean;
+      keepAlive?: boolean;
       model?: string;
       provider?: string;
       maxTokens?: number;
@@ -1016,7 +1016,7 @@ export class MeerkatClient {
         blocked_tools: options.flowToolOverlay.blockedTools,
       };
     }
-    if (options?.hostMode != null) params.host_mode = options.hostMode;
+    if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options?.model) params.model = options.model;
     if (options?.provider) params.provider = options.provider;
     if (options?.maxTokens) params.max_tokens = options.maxTokens;
@@ -1579,7 +1579,7 @@ export class MeerkatClient {
     if (options.enableShell) params.enable_shell = true;
     if (options.enableMemory) params.enable_memory = true;
     if (options.enableMob) params.enable_mob = true;
-    if (options.hostMode) params.host_mode = true;
+    if (options.keepAlive) params.keep_alive = true;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;

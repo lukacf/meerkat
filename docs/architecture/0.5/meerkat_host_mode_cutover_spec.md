@@ -10,7 +10,7 @@ path and replaces it with one canonical runtime-owned execution path.
 Current deletion target:
 
 - `drain_comms_inbox()` as an ordinary execution owner
-- `run_host_mode*()` as a long-lived direct execution loop
+- `run_keep_alive*()` as a long-lived direct execution loop
 - direct continuation injection from host loop
 - direct batching/routing/injection in `comms_impl.rs` as the authoritative
   runtime behavior
@@ -224,7 +224,7 @@ In the final design:
 
 ## Replacement For Direct Host-Mode APIs
 
-### `run_host_mode()` / `run_host_mode_with_events()`
+### `run_keep_alive()` / `run_keep_alive_with_events()`
 
 Final meaning:
 
@@ -278,7 +278,7 @@ delete host-triggered continuation admission.
 Replace host-loop `dismiss_received()` ownership with explicit runtime control
 delivery.
 
-### Step 4. Narrow `run_host_mode*()` into façades
+### Step 4. Narrow `run_keep_alive*()` into façades
 
 Keep any user-facing compatibility API shape, but remove long-lived direct
 execution ownership from `Agent`.

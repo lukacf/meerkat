@@ -83,6 +83,10 @@ impl SessionAgent for FactoryAgent {
         _render_metadata: Option<RenderMetadata>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        // handling_mode and render_metadata are runtime-owned semantics.
+        // The runtime routes Queue/Steer BEFORE calling the executor, so by
+        // the time this method runs the routing decision is already made.
+        // This implementation just executes the turn.
         self.agent.run_with_events(prompt, event_tx).await
     }
 

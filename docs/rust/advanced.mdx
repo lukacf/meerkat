@@ -235,10 +235,10 @@ injector.inject(
    - use mob event subscriptions for attributed mob-wide activity.
 4. Public callers no longer receive an interaction-scoped stream from injection.
 
-This distinction matters: queueing an event and consuming it are no longer treated as the same seam. The host-mode/drain lifecycle owns consumption truth.
+This distinction matters: queueing an event and consuming it are no longer treated as the same seam. The keep-alive/drain lifecycle owns consumption truth.
 
 **Requirements:**
-- Agent must be in host mode if you want the host loop to drain inbox events.
+- Agent must be in keep-alive mode if you want the keep-alive loop to drain inbox events.
 - Comms must be enabled.
 - If you need streaming output, configure an observation surface separately.
 </Accordion>
@@ -297,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: Some("You are a helpful math assistant.".into()),
         max_tokens: Some(2048),
         event_tx: None,
-        host_mode: false,
+        keep_alive: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -311,7 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,
-        host_mode: false,
+        keep_alive: false,
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,

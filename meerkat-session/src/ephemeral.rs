@@ -181,15 +181,21 @@ pub trait SessionAgent: Send {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
-    /// Run the next turn with normalized handling/render metadata.
+    /// Run the next turn.
+    ///
+    /// `handling_mode` and `render_metadata` are runtime-owned semantics:
+    /// the runtime routes Queue/Steer BEFORE calling the executor, so by
+    /// the time this method runs the routing decision is already made.
+    /// These parameters are present on the trait because the session task
+    /// forwards them from `StartTurnRequest`, but implementations should
+    /// not act on them — the runtime is the canonical owner.
     async fn run_turn_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-        handling_mode: meerkat_core::types::HandlingMode,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        _handling_mode: meerkat_core::types::HandlingMode,
+        _render_metadata: Option<meerkat_core::types::RenderMetadata>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        let _ = (handling_mode, render_metadata);
         self.run_with_events(prompt, event_tx).await
     }
 

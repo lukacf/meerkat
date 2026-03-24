@@ -44,7 +44,7 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     openai_base_url: config.openaiBaseUrl,
     gemini_base_url: config.geminiBaseUrl,
     comms_name: config.commsName,
-    host_mode: config.hostMode,
+    keep_alive: config.keepAlive,
     labels: config.labels,
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,

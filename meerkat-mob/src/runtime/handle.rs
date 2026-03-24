@@ -668,7 +668,25 @@ impl MobHandle {
     /// For low-level structural roster visibility without runtime projection,
     /// use [`list_all_members`](Self::list_all_members).
     pub async fn list_members(&self) -> Vec<MobMemberListEntry> {
-        let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
+        self.project_member_list(self.roster.read().await.list())
+            .await
+    }
+
+    /// List all members including those in `Retiring` state, with full
+    /// enriched status projection.
+    ///
+    /// Use this for observability surfaces (RPC, MCP) where in-flight
+    /// retires should remain visible with their transitional state.
+    pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
+        self.project_member_list(self.roster.read().await.list_all())
+            .await
+    }
+
+    async fn project_member_list<'a>(
+        &self,
+        entries: impl Iterator<Item = &'a crate::roster::RosterEntry>,
+    ) -> Vec<MobMemberListEntry> {
+        let entries: Vec<_> = entries.cloned().collect();
         let mut projected = Vec::with_capacity(entries.len());
         for entry in entries {
             let snapshot = self.member_status(&entry.meerkat_id).await.ok();
@@ -1523,8 +1541,11 @@ impl MobHandle {
                         crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
                         crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
                     },
-                    CanonicalSessionObservation::Inactive
-                    | CanonicalSessionObservation::Missing => match roster_state {
+                    CanonicalSessionObservation::Inactive => match roster_state {
+                        crate::roster::MemberState::Active => CanonicalMemberStatus::Active,
+                        crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
+                    },
+                    CanonicalSessionObservation::Missing => match roster_state {
                         crate::roster::MemberState::Active => CanonicalMemberStatus::Completed,
                         crate::roster::MemberState::Retiring => CanonicalMemberStatus::Retiring,
                     },

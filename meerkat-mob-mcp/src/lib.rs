@@ -358,7 +358,11 @@ impl MobMcpState {
         &self,
         mob_id: &MobId,
     ) -> Result<Vec<meerkat_mob::runtime::MobMemberListEntry>, MobError> {
-        self.handle_for(mob_id).await?.list_members().await.pipe(Ok)
+        self.handle_for(mob_id)
+            .await?
+            .list_members_including_retiring()
+            .await
+            .pipe(Ok)
     }
 
     pub async fn mob_append_system_context(

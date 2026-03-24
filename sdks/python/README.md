@@ -127,7 +127,7 @@ async def create_session(
     enable_shell: bool = False,
     enable_memory: bool = False,
     enable_mob: bool = False,
-    host_mode: bool = False,
+    keep_alive: bool = False,
     comms_name: Optional[str] = None,
     peer_meta: Optional[dict] = None,
     budget_limits: Optional[dict] = None,
@@ -154,8 +154,8 @@ Creates a new session, runs the first turn, and returns a runtime-backed `Sessio
 | `enable_shell`               | `bool`          | `False` | Enable shell tool (requires `enable_builtins`). |
 | `enable_memory`              | `bool`          | `False` | Enable semantic memory (`memory_search` tool). |
 | `enable_mob`                 | `bool`          | `False` | Enable mob orchestration helpers. |
-| `host_mode`                  | `bool`          | `False` | Run in host mode for inter-agent comms. |
-| `comms_name`                 | `Optional[str]` | `None`  | Agent name for comms (required when `host_mode` is `True`). |
+| `keep_alive`                 | `bool`          | `False` | Run in keep-alive mode for inter-agent comms. |
+| `comms_name`                 | `Optional[str]` | `None`  | Agent name for comms (required when `keep_alive` is `True`). |
 | `peer_meta`                  | `Optional[dict]`| `None`  | Metadata advertised to peer comms surfaces. |
 | `budget_limits`              | `Optional[dict]`| `None`  | Runtime budget limits for the session. |
 | `provider_params`            | `Optional[dict]`| `None`  | Provider-specific parameters (e.g. thinking config). |

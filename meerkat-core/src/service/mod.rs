@@ -304,6 +304,11 @@ pub struct StartTurnRequest {
     /// Optional normalized rendering metadata for this turn prompt.
     pub render_metadata: Option<RenderMetadata>,
     /// Handling mode for this turn's ordinary content-bearing work.
+    ///
+    /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
+    /// before calling the executor. The session service passes this through
+    /// to the `SessionAgent` but does not act on it. Non-Queue handling
+    /// only works correctly on runtime-backed surfaces.
     pub handling_mode: HandlingMode,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,

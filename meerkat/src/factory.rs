@@ -774,6 +774,30 @@ impl AgentFactory {
             .unwrap_or_else(|| self.store_path.clone())
     }
 
+    fn apply_resumed_session_metadata(
+        build_config: &mut AgentBuildConfig,
+    ) -> Option<SessionMetadata> {
+        let metadata = build_config
+            .resume_session
+            .as_ref()
+            .and_then(Session::session_metadata)?;
+
+        build_config.model = metadata.model.clone();
+        build_config.max_tokens = Some(metadata.max_tokens);
+        build_config.provider = Some(metadata.provider);
+        build_config.provider_params = metadata.provider_params.clone();
+        build_config.override_builtins = Some(metadata.tooling.builtins);
+        build_config.override_shell = Some(metadata.tooling.shell);
+        build_config.override_memory = Some(metadata.tooling.memory);
+        build_config.override_mob = Some(metadata.tooling.mob);
+        build_config.preload_skills = metadata.tooling.active_skills.clone();
+        build_config.host_mode = metadata.host_mode;
+        build_config.comms_name = metadata.comms_name.clone();
+        build_config.peer_meta = metadata.peer_meta.clone();
+
+        Some(metadata)
+    }
+
     /// Build an LLM adapter for the provided client/model.
     pub async fn build_llm_adapter(
         &self,
@@ -1052,6 +1076,8 @@ impl AgentFactory {
         mut build_config: AgentBuildConfig,
         config: &Config,
     ) -> Result<DynAgent, BuildAgentError> {
+        let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config);
+
         if let Some(value) = build_config.max_inline_peer_notifications
             && value < -1
         {
@@ -1173,6 +1199,8 @@ impl AgentFactory {
             .override_builtins
             .unwrap_or(self.enable_builtins);
         let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
+        let session = build_config.resume_session.clone().unwrap_or_default();
+        let _session_id = session.id().to_string();
         // 6b. Create comms runtime before tool wiring.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
         let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
@@ -1187,17 +1215,20 @@ impl AgentFactory {
                     .cloned()
                     .collect::<std::collections::HashSet<String>>(),
             );
-            let runtime = crate::build_comms_runtime_from_config_scoped_with_silent_intents(
-                config,
-                _realm_scope_root.as_path(),
-                comms_name,
-                build_config.peer_meta.clone(),
-                // Realm ID is the comms inproc namespace boundary.
-                build_config.realm_id.clone(),
-                silent_intents,
-            )
-            .await
-            .map_err(BuildAgentError::Comms)?;
+            let runtime =
+                crate::build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
+                    config,
+                    _realm_scope_root.as_path(),
+                    self.user_config_root.as_deref(),
+                    comms_name,
+                    build_config.peer_meta.clone(),
+                    // Realm ID is the comms inproc namespace boundary.
+                    build_config.realm_id.clone(),
+                    session.id(),
+                    silent_intents,
+                )
+                .await
+                .map_err(BuildAgentError::Comms)?;
             Some(Arc::new(runtime))
         } else {
             None
@@ -1236,9 +1267,6 @@ impl AgentFactory {
         // when the model cannot process image blocks in tool results).
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
             .is_none_or(|p| p.image_tool_results);
-
-        let session = build_config.resume_session.clone().unwrap_or_default();
-        let _session_id = session.id().to_string();
         let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> = build_config
             .ops_lifecycle_override
             .clone()
@@ -1578,40 +1606,52 @@ impl AgentFactory {
                 extra_sections.push(instruction.as_str());
             }
         }
+        let should_apply_system_prompt =
+            build_config.resume_session.is_none() || per_request_prompt.is_some();
         #[cfg(not(target_arch = "wasm32"))]
-        let system_prompt = crate::assemble_system_prompt(
-            config,
-            per_request_prompt.as_deref(),
-            _conventions_context_root,
-            &extra_sections,
-            &tool_usage_instructions,
-        )
-        .await;
+        let system_prompt = if should_apply_system_prompt {
+            Some(
+                crate::assemble_system_prompt(
+                    config,
+                    per_request_prompt.as_deref(),
+                    _conventions_context_root,
+                    &extra_sections,
+                    &tool_usage_instructions,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         #[cfg(target_arch = "wasm32")]
-        let system_prompt = {
-            // Precedence: per-request > config inline > default.
-            // No AGENTS.md or system_prompt_file on wasm32 (no filesystem).
-            let base = per_request_prompt
-                .or_else(|| config.agent.system_prompt.clone())
-                .unwrap_or_else(|| DEFAULT_WASM_SYSTEM_PROMPT.to_string());
-            let mut prompt = base;
-            for section in &extra_sections {
-                if !section.is_empty() {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(section);
+        let system_prompt = if should_apply_system_prompt {
+            Some({
+                // Precedence: per-request > config inline > default.
+                // No AGENTS.md or system_prompt_file on wasm32 (no filesystem).
+                let base = per_request_prompt
+                    .or_else(|| config.agent.system_prompt.clone())
+                    .unwrap_or_else(|| DEFAULT_WASM_SYSTEM_PROMPT.to_string());
+                let mut prompt = base;
+                for section in &extra_sections {
+                    if !section.is_empty() {
+                        prompt.push_str("\n\n");
+                        prompt.push_str(section);
+                    }
                 }
-            }
-            if let Some(ref config_tools) = config.agent.tool_instructions
-                && !config_tools.is_empty()
-            {
-                prompt.push_str("\n\n");
-                prompt.push_str(config_tools);
-            }
-            if !tool_usage_instructions.is_empty() {
-                prompt.push_str("\n\n");
-                prompt.push_str(&tool_usage_instructions);
-            }
-            prompt
+                if let Some(ref config_tools) = config.agent.tool_instructions
+                    && !config_tools.is_empty()
+                {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(config_tools);
+                }
+                if !tool_usage_instructions.is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&tool_usage_instructions);
+                }
+                prompt
+            })
+        } else {
+            None
         };
 
         // 11f. Wait for pending MCP connections when requested.
@@ -1663,11 +1703,14 @@ impl AgentFactory {
             .model(model.clone())
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
-            .system_prompt(system_prompt)
             .structured_output_retries(build_config.structured_output_retries)
             .with_hook_run_overrides(build_config.hooks_override)
             .with_model_defaults_resolver(Arc::new(ProfileBasedDefaultsResolver))
             .with_call_timeout_override(effective_call_timeout_override);
+
+        if let Some(system_prompt) = system_prompt {
+            builder = builder.system_prompt(system_prompt);
+        }
 
         if let Some(schema) = build_config.output_schema {
             builder = builder.output_schema(schema);
@@ -1774,26 +1817,49 @@ impl AgentFactory {
         }
 
         // 14. Set SessionMetadata
-        let metadata = SessionMetadata {
-            model,
-            max_tokens,
-            provider,
-            provider_params: build_config.provider_params,
-            tooling: SessionTooling {
+        let metadata = if let Some(mut metadata) = resumed_session_metadata {
+            metadata.model = model;
+            metadata.max_tokens = max_tokens;
+            metadata.provider = provider;
+            metadata.provider_params = build_config.provider_params;
+            metadata.tooling = SessionTooling {
                 builtins: effective_builtins,
                 shell: effective_shell,
                 comms: comms_enabled,
                 mob: build_config.override_mob.unwrap_or(self.enable_mob),
                 memory: effective_memory,
                 active_skills: active_skill_ids,
-            },
-            host_mode: build_config.host_mode,
-            comms_name: build_config.comms_name,
-            peer_meta: build_config.peer_meta,
-            realm_id: build_config.realm_id,
-            instance_id: build_config.instance_id,
-            backend: build_config.backend,
-            config_generation: build_config.config_generation,
+            };
+            metadata.host_mode = build_config.host_mode;
+            metadata.comms_name = build_config.comms_name;
+            metadata.peer_meta = build_config.peer_meta;
+            metadata.realm_id = build_config.realm_id;
+            metadata.instance_id = build_config.instance_id;
+            metadata.backend = build_config.backend;
+            metadata.config_generation = build_config.config_generation;
+            metadata
+        } else {
+            SessionMetadata {
+                model,
+                max_tokens,
+                provider,
+                provider_params: build_config.provider_params,
+                tooling: SessionTooling {
+                    builtins: effective_builtins,
+                    shell: effective_shell,
+                    comms: comms_enabled,
+                    mob: build_config.override_mob.unwrap_or(self.enable_mob),
+                    memory: effective_memory,
+                    active_skills: active_skill_ids,
+                },
+                host_mode: build_config.host_mode,
+                comms_name: build_config.comms_name,
+                peer_meta: build_config.peer_meta,
+                realm_id: build_config.realm_id,
+                instance_id: build_config.instance_id,
+                backend: build_config.backend,
+                config_generation: build_config.config_generation,
+            }
         };
         if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
             tracing::warn!("Failed to store session metadata: {}", err);

@@ -30,6 +30,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -101,6 +103,34 @@ impl StreamRegistryEntry {
 }
 
 type InteractionStreamRegistry = Arc<Mutex<HashMap<Uuid, StreamRegistryEntry>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+static SESSION_IDENTITY_CLAIMS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SessionIdentityClaim {
+    session_id: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SessionIdentityClaim {
+    fn acquire(session_id: &meerkat_core::SessionId) -> Result<Self, CommsRuntimeError> {
+        let session_id = session_id.to_string();
+        let mut claims = SESSION_IDENTITY_CLAIMS.lock();
+        if !claims.insert(session_id.clone()) {
+            return Err(CommsRuntimeError::SessionIdentityInUse(session_id));
+        }
+        Ok(Self { session_id })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SessionIdentityClaim {
+    fn drop(&mut self) {
+        SESSION_IDENTITY_CLAIMS.lock().remove(&self.session_id);
+    }
+}
 
 struct InteractionStream {
     id: Uuid,
@@ -744,6 +774,8 @@ fn map_event_injector_error(error: meerkat_core::event_injector::EventInjectorEr
 pub enum CommsRuntimeError {
     #[error("Identity error: {0}")]
     IdentityError(String),
+    #[error("Session identity already active: {0}")]
+    SessionIdentityInUse(String),
     #[error("Trust load error: {0}")]
     TrustLoadError(String),
     #[error("Listener error: {0}")]
@@ -773,6 +805,8 @@ pub struct CommsRuntime {
     listener_handles: Vec<ListenerHandle>,
     #[cfg(not(target_arch = "wasm32"))]
     listeners_started: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    _session_identity_claim: Option<SessionIdentityClaim>,
     keypair: Arc<Keypair>,
     require_peer_auth: bool,
     dismiss_flag: AtomicBool,
@@ -838,6 +872,7 @@ impl CommsRuntime {
             config: config.clone(),
             listener_handles: Vec::new(),
             listeners_started: false,
+            _session_identity_claim: None,
             keypair: Arc::new(keypair),
             require_peer_auth: config.require_peer_auth,
             dismiss_flag: AtomicBool::new(false),
@@ -930,6 +965,88 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             listeners_started: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            _session_identity_claim: None,
+            keypair: Arc::new(keypair),
+            require_peer_auth: true,
+            dismiss_flag: AtomicBool::new(false),
+            subscriber_registry: crate::event_injector::new_subscriber_registry(),
+            interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            peer_directory_reachability: Arc::new(Mutex::new(
+                PeerDirectoryReachabilityAuthority::new(),
+            )),
+            silent_intents,
+            actionable_notify,
+        };
+        InprocRegistry::global().register_with_meta_in_namespace(
+            namespace.as_deref().unwrap_or(""),
+            name,
+            runtime.public_key,
+            inbox_sender,
+            crate::PeerMeta::default(),
+        );
+        Ok(runtime)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn inproc_only_session_scoped_with_silent_intents(
+        name: &str,
+        namespace: Option<String>,
+        identity_root: std::path::PathBuf,
+        session_id: &meerkat_core::SessionId,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
+        let claim = SessionIdentityClaim::acquire(session_id)?;
+        let identity_dir = identity_root.join(session_id.to_string());
+        let keypair = Keypair::load_or_generate(&identity_dir)
+            .await
+            .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
+        let public_key = keypair.public_key();
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+
+        let classification_context = Arc::new(crate::classify::IngressClassificationContext {
+            require_peer_auth: true,
+            trusted_peers: trusted_peers.clone(),
+            silent_intents: silent_intents.clone(),
+        });
+        let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
+        let inbox_notify = inbox.notify();
+        let actionable_notify = inbox.classified_actionable_notify();
+        let comms_config = crate::CommsConfig::default();
+        let config = ResolvedCommsConfig {
+            enabled: true,
+            name: name.to_string(),
+            inproc_namespace: namespace.clone(),
+            identity_dir: identity_dir.clone(),
+            trusted_peers_path: identity_dir.join("trusted_peers.json"),
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            comms_config: comms_config.clone(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
+            allow_external_unauthenticated: false,
+        };
+        let router = Router::with_shared_peers(
+            keypair.clone(),
+            trusted_peers.clone(),
+            comms_config,
+            inbox_sender.clone(),
+            true,
+        )
+        .with_inproc_namespace(namespace.clone());
+        let runtime = Self {
+            public_key,
+            router: Arc::new(router),
+            trusted_peers,
+            inbox: Arc::new(AsyncMutex::new(inbox)),
+            inbox_notify,
+            config,
+            listener_handles: Vec::new(),
+            listeners_started: false,
+            _session_identity_claim: Some(claim),
             keypair: Arc::new(keypair),
             require_peer_auth: true,
             dismiss_flag: AtomicBool::new(false),
@@ -2437,6 +2554,120 @@ mod tests {
                 .as_ref()
                 .is_some_and(|id| id.starts_with("ed25519:")),
             "public_key should be available and formatted as ed25519 peer id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_scoped_inproc_identity_preserves_peer_id_for_same_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new();
+        let runtime = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-peer",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("create first session-scoped runtime");
+        let first_peer_id = runtime.public_key().to_peer_id();
+        drop(runtime);
+
+        let rebuilt = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-peer",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("recreate session-scoped runtime");
+        let rebuilt_peer_id = rebuilt.public_key().to_peer_id();
+
+        assert_eq!(
+            rebuilt_peer_id, first_peer_id,
+            "same session id should preserve the inproc peer_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_scoped_inproc_identity_rejects_second_live_activation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new();
+        let _runtime = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-lock",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("create first session-scoped runtime");
+
+        let error = match CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-lock",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        {
+            Ok(_) => panic!("second live activation should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, CommsRuntimeError::SessionIdentityInUse(_)),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_scoped_inproc_identity_does_not_restore_trust_from_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new();
+        let sender = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-trust",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("create session-scoped runtime");
+        let peer = CommsRuntime::inproc_only("session-scoped-trust-peer").unwrap();
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                "session-scoped-trust-peer",
+                peer.public_key().to_peer_id(),
+                &format!("inproc://{}", peer.participant_name()),
+            )
+            .expect("trusted peer spec"),
+        )
+        .await
+        .expect("add trusted peer");
+        assert_eq!(
+            sender.peers().await.len(),
+            1,
+            "trust should be visible while live"
+        );
+        drop(sender);
+
+        let rebuilt = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-trust",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("recreate session-scoped runtime");
+
+        assert!(
+            rebuilt.peers().await.is_empty(),
+            "session-scoped identity should preserve the keypair without replaying trusted peers"
         );
     }
 

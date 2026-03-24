@@ -630,6 +630,11 @@ export class MeerkatClient {
       labels: member.labels && typeof member.labels === 'object'
         ? Object.fromEntries(Object.entries(member.labels as Record<string, unknown>).map(([key, value]) => [key, String(value)]))
         : undefined,
+      status: member.status != null ? String(member.status) : undefined,
+      error: member.error != null ? String(member.error) : undefined,
+      isFinal: member.is_final != null ? Boolean(member.is_final) : undefined,
+      currentSessionId:
+        member.current_session_id != null ? String(member.current_session_id) : undefined,
       sessionId: member.member_ref && typeof member.member_ref === 'object'
         ? (member.member_ref as Record<string, unknown>).session_id != null
           ? String((member.member_ref as Record<string, unknown>).session_id)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::MobRuntimeMode;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
@@ -9,6 +10,8 @@ use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::SessionError;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 /// Point-in-time snapshot of a mob member's execution state.
@@ -30,6 +33,36 @@ pub struct MobMemberSnapshot {
     /// Live comms connectivity for currently wired peers, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_connectivity: Option<MobPeerConnectivitySnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MobMemberListEntry {
+    pub meerkat_id: MeerkatId,
+    pub profile: ProfileName,
+    pub member_ref: MemberRef,
+    pub runtime_mode: MobRuntimeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(default)]
+    pub state: crate::roster::MemberState,
+    pub wired_to: BTreeSet<MeerkatId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_peer_specs: BTreeMap<MeerkatId, TrustedPeerSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub status: MobMemberStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub is_final: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_session_id: Option<SessionId>,
+}
+
+impl MobMemberListEntry {
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.member_ref.session_id()
+    }
 }
 
 /// Live connectivity summary for a member's currently wired peers.
@@ -58,6 +91,8 @@ pub enum MobMemberStatus {
     Active,
     /// Member is in the process of retiring.
     Retiring,
+    /// Member failed to restore durable session state and needs repair.
+    Broken,
     /// Member has completed (session archived or not found).
     Completed,
     /// Member is not in the roster.
@@ -203,6 +238,7 @@ enum CanonicalMemberStatus {
     Unknown,
     Active,
     Retiring,
+    Broken,
     Completed,
 }
 
@@ -217,6 +253,7 @@ enum CanonicalSessionObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MobMemberTerminalClass {
     Running,
+    TerminalFailure,
     TerminalUnknown,
     TerminalCompleted,
 }
@@ -232,6 +269,7 @@ impl MobMemberTerminalClassifier {
             // Retiring remains non-terminal while canonical roster membership
             // still exists, even if the session read is already inactive/missing.
             CanonicalMemberStatus::Retiring => MobMemberTerminalClass::Running,
+            CanonicalMemberStatus::Broken => MobMemberTerminalClass::TerminalFailure,
             CanonicalMemberStatus::Active => match material.session_observation {
                 CanonicalSessionObservation::Active | CanonicalSessionObservation::Unknown => {
                     MobMemberTerminalClass::Running
@@ -248,7 +286,9 @@ impl MobMemberTerminalClassifier {
     fn is_terminal(material: &CanonicalMemberSnapshotMaterial) -> bool {
         matches!(
             Self::classify(material),
-            MobMemberTerminalClass::TerminalUnknown | MobMemberTerminalClass::TerminalCompleted
+            MobMemberTerminalClass::TerminalFailure
+                | MobMemberTerminalClass::TerminalUnknown
+                | MobMemberTerminalClass::TerminalCompleted
         )
     }
 
@@ -262,6 +302,7 @@ struct CanonicalMemberSnapshotMaterial {
     member_present: bool,
     status: CanonicalMemberStatus,
     session_observation: CanonicalSessionObservation,
+    error: Option<String>,
     output_preview: Option<String>,
     tokens_used: u64,
     current_session_id: Option<SessionId>,
@@ -274,13 +315,14 @@ impl CanonicalMemberSnapshotMaterial {
             CanonicalMemberStatus::Unknown => MobMemberStatus::Unknown,
             CanonicalMemberStatus::Active => MobMemberStatus::Active,
             CanonicalMemberStatus::Retiring => MobMemberStatus::Retiring,
+            CanonicalMemberStatus::Broken => MobMemberStatus::Broken,
             CanonicalMemberStatus::Completed => MobMemberStatus::Completed,
         };
         let is_final = MobMemberTerminalClassifier::is_terminal(self);
         MobMemberSnapshot {
             status,
             output_preview: self.output_preview.clone(),
-            error: None,
+            error: self.error.clone(),
             tokens_used: self.tokens_used,
             is_final,
             current_session_id: self.current_session_id.clone(),
@@ -318,6 +360,13 @@ pub struct MobHandle {
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, RestoreFailureDiagnostic>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RestoreFailureDiagnostic {
+    pub(crate) session_id: SessionId,
+    pub(crate) reason: String,
 }
 
 /// Clone-cheap, capability-bearing handle for interacting with one mob member.
@@ -484,6 +533,25 @@ impl MobEventsView {
 }
 
 impl MobHandle {
+    async fn restore_failure_for(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Option<RestoreFailureDiagnostic> {
+        self.restore_diagnostics
+            .read()
+            .await
+            .get(meerkat_id)
+            .cloned()
+    }
+
+    fn restore_failure_error(meerkat_id: &MeerkatId, diag: RestoreFailureDiagnostic) -> MobError {
+        MobError::MemberRestoreFailed {
+            member_id: meerkat_id.clone(),
+            session_id: diag.session_id,
+            reason: diag.reason,
+        }
+    }
+
     /// Poll mob events from the underlying store.
     pub async fn poll_events(
         &self,
@@ -593,14 +661,63 @@ impl MobHandle {
         })
     }
 
-    /// List active (operational) members in the roster.
+    /// List members as an operational projection surface.
     ///
-    /// Excludes members in `Retiring` state. Used by flow target selection,
-    /// supervisor escalation, and other paths that assume operational members.
-    /// For full roster visibility including retiring members, use
-    /// [`list_all_members`](Self::list_all_members).
-    pub async fn list_members(&self) -> Vec<RosterEntry> {
-        self.roster.read().await.list().cloned().collect()
+    /// This includes structural roster fields plus current runtime status,
+    /// error/finality state, and the current session binding when known.
+    /// For low-level structural roster visibility without runtime projection,
+    /// use [`list_all_members`](Self::list_all_members).
+    pub async fn list_members(&self) -> Vec<MobMemberListEntry> {
+        let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
+        let mut projected = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let snapshot = self.member_status(&entry.meerkat_id).await.ok();
+            let (status, error, is_final, current_session_id) = match snapshot {
+                Some(snapshot) => (
+                    snapshot.status,
+                    snapshot.error,
+                    snapshot.is_final,
+                    snapshot.current_session_id,
+                ),
+                None => (
+                    MobMemberStatus::Unknown,
+                    None,
+                    true,
+                    entry.session_id().cloned(),
+                ),
+            };
+            projected.push(MobMemberListEntry {
+                meerkat_id: entry.meerkat_id,
+                profile: entry.profile,
+                member_ref: entry.member_ref,
+                runtime_mode: entry.runtime_mode,
+                peer_id: entry.peer_id,
+                state: entry.state,
+                wired_to: entry.wired_to,
+                external_peer_specs: entry.external_peer_specs,
+                labels: entry.labels,
+                status,
+                error,
+                is_final,
+                current_session_id,
+            });
+        }
+        projected
+    }
+
+    /// List members currently eligible for runtime work dispatch.
+    ///
+    /// Excludes retiring, completed, broken, or unknown members even if they
+    /// still appear in the public operational projection.
+    pub(crate) async fn list_runnable_members(&self) -> Vec<MobMemberListEntry> {
+        self.list_members()
+            .await
+            .into_iter()
+            .filter(|entry| {
+                entry.state == crate::roster::MemberState::Active
+                    && entry.status == MobMemberStatus::Active
+            })
+            .collect()
     }
 
     /// List all members including those in `Retiring` state.
@@ -619,6 +736,9 @@ impl MobHandle {
 
     /// Acquire a capability-bearing handle for a specific active member.
     pub async fn member(&self, meerkat_id: &MeerkatId) -> Result<MemberHandle, MobError> {
+        if let Some(diag) = self.restore_failure_for(meerkat_id).await {
+            return Err(Self::restore_failure_error(meerkat_id, diag));
+        }
         let entry = self
             .get_member(meerkat_id)
             .await
@@ -1324,11 +1444,38 @@ impl MobHandle {
             }
         };
 
+        let restore_failure = {
+            self.restore_diagnostics
+                .read()
+                .await
+                .get(meerkat_id)
+                .cloned()
+        };
+
+        if let Some(diag) = restore_failure {
+            let member_present = roster_state.is_some();
+            return CanonicalMemberSnapshotMaterial {
+                member_present,
+                status: if member_present {
+                    CanonicalMemberStatus::Broken
+                } else {
+                    CanonicalMemberStatus::Unknown
+                },
+                session_observation: CanonicalSessionObservation::Missing,
+                error: Some(diag.reason),
+                output_preview: None,
+                tokens_used: 0,
+                current_session_id: Some(diag.session_id),
+                peer_connectivity: None,
+            };
+        }
+
         match (roster_state, current_session_id) {
             (None, _) => CanonicalMemberSnapshotMaterial {
                 member_present: false,
                 status: CanonicalMemberStatus::Unknown,
                 session_observation: CanonicalSessionObservation::Missing,
+                error: None,
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
@@ -1338,6 +1485,7 @@ impl MobHandle {
                 member_present: true,
                 status: CanonicalMemberStatus::Retiring,
                 session_observation: CanonicalSessionObservation::Missing,
+                error: None,
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
@@ -1347,6 +1495,7 @@ impl MobHandle {
                 member_present: true,
                 status: CanonicalMemberStatus::Completed,
                 session_observation: CanonicalSessionObservation::Missing,
+                error: None,
                 output_preview: None,
                 tokens_used: 0,
                 current_session_id: None,
@@ -1396,6 +1545,7 @@ impl MobHandle {
                     member_present: true,
                     status,
                     session_observation: observation,
+                    error: None,
                     output_preview,
                     tokens_used,
                     current_session_id: Some(session_id),

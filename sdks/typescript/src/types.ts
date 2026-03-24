@@ -178,6 +178,10 @@ export interface MobMember {
   readonly state?: string;
   readonly wiredTo?: readonly string[];
   readonly labels?: Record<string, string>;
+  readonly status?: string;
+  readonly error?: string;
+  readonly isFinal?: boolean;
+  readonly currentSessionId?: string;
   readonly sessionId?: string;
 }
 

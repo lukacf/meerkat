@@ -92,8 +92,9 @@ pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
 pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MemberSessionRef, MobEventsView, MobHandle, MobMemberSnapshot, MobMemberStatus,
-    MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
+    MemberSessionRef, MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot,
+    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget,
+    SpawnMemberSpec,
 };
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};

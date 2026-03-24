@@ -20,6 +20,59 @@ use meerkat_tools::{
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn canonical_session_comms_identity_root(
+    user_config_root: Option<&Path>,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(root) = user_config_root {
+        return Ok(root.join(".rkat").join("session_comms_identity"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "HOME is not set; cannot resolve session comms identity root".to_string()
+        })?;
+        return Ok(std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("meerkat")
+            .join("session_comms_identity"));
+    }
+
+    #[cfg(windows)]
+    {
+        let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+            "LOCALAPPDATA is not set; cannot resolve session comms identity root".to_string()
+        })?;
+        return Ok(std::path::PathBuf::from(local_app_data)
+            .join("meerkat")
+            .join("session_comms_identity"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(xdg_state_home) = std::env::var_os("XDG_STATE_HOME") {
+            return Ok(std::path::PathBuf::from(xdg_state_home)
+                .join("meerkat")
+                .join("session_comms_identity"));
+        }
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "HOME is not set; cannot resolve session comms identity root".to_string()
+        })?;
+        Ok(std::path::PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("meerkat")
+            .join("session_comms_identity"))
+    }
+
+    #[cfg(not(any(target_os = "macos", windows, unix)))]
+    {
+        Err("session-scoped comms identity root is unsupported on this platform".to_string())
+    }
+}
+
 /// Resolve layered hooks config (global -> project) without duplicating project entries.
 pub async fn resolve_layered_hooks_config(
     context_root: Option<&Path>,
@@ -405,6 +458,98 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
             inproc_namespace.clone(),
             silent_intents.clone(),
         )
+        .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,
+        CommsRuntimeMode::Tcp => {
+            let address = config
+                .comms
+                .address
+                .as_ref()
+                .ok_or_else(|| "comms.address is required when comms.mode = tcp".to_string())?;
+            let listen_tcp = address
+                .parse()
+                .map_err(|e| format!("Invalid comms TCP address '{address}': {e}"))?;
+            let comms = CoreCommsConfig {
+                enabled: true,
+                name: comms_name.to_string(),
+                inproc_namespace: inproc_namespace.clone(),
+                listen_tcp: Some(listen_tcp),
+                auth: config.comms.auth,
+                event_listen_tcp,
+                ..Default::default()
+            };
+            let resolved = comms.resolve_paths(base_dir.as_ref());
+            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
+                .await
+                .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
+            rt.start_listeners()
+                .await
+                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+            rt
+        }
+        CommsRuntimeMode::Uds => {
+            let address = config
+                .comms
+                .address
+                .as_ref()
+                .ok_or_else(|| "comms.address is required when comms.mode = uds".to_string())?;
+            let comms = CoreCommsConfig {
+                enabled: true,
+                name: comms_name.to_string(),
+                inproc_namespace: inproc_namespace.clone(),
+                listen_uds: Some(std::path::PathBuf::from(address)),
+                auth: config.comms.auth,
+                event_listen_tcp,
+                ..Default::default()
+            };
+            let resolved = comms.resolve_paths(base_dir.as_ref());
+            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
+                .await
+                .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
+            rt.start_listeners()
+                .await
+                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+            rt
+        }
+    };
+
+    if let Some(meta) = peer_meta {
+        runtime.set_peer_meta(meta);
+    }
+
+    Ok(runtime)
+}
+
+#[cfg(feature = "comms")]
+#[allow(clippy::implicit_hasher)]
+pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
+    config: &Config,
+    base_dir: impl AsRef<Path>,
+    user_config_root: Option<&Path>,
+    comms_name: &str,
+    peer_meta: Option<meerkat_core::PeerMeta>,
+    inproc_namespace: Option<String>,
+    session_id: &meerkat_core::SessionId,
+    silent_intents: std::sync::Arc<std::collections::HashSet<String>>,
+) -> Result<CommsRuntime, String> {
+    let event_listen_tcp = config
+        .comms
+        .event_address
+        .as_ref()
+        .map(|addr| {
+            addr.parse()
+                .map_err(|e| format!("Invalid event_address '{addr}': {e}"))
+        })
+        .transpose()?;
+
+    let runtime = match config.comms.mode {
+        CommsRuntimeMode::Inproc => CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            comms_name,
+            inproc_namespace.clone(),
+            canonical_session_comms_identity_root(user_config_root)?,
+            session_id,
+            silent_intents.clone(),
+        )
+        .await
         .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,
         CommsRuntimeMode::Tcp => {
             let address = config

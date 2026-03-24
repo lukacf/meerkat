@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use meerkat::surface::{RequestContext, request_action};
 use meerkat::SessionService;
 use meerkat_core::service::{
-    CreateSessionRequest, HostModeOwner, InitialTurnPolicy, SessionBuildOptions,
+    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
 };
 use meerkat_core::Session;
 
@@ -79,7 +79,6 @@ pub async fn handle(
         max_tokens: None,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::SessionService,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),

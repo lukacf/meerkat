@@ -62,7 +62,7 @@ impl Supervisor {
 
         let escalation_target = self
             .handle
-            .list_members()
+            .list_runnable_members()
             .await
             .into_iter()
             .find(|entry| entry.profile == supervisor_role)

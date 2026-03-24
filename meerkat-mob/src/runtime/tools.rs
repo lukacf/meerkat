@@ -625,6 +625,10 @@ impl AgentToolDispatcher for MobToolDispatcher {
                             "session_id": entry.session_id(),
                             "wired_to": entry.wired_to,
                             "external_peer_specs": entry.external_peer_specs,
+                            "status": entry.status,
+                            "error": entry.error,
+                            "is_final": entry.is_final,
+                            "current_session_id": entry.current_session_id,
                         })
                     })
                     .collect::<Vec<_>>();

@@ -341,6 +341,10 @@ export interface MobMember {
   state?: string;
   wired_to?: string[];
   labels?: Record<string, string>;
+  status?: string;
+  error?: string;
+  is_final?: boolean;
+  current_session_id?: string;
 }
 
 export interface ExternalPeerTarget {

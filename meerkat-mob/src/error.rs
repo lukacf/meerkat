@@ -32,6 +32,14 @@ pub enum MobError {
     #[error("wiring error: {0}")]
     WiringError(String),
 
+    /// The member failed to restore durable session state and is broken until repaired.
+    #[error("member {member_id} failed to restore session {session_id}: {reason}")]
+    MemberRestoreFailed {
+        member_id: MeerkatId,
+        session_id: meerkat_core::types::SessionId,
+        reason: String,
+    },
+
     /// The mob definition failed validation.
     #[error("definition error: {}", format_diagnostics(.0))]
     DefinitionError(Vec<Diagnostic>),
@@ -210,6 +218,11 @@ mod tests {
                 to: MobState::Running,
             },
             MobError::WiringError("w".to_string()),
+            MobError::MemberRestoreFailed {
+                member_id: MeerkatId::from("m"),
+                session_id: meerkat_core::types::SessionId::new(),
+                reason: "restore failed".to_string(),
+            },
             MobError::DefinitionError(vec![]),
             MobError::FlowNotFound(FlowId::from("f")),
             MobError::FlowFailed {

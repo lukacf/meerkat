@@ -1606,3 +1606,345 @@ exclude = ["mcp"]
         let _ = std::fs::remove_dir_all(workspace_root.join("dist/smoke-test"));
     }
 }
+
+// ============================================================================
+// SCENARIO 22: Runtime-backed host-mode comms stress
+// ============================================================================
+//
+// This is the critical post-cutover test: proves that comms admission works
+// exclusively through the runtime ingress path (comms_drain → comms_bridge →
+// RuntimeSessionAdapter → ingress authority → policy table). No direct
+// drain_comms_inbox or session-service host loop exists anymore.
+
+#[cfg(feature = "comms")]
+mod scenario_22_runtime_host_comms {
+    use super::*;
+    use meerkat_comms::agent::{
+        CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
+    };
+    use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, StartTurnRequest};
+    use meerkat_runtime::RuntimeSessionAdapter;
+    use parking_lot::RwLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Minimal runtime executor that routes turns through the session service.
+    struct TestRuntimeExecutor {
+        service: Arc<meerkat_session::EphemeralSessionService<meerkat::FactoryAgentBuilder>>,
+        session_id: meerkat_core::types::SessionId,
+        turn_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for TestRuntimeExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.turn_count.fetch_add(1, Ordering::Relaxed);
+
+            let prompt = match &primitive {
+                RunPrimitive::StagedInput(staged) => staged
+                    .appends
+                    .iter()
+                    .filter_map(|a| match &a.content {
+                        meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                RunPrimitive::ImmediateAppend(append) => match &append.content {
+                    meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                        text.clone()
+                    }
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+
+            let turn_req = StartTurnRequest {
+                prompt: prompt.into(),
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                event_tx: None,
+                host_mode: primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.host_mode)
+                    .unwrap_or(false),
+                skill_references: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            };
+
+            let result = self
+                .service
+                .start_turn(&self.session_id, turn_req)
+                .await
+                .map_err(|e| CoreExecutorError::ApplyFailed {
+                    reason: e.to_string(),
+                })?;
+            let _ = result;
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id: _run_id,
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "e2e: live API"]
+    async fn e2e_runtime_host_mode_comms_stress() {
+        let Some(api_key) = anthropic_api_key() else {
+            eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
+            return;
+        };
+
+        // --- TCP comms wiring for two agents ---
+        let keypair_a = Keypair::generate();
+        let keypair_b = Keypair::generate();
+        let pubkey_a = keypair_a.public_key();
+        let pubkey_b = keypair_b.public_key();
+
+        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = listener_a.local_addr().unwrap();
+        drop(listener_a);
+
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = listener_b.local_addr().unwrap();
+        drop(listener_b);
+
+        let trusted_for_a = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "agent-b".to_string(),
+                pubkey: pubkey_b,
+                addr: format!("tcp://{addr_b}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            }],
+        };
+
+        let trusted_for_b = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "agent-a".to_string(),
+                pubkey: pubkey_a,
+                addr: format!("tcp://{addr_a}"),
+                meta: meerkat_comms::PeerMeta::default(),
+            }],
+        };
+
+        let config_a = CommsManagerConfig::with_keypair(keypair_a)
+            .trusted_peers(trusted_for_a.clone())
+            .comms_config(CommsConfig::default());
+        let comms_manager_a = CommsManager::new(config_a).unwrap();
+
+        let config_b = CommsManagerConfig::with_keypair(keypair_b)
+            .trusted_peers(trusted_for_b.clone())
+            .comms_config(CommsConfig::default());
+        let comms_manager_b = CommsManager::new(config_b).unwrap();
+
+        let trusted_a_shared = Arc::new(RwLock::new(trusted_for_a));
+        let trusted_b_shared = Arc::new(RwLock::new(trusted_for_b));
+
+        let handle_a = spawn_tcp_listener(
+            &addr_a.to_string(),
+            comms_manager_a.keypair_arc(),
+            trusted_a_shared.clone(),
+            comms_manager_a.inbox_sender().clone(),
+        )
+        .await
+        .expect("listener A");
+
+        let handle_b = spawn_tcp_listener(
+            &addr_b.to_string(),
+            comms_manager_b.keypair_arc(),
+            trusted_b_shared.clone(),
+            comms_manager_b.inbox_sender().clone(),
+        )
+        .await
+        .expect("listener B");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // --- Agent A: runtime-backed host-mode agent ---
+        let temp_a = TempDir::new().unwrap();
+        let factory_a = AgentFactory::new(temp_a.path().join("sessions"));
+        let mut config = Config::default();
+        config.agent.model = smoke_model();
+        config.agent.system_prompt = Some(
+            "You are Agent A in host mode. When you receive a peer message, \
+             acknowledge it briefly. Keep responses under 50 words."
+                .to_string(),
+        );
+
+        let service_a = Arc::new(build_ephemeral_service(factory_a, config.clone(), 4));
+        let runtime_adapter_a = Arc::new(RuntimeSessionAdapter::ephemeral());
+
+        // Create session (host_mode=false on ephemeral — it's rejected there;
+        // the runtime adapter is what actually owns host-mode behavior).
+        let create_req = CreateSessionRequest {
+            model: smoke_model(),
+            prompt: "You are now in host mode. Wait for incoming messages."
+                .to_string()
+                .into(),
+            render_metadata: None,
+            system_prompt: Some(
+                "You are Agent A. You will receive messages from peers. \
+                 Acknowledge each one briefly."
+                    .to_string(),
+            ),
+            max_tokens: Some(256),
+            event_tx: None,
+            host_mode: false,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: None,
+            labels: None,
+        };
+
+        let create_result = service_a
+            .create_session(create_req)
+            .await
+            .expect("create_session A");
+        let session_id_a = create_result.session_id.clone();
+        eprintln!("[scenario 22] Created agent A session: {session_id_a}");
+
+        // Wire runtime executor
+        let turn_count_a = Arc::new(AtomicUsize::new(0));
+        let executor_a = Box::new(TestRuntimeExecutor {
+            service: service_a.clone(),
+            session_id: session_id_a.clone(),
+            turn_count: turn_count_a.clone(),
+        });
+        runtime_adapter_a
+            .register_session(session_id_a.clone())
+            .await;
+        runtime_adapter_a
+            .register_session_with_executor(session_id_a.clone(), executor_a)
+            .await;
+
+        // Submit initial prompt through runtime
+        let initial_input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "You are now in host mode. Wait for incoming messages.".to_string(),
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    host_mode: Some(true),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_outcome, initial_handle) = runtime_adapter_a
+            .accept_input_with_completion(&session_id_a, initial_input)
+            .await
+            .expect("accept initial prompt");
+
+        // Wait for initial turn to complete
+        if let Some(handle) = initial_handle {
+            let _ = handle.wait().await;
+        }
+        eprintln!("[scenario 22] Agent A initial turn complete");
+
+        // Spawn comms drain — this is the sole surviving host-mode inbox path
+        use meerkat_core::service::SessionServiceCommsExt;
+        let comms_rt_a = service_a.comms_runtime(&session_id_a).await;
+        runtime_adapter_a
+            .maybe_spawn_comms_drain(&session_id_a, true, comms_rt_a)
+            .await;
+        eprintln!("[scenario 22] Comms drain spawned for agent A");
+
+        // --- Agent B: simple agent that sends messages to A ---
+        let llm_client_b = Arc::new(AnthropicClient::new(api_key).unwrap());
+        let llm_adapter_b = Arc::new(LlmClientAdapter::new(llm_client_b, smoke_model()));
+        let tools_b = Arc::new(CommsToolDispatcher::new(
+            comms_manager_b.router().clone(),
+            trusted_b_shared,
+        ));
+        let (_store_b, store_adapter_b, _temp_b) = create_temp_store().await;
+        let mut agent_b = meerkat_comms::agent::CommsAgent::new(
+            AgentBuilder::new()
+                .model(smoke_model())
+                .max_tokens_per_turn(256)
+                .system_prompt(
+                    "You are Agent B. Use the `send` tool to send a peer_message to agent-a. \
+                     Send exactly this body: 'Runtime host mode stress test ping'",
+                )
+                .build(llm_adapter_b, tools_b, store_adapter_b)
+                .await,
+            comms_manager_b,
+        );
+
+        // --- Agent B sends a message to A ---
+        let result_b = agent_b
+            .run(
+                "Send a peer_message to agent-a with body exactly: \
+                 'Runtime host mode stress test ping'"
+                    .into(),
+            )
+            .await
+            .expect("Agent B send should succeed");
+        eprintln!(
+            "[scenario 22] Agent B sent message: tool_calls={}, text={}",
+            result_b.tool_calls,
+            result_b.text.trim()
+        );
+        assert!(
+            result_b.tool_calls > 0,
+            "Agent B should have used the send tool"
+        );
+
+        // Wait for message delivery + comms drain to pick it up + runtime to process
+        eprintln!("[scenario 22] Waiting for runtime-backed comms admission...");
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let turns = turn_count_a.load(Ordering::Relaxed);
+            eprintln!("[scenario 22] Agent A turns executed via runtime: {turns}");
+            // Initial turn = 1, comms-driven turn = 2+
+            if turns >= 2 {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!(
+                    "Timeout: agent A never processed comms message through runtime ingress. \
+                     turns={turns}. This means comms_drain → runtime ingress → executor \
+                     pipeline is broken."
+                );
+            }
+        }
+
+        let final_turns = turn_count_a.load(Ordering::Relaxed);
+        eprintln!(
+            "[scenario 22] PASS: Agent A executed {final_turns} turns via runtime-backed path"
+        );
+
+        // Verify:
+        // - All messages admitted (none lost) — at least 2 turns ran
+        assert!(
+            final_turns >= 2,
+            "Agent A should have run at least 2 turns (initial + comms-driven)"
+        );
+
+        // Cleanup
+        handle_a.abort();
+        handle_b.abort();
+    }
+}

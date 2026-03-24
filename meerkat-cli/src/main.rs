@@ -3236,7 +3236,14 @@ async fn run_agent(
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+    let external_tools =
+        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
+            Ok(tools) => tools,
+            Err(err) => {
+                shutdown_mcp(&mcp_adapter).await;
+                return Err(err);
+            }
+        };
 
     let parsed_app_context = app_context
         .as_deref()
@@ -3718,7 +3725,14 @@ async fn resume_session_with_llm_override(
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+    let external_tools =
+        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
+            Ok(tools) => tools,
+            Err(err) => {
+                shutdown_mcp(&mcp_adapter).await;
+                return Err(err);
+            }
+        };
 
     let output_pipeline = CliOutputPipeline::new(
         stream,

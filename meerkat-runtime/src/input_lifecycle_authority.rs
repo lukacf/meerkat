@@ -185,6 +185,15 @@ impl Default for InputLifecycleAuthority {
 impl InputLifecycleAuthority {
     /// Create a new authority in the Accepted state.
     pub fn new() -> Self {
+        Self::new_at(Utc::now())
+    }
+
+    /// Create a new authority in the Accepted state with a caller-owned timestamp.
+    ///
+    /// Use this when the caller already captured a canonical `now` to ensure
+    /// `updated_at` is consistent with sibling timestamps (e.g., `created_at`
+    /// on the owning `InputState`).
+    pub fn new_at(now: DateTime<Utc>) -> Self {
         Self {
             phase: InputLifecycleState::Accepted,
             fields: InputLifecycleFields {
@@ -193,7 +202,7 @@ impl InputLifecycleAuthority {
                 last_boundary_sequence: None,
             },
             history: Vec::new(),
-            updated_at: Utc::now(),
+            updated_at: now,
         }
     }
 

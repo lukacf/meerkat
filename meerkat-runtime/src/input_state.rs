@@ -171,7 +171,7 @@ impl InputState {
         let now = Utc::now();
         Self {
             input_id,
-            authority: InputLifecycleAuthority::new(),
+            authority: InputLifecycleAuthority::new_at(now),
             policy: None,
             durability: None,
             idempotency_key: None,
@@ -346,6 +346,7 @@ mod tests {
         ApplyMode, ConsumePoint, DrainPolicy, InterruptPolicy, QueueMode, RoutingDisposition,
         WakeMode,
     };
+    use meerkat_core::ops::{OpEvent, OperationId};
 
     #[test]
     fn lifecycle_state_terminal() {
@@ -417,6 +418,48 @@ mod tests {
         assert_eq!(parsed.input_id, state.input_id);
         assert_eq!(parsed.current_state(), state.current_state());
         assert_eq!(parsed.history().len(), 1);
+    }
+
+    #[test]
+    fn input_state_deserializes_legacy_persisted_input_tags() {
+        let mut continuation_state = InputState::new_accepted(InputId::new());
+        continuation_state.persisted_input = Some(Input::Continuation(
+            crate::input::ContinuationInput::terminal_peer_response_for_request(
+                "legacy continuation",
+                Some("req-legacy".into()),
+            ),
+        ));
+        let mut continuation_json = serde_json::to_value(&continuation_state).unwrap();
+        continuation_json["persisted_input"]["input_type"] =
+            serde_json::Value::String("system_generated".into());
+        let parsed: InputState = serde_json::from_value(continuation_json).unwrap();
+        assert!(matches!(
+            parsed.persisted_input,
+            Some(Input::Continuation(_))
+        ));
+
+        let mut operation_state = InputState::new_accepted(InputId::new());
+        operation_state.persisted_input = Some(Input::Operation(crate::input::OperationInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: crate::input::InputOrigin::System,
+                durability: crate::input::InputDurability::Derived,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            operation_id: OperationId::new(),
+            event: OpEvent::Cancelled {
+                id: OperationId::new(),
+            },
+        }));
+        let mut operation_json = serde_json::to_value(&operation_state).unwrap();
+        operation_json["persisted_input"]["input_type"] =
+            serde_json::Value::String("projected".into());
+        let parsed: InputState = serde_json::from_value(operation_json).unwrap();
+        assert!(matches!(parsed.persisted_input, Some(Input::Operation(_))));
     }
 
     #[test]

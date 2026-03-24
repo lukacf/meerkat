@@ -874,6 +874,27 @@ async fn initialize_methods_list_complete() {
     handle.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn notification_catalog_lists_live_stream_notifications() {
+    let notifications = meerkat_contracts::rpc_notification_names(
+        meerkat_contracts::RpcMethodCatalogOptions::documented_surface(),
+    );
+
+    for expected in [
+        "initialized",
+        "session/event",
+        "session/stream_event",
+        "session/stream_end",
+        "mob/stream_event",
+        "mob/stream_end",
+    ] {
+        assert!(
+            notifications.iter().any(|name| name == expected),
+            "notification catalog missing {expected}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 15. mob_create_status_list_lifecycle (feature-gated)
 // ---------------------------------------------------------------------------

@@ -116,6 +116,38 @@ test("Session.destroy remains retryable when the underlying wasm destroy throws"
   assert.throws(() => session.getState(), /destroyed/i);
 });
 
+test("Session.destroy becomes idempotent after the runtime has already been destroyed", () => {
+  let destroyAttempts = 0;
+  const session = new Session(
+    8,
+    async () => "{}",
+    () => JSON.stringify({
+      handle: 8,
+      session_id: "sess_runtime_gone",
+      mob_id: "",
+      model: "claude-sonnet-4-5",
+      usage: { input_tokens: 0, output_tokens: 0 },
+      run_counter: 0,
+      message_count: 0,
+      is_active: false,
+      last_assistant_text: null,
+    }),
+    () => {
+      destroyAttempts += 1;
+      throw new Error("not_initialized: runtime not initialized");
+    },
+    () => "[]",
+    () => JSON.stringify({ handle: 8, status: "staged" }),
+  );
+
+  assert.doesNotThrow(() => session.destroy());
+  assert.equal(session.isDestroyed, true);
+  assert.equal(destroyAttempts, 1);
+  assert.doesNotThrow(() => session.destroy());
+  assert.equal(destroyAttempts, 1);
+  assert.throws(() => session.getState(), /destroyed/i);
+});
+
 test("MeerkatRuntime opens and closes a public mob subscription through the shipped package surface", async () => {
   let subscribedHandle;
   const wasm = {

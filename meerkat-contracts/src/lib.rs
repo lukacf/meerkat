@@ -6,6 +6,7 @@
 pub mod capability;
 pub mod error;
 pub mod protocol;
+pub mod rpc_catalog;
 pub mod session_locator;
 pub mod version;
 pub mod wire;
@@ -20,6 +21,10 @@ pub use capability::{
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use protocol::Protocol;
+pub use rpc_catalog::{
+    RpcMethodCatalogOptions, RpcMethodDescriptor, RpcNotificationDescriptor, rpc_method_catalog,
+    rpc_method_names, rpc_notification_catalog, rpc_notification_names,
+};
 pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
 pub use wire::{

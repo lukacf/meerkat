@@ -132,12 +132,30 @@ export class Session {
   /** Destroy the session and release resources. */
   destroy(): void {
     if (this.destroyed) return;
-    this.destroyFn(this.handle);
-    this.destroyed = true;
+    try {
+      this.destroyFn(this.handle);
+      this.destroyed = true;
+    } catch (error) {
+      if (isRuntimeNotInitializedError(error)) {
+        this.destroyed = true;
+        return;
+      }
+      throw error;
+    }
   }
 
   /** Whether this session has been destroyed. */
   get isDestroyed(): boolean {
     return this.destroyed;
   }
+}
+
+function isRuntimeNotInitializedError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+  return /not_initialized/i.test(message);
 }

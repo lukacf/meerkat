@@ -664,6 +664,32 @@ impl SessionRuntime {
             }
         }
 
+        // Reject build-only overrides that cannot be applied via runtime turn
+        // metadata. These fields only apply during pending→materialized
+        // promotion (handled by the legacy start_turn path). Silently
+        // dropping them would violate surface contract.
+        if let Some(ref ov) = overrides {
+            let rejected = [
+                ov.max_tokens.map(|_| "max_tokens"),
+                ov.system_prompt.as_ref().map(|_| "system_prompt"),
+                ov.output_schema.as_ref().map(|_| "output_schema"),
+                ov.structured_output_retries
+                    .map(|_| "structured_output_retries"),
+            ];
+            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
+            if !rejected.is_empty() {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!(
+                        "Cannot override {} on a runtime-routed turn; \
+                         set these at session/create time or use a deferred session",
+                        rejected.join(", ")
+                    ),
+                    data: None,
+                });
+            }
+        }
+
         // Build turn metadata from overrides
         let turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
@@ -4454,5 +4480,81 @@ mod tests {
             meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
             "hot-swap to Anthropic should remove view_image but keep other denied tools"
         );
+    }
+
+    /// Regression: start_turn_via_runtime must reject build-only overrides
+    /// (max_tokens, system_prompt, output_schema, structured_output_retries)
+    /// that cannot be applied via RuntimeTurnMetadata. Before the fix these
+    /// were silently dropped.
+    #[tokio::test]
+    async fn runtime_turn_rejects_build_only_overrides() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        for (field, overrides) in [
+            (
+                "max_tokens",
+                TurnOverrides {
+                    max_tokens: Some(1024),
+                    ..Default::default()
+                },
+            ),
+            (
+                "system_prompt",
+                TurnOverrides {
+                    system_prompt: Some("override".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "output_schema",
+                TurnOverrides {
+                    output_schema: Some(serde_json::json!({"type": "object"})),
+                    ..Default::default()
+                },
+            ),
+            (
+                "structured_output_retries",
+                TurnOverrides {
+                    structured_output_retries: Some(5),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let (tx, _rx) = mpsc::channel(100);
+            let result = runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    "test".into(),
+                    tx,
+                    None,
+                    None,
+                    None,
+                    Some(overrides),
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "build-only override '{field}' must be rejected on runtime-routed turn"
+            );
+            let err = result.unwrap_err();
+            assert_eq!(
+                err.code,
+                error::INVALID_PARAMS,
+                "'{field}' rejection must use INVALID_PARAMS"
+            );
+            assert!(
+                err.message.contains(field),
+                "error message must mention '{field}': {}",
+                err.message
+            );
+        }
     }
 }

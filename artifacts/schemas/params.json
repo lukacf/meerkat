@@ -31,7 +31,7 @@
           "null"
         ]
       },
-      "host_mode": {
+      "keep_alive": {
         "default": false,
         "type": "boolean"
       },

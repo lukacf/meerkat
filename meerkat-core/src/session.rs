@@ -511,6 +511,7 @@ pub struct SessionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
     pub tooling: SessionTooling,
+    #[serde(default)]
     pub keep_alive: bool,
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (populated when comms is enabled).

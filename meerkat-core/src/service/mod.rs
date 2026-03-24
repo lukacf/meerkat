@@ -144,9 +144,6 @@ pub struct CreateSessionRequest {
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Run in host mode: process prompt then stay alive for comms messages.
-    /// This is a session-level property applied to all turns.
-    pub host_mode: bool,
     /// Canonical SkillKeys to resolve and inject for the first turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
@@ -310,8 +307,6 @@ pub struct StartTurnRequest {
     pub handling_mode: HandlingMode,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Run this turn in host mode.
-    pub host_mode: bool,
     /// Canonical SkillKeys to resolve and inject for this turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).

@@ -34,7 +34,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             system_prompt: Some("You are a helpful assistant. Be concise.".into()),
             max_tokens: Some(512),
             event_tx: None,
-            host_mode: false,
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: None,

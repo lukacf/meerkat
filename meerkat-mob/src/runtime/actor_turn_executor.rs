@@ -356,7 +356,6 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             render_metadata: None,
                             handling_mode: meerkat_core::types::HandlingMode::Queue,
                             event_tx: Some(event_tx),
-                            host_mode: false,
                             skill_references: None,
                             flow_tool_overlay,
                             additional_instructions: None,

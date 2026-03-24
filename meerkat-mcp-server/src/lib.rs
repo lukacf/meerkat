@@ -112,8 +112,8 @@ pub struct MeerkatRunInput {
     /// Run in host mode: process prompt then stay alive listening for comms messages.
     /// Requires comms_name to be set.
     #[serde(default)]
-    pub host_mode: bool,
-    /// Agent name for inter-agent communication. Required for host_mode.
+    pub keep_alive: bool,
+    /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (name, description, labels).
@@ -266,16 +266,16 @@ async fn load_config_async(
     config
 }
 
-fn resolve_host_mode(requested: bool) -> Result<bool, String> {
+fn resolve_keep_alive(requested: bool) -> Result<bool, String> {
     #[cfg(feature = "comms")]
     {
-        meerkat::surface::resolve_host_mode(requested)
+        meerkat::surface::resolve_keep_alive(requested)
     }
     #[cfg(not(feature = "comms"))]
     {
         if requested {
             return Err(
-                "host_mode requires comms support (build with --features comms)".to_string(),
+                "keep_alive requires comms support (build with --features comms)".to_string(),
             );
         }
         Ok(false)
@@ -668,8 +668,8 @@ pub struct MeerkatResumeInput {
     pub builtin_config: Option<BuiltinConfigInput>,
     /// Run in host mode: process prompt then stay alive listening for comms messages.
     #[serde(default)]
-    pub host_mode: bool,
-    /// Agent name for inter-agent communication. Required for host_mode.
+    pub keep_alive: bool,
+    /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.
@@ -2252,14 +2252,14 @@ async fn handle_meerkat_run(
     request_context: Option<RequestContext>,
 ) -> Result<Value, String> {
     validate_public_peer_meta(input.peer_meta.as_ref())?;
-    let host_mode = resolve_host_mode(input.host_mode)?;
-    if host_mode
+    let keep_alive = resolve_keep_alive(input.keep_alive)?;
+    if keep_alive
         && input
             .comms_name
             .as_ref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err("host_mode requires comms_name".to_string());
+        return Err("keep_alive requires comms_name".to_string());
     }
     let config = state
         .config_runtime
@@ -2379,7 +2379,6 @@ async fn handle_meerkat_run(
         system_prompt: input.system_prompt,
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
-        host_mode,
 
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
@@ -2402,13 +2401,13 @@ async fn handle_meerkat_run(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Spawn comms drain for host_mode sessions — lifecycle owned by runtime adapter.
+    // Spawn comms drain for keep_alive sessions — lifecycle owned by runtime adapter.
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
         state
             .runtime_adapter
-            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
     }
 
@@ -2499,20 +2498,20 @@ async fn handle_meerkat_resume(
             .map(|meta| meta.tooling.memory)
             .filter(|&v| v)
     });
-    let host_mode_requested =
-        input.host_mode || stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
-    let host_mode = resolve_host_mode(host_mode_requested)?;
+    let keep_alive_requested =
+        input.keep_alive || stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
+    let keep_alive = resolve_keep_alive(keep_alive_requested)?;
     let comms_name = input.comms_name.clone().or_else(|| {
         stored_metadata
             .as_ref()
             .and_then(|meta| meta.comms_name.clone())
     });
-    if host_mode
+    if keep_alive
         && comms_name
             .as_ref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err("host_mode requires comms_name".to_string());
+        return Err("keep_alive requires comms_name".to_string());
     }
     let model = input
         .model
@@ -2664,7 +2663,6 @@ async fn handle_meerkat_resume(
             system_prompt: input.system_prompt.clone(),
             max_tokens,
             event_tx: event_tx.clone(),
-            host_mode,
 
             skill_references,
             initial_turn: InitialTurnPolicy::RunImmediately,
@@ -2680,7 +2678,6 @@ async fn handle_meerkat_resume(
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: event_tx.clone(),
-            host_mode,
 
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
@@ -2696,7 +2693,6 @@ async fn handle_meerkat_resume(
                     system_prompt: input.system_prompt.clone(),
                     max_tokens,
                     event_tx: event_tx.clone(),
-                    host_mode,
 
                     skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
@@ -2724,13 +2720,13 @@ async fn handle_meerkat_resume(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Spawn comms drain for host_mode sessions — lifecycle owned by runtime adapter.
+    // Spawn comms drain for keep_alive sessions — lifecycle owned by runtime adapter.
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
         state
             .runtime_adapter
-            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
     }
 
@@ -3356,42 +3352,42 @@ mod tests {
 
     #[cfg(not(feature = "comms"))]
     #[test]
-    fn test_resolve_host_mode_rejects_when_comms_disabled() {
-        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
-        assert!(err.contains("host_mode requires comms support"));
+    fn test_resolve_keep_alive_rejects_when_comms_disabled() {
+        let err = resolve_keep_alive(true).expect_err("keep_alive should be rejected");
+        assert!(err.contains("keep_alive requires comms support"));
     }
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_resolve_host_mode_allows_when_comms_enabled() {
-        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
-        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
+    fn test_resolve_keep_alive_allows_when_comms_enabled() {
+        assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
+        assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
     }
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_meerkat_run_input_with_host_mode() {
+    fn test_meerkat_run_input_with_keep_alive() {
         let input_json = json!({
             "prompt": "Hello",
-            "host_mode": true,
+            "keep_alive": true,
             "comms_name": "test-agent"
         });
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
-        assert!(input.host_mode);
+        assert!(input.keep_alive);
         assert_eq!(input.comms_name, Some("test-agent".to_string()));
     }
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_meerkat_run_input_host_mode_defaults_to_false() {
+    fn test_meerkat_run_input_keep_alive_defaults_to_false() {
         let input_json = json!({
             "prompt": "Hello"
         });
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
-        assert!(!input.host_mode);
+        assert!(!input.keep_alive);
         assert!(input.comms_name.is_none());
     }
 
@@ -3418,7 +3414,7 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[tokio::test]
-    async fn test_handle_meerkat_run_host_mode_requires_comms_name() {
+    async fn test_handle_meerkat_run_keep_alive_requires_comms_name() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
         let result = handle_meerkat_run(
@@ -3436,7 +3432,7 @@ mod tests {
                 tools: vec![],
                 enable_builtins: false,
                 builtin_config: None,
-                host_mode: true,
+                keep_alive: true,
                 comms_name: None, // Missing!
                 peer_meta: None,
                 hooks_override: None,
@@ -3464,14 +3460,14 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_tools_list_has_host_mode_parameter() {
+    fn test_tools_list_has_keep_alive_parameter() {
         let tools = tools_list();
         let run_tool = &tools[0];
 
-        // Verify host_mode parameter exists in the schema
-        assert!(run_tool["inputSchema"]["properties"]["host_mode"].is_object());
+        // Verify keep_alive parameter exists in the schema
+        assert!(run_tool["inputSchema"]["properties"]["keep_alive"].is_object());
         assert_eq!(
-            run_tool["inputSchema"]["properties"]["host_mode"]["type"],
+            run_tool["inputSchema"]["properties"]["keep_alive"]["type"],
             "boolean"
         );
 

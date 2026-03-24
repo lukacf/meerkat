@@ -808,7 +808,7 @@ impl SessionRuntime {
         let turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 handling_mode: None,
-                host_mode: overrides.as_ref().and_then(|ov| ov.host_mode),
+                keep_alive: overrides.as_ref().and_then(|ov| ov.keep_alive),
                 skill_references,
                 flow_tool_overlay,
                 additional_instructions,
@@ -822,16 +822,16 @@ impl SessionRuntime {
 
         self.ensure_runtime_executor(session_id).await?;
 
-        // Spawn comms drain for host_mode sessions routed through the runtime path.
+        // Spawn comms drain for keep_alive sessions routed through the runtime path.
         #[cfg(feature = "comms")]
         {
-            let host_mode = overrides
+            let keep_alive = overrides
                 .as_ref()
-                .and_then(|ov| ov.host_mode)
+                .and_then(|ov| ov.keep_alive)
                 .unwrap_or(false);
             let comms_rt = self.service.comms_runtime(session_id).await;
             self.runtime_adapter
-                .maybe_spawn_comms_drain(session_id, host_mode, comms_rt)
+                .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
                 .await;
         }
 
@@ -999,22 +999,22 @@ impl SessionRuntime {
             }
         };
 
-        let persisted_host_mode = if pending_session.is_none() {
+        let persisted_keep_alive = if pending_session.is_none() {
             self.load_persisted_session(session_id)
                 .await?
-                .and_then(|session| session.session_metadata().map(|meta| meta.host_mode))
+                .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
         } else {
             None
         };
-        let host_mode = overrides
+        let keep_alive = overrides
             .as_ref()
-            .and_then(|ov| ov.host_mode)
+            .and_then(|ov| ov.keep_alive)
             .or_else(|| {
                 pending_session
                     .as_ref()
-                    .map(|(build_config, _, _, _, _)| build_config.host_mode)
+                    .map(|(build_config, _, _, _, _)| build_config.keep_alive)
             })
-            .or(persisted_host_mode)
+            .or(persisted_keep_alive)
             .unwrap_or(false);
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
@@ -1030,7 +1030,6 @@ impl SessionRuntime {
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx.clone()),
-                host_mode,
 
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
@@ -1118,8 +1117,8 @@ impl SessionRuntime {
                 if let Some(retries) = ov.structured_output_retries {
                     build_config.structured_output_retries = retries;
                 }
-                if let Some(host_mode) = ov.host_mode {
-                    build_config.host_mode = host_mode;
+                if let Some(keep_alive) = ov.keep_alive {
+                    build_config.keep_alive = keep_alive;
                 }
             }
 
@@ -1153,7 +1152,6 @@ impl SessionRuntime {
                     system_prompt: build_config.system_prompt.clone(),
                     max_tokens: build_config.max_tokens,
                     event_tx: None,
-                    host_mode: build_config.host_mode,
 
                     skill_references: skill_references.clone(),
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1183,7 +1181,7 @@ impl SessionRuntime {
                     {
                         let comms_rt = self.service.comms_runtime(session_id).await;
                         self.runtime_adapter
-                            .maybe_spawn_comms_drain(session_id, build_config.host_mode, comms_rt)
+                            .maybe_spawn_comms_drain(session_id, build_config.keep_alive, comms_rt)
                             .await;
                     }
                 }
@@ -1227,7 +1225,6 @@ impl SessionRuntime {
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx),
-                        host_mode: build_config.host_mode,
 
                         skill_references,
                         flow_tool_overlay,
@@ -1345,7 +1342,6 @@ impl SessionRuntime {
                     .and_then(|ov| ov.max_tokens)
                     .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens)),
                 event_tx: None,
-                host_mode,
 
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1358,7 +1354,7 @@ impl SessionRuntime {
         {
             let comms_rt = self.service.comms_runtime(session_id).await;
             self.runtime_adapter
-                .maybe_spawn_comms_drain(session_id, host_mode, comms_rt)
+                .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
                 .await;
         }
         let (_, output) = self
@@ -1371,7 +1367,6 @@ impl SessionRuntime {
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
-                    host_mode,
 
                     skill_references,
                     flow_tool_overlay,
@@ -1489,7 +1484,7 @@ impl SessionRuntime {
     ///
     /// `overrides` may contain per-turn overrides. For pending (deferred)
     /// sessions, all overrides are applied to the staged `AgentBuildConfig`.
-    /// For materialized sessions, only `host_mode` is allowed; all other
+    /// For materialized sessions, only `keep_alive` is allowed; all other
     /// overrides are rejected with an error.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_turn(
@@ -1627,8 +1622,8 @@ impl SessionRuntime {
                 if let Some(retries) = ov.structured_output_retries {
                     build_config.structured_output_retries = retries;
                 }
-                if let Some(host_mode) = ov.host_mode {
-                    build_config.host_mode = host_mode;
+                if let Some(keep_alive) = ov.keep_alive {
+                    build_config.keep_alive = keep_alive;
                 }
             }
             // Inject default LLM client if the caller didn't provide one.
@@ -1660,7 +1655,6 @@ impl SessionRuntime {
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: Some(event_tx),
-                host_mode: build_config.host_mode,
 
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -1749,12 +1743,12 @@ impl SessionRuntime {
             }
         }
 
-        let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {
-            Some(host_mode) => host_mode,
+        let keep_alive = match overrides.as_ref().and_then(|ov| ov.keep_alive) {
+            Some(keep_alive) => keep_alive,
             None => self
                 .load_persisted_session(session_id)
                 .await?
-                .and_then(|session| session.session_metadata().map(|meta| meta.host_mode))
+                .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
                 .unwrap_or(false),
         };
 
@@ -1763,7 +1757,6 @@ impl SessionRuntime {
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx.clone()),
-            host_mode,
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
             additional_instructions: additional_instructions.clone(),
@@ -1775,7 +1768,7 @@ impl SessionRuntime {
                     session_id,
                     turn_prompt,
                     event_tx,
-                    host_mode,
+                    keep_alive,
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
@@ -1799,7 +1792,7 @@ impl SessionRuntime {
                     session_id,
                     turn_prompt,
                     event_tx,
-                    host_mode,
+                    keep_alive,
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
@@ -1852,7 +1845,7 @@ impl SessionRuntime {
         session_id: &SessionId,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        host_mode: bool,
+        keep_alive: bool,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
@@ -1896,7 +1889,7 @@ impl SessionRuntime {
             build_config.provider = Some(meta.provider);
             build_config.provider_params = meta.provider_params.clone();
             build_config.max_tokens = Some(meta.max_tokens);
-            build_config.host_mode = meta.host_mode;
+            build_config.keep_alive = meta.keep_alive;
             build_config.comms_name = meta.comms_name.clone();
             build_config.peer_meta = meta.peer_meta.clone();
             build_config.override_builtins = Some(meta.tooling.builtins);
@@ -1906,9 +1899,9 @@ impl SessionRuntime {
             build_config.preload_skills = meta.tooling.active_skills.clone();
         }
 
-        // Apply caller-requested host_mode override (from turn/start params).
-        if host_mode {
-            build_config.host_mode = true;
+        // Apply caller-requested keep_alive override (from turn/start params).
+        if keep_alive {
+            build_config.keep_alive = true;
         }
 
         // Inject default LLM client if available.
@@ -3969,7 +3962,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 1 tests: Deferred create, host_mode override, per-turn overrides
+    // Phase 1 tests: Deferred create, keep_alive override, per-turn overrides
     // -----------------------------------------------------------------------
 
     /// Deferred session/create returns a session in Idle state (no turn executed).
@@ -4016,9 +4009,9 @@ mod tests {
         assert!(result.text.contains("Hello from mock"));
     }
 
-    /// turn/start with host_mode override on a materialized session is not rejected.
+    /// turn/start with keep_alive override on a materialized session is not rejected.
     #[tokio::test]
-    async fn turn_start_with_host_mode_override_accepted_on_materialized() {
+    async fn turn_start_with_keep_alive_override_accepted_on_materialized() {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
@@ -4044,12 +4037,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Second turn with only host_mode override (no model/provider etc.)
-        // should not be rejected — host_mode is allowed on materialized sessions.
-        // Use host_mode: false to avoid needing comms runtime.
+        // Second turn with only keep_alive override (no model/provider etc.)
+        // should not be rejected — keep_alive is allowed on materialized sessions.
+        // Use keep_alive: false to avoid needing comms runtime.
         let (event_tx, _rx) = mpsc::channel(100);
         let overrides = TurnOverrides {
-            host_mode: Some(false),
+            keep_alive: Some(false),
             ..Default::default()
         };
         let result = runtime
@@ -4065,7 +4058,7 @@ mod tests {
             .await;
         assert!(
             result.is_ok(),
-            "host_mode override should succeed on materialized session"
+            "keep_alive override should succeed on materialized session"
         );
     }
 
@@ -4225,7 +4218,7 @@ mod tests {
         let json = serde_json::json!({
             "session_id": "test-id",
             "prompt": "hello",
-            "host_mode": true,
+            "keep_alive": true,
             "model": "claude-opus-4-6",
             "provider": "anthropic",
             "max_tokens": 4096,
@@ -4237,7 +4230,7 @@ mod tests {
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.session_id, "test-id");
         assert_eq!(params.prompt, ContentInput::Text("hello".to_string()));
-        assert_eq!(params.host_mode, Some(true));
+        assert_eq!(params.keep_alive, Some(true));
         assert_eq!(params.model.as_deref(), Some("claude-opus-4-6"));
         assert_eq!(params.provider.as_deref(), Some("anthropic"));
         assert_eq!(params.max_tokens, Some(4096));

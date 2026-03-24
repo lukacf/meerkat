@@ -435,10 +435,6 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 .and_then(|meta| meta.handling_mode)
                 .unwrap_or(meerkat_core::types::HandlingMode::Queue),
             event_tx: queued_context.map(|context| context.event_tx),
-            host_mode: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.host_mode)
-                .unwrap_or(false),
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),
@@ -611,7 +607,7 @@ impl MobProvisioner for SessionBackend {
                 .await?;
             let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 handling_mode: Some(req.handling_mode),
-                host_mode: if req.host_mode { Some(true) } else { None },
+                keep_alive: None,
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
                 additional_instructions: req.additional_instructions.clone(),
@@ -666,7 +662,7 @@ impl MobProvisioner for SessionBackend {
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         handling_mode: Some(req.handling_mode),
-                        host_mode: if req.host_mode { Some(true) } else { None },
+                        keep_alive: None,
                         skill_references: req.skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
                         additional_instructions: req.additional_instructions.clone(),

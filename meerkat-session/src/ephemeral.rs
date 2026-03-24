@@ -551,14 +551,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        // Host mode requires a runtime-backed surface. Direct ephemeral session
-        // service callers cannot own the host-mode drain lifecycle.
-        if req.host_mode {
-            return Err(SessionError::Unsupported(
-                "host_mode requires a runtime-backed surface".to_string(),
-            ));
-        }
-
         // Reserve capacity up front so two concurrent create_session calls cannot race
         // past max_sessions between check and insert.
         let capacity_permit = match self.session_capacity.clone().try_acquire_owned() {
@@ -738,14 +730,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        // Host mode requires a runtime-backed surface. Direct ephemeral session
-        // service callers cannot own the host-mode drain lifecycle.
-        if req.host_mode {
-            return Err(SessionError::Unsupported(
-                "host_mode requires a runtime-backed surface".to_string(),
-            ));
-        }
-
         let (result_tx, result_rx) = oneshot::channel();
 
         // Prepend additional instructions as system notices to the prompt.

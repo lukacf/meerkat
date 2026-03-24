@@ -44,9 +44,9 @@ pub struct StartTurnParams {
     /// Additional instruction sections prepended as system notices for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    /// Override host mode for this turn. Only applies to pending (deferred) sessions.
+    /// Override keep-alive mode for this turn. Only applies to pending (deferred) sessions.
     #[serde(default)]
-    pub host_mode: Option<bool>,
+    pub keep_alive: Option<bool>,
     // -- Per-turn overrides ---------------------------------------------------
     /// Override model. On pending sessions, sets the model before materialization.
     /// On materialized sessions, hot-swaps the LLM client for the remainder of the session.
@@ -105,7 +105,7 @@ fn canonical_skill_ids(
 /// Collect per-turn override fields into a struct for `SessionRuntime::start_turn`.
 #[derive(Debug, Default)]
 pub struct TurnOverrides {
-    pub host_mode: Option<bool>,
+    pub keep_alive: Option<bool>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub max_tokens: Option<u32>,
@@ -117,7 +117,7 @@ pub struct TurnOverrides {
 
 impl TurnOverrides {
     fn is_empty(&self) -> bool {
-        self.host_mode.is_none()
+        self.keep_alive.is_none()
             && self.model.is_none()
             && self.provider.is_none()
             && self.max_tokens.is_none()
@@ -185,7 +185,7 @@ pub async fn handle_start(
     };
 
     let overrides = TurnOverrides {
-        host_mode: params.host_mode,
+        keep_alive: params.keep_alive,
         model: params.model,
         provider: params.provider,
         max_tokens: params.max_tokens,

@@ -49,7 +49,7 @@ pub struct StructuredOutputParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CommsParams {
     #[serde(default)]
-    pub host_mode: bool,
+    pub keep_alive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.

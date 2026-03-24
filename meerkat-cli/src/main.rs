@@ -2386,8 +2386,8 @@ async fn create_mcp_tools(
     Ok(Some(adapter))
 }
 
-fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
-    meerkat::surface::resolve_host_mode(requested).map_err(|e| anyhow::anyhow!(e))
+fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
+    meerkat::surface::resolve_keep_alive(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Load MCP tools as an external tool dispatcher for session build options.
@@ -2500,10 +2500,6 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: self.event_tx.clone(),
-            host_mode: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.host_mode)
-                .unwrap_or(false),
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),
@@ -2622,11 +2618,10 @@ impl SessionService for RunMobSessionService {
         req: CreateSessionRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
         let model = req.model.clone();
-        let host_mode = req.host_mode;
         let started = std::time::Instant::now();
         tracing::info!(
             target: "mob_tools",
-            "RunMobSessionService::create_session start model={model} host_mode={host_mode}"
+            "RunMobSessionService::create_session start model={model}"
         );
         let out = self.inner.create_session(req).await;
         match &out {
@@ -3121,7 +3116,7 @@ async fn run_agent(
     enable_mob: bool,
     wait_for_mcp: bool,
     verbose: bool,
-    host_mode: bool,
+    keep_alive: bool,
     stdin_events: bool,
     line_format: LineFormat,
     config: &Config,
@@ -3137,7 +3132,7 @@ async fn run_agent(
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    let host_mode = resolve_host_mode(host_mode)?;
+    let keep_alive = resolve_keep_alive(keep_alive)?;
     let effective_mob = enable_mob || config.tools.mob_enabled;
     let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
@@ -3205,9 +3200,9 @@ async fn run_agent(
     // Build the parent session service.
     let service = build_cli_service(factory, config.clone());
 
-    if host_mode {
+    if keep_alive {
         eprintln!(
-            "Running in host mode{} (Ctrl+C to exit)...",
+            "Running in keep-alive mode{} (Ctrl+C to exit)...",
             if verbose { " with verbose output" } else { "" }
         );
     }
@@ -3306,7 +3301,6 @@ async fn run_agent(
         system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: output_pipeline.event_sender(),
-        host_mode,
 
         skill_references: if run_initial_turn_during_create {
             canonical_skill_refs.clone()
@@ -3319,10 +3313,10 @@ async fn run_agent(
         labels: parsed_labels,
     };
 
-    // Warn if --stdin is used without --host (it has no effect)
+    // Warn if --stdin is used without keep-alive (it has no effect)
     #[cfg(feature = "comms")]
-    if stdin_events && !host_mode {
-        eprintln!("Warning: --stdin has no effect without --host");
+    if stdin_events && !keep_alive {
+        eprintln!("Warning: --stdin has no effect without keep-alive mode");
     }
 
     // `create_session` always defers the initial turn in this path, so we can
@@ -3361,7 +3355,7 @@ async fn run_agent(
             .await;
 
         #[cfg(feature = "comms")]
-        if stdin_events && host_mode {
+        if stdin_events && keep_alive {
             stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
                 runtime_adapter.clone(),
                 session_id.clone(),
@@ -3376,7 +3370,7 @@ async fn run_agent(
             prompt.to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    host_mode: if host_mode { Some(true) } else { None },
+                    keep_alive: if keep_alive { Some(true) } else { None },
                     skill_references: canonical_skill_refs,
                     flow_tool_overlay,
                     additional_instructions: None,
@@ -3389,13 +3383,13 @@ async fn run_agent(
             .await
             .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
 
-        // Spawn the comms drain in host mode so inbound peer interactions are
+        // Spawn the comms drain in keep-alive mode so inbound peer interactions are
         // routed through the runtime adapter and automatically trigger new turns.
         #[cfg(feature = "comms")]
         {
             let comms_rt = service.comms_runtime(&session_id).await;
             runtime_adapter
-                .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+                .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
                 .await;
         }
 
@@ -3411,7 +3405,7 @@ async fn run_agent(
 
     let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
         // The initial turn is complete — abort the comms drain so the CLI can
-        // return. run_agent is a one-shot command; persistent host-mode draining
+        // return. run_agent is a one-shot command; persistent keep-alive draining
         // is only appropriate for interactive sessions (chat).
         #[cfg(feature = "comms")]
         {
@@ -3628,8 +3622,8 @@ async fn resume_session_with_llm_override(
             memory: false,
             active_skills: None,
         });
-    let host_mode_requested = stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
-    let host_mode = resolve_host_mode(host_mode_requested)?;
+    let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
+    let keep_alive = resolve_keep_alive(keep_alive_requested)?;
     let comms_name = stored_metadata
         .as_ref()
         .and_then(|meta| meta.comms_name.clone());
@@ -3685,7 +3679,7 @@ async fn resume_session_with_llm_override(
     }
 
     #[cfg(feature = "comms")]
-    let factory = factory.comms(tooling.comms || host_mode);
+    let factory = factory.comms(tooling.comms || keep_alive);
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
@@ -3798,7 +3792,6 @@ async fn resume_session_with_llm_override(
                 system_prompt,
                 max_tokens: Some(max_tokens),
                 event_tx: output_pipeline.event_sender(),
-                host_mode,
 
                 skill_references: if run_initial_turn_during_create {
                     canonical_skill_refs.clone()
@@ -3836,7 +3829,7 @@ async fn resume_session_with_llm_override(
             prompt.to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    host_mode: if host_mode { Some(true) } else { None },
+                    keep_alive: if keep_alive { Some(true) } else { None },
                     skill_references: canonical_skill_refs,
                     flow_tool_overlay,
                     additional_instructions,
@@ -3849,13 +3842,13 @@ async fn resume_session_with_llm_override(
             .await
             .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
 
-        // Spawn the comms drain in host mode so inbound peer interactions are
+        // Spawn the comms drain in keep-alive mode so inbound peer interactions are
         // routed through the runtime adapter and automatically trigger new turns.
         #[cfg(feature = "comms")]
         {
             let comms_rt = service.comms_runtime(&session_id).await;
             resume_adapter
-                .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+                .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
                 .await;
         }
 
@@ -7094,9 +7087,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_host_mode_roundtrip() {
-        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
-        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
+    fn test_resolve_keep_alive_roundtrip() {
+        assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
+        assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
     }
 
     #[test]
@@ -8999,7 +8992,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            host_mode: false,
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,

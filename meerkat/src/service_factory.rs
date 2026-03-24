@@ -79,14 +79,10 @@ impl SessionAgent for FactoryAgent {
     async fn run_turn_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-        handling_mode: HandlingMode,
-        render_metadata: Option<RenderMetadata>,
+        _handling_mode: HandlingMode,
+        _render_metadata: Option<RenderMetadata>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        // TODO: Phase 3 will reintroduce interaction-id-scoped admission for
-        // non-Queue handling (Steer) and render_metadata turns. For now, all
-        // turns go through run_with_events.
-        let _ = (handling_mode, render_metadata);
         self.agent.run_with_events(prompt, event_tx).await
     }
 
@@ -481,7 +477,6 @@ mod tests {
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            host_mode: false,
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -577,7 +572,6 @@ mod tests {
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            host_mode: false,
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -615,7 +609,6 @@ mod tests {
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            host_mode: false,
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,

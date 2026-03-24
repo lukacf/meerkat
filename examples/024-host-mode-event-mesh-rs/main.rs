@@ -124,8 +124,6 @@ task that owns the Agent exclusively (no mutex needed).
             ),
             max_tokens: Some(256),
             event_tx: Some(event_tx),
-            host_mode: false,
-
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: None,
@@ -159,8 +157,6 @@ task that owns the Agent exclusively (no mutex needed).
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                host_mode: false,
-
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -197,8 +193,6 @@ task that owns the Agent exclusively (no mutex needed).
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                host_mode: false,
-
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,

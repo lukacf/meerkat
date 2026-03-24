@@ -28,7 +28,6 @@ use tokio::sync::{Notify, RwLock};
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<Notify>>>,
     start_turn_calls: AtomicU64,
-    host_mode_start_turn_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
 }
 
@@ -102,18 +101,11 @@ impl SessionService for MockSessionService {
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
-        if req.host_mode {
-            self.host_mode_start_turn_calls
-                .fetch_add(1, Ordering::Relaxed);
-        }
         let sessions = self.sessions.read().await;
         let Some(notify) = sessions.get(id).cloned() else {
             return Err(SessionError::NotFound { id: id.clone() });
         };
         drop(sessions);
-        if req.host_mode {
-            notify.notified().await;
-        }
         Ok(RunResult {
             text: "ok".to_string(),
             session_id: id.clone(),
@@ -273,7 +265,6 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .await
         .expect("spawn turn-driven");
     let start_before = service.start_turn_calls.load(Ordering::Relaxed);
-    let host_before = service.host_mode_start_turn_calls.load(Ordering::Relaxed);
     let inject_before = service.inject_calls.load(Ordering::Relaxed);
 
     handle
@@ -292,15 +283,10 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .expect("external turn-driven");
 
     let start_after = service.start_turn_calls.load(Ordering::Relaxed);
-    let host_after = service.host_mode_start_turn_calls.load(Ordering::Relaxed);
     let inject_after = service.inject_calls.load(Ordering::Relaxed);
     assert!(
         start_after > start_before,
         "turn-driven path should invoke start_turn"
-    );
-    assert_eq!(
-        host_after, host_before,
-        "external turns should not route through host-mode start_turn"
     );
     assert!(
         inject_after > inject_before,

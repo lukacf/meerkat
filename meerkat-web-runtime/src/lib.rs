@@ -196,9 +196,9 @@ struct SessionConfig {
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
-    /// Whether this session runs in host mode (enables comms tools).
+    /// Whether this session stays alive after the initial turn (enables comms drain loop).
     #[serde(default)]
-    host_mode: bool,
+    keep_alive: bool,
     /// Application-defined labels (flow through mob spawn, not used at create_session level).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -300,7 +300,7 @@ struct RuntimeHandleSession {
     session_id: meerkat_core::SessionId,
     mob_id: String,
     model: String,
-    host_mode: bool,
+    keep_alive: bool,
     run_counter: u64,
     event_rx: WasmSessionEventReceiver,
 }
@@ -1261,7 +1261,7 @@ fn build_direct_session_request(
     build_config.llm_client_override = Some(llm_client);
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
-        build_config.host_mode = config.host_mode;
+        build_config.keep_alive = config.keep_alive;
     }
     build_config.additional_instructions = config.additional_instructions.clone();
     build_config.app_context = config.app_context.clone();
@@ -1273,7 +1273,6 @@ fn build_direct_session_request(
         system_prompt,
         max_tokens: Some(config.max_tokens),
         event_tx: None,
-        host_mode: build_config.host_mode,
 
         skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
@@ -1288,7 +1287,7 @@ fn create_runtime_backed_session(
     mob_id: String,
 ) -> Result<u32, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
-    let host_mode = config.comms_name.is_some() && config.host_mode;
+    let keep_alive = config.comms_name.is_some() && config.keep_alive;
     let request = build_direct_session_request(&config, system_prompt)?;
 
     let created = futures::executor::block_on(session_service.create_session(request))
@@ -1312,7 +1311,7 @@ fn create_runtime_backed_session(
                 session_id,
                 mob_id,
                 model: config.model,
-                host_mode,
+                keep_alive,
                 run_counter: 0,
                 event_rx,
             },
@@ -1434,7 +1433,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     } else {
         serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
     };
-    let (session_service, session_id, run_id, host_mode) = with_runtime_state_mut(|state| {
+    let (session_service, session_id, run_id, keep_alive) = with_runtime_state_mut(|state| {
         let session = state
             .sessions
             .get_mut(&handle)
@@ -1444,7 +1443,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
             state.session_service.clone(),
             session.session_id.clone(),
             session.run_counter,
-            session.host_mode,
+            session.keep_alive,
         ))
     })?;
 
@@ -1462,7 +1461,6 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                host_mode,
 
                 skill_references: None,
                 flow_tool_overlay: None,

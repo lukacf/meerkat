@@ -198,7 +198,7 @@ async fn build_agent_sets_session_metadata() {
     assert!(metadata.tooling.active_skills.is_none());
     #[cfg(not(feature = "skills"))]
     assert!(metadata.tooling.active_skills.is_none());
-    assert!(!metadata.host_mode);
+    assert!(!metadata.keep_alive);
     assert!(metadata.comms_name.is_none());
 }
 
@@ -285,7 +285,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             memory: false,
             active_skills: None,
         },
-        host_mode: false,
+        keep_alive: false,
         comms_name: Some("persisted-resume-name".to_string()),
         peer_meta: Some(
             meerkat_core::PeerMeta::default()
@@ -363,7 +363,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
                 memory: false,
                 active_skills: None,
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: None,
             peer_meta: None,
             realm_id: None,
@@ -415,7 +415,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
                 memory: false,
                 active_skills: None,
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: Some("resume-peer".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -490,7 +490,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 memory: false,
                 active_skills: None,
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: Some("resume-peer".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -561,17 +561,17 @@ async fn build_agent_applies_system_prompt_override() {
     }
 }
 
-/// 9. `build_agent` with host_mode but no comms_name fails.
+/// 9. `build_agent` with keep_alive but no comms_name fails.
 #[cfg(feature = "comms")]
 #[tokio::test]
-async fn build_agent_host_mode_without_comms_name_fails() {
+async fn build_agent_keep_alive_without_comms_name_fails() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        host_mode: true,
+        keep_alive: true,
         comms_name: None,
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
@@ -579,11 +579,11 @@ async fn build_agent_host_mode_without_comms_name_fails() {
     let result = factory.build_agent(build_config, &config).await;
     let err = match result {
         Err(e) => e,
-        Ok(_) => panic!("Expected HostModeRequiresCommsName error"),
+        Ok(_) => panic!("Expected KeepAliveRequiresCommsName error"),
     };
     assert!(
-        matches!(err, BuildAgentError::HostModeRequiresCommsName),
-        "Should be HostModeRequiresCommsName, got: {err:?}"
+        matches!(err, BuildAgentError::KeepAliveRequiresCommsName),
+        "Should be KeepAliveRequiresCommsName, got: {err:?}"
     );
 }
 
@@ -812,7 +812,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
                     "nonexistent-legacy-skill".into(),
                 )]),
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: None,
             peer_meta: None,
             realm_id: None,

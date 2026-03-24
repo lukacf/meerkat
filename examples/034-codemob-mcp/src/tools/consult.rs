@@ -78,7 +78,6 @@ pub async fn handle(
         ),
         max_tokens: None,
         event_tx: None,
-        host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),

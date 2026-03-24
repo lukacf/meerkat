@@ -81,9 +81,9 @@ pub struct RuntimeTurnMetadata {
     /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handling_mode: Option<HandlingMode>,
-    /// `None` = use session default; `Some(true)` = force host mode; `Some(false)` = force non-host.
+    /// `None` = use session default; `Some(true)` = force keep-alive; `Some(false)` = force non-keep-alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_mode: Option<bool>,
+    pub keep_alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_references: Option<Vec<SkillKey>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,7 +247,7 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
-                host_mode: Some(true),
+                keep_alive: Some(true),
                 ..Default::default()
             }),
         };

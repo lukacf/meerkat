@@ -190,9 +190,9 @@ pub struct AgentBuildConfig {
     pub structured_output_retries: u32,
     /// Run-scoped hook overrides.
     pub hooks_override: HookRunOverrides,
-    /// Whether to enable comms host mode.
-    pub host_mode: bool,
-    /// Name for the comms participant (required when `host_mode` is `true`).
+    /// Whether to keep the agent alive after the initial turn (enables comms drain loop).
+    pub keep_alive: bool,
+    /// Name for the comms participant (required when `keep_alive` is `true`).
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (flows to `InprocRegistry` and `peers()` output).
     pub peer_meta: Option<meerkat_core::PeerMeta>,
@@ -306,7 +306,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("output_schema", &self.output_schema.is_some())
             .field("structured_output_retries", &self.structured_output_retries)
-            .field("host_mode", &self.host_mode)
+            .field("keep_alive", &self.keep_alive)
             .field("comms_name", &self.comms_name)
             .field("peer_meta", &self.peer_meta)
             .field("resume_session", &self.resume_session.is_some())
@@ -362,7 +362,7 @@ impl AgentBuildConfig {
             output_schema: None,
             structured_output_retries: 2,
             hooks_override: HookRunOverrides::default(),
-            host_mode: false,
+            keep_alive: false,
             comms_name: None,
             peer_meta: None,
             resume_session: None,
@@ -404,7 +404,6 @@ impl AgentBuildConfig {
         let mut build = Self::new(req.model.clone());
         build.system_prompt = req.system_prompt.clone();
         build.max_tokens = req.max_tokens;
-        build.host_mode = req.host_mode;
         if let Some(options) = &req.build {
             build.apply_session_build_options(options);
         }
@@ -514,10 +513,10 @@ pub enum BuildAgentError {
     #[error("Config error: {0}")]
     Config(String),
 
-    /// `host_mode` was set but `comms_name` is missing.
-    #[error("host_mode requires comms_name to be set")]
+    /// `keep_alive` was set but `comms_name` is missing.
+    #[error("keep_alive requires comms_name to be set")]
     #[cfg(feature = "comms")]
-    HostModeRequiresCommsName,
+    KeepAliveRequiresCommsName,
 }
 
 /// Resolver that delegates to `meerkat_models::profile::profile_for()`
@@ -791,7 +790,7 @@ impl AgentFactory {
         build_config.override_memory = Some(metadata.tooling.memory);
         build_config.override_mob = Some(metadata.tooling.mob);
         build_config.preload_skills = metadata.tooling.active_skills.clone();
-        build_config.host_mode = metadata.host_mode;
+        build_config.keep_alive = metadata.keep_alive;
         build_config.comms_name = metadata.comms_name.clone();
         build_config.peer_meta = metadata.peer_meta.clone();
 
@@ -1086,10 +1085,10 @@ impl AgentFactory {
             )));
         }
 
-        // 1. Validate host_mode
+        // 1. Validate keep_alive
         #[cfg(feature = "comms")]
-        if build_config.host_mode && build_config.comms_name.is_none() {
-            return Err(BuildAgentError::HostModeRequiresCommsName);
+        if build_config.keep_alive && build_config.comms_name.is_none() {
+            return Err(BuildAgentError::KeepAliveRequiresCommsName);
         }
 
         // 2. Resolve provider
@@ -1203,11 +1202,11 @@ impl AgentFactory {
         let _session_id = session.id().to_string();
         // 6b. Create comms runtime before tool wiring.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-        let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
+        let comms_runtime = if build_config.keep_alive || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
                 .as_ref()
-                .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
+                .ok_or(BuildAgentError::KeepAliveRequiresCommsName)?;
             let silent_intents = Arc::new(
                 build_config
                     .silent_comms_intents
@@ -1234,11 +1233,11 @@ impl AgentFactory {
             None
         };
         #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let comms_runtime = if build_config.host_mode || build_config.comms_name.is_some() {
+        let comms_runtime = if build_config.keep_alive || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
                 .as_ref()
-                .ok_or(BuildAgentError::HostModeRequiresCommsName)?;
+                .ok_or(BuildAgentError::KeepAliveRequiresCommsName)?;
             let silent_intents = Arc::new(
                 build_config
                     .silent_comms_intents
@@ -1827,7 +1826,7 @@ impl AgentFactory {
             metadata.tooling.comms = comms_enabled;
             metadata.tooling.mob = build_config.override_mob.unwrap_or(self.enable_mob);
             metadata.tooling.memory = effective_memory;
-            metadata.host_mode = build_config.host_mode;
+            metadata.keep_alive = build_config.keep_alive;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;
             metadata.realm_id = build_config.realm_id;
@@ -1849,7 +1848,7 @@ impl AgentFactory {
                     memory: effective_memory,
                     active_skills: active_skill_ids,
                 },
-                host_mode: build_config.host_mode,
+                keep_alive: build_config.keep_alive,
                 comms_name: build_config.comms_name,
                 peer_meta: build_config.peer_meta,
                 realm_id: build_config.realm_id,

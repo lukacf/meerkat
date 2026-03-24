@@ -81,7 +81,6 @@ mod scenario_22_session_service_lifecycle {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                host_mode: false,
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -112,7 +111,6 @@ mod scenario_22_session_service_lifecycle {
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
-                    host_mode: false,
 
                     skill_references: None,
                     flow_tool_overlay: None,

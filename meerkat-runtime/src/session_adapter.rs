@@ -1034,10 +1034,10 @@ impl RuntimeSessionAdapter {
     pub async fn maybe_spawn_comms_drain(
         self: &Arc<Self>,
         session_id: &SessionId,
-        host_mode: bool,
+        keep_alive: bool,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
-        if !host_mode {
+        if !keep_alive {
             return false;
         }
 

@@ -590,7 +590,7 @@ impl SessionService for ContractSessionService {
     }
 }
 
-fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
+fn keep_alive_req(comms_name: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "contract-mock".to_string(),
         prompt: "hello".to_string().into(),
@@ -598,7 +598,6 @@ fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        host_mode: true,
         skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
@@ -610,19 +609,19 @@ fn host_mode_req(comms_name: &str) -> CreateSessionRequest {
 }
 
 #[tokio::test]
-async fn contract_mob_001_host_mode_session_stays_alive() {
+async fn contract_mob_001_keep_alive_session_stays_alive() {
     let suffix = Uuid::new_v4().simple().to_string();
     let service = Arc::new(ContractSessionService::new());
 
     let a_name = format!("c001-a-{suffix}");
     let b_name = format!("c001-b-{suffix}");
     let sid_a = service
-        .create_session(host_mode_req(&a_name))
+        .create_session(keep_alive_req(&a_name))
         .await
         .expect("create host-mode session A")
         .session_id;
     let sid_b = service
-        .create_session(host_mode_req(&b_name))
+        .create_session(keep_alive_req(&b_name))
         .await
         .expect("create host-mode session B")
         .session_id;
@@ -681,14 +680,13 @@ async fn contract_mob_001_host_mode_session_stays_alive() {
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                host_mode: true,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
             },
         )
         .await
-        .expect("start second turn on host-mode session");
+        .expect("start second turn on keep-alive session");
 
     // Verify comms still works after extra turn.
     let after_cmd = CommsCommand::PeerRequest {
@@ -721,7 +719,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
     let suffix = Uuid::new_v4().simple().to_string();
     let service = Arc::new(ContractSessionService::new());
     let sid = service
-        .create_session(host_mode_req(&format!("c007-{suffix}")))
+        .create_session(keep_alive_req(&format!("c007-{suffix}")))
         .await
         .expect("create session")
         .session_id;
@@ -754,7 +752,6 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,

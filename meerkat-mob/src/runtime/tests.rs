@@ -314,7 +314,6 @@ fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
 
 #[derive(Clone, Debug)]
 struct CreateSessionRecord {
-    host_mode: bool,
     initial_turn: meerkat_core::service::InitialTurnPolicy,
     comms_name: Option<String>,
     peer_meta_labels: BTreeMap<String, String>,
@@ -325,7 +324,7 @@ struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
     live_session_data: RwLock<HashMap<SessionId, Session>>,
     persisted_sessions: RwLock<HashMap<SessionId, Session>>,
-    host_mode_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
+    keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     runtime_adapter: Mutex<Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>>,
     session_counter: AtomicU64,
@@ -348,8 +347,8 @@ struct MockSessionService {
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     start_turn_calls: AtomicU64,
-    host_mode_start_turn_calls: AtomicU64,
-    host_mode_prompts: RwLock<Vec<(SessionId, String)>>,
+    keep_alive_start_turn_calls: AtomicU64,
+    keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
     create_session_delay_ms: AtomicU64,
@@ -371,7 +370,7 @@ impl MockSessionService {
             sessions: RwLock::new(HashMap::new()),
             live_session_data: RwLock::new(HashMap::new()),
             persisted_sessions: RwLock::new(HashMap::new()),
-            host_mode_notifiers: RwLock::new(HashMap::new()),
+            keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             runtime_adapter: Mutex::new(None),
             session_counter: AtomicU64::new(0),
@@ -386,8 +385,8 @@ impl MockSessionService {
             archived_sent_intents: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             start_turn_calls: AtomicU64::new(0),
-            host_mode_start_turn_calls: AtomicU64::new(0),
-            host_mode_prompts: RwLock::new(Vec::new()),
+            keep_alive_start_turn_calls: AtomicU64::new(0),
+            keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
             create_session_delay_ms: AtomicU64::new(0),
@@ -593,12 +592,12 @@ impl MockSessionService {
         self.start_turn_calls.load(Ordering::Relaxed)
     }
 
-    fn host_mode_start_turn_call_count(&self) -> u64 {
-        self.host_mode_start_turn_calls.load(Ordering::Relaxed)
+    fn keep_alive_start_turn_call_count(&self) -> u64 {
+        self.keep_alive_start_turn_calls.load(Ordering::Relaxed)
     }
 
-    async fn host_mode_prompts(&self) -> Vec<(SessionId, String)> {
-        self.host_mode_prompts.read().await.clone()
+    async fn keep_alive_prompts(&self) -> Vec<(SessionId, String)> {
+        self.keep_alive_prompts.read().await.clone()
     }
 
     fn interrupt_call_count(&self) -> u64 {
@@ -806,7 +805,7 @@ impl SessionService for MockSessionService {
                     memory: build.and_then(|b| b.override_memory).unwrap_or(false),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
-                host_mode: req.host_mode,
+                keep_alive: false,
                 comms_name: build.and_then(|b| b.comms_name.clone()),
                 peer_meta: build.and_then(|b| b.peer_meta.clone()),
                 realm_id: build.and_then(|b| b.realm_id.clone()),
@@ -826,7 +825,7 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), session);
-        self.host_mode_notifiers
+        self.keep_alive_notifiers
             .write()
             .await
             .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
@@ -856,7 +855,6 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push(CreateSessionRecord {
-                host_mode: req.host_mode,
                 initial_turn: req.initial_turn,
                 comms_name: req
                     .build
@@ -901,10 +899,11 @@ impl SessionService for MockSessionService {
             .await
             .push((id.clone(), req.flow_tool_overlay.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
-        if req.host_mode {
-            self.host_mode_start_turn_calls
+        let is_keep_alive = req.event_tx.is_none();
+        if is_keep_alive {
+            self.keep_alive_start_turn_calls
                 .fetch_add(1, Ordering::Relaxed);
-            self.host_mode_prompts
+            self.keep_alive_prompts
                 .write()
                 .await
                 .push((id.clone(), req.prompt.text_content()));
@@ -927,9 +926,9 @@ impl SessionService for MockSessionService {
         }
         drop(sessions);
 
-        if req.host_mode {
+        if is_keep_alive {
             let notifier = self
-                .host_mode_notifiers
+                .keep_alive_notifiers
                 .read()
                 .await
                 .get(id)
@@ -1002,7 +1001,7 @@ impl SessionService for MockSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
-        if let Some(notifier) = self.host_mode_notifiers.read().await.get(id).cloned() {
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
             notifier.notify_waiters();
         }
         Ok(())
@@ -1073,7 +1072,7 @@ impl SessionService for MockSessionService {
             self.session_comms_names.write().await.remove(id);
             self.external_tools_by_session.write().await.remove(id);
             self.live_session_data.write().await.remove(id);
-            if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
+            if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
                 notifier.notify_waiters();
             }
             let intents = runtime.sent_intents().await;
@@ -1326,7 +1325,7 @@ impl MobSessionService for MockSessionService {
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.sessions.write().await.remove(session_id);
         self.live_session_data.write().await.remove(session_id);
-        self.host_mode_notifiers.write().await.remove(session_id);
+        self.keep_alive_notifiers.write().await.remove(session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.external_tools_by_session
             .write()
@@ -3726,7 +3725,6 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -4131,7 +4129,6 @@ async fn test_resume_reconciles_orphaned_sessions() {
                 comms_name: Some("test-mob/worker/orphan".to_string()),
                 ..Default::default()
             }),
-            host_mode: true,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             labels: None,
@@ -4810,7 +4807,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     metadata.tooling.active_skills = Some(vec![meerkat_core::skills::SkillId(
         "mob-communication".into(),
     )]);
-    metadata.host_mode = false;
+    metadata.keep_alive = false;
     metadata.comms_name = Some(test_comms_name("worker", "w-1"));
     let mut peer_meta = metadata.peer_meta.clone().expect("peer metadata");
     peer_meta.labels.insert("resume".into(), "yes".into());
@@ -4851,7 +4848,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     assert_eq!(restored_metadata.provider_params, metadata.provider_params);
     assert_eq!(restored_metadata.max_tokens, metadata.max_tokens);
     assert_eq!(restored_metadata.tooling, metadata.tooling);
-    assert_eq!(restored_metadata.host_mode, metadata.host_mode);
+    assert_eq!(restored_metadata.keep_alive, metadata.keep_alive);
     assert_eq!(restored_metadata.comms_name, metadata.comms_name);
     assert_eq!(restored_metadata.peer_meta, metadata.peer_meta);
     assert!(
@@ -4864,7 +4861,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
 }
 
 #[tokio::test]
-async fn test_resume_marks_persisted_host_mode_session_as_broken() {
+async fn test_resume_marks_persisted_keep_alive_session_as_broken() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
@@ -4891,7 +4888,7 @@ async fn test_resume_marks_persisted_host_mode_session_as_broken() {
         .await
         .expect("live session");
     let mut metadata = persisted.session_metadata().expect("metadata");
-    metadata.host_mode = true;
+    metadata.keep_alive = true;
     persisted
         .set_session_metadata(metadata)
         .expect("set metadata");
@@ -4915,13 +4912,13 @@ async fn test_resume_marks_persisted_host_mode_session_as_broken() {
         snapshot
             .error
             .as_deref()
-            .is_some_and(|message| message.contains("host_mode=false")),
-        "host_mode mismatch should surface as a restore failure"
+            .is_some_and(|message| message.contains("keep_alive=false")),
+        "keep_alive mismatch should surface as a restore failure"
     );
 }
 
 #[tokio::test]
-async fn test_attach_existing_session_rejects_persisted_host_mode_true() {
+async fn test_attach_existing_session_rejects_persisted_keep_alive_true() {
     let service = Arc::new(MockSessionService::new());
     let initial = service
         .create_session(CreateSessionRequest {
@@ -4935,7 +4932,6 @@ async fn test_attach_existing_session_rejects_persisted_host_mode_true() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            host_mode: false,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             labels: None,
@@ -4948,7 +4944,7 @@ async fn test_attach_existing_session_rejects_persisted_host_mode_true() {
         .await
         .expect("live session");
     let mut metadata = persisted.session_metadata().expect("metadata");
-    metadata.host_mode = true;
+    metadata.keep_alive = true;
     persisted
         .set_session_metadata(metadata)
         .expect("set metadata");
@@ -4968,10 +4964,10 @@ async fn test_attach_existing_session_rejects_persisted_host_mode_true() {
             session_id.clone(),
         )
         .await
-        .expect_err("host_mode=true session should be rejected for mob-managed resume");
+        .expect_err("keep_alive=true session should be rejected for mob-managed resume");
     assert!(
-        error.to_string().contains("host_mode=false"),
-        "explicit member resume should fail with the host_mode incompatibility"
+        error.to_string().contains("keep_alive=false"),
+        "explicit member resume should fail with the keep_alive incompatibility"
     );
 }
 
@@ -5047,7 +5043,6 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            host_mode: false,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             labels: None,
@@ -5114,7 +5109,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                     "mob-communication".into(),
                 )]),
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: Some(test_comms_name("worker", "w-1")),
             peer_meta: Some(
                 meerkat_core::PeerMeta::default()
@@ -5170,7 +5165,6 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            host_mode: false,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             labels: None,
@@ -5736,7 +5730,7 @@ async fn test_spawn_creates_session() {
 }
 
 #[tokio::test]
-async fn test_spawn_create_session_request_sets_non_host_mode_and_peer_meta_labels() {
+async fn test_spawn_create_session_request_sets_peer_meta_labels() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -5750,7 +5744,6 @@ async fn test_spawn_create_session_request_sets_non_host_mode_and_peer_meta_labe
         "exactly one create_session expected"
     );
     let req = &create_requests[0];
-    assert!(!req.host_mode, "spawn must create non-host-mode sessions");
     assert_eq!(
         req.initial_turn,
         meerkat_core::service::InitialTurnPolicy::Defer,
@@ -8561,7 +8554,7 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
     );
     assert_eq!(
         service.start_turn_call_count(),
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         "autonomous dispatch must not issue additional non-host start_turn calls"
     );
 }
@@ -8653,7 +8646,7 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
         .expect("spawn worker");
     let baseline_non_host_start_turn = service
         .start_turn_call_count()
-        .saturating_sub(service.host_mode_start_turn_call_count());
+        .saturating_sub(service.keep_alive_start_turn_call_count());
 
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
@@ -8664,7 +8657,7 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
 
     let non_host_start_turn = service
         .start_turn_call_count()
-        .saturating_sub(service.host_mode_start_turn_call_count());
+        .saturating_sub(service.keep_alive_start_turn_call_count());
     assert_eq!(
         non_host_start_turn, baseline_non_host_start_turn,
         "autonomous flow dispatch should avoid non-host start_turn calls"
@@ -8866,7 +8859,7 @@ async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() 
         .expect("spawn external autonomous worker");
     let baseline_non_host_start_turn = service
         .start_turn_call_count()
-        .saturating_sub(service.host_mode_start_turn_call_count());
+        .saturating_sub(service.keep_alive_start_turn_call_count());
 
     let run_id = handle
         .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
@@ -8877,7 +8870,7 @@ async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() 
 
     let non_host_start_turn = service
         .start_turn_call_count()
-        .saturating_sub(service.host_mode_start_turn_call_count());
+        .saturating_sub(service.keep_alive_start_turn_call_count());
     assert_eq!(
         non_host_start_turn, baseline_non_host_start_turn,
         "external autonomous flow dispatch should avoid non-host start_turn calls"
@@ -11385,18 +11378,18 @@ async fn test_spawn_with_custom_initial_message() {
         "spawn should use the custom initial_message, not the default"
     );
 
-    let host_mode_prompts = service.host_mode_prompts().await;
+    let keep_alive_prompts = service.keep_alive_prompts().await;
     assert_eq!(
-        host_mode_prompts.len(),
+        keep_alive_prompts.len(),
         1,
         "autonomous spawn must start exactly one host loop"
     );
     assert_eq!(
-        host_mode_prompts[0].1, custom_msg,
+        keep_alive_prompts[0].1, custom_msg,
         "first autonomous host-loop prompt must use initial_message when provided"
     );
     assert_eq!(
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         1,
         "spawn must start exactly one autonomous host loop"
     );
@@ -11429,28 +11422,28 @@ async fn test_spawn_without_initial_message_uses_default() {
         prompts[0].1
     );
 
-    let host_mode_prompts = service.host_mode_prompts().await;
+    let keep_alive_prompts = service.keep_alive_prompts().await;
     assert_eq!(
-        host_mode_prompts.len(),
+        keep_alive_prompts.len(),
         1,
         "autonomous spawn must start exactly one host loop"
     );
     assert!(
-        host_mode_prompts[0]
+        keep_alive_prompts[0]
             .1
             .contains("You have been spawned as 'w-1'"),
         "host-loop fallback prompt should contain meerkat id, got: '{}'",
-        host_mode_prompts[0].1
+        keep_alive_prompts[0].1
     );
     assert!(
-        host_mode_prompts[0].1.contains("role: worker"),
+        keep_alive_prompts[0].1.contains("role: worker"),
         "host-loop fallback prompt should contain role, got: '{}'",
-        host_mode_prompts[0].1
+        keep_alive_prompts[0].1
     );
     assert!(
-        host_mode_prompts[0].1.contains("mob 'test-mob'"),
+        keep_alive_prompts[0].1.contains("mob 'test-mob'"),
         "host-loop fallback prompt should contain mob id, got: '{}'",
-        host_mode_prompts[0].1
+        keep_alive_prompts[0].1
     );
 }
 
@@ -11485,7 +11478,7 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         .await
         .expect("spawn worker");
     assert_eq!(
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         1,
         "spawn should start autonomous host loop"
     );
@@ -11520,7 +11513,7 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
         .await
         .expect("spawn turn-driven worker");
     assert_eq!(
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         1,
         "only autonomous members should start host loops"
     );
@@ -11534,7 +11527,7 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
 
     handle.resume().await.expect("resume");
     assert_eq!(
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         2,
         "resume should restart autonomous host loops from projected runtime_mode"
     );
@@ -11553,7 +11546,7 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
         .await
         .expect("spawn worker");
     assert_eq!(
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         2,
         "both autonomous members should start host loops"
     );
@@ -11618,7 +11611,7 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
     );
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     assert_eq!(
-        service.host_mode_start_turn_call_count(),
+        service.keep_alive_start_turn_call_count(),
         2,
         "resume should restart only autonomous host loops from projected runtime_mode"
     );
@@ -11716,7 +11709,7 @@ async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
 /// actual PeerRequest delivery between wired meerkats.
 struct RealCommsSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<meerkat_comms::CommsRuntime>>>,
-    host_mode_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
+    keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     session_counter: AtomicU64,
 }
@@ -11725,7 +11718,7 @@ impl RealCommsSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
-            host_mode_notifiers: RwLock::new(HashMap::new()),
+            keep_alive_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             session_counter: AtomicU64::new(0),
         }
@@ -11750,7 +11743,7 @@ impl SessionService for RealCommsSessionService {
             .write()
             .await
             .insert(session_id.clone(), Arc::new(comms));
-        self.host_mode_notifiers
+        self.keep_alive_notifiers
             .write()
             .await
             .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
@@ -11772,21 +11765,19 @@ impl SessionService for RealCommsSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
-        if req.host_mode {
-            let notifier = self
-                .host_mode_notifiers
-                .read()
-                .await
-                .get(id)
-                .cloned()
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            notifier.notified().await;
-            return Ok(mock_run_result(
-                id.clone(),
-                "Host loop interrupted".to_string(),
-            ));
-        }
-        Ok(mock_run_result(id.clone(), "Turn completed".to_string()))
+        // All start_turn calls block until interrupted (keep-alive behavior).
+        let notifier = self
+            .keep_alive_notifiers
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        notifier.notified().await;
+        Ok(mock_run_result(
+            id.clone(),
+            "Host loop interrupted".to_string(),
+        ))
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -11795,7 +11786,7 @@ impl SessionService for RealCommsSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
-        if let Some(notifier) = self.host_mode_notifiers.read().await.get(id).cloned() {
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
             notifier.notify_waiters();
         }
         Ok(())
@@ -11844,7 +11835,7 @@ impl SessionService for RealCommsSessionService {
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let mut sessions = self.sessions.write().await;
         sessions.remove(id);
-        if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
+        if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
             notifier.notify_waiters();
         }
         self.session_comms_names.write().await.remove(id);

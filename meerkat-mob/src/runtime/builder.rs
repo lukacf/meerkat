@@ -730,7 +730,6 @@ impl MobBuilder {
                                 render_metadata: None,
                                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
-                                host_mode: false,
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,

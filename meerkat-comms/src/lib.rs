@@ -86,17 +86,17 @@ inventory::submit! {
     }
 }
 
-/// Confirm host mode availability when the comms crate is compiled in.
+/// Confirm keep-alive mode availability when the comms crate is compiled in.
 ///
 /// This function is intentionally a passthrough — its existence in the
 /// dependency graph *is* the validation. When `meerkat-comms` is linked,
-/// comms is available and host mode can be enabled. The feature-gate check
-/// lives in `meerkat::surface::resolve_host_mode()`, which calls this
+/// comms is available and keep-alive mode can be enabled. The feature-gate check
+/// lives in `meerkat::surface::resolve_keep_alive()`, which calls this
 /// function under `#[cfg(feature = "comms")]` and returns an error under
 /// `#[cfg(not(feature = "comms"))]`.
 ///
 /// This two-layer design avoids duplicating the `cfg` check in every
 /// surface crate.
-pub fn validate_host_mode(requested: bool) -> Result<bool, String> {
+pub fn validate_keep_alive(requested: bool) -> Result<bool, String> {
     Ok(requested)
 }

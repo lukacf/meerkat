@@ -41,7 +41,7 @@ pub struct BuildResumedAgentConfigParams<'a> {
 /// This is the first step in the construction chain:
 ///   Profile -> `build_agent_config()` -> `to_create_session_request()` -> `SessionService::create_session()`
 ///
-/// Mob-managed sessions are created with `host_mode=false` so spawn returns
+/// Mob-managed sessions are created with `keep_alive=false` so spawn returns
 /// promptly from nested tool dispatch paths. Lifecycles are managed explicitly
 /// by mob runtime commands (`start_turn`, `retire`, etc.).
 pub async fn build_agent_config(
@@ -91,7 +91,7 @@ pub async fn build_agent_config(
     let system_prompt = assemble_system_prompt(profile, definition).await?;
 
     let mut config = AgentBuildConfig::new(profile.model.clone());
-    config.host_mode = false;
+    config.keep_alive = false;
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id);
@@ -186,9 +186,9 @@ fn apply_resumed_session_metadata(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
 ) -> Result<(), MobError> {
-    if metadata.host_mode {
+    if metadata.keep_alive {
         return Err(MobError::Internal(
-            "mob-managed resume requires persisted host_mode=false".to_string(),
+            "mob-managed resume requires persisted keep_alive=false".to_string(),
         ));
     }
 
@@ -215,7 +215,7 @@ fn apply_resumed_session_metadata(
     config.override_memory = Some(metadata.tooling.memory);
     config.override_mob = Some(metadata.tooling.mob);
     config.preload_skills = metadata.tooling.active_skills.clone();
-    config.host_mode = metadata.host_mode;
+    config.keep_alive = metadata.keep_alive;
     config.comms_name = Some(stored_comms_name);
     config.peer_meta = metadata.peer_meta.clone();
     Ok(())
@@ -238,7 +238,6 @@ pub fn to_create_session_request(
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
         event_tx: None,
-        host_mode: config.host_mode,
 
         skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
@@ -377,7 +376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_agent_config_non_host_mode() {
+    async fn test_build_agent_config_non_keep_alive() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(BuildAgentConfigParams {
@@ -395,7 +394,7 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        assert!(!config.host_mode, "host_mode must be false for mob spawn");
+        assert!(!config.keep_alive, "keep_alive must be false for mob spawn");
     }
 
     #[tokio::test]
@@ -720,7 +719,6 @@ mod tests {
 
         let req = to_create_session_request(&config, "Hello mob".to_string().into());
         assert_eq!(req.model, "claude-opus-4-6");
-        assert!(!req.host_mode, "host_mode must carry through as false");
         assert_eq!(req.prompt.text_content(), "Hello mob");
         assert!(req.system_prompt.is_some());
 
@@ -753,7 +751,6 @@ mod tests {
 
         let req = to_create_session_request(&config, "Start working".to_string().into());
         assert_eq!(req.model, "claude-sonnet-4-5");
-        assert!(!req.host_mode);
         let build = req.build.expect("build options");
         assert_eq!(build.override_shell, Some(false));
     }

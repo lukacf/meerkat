@@ -114,22 +114,22 @@ pub fn build_models_catalog_response() -> meerkat_contracts::ModelsCatalogRespon
     }
 }
 
-/// Validate whether host mode can be enabled in the current build.
+/// Validate whether keep-alive mode can be enabled in the current build.
 ///
-/// Delegates to `meerkat_comms::validate_host_mode()` when the comms feature
+/// Delegates to `meerkat_comms::validate_keep_alive()` when the comms feature
 /// is compiled in; returns an error if requested but comms is not available.
 ///
 /// This is the canonical entry point — all surfaces should call this.
-pub fn resolve_host_mode(requested: bool) -> Result<bool, String> {
+pub fn resolve_keep_alive(requested: bool) -> Result<bool, String> {
     #[cfg(feature = "comms")]
     {
-        meerkat_comms::validate_host_mode(requested)
+        meerkat_comms::validate_keep_alive(requested)
     }
     #[cfg(not(feature = "comms"))]
     {
         if requested {
             return Err(
-                "host_mode requires comms support (build with --features comms)".to_string(),
+                "keep_alive requires comms support (build with --features comms)".to_string(),
             );
         }
         Ok(false)

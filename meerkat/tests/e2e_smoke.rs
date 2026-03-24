@@ -1163,7 +1163,6 @@ mod scenario_09_session_service {
             system_prompt: Some("You are a helpful assistant. Be brief.".to_string()),
             max_tokens: Some(256),
             event_tx: None,
-            host_mode: false,
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
@@ -1212,7 +1211,6 @@ mod scenario_09_session_service {
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-            host_mode: false,
 
             skill_references: None,
             flow_tool_overlay: None,
@@ -1677,7 +1675,6 @@ mod scenario_22_runtime_host_comms {
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -1721,7 +1718,7 @@ mod scenario_22_runtime_host_comms {
 
     #[tokio::test]
     #[ignore = "e2e: live API"]
-    async fn e2e_runtime_host_mode_comms_stress() {
+    async fn e2e_runtime_keep_alive_comms_stress() {
         let Some(_api_key) = anthropic_api_key() else {
             eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
             return;
@@ -1760,7 +1757,6 @@ mod scenario_22_runtime_host_comms {
             ),
             max_tokens: Some(256),
             event_tx: None,
-            host_mode: false,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             build: Some(build_a),
@@ -1792,7 +1788,7 @@ mod scenario_22_runtime_host_comms {
             "You are Agent A. Wait for messages.".to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    host_mode: Some(true),
+                    keep_alive: Some(true),
                     ..Default::default()
                 },
             ),

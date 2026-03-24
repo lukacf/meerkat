@@ -142,7 +142,6 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
             system_prompt: None,
             max_tokens: Some(state.max_tokens),
             event_tx: None,
-            host_mode: false,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             build: Some(SessionBuildOptions {

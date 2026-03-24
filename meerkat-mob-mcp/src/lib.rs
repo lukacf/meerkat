@@ -1910,7 +1910,7 @@ mod tests {
     struct MockSessionSvc {
         sessions: RwLock<HashMap<SessionId, Arc<MockComms>>>,
         persisted_sessions: RwLock<HashMap<SessionId, Session>>,
-        host_mode_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
+        keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
     }
@@ -1920,7 +1920,7 @@ mod tests {
             Self {
                 sessions: RwLock::new(HashMap::new()),
                 persisted_sessions: RwLock::new(HashMap::new()),
-                host_mode_notifiers: RwLock::new(HashMap::new()),
+                keep_alive_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
             }
@@ -1954,7 +1954,7 @@ mod tests {
                 .write()
                 .await
                 .insert(sid.clone(), Arc::new(MockComms::new(&name)));
-            self.host_mode_notifiers
+            self.keep_alive_notifiers
                 .write()
                 .await
                 .insert(sid.clone(), Arc::new(Notify::new()));
@@ -1982,26 +1982,15 @@ mod tests {
             if delay_ms > 0 {
                 sleep(Duration::from_millis(delay_ms)).await;
             }
-            if req.host_mode {
-                let notifier = self
-                    .host_mode_notifiers
-                    .read()
-                    .await
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-                notifier.notified().await;
-                return Ok(RunResult {
-                    text: "ok".to_string(),
-                    session_id: id.clone(),
-                    usage: Usage::default(),
-                    turns: 1,
-                    tool_calls: 0,
-                    structured_output: None,
-                    schema_warnings: None,
-                    skill_diagnostics: None,
-                });
-            }
+            // All start_turn calls block until interrupted (keep-alive behavior).
+            let notifier = self
+                .keep_alive_notifiers
+                .read()
+                .await
+                .get(id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            notifier.notified().await;
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: id.clone(),
@@ -2015,7 +2004,7 @@ mod tests {
         }
 
         async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-            if let Some(notifier) = self.host_mode_notifiers.read().await.get(id).cloned() {
+            if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
                 notifier.notify_waiters();
             }
             Ok(())
@@ -2084,7 +2073,7 @@ mod tests {
         async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
             let removed_live = self.sessions.write().await.remove(id).is_some();
             let removed_persisted = self.persisted_sessions.write().await.remove(id).is_some();
-            if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
+            if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
                 notifier.notify_waiters();
             }
             if removed_live || removed_persisted {
@@ -2192,8 +2181,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                host_mode: false,
-
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2232,8 +2219,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                host_mode: false,
-
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2267,8 +2252,6 @@ mod tests {
                     render_metadata: None,
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    host_mode: false,
-
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -2303,8 +2286,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                host_mode: false,
-
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2389,8 +2370,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                host_mode: false,
-
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2434,8 +2413,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                host_mode: false,
-
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2457,8 +2434,6 @@ mod tests {
                     render_metadata: None,
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    host_mode: false,
-
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -2547,7 +2522,7 @@ mod tests {
                 comms: true,
                 ..SessionTooling::default()
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: None,
             realm_id: None,
@@ -2580,7 +2555,7 @@ mod tests {
                 comms: true,
                 ..SessionTooling::default()
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()
@@ -2618,7 +2593,7 @@ mod tests {
                 comms: true,
                 ..SessionTooling::default()
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: Some("team/reviewer/alice".to_string()),
             peer_meta: Some(
                 PeerMeta::default()

@@ -301,7 +301,7 @@ impl MobActor {
                                 render_metadata: None,
                                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
-                                host_mode: false,
+
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,
@@ -666,7 +666,6 @@ impl MobActor {
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: None,
-                        host_mode: true,
 
                         skill_references: None,
                         flow_tool_overlay: None,
@@ -4067,7 +4066,6 @@ impl MobActor {
                     render_metadata,
                     handling_mode,
                     event_tx: None,
-                    host_mode: false,
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

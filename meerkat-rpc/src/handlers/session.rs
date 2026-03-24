@@ -81,10 +81,10 @@ pub struct CreateSessionParams {
     /// Enable shell tool. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_shell: Option<bool>,
-    /// Run in host mode for inter-agent comms.
+    /// Keep the agent alive after the initial turn (enables comms drain loop).
     #[serde(default)]
-    pub host_mode: bool,
-    /// Agent name for comms (required when host_mode is true).
+    pub keep_alive: bool,
+    /// Agent name for comms (required when keep_alive is true).
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (description, labels).
@@ -284,7 +284,7 @@ pub async fn handle_create(
     build_config.hooks_override = params.hooks_override.unwrap_or_default();
     build_config.override_builtins = params.enable_builtins;
     build_config.override_shell = params.enable_shell;
-    build_config.host_mode = params.host_mode;
+    build_config.keep_alive = params.keep_alive;
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
     build_config.override_memory = params.enable_memory;
@@ -418,7 +418,7 @@ pub async fn handle_create(
     });
 
     // Start the initial turn — route through runtime for V9 consistency
-    let result = if params.host_mode {
+    let result = if params.keep_alive {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = event_tx.clone();

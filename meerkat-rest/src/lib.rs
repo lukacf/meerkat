@@ -417,11 +417,11 @@ async fn apply_runtime_turn(
         session_id.clone(),
         false,
     );
-    let host_mode = match primitive
+    let keep_alive = match primitive
         .turn_metadata()
-        .and_then(|metadata| metadata.host_mode)
+        .and_then(|metadata| metadata.keep_alive)
     {
-        Some(host_mode) => host_mode,
+        Some(keep_alive) => keep_alive,
         None => context
             .session_service
             .load_persisted(session_id)
@@ -431,7 +431,7 @@ async fn apply_runtime_turn(
             .and_then(|session| {
                 session
                     .session_metadata()
-                    .map(|metadata| metadata.host_mode)
+                    .map(|metadata| metadata.keep_alive)
             })
             .unwrap_or(false),
     };
@@ -441,7 +441,6 @@ async fn apply_runtime_turn(
         render_metadata: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(event_tx.clone()),
-        host_mode,
 
         skill_references: primitive
             .turn_metadata()
@@ -574,7 +573,6 @@ async fn apply_runtime_turn(
                         .map_or(context.max_tokens, |meta| meta.max_tokens),
                 ),
                 event_tx: None,
-                host_mode: stored_metadata.as_ref().is_some_and(|meta| meta.host_mode),
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -593,10 +591,6 @@ async fn apply_runtime_turn(
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx.clone()),
-                        host_mode: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.host_mode)
-                            .unwrap_or(false),
 
                         skill_references: primitive
                             .turn_metadata()
@@ -694,8 +688,8 @@ fn realm_origin_from_selection(selection: &RealmSelection) -> RealmOrigin {
     }
 }
 
-fn resolve_host_mode(requested: bool) -> Result<bool, ApiError> {
-    meerkat::surface::resolve_host_mode(requested).map_err(ApiError::BadRequest)
+fn resolve_keep_alive(requested: bool) -> Result<bool, ApiError> {
+    meerkat::surface::resolve_keep_alive(requested).map_err(ApiError::BadRequest)
 }
 
 fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), ApiError> {
@@ -726,8 +720,8 @@ pub struct CreateSessionRequest {
     /// Run in host mode: process prompt then stay alive listening for comms messages.
     /// Requires comms_name to be set.
     #[serde(default)]
-    pub host_mode: bool,
-    /// Agent name for inter-agent communication. Required for host_mode.
+    pub keep_alive: bool,
+    /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.
@@ -823,8 +817,8 @@ pub struct ContinueSessionRequest {
     pub structured_output_retries: u32,
     /// Run in host mode: process prompt then stay alive listening for comms messages.
     #[serde(default)]
-    pub host_mode: bool,
-    /// Agent name for inter-agent communication. Required for host_mode.
+    pub keep_alive: bool,
+    /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.
@@ -2142,7 +2136,7 @@ async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
     validate_public_peer_meta(req.peer_meta.as_ref())?;
-    let host_mode = resolve_host_mode(req.host_mode)?;
+    let keep_alive = resolve_keep_alive(req.keep_alive)?;
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = canonical_skill_keys_for_state(
@@ -2239,7 +2233,6 @@ async fn create_session(
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
-        host_mode,
 
         skill_references: skill_references.clone(),
         initial_turn: InitialTurnPolicy::Defer,
@@ -2273,12 +2266,12 @@ async fn create_session(
         ));
     }
 
-    // Spawn comms drain for host_mode sessions.
+    // Spawn comms drain for keep_alive sessions.
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
         adapter
-            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
     }
 
@@ -2287,7 +2280,7 @@ async fn create_session(
         req.prompt,
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: if host_mode { Some(true) } else { None },
+                keep_alive: if keep_alive { Some(true) } else { None },
                 skill_references,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -2562,8 +2555,8 @@ async fn continue_session(
         req.verbose,
     );
 
-    let host_mode_requested = req.host_mode;
-    let host_mode = resolve_host_mode(host_mode_requested)?;
+    let keep_alive_requested = req.keep_alive;
+    let keep_alive = resolve_keep_alive(keep_alive_requested)?;
     let skill_references = canonical_skill_keys_for_state(
         &state,
         req.skill_refs.clone(),
@@ -2598,7 +2591,6 @@ async fn continue_session(
         render_metadata: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(caller_event_tx.clone()),
-        host_mode,
 
         skill_references: skill_references.clone(),
         flow_tool_overlay: req.flow_tool_overlay.clone(),
@@ -2614,12 +2606,12 @@ async fn continue_session(
     }
     let adapter = state.runtime_adapter.clone();
 
-    // Spawn comms drain for host_mode sessions (idempotent — skips if already running).
+    // Spawn comms drain for keep_alive sessions (idempotent — skips if already running).
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
         adapter
-            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+            .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
     }
 
@@ -2627,7 +2619,7 @@ async fn continue_session(
         svc_req.prompt.clone(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: if svc_req.host_mode { Some(true) } else { None },
+                keep_alive: if keep_alive { Some(true) } else { None },
                 skill_references: svc_req.skill_references.clone(),
                 flow_tool_overlay: svc_req.flow_tool_overlay.clone(),
                 additional_instructions: svc_req.additional_instructions.clone(),
@@ -3378,27 +3370,27 @@ mod tests {
     }
 
     #[test]
-    fn test_create_session_request_parsing_with_host_mode() {
+    fn test_create_session_request_parsing_with_keep_alive() {
         let req_json = serde_json::json!({
             "prompt": "Hello",
-            "host_mode": true,
+            "keep_alive": true,
             "comms_name": "test-agent"
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert_eq!(req.prompt, ContentInput::Text("Hello".to_string()));
-        assert!(req.host_mode);
+        assert!(req.keep_alive);
         assert_eq!(req.comms_name, Some("test-agent".to_string()));
     }
 
     #[test]
-    fn test_create_session_request_host_mode_defaults_to_false() {
+    fn test_create_session_request_keep_alive_defaults_to_false() {
         let req_json = serde_json::json!({
             "prompt": "Hello"
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
-        assert!(!req.host_mode);
+        assert!(!req.keep_alive);
         assert!(req.comms_name.is_none());
     }
 
@@ -3469,7 +3461,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                host_mode: false,
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -3542,7 +3533,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                host_mode: false,
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -3611,7 +3601,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                host_mode: false,
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
@@ -3666,7 +3655,6 @@ mod tests {
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                host_mode: false,
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
@@ -3691,7 +3679,6 @@ mod tests {
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
-                    host_mode: false,
 
                     skill_references: None,
                     flow_tool_overlay: None,
@@ -3869,16 +3856,16 @@ mod tests {
 
     #[cfg(not(feature = "comms"))]
     #[test]
-    fn test_resolve_host_mode_rejects_when_comms_disabled() {
-        let err = resolve_host_mode(true).expect_err("host mode should be rejected");
+    fn test_resolve_keep_alive_rejects_when_comms_disabled() {
+        let err = resolve_keep_alive(true).expect_err("keep_alive should be rejected");
         assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_resolve_host_mode_allows_when_comms_enabled() {
-        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
-        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
+    fn test_resolve_keep_alive_allows_when_comms_enabled() {
+        assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
+        assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
     }
 
     #[test]

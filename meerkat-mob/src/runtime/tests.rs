@@ -15,6 +15,7 @@ use crate::store::{
 use async_trait::async_trait;
 use chrono::Utc;
 use indexmap::IndexMap;
+use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerName, PeerReachability,
@@ -941,6 +942,8 @@ impl SessionService for MockSessionService {
                 updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
                 last_assistant_text: None,
                 labels: Default::default(),
             },
@@ -2123,6 +2126,14 @@ impl SessionAgent for PersistentMockAgent {
 
     fn cancel(&mut self) {}
 
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
     fn session_id(&self) -> SessionId {
         self.session_id.clone()
     }
@@ -2311,6 +2322,14 @@ impl SessionAgent for OverlayProbeSessionAgent {
 
     fn cancel(&mut self) {
         self.agent.cancel();
+    }
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
     }
 
     fn session_id(&self) -> SessionId {
@@ -10532,6 +10551,8 @@ impl SessionService for RealCommsSessionService {
                 updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
                 last_assistant_text: None,
                 labels: Default::default(),
             },

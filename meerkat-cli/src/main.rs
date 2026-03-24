@@ -3298,6 +3298,7 @@ async fn run_agent(
         },
         shell_env: None,
         ops_lifecycle_override: ops_lifecycle,
+        call_timeout_override: Default::default(),
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3794,6 +3795,7 @@ async fn resume_session_with_llm_override(
         additional_instructions: None,
         shell_env: None,
         ops_lifecycle_override: resume_ops_lifecycle,
+        call_timeout_override: Default::default(),
     };
 
     let turn_result = async {
@@ -6891,6 +6893,8 @@ mod tests {
                     updated_at: std::time::SystemTime::now(),
                     message_count: 0,
                     is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
                     last_assistant_text: None,
                     labels: Default::default(),
                 },
@@ -7077,6 +7081,8 @@ mod tests {
                     updated_at: std::time::SystemTime::now(),
                     message_count: 0,
                     is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
                     last_assistant_text: None,
                     labels: Default::default(),
                 },

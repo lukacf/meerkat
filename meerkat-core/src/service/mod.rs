@@ -17,6 +17,7 @@ use crate::types::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
+    SessionLlmIdentity,
 };
 use crate::{EventStream, StreamError};
 use async_trait::async_trait;
@@ -218,6 +219,12 @@ pub struct SessionBuildOptions {
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Explicit call-timeout override at the build seam.
+    ///
+    /// - `Inherit` (default): defer to config override, then profile default
+    /// - `Disabled`: explicitly disable call timeout regardless of profile
+    /// - `Value(d)`: explicitly set call timeout to `d`
+    pub call_timeout_override: crate::CallTimeoutOverride,
 }
 
 impl Default for SessionBuildOptions {
@@ -250,6 +257,7 @@ impl Default for SessionBuildOptions {
             app_context: None,
             additional_instructions: None,
             shell_env: None,
+            call_timeout_override: crate::CallTimeoutOverride::Inherit,
         }
     }
 }
@@ -289,6 +297,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
+            .field("call_timeout_override", &self.call_timeout_override)
             .finish()
     }
 }
@@ -402,6 +411,8 @@ pub struct SessionInfo {
     pub updated_at: SystemTime,
     pub message_count: usize,
     pub is_active: bool,
+    pub model: String,
+    pub provider: Provider,
     pub last_assistant_text: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
@@ -509,6 +520,23 @@ pub trait SessionService: Send + Sync {
         _client: std::sync::Arc<dyn crate::AgentLlmClient>,
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported("set_session_client".to_string()))
+    }
+
+    /// Atomically replace the live session client and the session's durable
+    /// LLM identity.
+    ///
+    /// This is the canonical seam for materialized-session hot-swap semantics.
+    /// Implementations should apply both updates together so future turns and
+    /// resume/recovery see the same model/provider/provider_params identity.
+    async fn hot_swap_session_llm_identity(
+        &self,
+        _id: &SessionId,
+        _client: std::sync::Arc<dyn crate::AgentLlmClient>,
+        _identity: SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "hot_swap_session_llm_identity".to_string(),
+        ))
     }
 
     /// Stage an external tool visibility filter on a live session.

@@ -402,16 +402,20 @@ where
 
             // Check budget — typed routing per budget kind
             if let Err(budget_err) = self.budget.check() {
-                match &budget_err {
+                match budget_err {
                     AgentError::TimeBudgetExceeded {
                         elapsed_secs,
                         limit_secs,
                     } => {
                         emit_event!(AgentEvent::BudgetWarning {
                             budget_type: BudgetType::Time,
-                            used: *elapsed_secs,
-                            limit: *limit_secs,
+                            used: elapsed_secs,
+                            limit: limit_secs,
                             percent: 1.0,
+                        });
+                        self.pending_fatal_diagnostic = Some(AgentError::TimeBudgetExceeded {
+                            elapsed_secs,
+                            limit_secs,
                         });
                         self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
                             run_id: run_id.clone(),
@@ -420,8 +424,8 @@ where
                     AgentError::TokenBudgetExceeded { used, limit } => {
                         emit_event!(AgentEvent::BudgetWarning {
                             budget_type: BudgetType::Tokens,
-                            used: *used,
-                            limit: *limit,
+                            used,
+                            limit,
                             percent: 1.0,
                         });
                         self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
@@ -431,15 +435,15 @@ where
                     AgentError::ToolCallBudgetExceeded { count, limit } => {
                         emit_event!(AgentEvent::BudgetWarning {
                             budget_type: BudgetType::ToolCalls,
-                            used: *count as u64,
-                            limit: *limit as u64,
+                            used: count as u64,
+                            limit: limit as u64,
                             percent: 1.0,
                         });
                         self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
                             run_id: run_id.clone(),
                         })?;
                     }
-                    _ => return Err(budget_err),
+                    other => return Err(other),
                 }
                 return self.build_result(turn_count, tool_call_count).await;
             }
@@ -642,10 +646,12 @@ where
                         .await
                     {
                         Ok(r) => r,
-                        Err(AgentError::TimeBudgetExceeded {
-                            elapsed_secs,
-                            limit_secs,
-                        }) => {
+                        Err(
+                            e @ AgentError::TimeBudgetExceeded {
+                                elapsed_secs,
+                                limit_secs,
+                            },
+                        ) => {
                             // Dedicated time-budget terminal path — same as loop-top
                             emit_event!(AgentEvent::BudgetWarning {
                                 budget_type: BudgetType::Time,
@@ -653,6 +659,7 @@ where
                                 limit: limit_secs,
                                 percent: 1.0,
                             });
+                            self.pending_fatal_diagnostic = Some(e);
                             self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
                                 run_id: run_id.clone(),
                             })?;

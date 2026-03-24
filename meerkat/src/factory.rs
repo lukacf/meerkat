@@ -445,6 +445,7 @@ impl AgentBuildConfig {
         self.additional_instructions = build.additional_instructions.clone();
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
+        self.call_timeout_override = build.call_timeout_override.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -480,6 +481,7 @@ impl AgentBuildConfig {
             additional_instructions: self.additional_instructions.clone(),
             shell_env: self.shell_env.clone(),
             checkpointer: self.checkpointer.clone(),
+            call_timeout_override: self.call_timeout_override.clone(),
         }
     }
 }
@@ -1776,6 +1778,7 @@ impl AgentFactory {
             model,
             max_tokens,
             provider,
+            provider_params: build_config.provider_params,
             tooling: SessionTooling {
                 builtins: effective_builtins,
                 shell: effective_shell,

@@ -104,6 +104,14 @@ impl SessionAgent for MockAgent {
         // No-op for mock
     }
 
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
     fn session_id(&self) -> SessionId {
         self.session_id.clone()
     }
@@ -426,6 +434,14 @@ impl SessionAgent for RealSessionAgent {
         self.agent.cancel();
     }
 
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
     fn session_id(&self) -> SessionId {
         self.agent.session().id().clone()
     }
@@ -491,6 +507,14 @@ impl SessionAgent for CompactionSessionAgent {
 
     fn cancel(&mut self) {
         self.agent.cancel();
+    }
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
     }
 
     fn session_id(&self) -> SessionId {

@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use meerkat_comms::CommsRuntime;
+use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerDirectorySource, PeerName, SendReceipt, TrustedPeerSpec,
@@ -551,6 +552,8 @@ impl SessionService for ContractSessionService {
                 updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
                 last_assistant_text: None,
                 labels: Default::default(),
             },

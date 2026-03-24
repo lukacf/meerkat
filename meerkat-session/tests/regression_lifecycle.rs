@@ -119,6 +119,14 @@ impl SessionAgent for HostModeAgent {
 
     fn cancel(&mut self) {}
 
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
     fn session_id(&self) -> SessionId {
         self.session_id.clone()
     }
@@ -275,6 +283,14 @@ impl SessionAgent for MockAgent {
     }
 
     fn cancel(&mut self) {}
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
 
     fn session_id(&self) -> SessionId {
         self.session_id.clone()
@@ -478,6 +494,14 @@ impl SessionAgent for RecordingTurnAgent {
     }
 
     fn cancel(&mut self) {}
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
 
     fn session_id(&self) -> SessionId {
         self.session_id.clone()

@@ -561,6 +561,7 @@ async fn apply_runtime_turn(
                 app_context: None,
                 additional_instructions: None,
                 shell_env: None,
+                call_timeout_override: Default::default(),
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -2231,6 +2232,7 @@ async fn create_session(
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
         shell_env: req.shell_env,
+        call_timeout_override: Default::default(),
     };
 
     let svc_req = SvcCreateSessionRequest {

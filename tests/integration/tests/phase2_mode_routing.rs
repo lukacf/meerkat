@@ -17,7 +17,7 @@ use meerkat_core::service::{
 use meerkat_core::types::{
     ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, Usage,
 };
-use meerkat_core::{InteractionId, PlainEventSource};
+use meerkat_core::{InteractionId, PlainEventSource, Provider};
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobBuilder, MobId, MobRuntimeMode, MobSessionService, MobStorage,
     Prefab, ProfileName,
@@ -144,6 +144,8 @@ impl SessionService for MockSessionService {
                 updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
                 last_assistant_text: None,
                 labels: Default::default(),
             },

@@ -238,7 +238,6 @@
     "type": "object"
   },
   "MobSendParams": {
-    "additionalProperties": false,
     "$defs": {
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
@@ -366,6 +365,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Request payload for `mob/send`.",
     "properties": {
       "content": {
@@ -407,7 +407,6 @@
     "type": "object"
   },
   "MobUnwireParams": {
-    "additionalProperties": false,
     "$defs": {
       "MobPeerTarget": {
         "description": "Target for a mob wire/unwire call.",
@@ -460,6 +459,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Request payload for `mob/unwire`.",
     "properties": {
       "member": {
@@ -481,7 +481,6 @@
     "type": "object"
   },
   "MobWireParams": {
-    "additionalProperties": false,
     "$defs": {
       "MobPeerTarget": {
         "description": "Target for a mob wire/unwire call.",
@@ -534,6 +533,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Request payload for `mob/wire`.",
     "properties": {
       "member": {

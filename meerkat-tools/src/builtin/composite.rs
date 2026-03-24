@@ -39,8 +39,16 @@ pub struct CompositeDispatcher {
     #[cfg(feature = "skills")]
     skill_tools: Option<SkillToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
+    builtin_config: BuiltinToolConfig,
     #[allow(dead_code)]
     task_store: Arc<dyn TaskStore>,
+    #[cfg(not(target_arch = "wasm32"))]
+    project_root: Option<PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    shell_config: Option<ShellConfig>,
+    #[allow(dead_code)]
+    session_id: Option<String>,
+    image_tool_results: bool,
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
@@ -116,10 +124,10 @@ impl CompositeDispatcher {
         builtin_tools.push(Arc::new(WaitTool::new()));
         builtin_tools.push(Arc::new(DateTimeTool::new()));
         builtin_tools.push(Arc::new(ApplyPatchTool::new(project_root.clone())));
-        builtin_tools.push(Arc::new(ViewImageTool::new(project_root)));
+        builtin_tools.push(Arc::new(ViewImageTool::new(project_root.clone())));
 
         // Add shell tools if enabled
-        let job_manager = if let Some(cfg) = shell_config {
+        let job_manager = if let Some(ref cfg) = shell_config {
             if cfg.enabled {
                 let mut manager = JobManager::new(cfg.clone());
                 if let Some(session_id) = shell_session_id
@@ -138,7 +146,10 @@ impl CompositeDispatcher {
                 // Use with_job_manager to share the same JobManager between ShellTool
                 // and job control tools. This ensures background jobs spawned via
                 // ShellTool are visible to shell_jobs/shell_job_status/shell_job_cancel.
-                builtin_tools.push(Arc::new(ShellTool::with_job_manager(cfg, mgr.clone())));
+                builtin_tools.push(Arc::new(ShellTool::with_job_manager(
+                    cfg.clone(),
+                    mgr.clone(),
+                )));
                 builtin_tools.push(Arc::new(ShellJobStatusTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobsListTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobCancelTool::new(mgr.clone())));
@@ -168,7 +179,12 @@ impl CompositeDispatcher {
             #[cfg(feature = "skills")]
             skill_tools: None,
             external,
+            builtin_config: config.clone(),
             task_store,
+            project_root: Some(project_root),
+            shell_config,
+            session_id: shell_session_id,
+            image_tool_results: _image_tool_results,
             job_manager,
             allowed_tools,
         })
@@ -216,7 +232,10 @@ impl CompositeDispatcher {
             #[cfg(feature = "skills")]
             skill_tools: None,
             external,
+            builtin_config: config.clone(),
             task_store,
+            session_id,
+            image_tool_results: true,
             allowed_tools,
         })
     }
@@ -445,18 +464,55 @@ impl AgentToolDispatcher for CompositeDispatcher {
     ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
         let mut owned =
             Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        let Some(external) = owned.external.take() else {
-            return Err(OpsLifecycleBindError::Unsupported);
+        let rebound_external = match owned.external.take() {
+            Some(external) if external.supports_ops_lifecycle_binding() => {
+                Some(external.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?)
+            }
+            other => other,
         };
-        if !external.supports_ops_lifecycle_binding() {
-            owned.external = Some(external);
-            return Err(OpsLifecycleBindError::Unsupported);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if owned.job_manager.is_none() && rebound_external.is_none() {
+                return Err(OpsLifecycleBindError::Unsupported);
+            }
+
+            #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
+            let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
+                Arc::clone(&owned.task_store),
+                &owned.builtin_config,
+                owned.project_root.clone(),
+                owned.shell_config.clone(),
+                rebound_external,
+                Some(owner_session_id.to_string()),
+                Some(registry),
+                owned.image_tool_results,
+            )
+            .map_err(|_| OpsLifecycleBindError::Unsupported)?;
+
+            #[cfg(feature = "skills")]
+            if let Some(skill_tools) = owned.skill_tools.take() {
+                rebound.register_skill_tools(skill_tools);
+            }
+
+            Ok(Arc::new(rebound))
         }
-        owned.external = Some(external.bind_ops_lifecycle(registry, owner_session_id)?);
-        Ok(Arc::new(owned))
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = registry;
+            let _ = owner_session_id;
+            let _ = rebound_external;
+            Err(OpsLifecycleBindError::Unsupported)
+        }
     }
 
     fn supports_ops_lifecycle_binding(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.job_manager.is_some() {
+            return true;
+        }
+
         self.external
             .as_ref()
             .is_some_and(|ext| ext.supports_ops_lifecycle_binding())
@@ -468,7 +524,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+    use meerkat_core::types::SessionId;
     use serde_json::json;
+    use tempfile::TempDir;
 
     struct MockExternalDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -736,6 +795,104 @@ mod tests {
             .await
             .expect("external tool dispatch should succeed even with a stale allow-set entry");
         assert_eq!(result.result.text_content(), "{}");
+    }
+
+    #[test]
+    fn supports_ops_lifecycle_binding_when_shell_tools_present() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MemoryTaskStore::new());
+        let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = BuiltinToolConfig::default();
+        config.policy.enable.insert("shell".to_string());
+        config.policy.enable.insert("shell_job_cancel".to_string());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &config,
+            None,
+            Some(shell_config),
+            None,
+            Some(SessionId::new().to_string()),
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        assert!(
+            dispatcher.supports_ops_lifecycle_binding(),
+            "shell-enabled composite dispatcher should support ops lifecycle binding"
+        );
+        assert!(
+            !dispatcher
+                .shell_job_manager()
+                .expect("shell manager")
+                .exports_canonical_async_ops(),
+            "shell manager should start unbound before canonical registry binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_ops_lifecycle_rebuilds_shell_tools_with_canonical_registry() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MemoryTaskStore::new());
+        let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = BuiltinToolConfig::default();
+        config.policy.enable.insert("shell".to_string());
+        config.policy.enable.insert("shell_job_cancel".to_string());
+        let dispatcher = Arc::new(
+            CompositeDispatcher::new(
+                store,
+                &config,
+                None,
+                Some(shell_config),
+                None,
+                Some(SessionId::new().to_string()),
+                true,
+            )
+            .expect("composite dispatcher should build"),
+        );
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = dispatcher
+            .bind_ops_lifecycle(Arc::clone(&registry), SessionId::new())
+            .expect("ops lifecycle binding should succeed");
+
+        let call_json = serde_json::value::RawValue::from_string(
+            r#"{"command":"sleep 60","background":true}"#.to_string(),
+        )
+        .unwrap();
+        let call = ToolCallView {
+            id: "shell-bg",
+            name: "shell",
+            args: &call_json,
+        };
+        let outcome = rebound
+            .dispatch(call)
+            .await
+            .expect("background shell dispatch");
+        assert_eq!(
+            outcome.async_ops.len(),
+            1,
+            "rebound shell dispatcher must emit canonical async op refs"
+        );
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("json result");
+        let cancel_json = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "job_id": payload["job_id"].as_str().expect("job id"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cancel = ToolCallView {
+            id: "shell-cancel",
+            name: "shell_job_cancel",
+            args: &cancel_json,
+        };
+        let _ = rebound
+            .dispatch(cancel)
+            .await
+            .expect("background shell cancel");
     }
 
     #[tokio::test]

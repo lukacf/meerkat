@@ -2378,6 +2378,7 @@ struct CliRuntimeExecutor {
         Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
 fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
@@ -2428,7 +2429,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             prompt: prompt.into(),
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
-            event_tx: None,
+            event_tx: self.event_tx.clone(),
             host_mode: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.host_mode)
@@ -3280,6 +3281,7 @@ async fn run_agent(
         persistent_service: None,
         session_id: session_id.clone(),
         runtime_adapter: runtime_adapter.clone(),
+        event_tx: output_pipeline.event_sender(),
     });
     runtime_adapter
         .register_session_with_executor(session_id.clone(), executor)
@@ -3365,7 +3367,10 @@ async fn run_agent(
     output_pipeline
         .shutdown_after(async {
             // Shutdown the session service and MCP connections gracefully.
-            // This drops runtime-held event senders so the receiver can close cleanly.
+            // Unregister the runtime-backed executor before awaiting stream tasks.
+            // The adapter owns the boxed executor, and the executor now holds the
+            // caller stream sender for runtime-backed turns.
+            runtime_adapter.unregister_session(&session_id).await;
             service.shutdown().await;
             shutdown_mcp(&mcp_adapter).await;
             if let Some(ref mut mob_ctx) = run_mob_tools {
@@ -3753,6 +3758,7 @@ async fn resume_session_with_llm_override(
         persistent_service: Some(service.clone()),
         session_id: session_id.clone(),
         runtime_adapter: resume_adapter.clone(),
+        event_tx: output_pipeline.event_sender(),
     });
     resume_adapter
         .register_session_with_executor(session_id.clone(), executor)
@@ -3820,6 +3826,7 @@ async fn resume_session_with_llm_override(
     output_pipeline
         .shutdown_after(async {
             // Shutdown the session service and MCP connections gracefully.
+            resume_adapter.unregister_session(&session_id).await;
             log_stage("service.shutdown");
             service.shutdown().await;
             log_stage("shutdown_mcp");
@@ -6442,6 +6449,44 @@ mod tests {
         .expect("verbose pipeline shutdown should succeed");
     }
 
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_releases_runtime_executor_sender_clones() {
+        let session_id = SessionId::new();
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: session_id.to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let service: Arc<dyn meerkat_core::service::SessionService> =
+            Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let executor = Box::new(CliRuntimeExecutor {
+            service,
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            event_tx: pipeline.event_sender(),
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await;
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async {
+                runtime_adapter.unregister_session(&session_id).await;
+                Ok(())
+            }),
+        )
+        .await
+        .expect("shutdown should finish once runtime executor is unregistered")
+        .expect("shutdown should succeed");
+    }
+
     struct StaticDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
     }
@@ -6808,6 +6853,114 @@ mod tests {
         }
     }
 
+    struct CapturingEventTurnService {
+        session_id: SessionId,
+        saw_event_tx: std::sync::atomic::AtomicBool,
+    }
+
+    impl CapturingEventTurnService {
+        fn new(session_id: SessionId) -> Self {
+            Self {
+                session_id,
+                saw_event_tx: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for CapturingEventTurnService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            Ok(RunResult {
+                text: String::new(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 0,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            id: &SessionId,
+            req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            if let Some(tx) = req.event_tx {
+                self.saw_event_tx
+                    .store(true, std::sync::atomic::Ordering::Release);
+                let _ = tx
+                    .send(EventEnvelope::new(
+                        "capturing-turn-service",
+                        1,
+                        None,
+                        AgentEvent::TextDelta {
+                            delta: "streamed".to_string(),
+                        },
+                    ))
+                    .await;
+            }
+            Ok(RunResult {
+                text: "streamed".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(SessionView {
+                state: SessionInfo {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::now(),
+                    updated_at: std::time::SystemTime::now(),
+                    message_count: 0,
+                    is_active: false,
+                    last_assistant_text: None,
+                    labels: Default::default(),
+                },
+                billing: SessionUsage {
+                    total_tokens: 0,
+                    usage: Usage::default(),
+                },
+            })
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            Ok(vec![SessionSummary {
+                session_id: self.session_id.clone(),
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            }])
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_resolve_host_mode_roundtrip() {
         assert!(resolve_host_mode(true).expect("host mode should be enabled"));
@@ -6833,6 +6986,56 @@ mod tests {
         assert!(!resolve_stream_enabled(false, false, false).expect("json default"));
         assert!(resolve_stream_enabled(true, false, false).expect("explicit stream"));
         assert!(!resolve_stream_enabled(false, true, true).expect("explicit no-stream"));
+    }
+
+    #[tokio::test]
+    async fn test_cli_runtime_executor_forwards_stream_events_to_runtime_backed_turns() {
+        let session_id = SessionId::new();
+        let service = Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
+        let mut executor = CliRuntimeExecutor {
+            service: service.clone(),
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter,
+            event_tx: Some(event_tx),
+        };
+        let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(
+            meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                    text: "hello".to_string(),
+                },
+            },
+        );
+        let run_id = meerkat_core::lifecycle::RunId::new();
+
+        let output = meerkat_core::lifecycle::CoreExecutor::apply(&mut executor, run_id, primitive)
+            .await
+            .expect("runtime-backed CLI turn should succeed");
+        assert_eq!(
+            output
+                .run_result
+                .expect("executor should return run result")
+                .text,
+            "streamed"
+        );
+
+        let envelope = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("stream event should arrive without timing out")
+            .expect("stream event channel should remain open");
+        assert!(matches!(
+            envelope.payload,
+            AgentEvent::TextDelta { ref delta } if delta == "streamed"
+        ));
+        assert!(
+            service
+                .saw_event_tx
+                .load(std::sync::atomic::Ordering::Acquire),
+            "runtime-backed executor must forward the caller event sender"
+        );
     }
 
     #[test]

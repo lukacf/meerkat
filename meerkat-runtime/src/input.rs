@@ -105,8 +105,10 @@ pub enum Input {
     /// External event input.
     ExternalEvent(ExternalEventInput),
     /// Explicit runtime continuation work.
+    #[serde(alias = "system_generated")]
     Continuation(ContinuationInput),
     /// Explicit non-content operation/lifecycle input.
+    #[serde(alias = "projected")]
     Operation(OperationInput),
 }
 
@@ -544,6 +546,23 @@ mod tests {
     }
 
     #[test]
+    fn continuation_input_accepts_legacy_system_generated_tag() {
+        let input = Input::Continuation(ContinuationInput::terminal_peer_response_for_request(
+            "legacy system generated",
+            Some("req-legacy".into()),
+        ));
+        let mut json = serde_json::to_value(&input).unwrap();
+        json["input_type"] = serde_json::Value::String("system_generated".into());
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        match parsed {
+            Input::Continuation(continuation) => {
+                assert_eq!(continuation.request_id.as_deref(), Some("req-legacy"));
+            }
+            other => panic!("Expected Continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn operation_input_serde() {
         let input = Input::Operation(OperationInput {
             header: InputHeader {
@@ -557,6 +576,24 @@ mod tests {
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "operation");
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        assert!(matches!(parsed, Input::Operation(_)));
+    }
+
+    #[test]
+    fn operation_input_accepts_legacy_projected_tag() {
+        let input = Input::Operation(OperationInput {
+            header: InputHeader {
+                durability: InputDurability::Derived,
+                ..make_header()
+            },
+            operation_id: OperationId::new(),
+            event: OpEvent::Cancelled {
+                id: OperationId::new(),
+            },
+        });
+        let mut json = serde_json::to_value(&input).unwrap();
+        json["input_type"] = serde_json::Value::String("projected".into());
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::Operation(_)));
     }

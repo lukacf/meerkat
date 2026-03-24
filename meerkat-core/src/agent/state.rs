@@ -147,20 +147,20 @@ where
                     {
                         Ok(inner_result) => inner_result,
                         Err(_elapsed) => {
-                            // Timeout fired — classify by pre-selected source
+                            // Timeout fired — classify by pre-selected source.
+                            // TurnBudget is non-retryable (whole-turn expired).
+                            // CallBudget flows through step 5 retry logic below.
                             match source {
-                                CallTimeoutSource::CallBudget => {
-                                    return Err(AgentError::Llm {
-                                        provider: self.client.provider(),
-                                        reason: crate::error::LlmFailureReason::CallTimeout {
-                                            duration_ms: effective_timeout.as_millis() as u64,
-                                        },
-                                        message: format!(
-                                            "LLM call timed out after {}s",
-                                            effective_timeout.as_secs()
-                                        ),
-                                    });
-                                }
+                                CallTimeoutSource::CallBudget => Err(AgentError::Llm {
+                                    provider: self.client.provider(),
+                                    reason: crate::error::LlmFailureReason::CallTimeout {
+                                        duration_ms: effective_timeout.as_millis() as u64,
+                                    },
+                                    message: format!(
+                                        "LLM call timed out after {}s",
+                                        effective_timeout.as_secs()
+                                    ),
+                                }),
                                 CallTimeoutSource::TurnBudget => {
                                     let limit = self
                                         .budget

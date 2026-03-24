@@ -626,7 +626,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 ),
                 event_tx: None,
                 host_mode: stored_metadata.as_ref().is_some_and(|meta| meta.host_mode),
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 build: Some(build),
@@ -1223,9 +1222,7 @@ mod tests {
     use super::*;
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
     use meerkat_core::checkpoint::SessionCheckpointer;
-    use meerkat_core::service::{
-        HostModeOwner, InitialTurnPolicy, SessionService, SessionServiceControlExt,
-    };
+    use meerkat_core::service::{InitialTurnPolicy, SessionService, SessionServiceControlExt};
     use meerkat_runtime::InMemoryRuntimeStore;
     use meerkat_store::MemoryStore;
     use meerkat_store::StoreError;
@@ -1481,7 +1478,6 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn,
             build: None,
@@ -1496,7 +1492,6 @@ mod tests {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,

@@ -151,7 +151,7 @@ pub use schema::{
 };
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, HostModeOwner, SessionBuildOptions, SessionControlError, SessionError,
+    CreateSessionRequest, SessionBuildOptions, SessionControlError, SessionError,
     SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
     SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,

@@ -239,7 +239,7 @@ pub fn to_create_session_request(
         max_tokens: config.max_tokens,
         event_tx: None,
         host_mode: config.host_mode,
-        host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
         skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution

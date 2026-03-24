@@ -482,7 +482,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: Some(SessionBuildOptions {
@@ -578,7 +578,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -616,7 +616,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: None,

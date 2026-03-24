@@ -143,7 +143,6 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
             max_tokens: Some(state.max_tokens),
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             build: Some(SessionBuildOptions {

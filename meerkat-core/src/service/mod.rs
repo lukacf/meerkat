@@ -147,8 +147,6 @@ pub struct CreateSessionRequest {
     /// Run in host mode: process prompt then stay alive for comms messages.
     /// This is a session-level property applied to all turns.
     pub host_mode: bool,
-    /// Which layer owns the background host-mode drain lifecycle.
-    pub host_mode_owner: HostModeOwner,
     /// Canonical SkillKeys to resolve and inject for the first turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
@@ -314,8 +312,6 @@ pub struct StartTurnRequest {
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     /// Run this turn in host mode.
     pub host_mode: bool,
-    /// Which layer owns the background host-mode drain lifecycle for this turn.
-    pub host_mode_owner: HostModeOwner,
     /// Canonical SkillKeys to resolve and inject for this turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
@@ -364,14 +360,6 @@ pub struct TurnToolOverlay {
     /// Optional deny-list for this turn.
     #[serde(default)]
     pub blocked_tools: Option<Vec<String>>,
-}
-
-/// Owner of the background host-mode comms drain lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HostModeOwner {
-    /// An external runtime/surface owns the host-mode drain lifecycle.
-    #[default]
-    ExternalRuntime,
 }
 
 /// Query parameters for listing sessions.

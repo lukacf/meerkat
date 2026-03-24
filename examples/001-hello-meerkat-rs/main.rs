@@ -35,7 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: Some(512),
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: None,

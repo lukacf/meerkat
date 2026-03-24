@@ -231,15 +231,6 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 .turn_metadata()
                 .and_then(|meta| meta.host_mode)
                 .unwrap_or(false),
-            host_mode_owner: if primitive
-                .turn_metadata()
-                .and_then(|meta| meta.host_mode)
-                .unwrap_or(false)
-            {
-                meerkat_core::service::HostModeOwner::ExternalRuntime
-            } else {
-                meerkat_core::service::HostModeOwner::ExternalRuntime
-            },
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),

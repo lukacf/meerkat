@@ -1164,7 +1164,7 @@ mod scenario_09_session_service {
             max_tokens: Some(256),
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: None,
@@ -1213,7 +1213,7 @@ mod scenario_09_session_service {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
             skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,

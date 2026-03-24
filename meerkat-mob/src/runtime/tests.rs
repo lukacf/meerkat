@@ -3727,7 +3727,6 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -4133,7 +4132,6 @@ async fn test_resume_reconciles_orphaned_sessions() {
                 ..Default::default()
             }),
             host_mode: true,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             labels: None,
@@ -4864,7 +4862,6 @@ async fn test_attach_existing_session_rejects_persisted_host_mode_true() {
                 ..Default::default()
             }),
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             labels: None,
@@ -4977,7 +4974,6 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
                 ..Default::default()
             }),
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             labels: None,
@@ -5101,7 +5097,6 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
                 ..Default::default()
             }),
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             labels: None,

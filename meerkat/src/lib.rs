@@ -7,7 +7,7 @@
 //! ```text
 //! use meerkat::{AgentFactory, Config, build_ephemeral_service};
 //! use meerkat::{CreateSessionRequest, SessionService};
-//! use meerkat_core::service::{InitialTurnPolicy, HostModeOwner};
+//! use meerkat_core::service::InitialTurnPolicy;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +23,6 @@
 //!         max_tokens: None,
 //!         event_tx: None,
 //!         host_mode: false,
-//!         host_mode_owner: HostModeOwner::ExternalRuntime,
 //!         skill_references: None,
 //!         initial_turn: InitialTurnPolicy::RunImmediately,
 //!         build: None,

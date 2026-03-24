@@ -82,7 +82,7 @@ mod scenario_22_session_service_lifecycle {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 build: None,
@@ -113,7 +113,7 @@ mod scenario_22_session_service_lifecycle {
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
-                    host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

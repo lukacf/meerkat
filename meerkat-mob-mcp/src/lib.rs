@@ -2193,7 +2193,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2233,7 +2233,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2268,7 +2268,7 @@ mod tests {
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
-                    host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -2304,7 +2304,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2390,7 +2390,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2435,7 +2435,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2458,7 +2458,7 @@ mod tests {
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
-                    host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

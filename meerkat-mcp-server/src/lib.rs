@@ -13,8 +13,8 @@ use meerkat::{
 use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
-    CreateSessionRequest, HostModeOwner, InitialTurnPolicy, SessionBuildOptions, SessionError,
-    SessionService, SessionServiceHistoryExt, StartTurnRequest,
+    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
+    SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
@@ -2380,7 +2380,7 @@ async fn handle_meerkat_run(
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
         host_mode,
-        host_mode_owner: HostModeOwner::ExternalRuntime,
+
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(build),
@@ -2665,7 +2665,7 @@ async fn handle_meerkat_resume(
             max_tokens,
             event_tx: event_tx.clone(),
             host_mode,
-            host_mode_owner: HostModeOwner::ExternalRuntime,
+
             skill_references,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -2681,7 +2681,7 @@ async fn handle_meerkat_resume(
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: event_tx.clone(),
             host_mode,
-            host_mode_owner: HostModeOwner::ExternalRuntime,
+
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
             additional_instructions: input.additional_instructions.clone(),
@@ -2697,7 +2697,7 @@ async fn handle_meerkat_resume(
                     max_tokens,
                     event_tx: event_tx.clone(),
                     host_mode,
-                    host_mode_owner: HostModeOwner::ExternalRuntime,
+
                     skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
                     build: Some(build),

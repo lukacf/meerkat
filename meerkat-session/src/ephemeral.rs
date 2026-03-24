@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest, HostModeOwner,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
     SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
     SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
@@ -69,7 +69,6 @@ enum SessionCommand {
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         handling_mode: meerkat_core::types::HandlingMode,
         host_mode: bool,
-        host_mode_owner: HostModeOwner,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
@@ -703,7 +702,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 render_metadata: req.render_metadata,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 host_mode,
-                host_mode_owner: req.host_mode_owner,
                 event_tx: caller_event_tx,
                 result_tx,
                 skill_references: req.skill_references,
@@ -792,7 +790,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     render_metadata: req.render_metadata,
                     handling_mode: req.handling_mode,
                     host_mode: req.host_mode,
-                    host_mode_owner: req.host_mode_owner,
                     event_tx: req.event_tx,
                     result_tx,
                     skill_references: req.skill_references,
@@ -1174,7 +1171,6 @@ async fn session_task<A: SessionAgent>(
                 render_metadata,
                 handling_mode,
                 host_mode: _,
-                host_mode_owner: _,
                 event_tx,
                 result_tx,
                 skill_references,

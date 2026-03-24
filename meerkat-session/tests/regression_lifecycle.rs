@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, HostModeOwner,
-    InitialTurnPolicy, SessionError, SessionQuery, SessionService, SessionServiceControlExt,
-    StartTurnRequest, TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, InitialTurnPolicy,
+    SessionError, SessionQuery, SessionService, SessionServiceControlExt, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
@@ -418,7 +418,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         max_tokens: None,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::ExternalRuntime,
+
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -447,7 +447,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         handling_mode: HandlingMode::Queue,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::ExternalRuntime,
+
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,
@@ -990,7 +990,7 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 handling_mode: HandlingMode::Steer,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: HostModeOwner::ExternalRuntime,
+
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,

@@ -74,7 +74,7 @@ pub use comms::{
 pub use comms_drain_lifecycle_authority::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
     CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainLifecycleTransition,
-    CommsDrainMode, CommsDrainPhase, DrainExitReason,
+    CommsDrainMode, CommsDrainPhase, DrainCaller, DrainExitReason,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,

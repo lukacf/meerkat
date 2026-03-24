@@ -237,7 +237,8 @@ where
         }
 
         // Only commit boundary side effects after hooks accept the transition.
-        self.drain_comms_inbox().await;
+        self.drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+            .await;
 
         Ok(())
     }
@@ -264,7 +265,8 @@ where
         for effect in &transition.effects {
             match effect {
                 TurnExecutionEffect::DrainCommsInbox => {
-                    self.drain_comms_inbox().await;
+                    self.drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                        .await;
                 }
                 TurnExecutionEffect::CheckCompaction => {
                     let current_boundary_index = self.compaction_cadence.session_boundary_index;

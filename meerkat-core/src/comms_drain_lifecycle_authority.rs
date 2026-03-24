@@ -5,6 +5,21 @@
 
 use std::fmt;
 
+/// Identity of the caller requesting a comms inbox drain.
+///
+/// The machine uses this to decide whether a drain is permitted when
+/// turn-boundary suppression is active.  Typed so the decision lives
+/// in the authority, not in shell-level bypass methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainCaller {
+    /// Normal turn-boundary drain inside the agent loop.
+    /// Suppressed when a dedicated drain owner is active.
+    TurnBoundary,
+    /// The designated drain owner (host-mode pump, injected-turn admission).
+    /// Always permitted — this caller IS the task the suppression defers to.
+    DesignatedOwner,
+}
+
 /// Phase of the comms drain lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommsDrainPhase {
@@ -139,6 +154,18 @@ impl CommsDrainLifecycleAuthority {
 
     pub fn suppresses_turn_boundary_drain(&self) -> bool {
         self.fields.suppresses_turn_boundary_drain
+    }
+
+    /// Machine-owned drain permission rule.
+    ///
+    /// Given the current turn-boundary suppression state and a typed caller
+    /// identity, returns whether the drain is permitted.  This is the
+    /// canonical decision point — shell code must not invent bypass logic.
+    pub fn permits_drain(suppressed: bool, caller: DrainCaller) -> bool {
+        match caller {
+            DrainCaller::TurnBoundary => !suppressed,
+            DrainCaller::DesignatedOwner => true,
+        }
     }
 
     fn reject(&self, input: &str) -> CommsDrainLifecycleError {

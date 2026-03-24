@@ -78,24 +78,23 @@ where
     ///
     /// Routes on the stored `PeerInputClass` from ingress classification —
     /// no downstream re-classification.
-    /// Turn-boundary drain: skips when a dedicated comms drain task is active
-    /// (the session service is the sole inbox consumer in that case).
-    pub(super) async fn drain_comms_inbox(&mut self) -> bool {
-        if self
+    /// Drain comms inbox if the authority permits it for the given caller.
+    ///
+    /// The drain-permission rule is machine-owned
+    /// (`CommsDrainLifecycleAuthority::permits_drain`): turn-boundary
+    /// callers are suppressed when a dedicated drain task is active,
+    /// while designated-owner callers (host-mode pump, injected-turn
+    /// admission) are always permitted.
+    pub(super) async fn drain_comms_inbox(
+        &mut self,
+        caller: crate::comms_drain_lifecycle_authority::DrainCaller,
+    ) -> bool {
+        let suppressed = self
             .comms_drain_active
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+            .load(std::sync::atomic::Ordering::Acquire);
+        if !crate::CommsDrainLifecycleAuthority::permits_drain(suppressed, caller) {
             return false;
         }
-        self.drain_comms_inbox_unconditional().await
-    }
-
-    /// Drain the comms inbox regardless of the `comms_drain_active` flag.
-    ///
-    /// Used by callers that ARE the designated drain owner: host-mode pump
-    /// and injected-turn admission. These must bypass the delegation guard
-    /// because they are the very task the guard is deferring to.
-    pub(super) async fn drain_comms_inbox_unconditional(&mut self) -> bool {
         use crate::interaction::PeerInputClass;
 
         let comms = match &self.comms_runtime {
@@ -597,7 +596,9 @@ mod tests {
             .await;
 
         // No comms runtime set, should return false
-        let drained = agent.drain_comms_inbox().await;
+        let drained = agent
+            .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+            .await;
         assert!(!drained);
     }
 
@@ -615,7 +616,9 @@ mod tests {
             .await;
 
         // Empty inbox should return false
-        let drained = agent.drain_comms_inbox().await;
+        let drained = agent
+            .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+            .await;
         assert!(!drained);
         assert_eq!(comms.drain_count(), 1);
     }
@@ -637,7 +640,9 @@ mod tests {
             .await;
 
         // Should return true and inject messages
-        let drained = agent.drain_comms_inbox().await;
+        let drained = agent
+            .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+            .await;
         assert!(drained);
 
         // Check that messages were injected into session
@@ -671,10 +676,18 @@ mod tests {
             .await;
 
         // First drain should return true
-        assert!(agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         // Second drain should return false (inbox is now empty)
-        assert!(!agent.drain_comms_inbox().await);
+        assert!(
+            !agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         // Verify drain was called twice
         assert_eq!(comms.drain_count(), 2);
@@ -694,20 +707,32 @@ mod tests {
             .await;
 
         // First drain - empty
-        assert!(!agent.drain_comms_inbox().await);
+        assert!(
+            !agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         // Add a message
         comms.push_message("First message".to_string()).await;
 
         // Second drain - has message
-        assert!(agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         // Add more messages
         comms.push_message("Second message".to_string()).await;
         comms.push_message("Third message".to_string()).await;
 
         // Third drain - has messages
-        assert!(agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         // Session should have two user messages (one from each successful drain)
         let user_messages: Vec<_> = agent
@@ -764,8 +789,16 @@ mod tests {
             )
             .await;
 
-        assert!(agent.drain_comms_inbox().await);
-        assert!(!agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
+        assert!(
+            !agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         let user_msgs: Vec<_> = agent
             .session
@@ -818,9 +851,17 @@ mod tests {
             )
             .await;
 
-        assert!(agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
         comms.set_peer_count(5);
-        assert!(agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         let user_msgs: Vec<_> = agent
             .session
@@ -868,7 +909,11 @@ mod tests {
             )
             .await;
 
-        assert!(agent.drain_comms_inbox().await);
+        assert!(
+            agent
+                .drain_comms_inbox(crate::DrainCaller::TurnBoundary)
+                .await
+        );
 
         let user_msgs: Vec<_> = agent
             .session

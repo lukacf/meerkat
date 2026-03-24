@@ -4116,6 +4116,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pending_session_read_reports_effective_llm_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .expect("pending session should be readable");
+        assert_eq!(info.model, "claude-sonnet-4-5");
+        assert_eq!(info.provider, "anthropic");
+    }
+
+    #[tokio::test]
+    async fn turn_start_on_pending_session_rejects_provider_only_override() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        let overrides = TurnOverrides {
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let err = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .expect_err("provider-only override should be rejected on pending sessions too");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message.contains("provider override requires model"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
     /// turn/start on a materialized session allows model override (hot-swap).
     #[tokio::test]
     async fn turn_start_on_materialized_session_allows_model_override() {

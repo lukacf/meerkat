@@ -271,12 +271,10 @@ impl MobMemberTerminalClassifier {
             CanonicalMemberStatus::Retiring => MobMemberTerminalClass::Running,
             CanonicalMemberStatus::Broken => MobMemberTerminalClass::TerminalFailure,
             CanonicalMemberStatus::Active => match material.session_observation {
-                CanonicalSessionObservation::Active | CanonicalSessionObservation::Unknown => {
-                    MobMemberTerminalClass::Running
-                }
-                CanonicalSessionObservation::Inactive | CanonicalSessionObservation::Missing => {
-                    MobMemberTerminalClass::TerminalCompleted
-                }
+                CanonicalSessionObservation::Active
+                | CanonicalSessionObservation::Inactive
+                | CanonicalSessionObservation::Unknown => MobMemberTerminalClass::Running,
+                CanonicalSessionObservation::Missing => MobMemberTerminalClass::TerminalCompleted,
             },
             CanonicalMemberStatus::Completed => MobMemberTerminalClass::TerminalCompleted,
             CanonicalMemberStatus::Unknown => MobMemberTerminalClass::TerminalUnknown,

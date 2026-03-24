@@ -13,11 +13,10 @@ use crate::tokio;
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScopeRevision, ToolScopeStageError,
 };
-use crate::types::{ContentInput, HandlingMode, Message, RenderMetadata, RunResult};
+use crate::types::{ContentInput, Message, RunResult};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
@@ -33,17 +32,6 @@ pub trait AgentRunner: Send {
         prompt: ContentInput,
         tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError>;
-}
-
-/// Outcome of a host-mode poll cycle.
-#[derive(Debug)]
-pub enum HostModePollOutcome {
-    /// No comms work was available.
-    Idle,
-    /// A pending comms message was drained and processed into a turn.
-    Ran(RunResult),
-    /// Peer DISMISS was observed; the host-mode drain should stop.
-    Dismissed,
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -143,51 +131,6 @@ where
     /// Get the current nesting depth
     pub fn depth(&self) -> u32 {
         self.depth
-    }
-
-    /// Set whether a separate host-mode drain owns comms inbox consumption.
-    ///
-    /// Only called through the `SessionAgent` trait as the realization endpoint
-    /// for `CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed`. Must
-    /// not be called directly from shell code — use protocol helpers instead.
-    pub fn set_comms_drain_active(&mut self, active: bool) {
-        self.comms_drain_active.store(active, Ordering::Release);
-    }
-
-    /// Shared comms-drain control flag used by host-mode owners.
-    pub fn comms_drain_control(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.comms_drain_active)
-    }
-
-    /// Poll a host-mode cycle using the existing comms inbox as the next turn source.
-    pub async fn poll_host_mode_with_events(
-        &mut self,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<HostModePollOutcome, AgentError> {
-        if self
-            .comms_arc()
-            .is_some_and(|comms| comms.dismiss_received())
-        {
-            return Ok(HostModePollOutcome::Dismissed);
-        }
-
-        let drained = self
-            .drain_comms_inbox(crate::DrainCaller::DesignatedOwner)
-            .await;
-        if !drained {
-            return if self
-                .comms_arc()
-                .is_some_and(|comms| comms.dismiss_received())
-            {
-                Ok(HostModePollOutcome::Dismissed)
-            } else {
-                Ok(HostModePollOutcome::Idle)
-            };
-        }
-
-        self.run_pending_with_events(event_tx)
-            .await
-            .map(HostModePollOutcome::Ran)
     }
 
     /// Get the event tap for interaction-scoped streaming.
@@ -521,48 +464,6 @@ where
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, AgentError> {
         self.run_inner(user_input, Some(event_tx)).await
-    }
-
-    /// Run a turn with explicit injected-event semantics.
-    pub async fn run_injected_turn_with_events(
-        &mut self,
-        user_input: ContentInput,
-        handling_mode: HandlingMode,
-        render_metadata: Option<RenderMetadata>,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<RunResult, AgentError> {
-        let injector = self
-            .comms_arc()
-            .and_then(|runtime| runtime.event_injector())
-            .ok_or_else(|| {
-                AgentError::ConfigError(
-                    "handling_mode/render_metadata require an event injector".to_string(),
-                )
-            })?;
-
-        injector
-            .inject(
-                user_input,
-                crate::PlainEventSource::Rpc,
-                handling_mode,
-                render_metadata,
-            )
-            .map_err(|error| {
-                AgentError::InternalError(format!(
-                    "failed to inject turn into comms inbox: {error}"
-                ))
-            })?;
-
-        if !self
-            .drain_comms_inbox(crate::DrainCaller::DesignatedOwner)
-            .await
-        {
-            return Err(AgentError::InternalError(
-                "injected turn was not admitted into the session".to_string(),
-            ));
-        }
-
-        self.run_pending_with_events(event_tx).await
     }
 
     /// Run the agent using the pending user message already in the session.

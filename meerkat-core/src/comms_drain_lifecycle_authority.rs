@@ -1,24 +1,8 @@
 //! RMAT/MTAS sealed authority for the CommsDrainLifecycle machine.
 //!
-//! Shared by direct `SessionService` host-mode orchestration and the
-//! runtime-backed comms drain path so both realize the same lifecycle truth.
+//! Owns spawn/stop/respawn lifecycle for the runtime-backed comms drain task.
 
 use std::fmt;
-
-/// Identity of the caller requesting a comms inbox drain.
-///
-/// The machine uses this to decide whether a drain is permitted when
-/// turn-boundary suppression is active.  Typed so the decision lives
-/// in the authority, not in shell-level bypass methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DrainCaller {
-    /// Normal turn-boundary drain inside the agent loop.
-    /// Suppressed when a dedicated drain owner is active.
-    TurnBoundary,
-    /// The designated drain owner (host-mode pump, injected-turn admission).
-    /// Always permitted — this caller IS the task the suppression defers to.
-    DesignatedOwner,
-}
 
 /// Phase of the comms drain lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +59,6 @@ pub enum CommsDrainLifecycleInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommsDrainLifecycleEffect {
     SpawnDrainTask { mode: CommsDrainMode },
-    SetTurnBoundaryDrainSuppressed { active: bool },
     AbortDrainTask,
 }
 
@@ -109,7 +92,6 @@ impl std::error::Error for CommsDrainLifecycleError {}
 #[derive(Debug, Clone)]
 struct CommsDrainLifecycleFields {
     mode: Option<CommsDrainMode>,
-    suppresses_turn_boundary_drain: bool,
 }
 
 mod sealed {
@@ -137,10 +119,7 @@ impl CommsDrainLifecycleAuthority {
     pub fn new() -> Self {
         Self {
             phase: CommsDrainPhase::Inactive,
-            fields: CommsDrainLifecycleFields {
-                mode: None,
-                suppresses_turn_boundary_drain: false,
-            },
+            fields: CommsDrainLifecycleFields { mode: None },
         }
     }
 
@@ -150,22 +129,6 @@ impl CommsDrainLifecycleAuthority {
 
     pub fn mode(&self) -> Option<CommsDrainMode> {
         self.fields.mode
-    }
-
-    pub fn suppresses_turn_boundary_drain(&self) -> bool {
-        self.fields.suppresses_turn_boundary_drain
-    }
-
-    /// Machine-owned drain permission rule.
-    ///
-    /// Given the current turn-boundary suppression state and a typed caller
-    /// identity, returns whether the drain is permitted.  This is the
-    /// canonical decision point — shell code must not invent bypass logic.
-    pub fn permits_drain(suppressed: bool, caller: DrainCaller) -> bool {
-        match caller {
-            DrainCaller::TurnBoundary => !suppressed,
-            DrainCaller::DesignatedOwner => true,
-        }
     }
 
     fn reject(&self, input: &str) -> CommsDrainLifecycleError {
@@ -198,11 +161,7 @@ impl CommsDrainLifecycleAuthority {
         let next_phase = match (phase, input) {
             (Inactive, EnsureRunning { mode }) => {
                 fields.mode = Some(*mode);
-                fields.suppresses_turn_boundary_drain = true;
                 effects.push(CommsDrainLifecycleEffect::SpawnDrainTask { mode: *mode });
-                effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                    active: true,
-                });
                 Starting
             }
             (Starting, TaskSpawned) => Running,
@@ -210,51 +169,25 @@ impl CommsDrainLifecycleAuthority {
                 if *reason == DrainExitReason::Failed
                     && fields.mode == Some(CommsDrainMode::PersistentHost)
                 {
-                    fields.suppresses_turn_boundary_drain = false;
-                    effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                        active: false,
-                    });
                     ExitedRespawnable
                 } else {
-                    fields.suppresses_turn_boundary_drain = false;
-                    effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                        active: false,
-                    });
                     Stopped
                 }
             }
             (Running | Starting, StopRequested) => {
-                fields.suppresses_turn_boundary_drain = false;
                 effects.push(CommsDrainLifecycleEffect::AbortDrainTask);
-                effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                    active: false,
-                });
                 Stopped
             }
-            (Running | Starting, AbortObserved) => {
-                fields.suppresses_turn_boundary_drain = false;
-                effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                    active: false,
-                });
-                Stopped
-            }
+            (Running | Starting, AbortObserved) => Stopped,
             (ExitedRespawnable, EnsureRunning { mode }) => {
                 fields.mode = Some(*mode);
-                fields.suppresses_turn_boundary_drain = true;
                 effects.push(CommsDrainLifecycleEffect::SpawnDrainTask { mode: *mode });
-                effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                    active: true,
-                });
                 Starting
             }
             (ExitedRespawnable, StopRequested) => Stopped,
             (Stopped, EnsureRunning { mode }) => {
                 fields.mode = Some(*mode);
-                fields.suppresses_turn_boundary_drain = true;
                 effects.push(CommsDrainLifecycleEffect::SpawnDrainTask { mode: *mode });
-                effects.push(CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed {
-                    active: true,
-                });
                 Starting
             }
             _ => {

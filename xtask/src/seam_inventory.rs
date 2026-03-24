@@ -74,12 +74,6 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             SeamClassification::OwnerRealizationPlusFeedback,
             "Shell must abort task AND feed back AbortObserved",
         ),
-        (
-            "CommsDrainLifecycleMachine",
-            "SetTurnBoundaryDrainSuppressed",
-            SeamClassification::NoOwnerRealization,
-            "Local projection — sets atomic flag observable by turn loop",
-        ),
         // === TurnExecutionMachine ===
         (
             "TurnExecutionMachine",

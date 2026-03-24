@@ -62,7 +62,7 @@ pub mod wait_interrupt;
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
-    HostModePollOutcome, LlmStreamResult,
+    LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
@@ -74,7 +74,7 @@ pub use comms::{
 pub use comms_drain_lifecycle_authority::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
     CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainLifecycleTransition,
-    CommsDrainMode, CommsDrainPhase, DrainCaller, DrainExitReason,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,

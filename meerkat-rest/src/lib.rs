@@ -29,8 +29,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
-#[cfg(feature = "comms")]
-use meerkat::SessionServiceCommsExt;
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
     PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
@@ -2280,8 +2278,6 @@ async fn create_session(
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
-        let control = state.session_service.comms_drain_control(&session_id).await;
-        adapter.set_comms_drain_control(&session_id, control).await;
         adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
             .await;
@@ -2623,8 +2619,6 @@ async fn continue_session(
     #[cfg(feature = "comms")]
     {
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
-        let control = state.session_service.comms_drain_control(&session_id).await;
-        adapter.set_comms_drain_control(&session_id, control).await;
         adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
             .await;

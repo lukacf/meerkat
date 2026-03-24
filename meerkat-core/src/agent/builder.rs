@@ -268,7 +268,6 @@ impl AgentBuilder {
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,
-            comms_drain_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         if let Some(raw_filter) = agent

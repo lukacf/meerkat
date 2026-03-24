@@ -25,19 +25,13 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     variant("Stopped"),
                 ],
             },
-            fields: vec![
-                field(
-                    "mode",
-                    TypeRef::Option(Box::new(TypeRef::Enum("CommsDrainMode".into()))),
-                ),
-                field("suppresses_turn_boundary_drain", TypeRef::Bool),
-            ],
+            fields: vec![field(
+                "mode",
+                TypeRef::Option(Box::new(TypeRef::Enum("CommsDrainMode".into()))),
+            )],
             init: InitSchema {
                 phase: "Inactive".into(),
-                fields: vec![
-                    init("mode", Expr::None),
-                    init("suppresses_turn_boundary_drain", Expr::Bool(false)),
-                ],
+                fields: vec![init("mode", Expr::None)],
             },
             terminal_phases: vec!["Stopped".into()],
         },
@@ -64,10 +58,6 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     name: "SpawnDrainTask".into(),
                     fields: vec![field("mode", TypeRef::Enum("CommsDrainMode".into()))],
                 },
-                VariantSchema {
-                    name: "SetTurnBoundaryDrainSuppressed".into(),
-                    fields: vec![field("active", TypeRef::Bool)],
-                },
                 variant("AbortDrainTask"),
             ],
         },
@@ -91,26 +81,6 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     Expr::Neq(Box::new(Expr::Field("mode".into())), Box::new(Expr::None)),
                 ]),
             },
-            // Running or Starting implies suppression is active
-            InvariantSchema {
-                name: "active_implies_suppression".into(),
-                expr: Expr::Or(vec![
-                    Expr::And(vec![
-                        Expr::Neq(
-                            Box::new(Expr::CurrentPhase),
-                            Box::new(Expr::Phase("Starting".into())),
-                        ),
-                        Expr::Neq(
-                            Box::new(Expr::CurrentPhase),
-                            Box::new(Expr::Phase("Running".into())),
-                        ),
-                    ]),
-                    Expr::Eq(
-                        Box::new(Expr::Field("suppresses_turn_boundary_drain".into())),
-                        Box::new(Expr::Bool(true)),
-                    ),
-                ]),
-            },
         ],
         transitions: vec![
             // (Inactive, EnsureRunning{mode}) -> Starting
@@ -122,27 +92,15 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     bindings: vec!["mode".into()],
                 },
                 guards: vec![],
-                updates: vec![
-                    Update::Assign {
-                        field: "mode".into(),
-                        expr: Expr::Some(Box::new(Expr::Binding("mode".into()))),
-                    },
-                    Update::Assign {
-                        field: "suppresses_turn_boundary_drain".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
+                updates: vec![Update::Assign {
+                    field: "mode".into(),
+                    expr: Expr::Some(Box::new(Expr::Binding("mode".into()))),
+                }],
                 to: "Starting".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SpawnDrainTask".into(),
-                        fields: IndexMap::from([("mode".into(), Expr::Binding("mode".into()))]),
-                    },
-                    EffectEmit {
-                        variant: "SetTurnBoundaryDrainSuppressed".into(),
-                        fields: IndexMap::from([("active".into(), Expr::Bool(true))]),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "SpawnDrainTask".into(),
+                    fields: IndexMap::from([("mode".into(), Expr::Binding("mode".into()))]),
+                }],
             },
             // (Starting, TaskSpawned) -> Running
             TransitionSchema {
@@ -183,15 +141,9 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                         ),
                     },
                 ],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "ExitedRespawnable".into(),
-                emit: vec![EffectEmit {
-                    variant: "SetTurnBoundaryDrainSuppressed".into(),
-                    fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                }],
+                emit: vec![],
             },
             // (Starting, TaskExited{reason}) -> Stopped (non-respawnable cases)
             TransitionSchema {
@@ -218,15 +170,9 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                         ),
                     ]),
                 }],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "Stopped".into(),
-                emit: vec![EffectEmit {
-                    variant: "SetTurnBoundaryDrainSuppressed".into(),
-                    fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                }],
+                emit: vec![],
             },
             // (Running, TaskExited{reason=Failed}) when mode=PersistentHost -> ExitedRespawnable
             TransitionSchema {
@@ -254,15 +200,9 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                         ),
                     },
                 ],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "ExitedRespawnable".into(),
-                emit: vec![EffectEmit {
-                    variant: "SetTurnBoundaryDrainSuppressed".into(),
-                    fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                }],
+                emit: vec![],
             },
             // (Running, TaskExited{reason}) -> Stopped (non-respawnable cases)
             TransitionSchema {
@@ -287,15 +227,9 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                         ),
                     ]),
                 }],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "Stopped".into(),
-                emit: vec![EffectEmit {
-                    variant: "SetTurnBoundaryDrainSuppressed".into(),
-                    fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                }],
+                emit: vec![],
             },
             // (Running, StopRequested) -> Stopped
             TransitionSchema {
@@ -306,21 +240,12 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     bindings: vec![],
                 },
                 guards: vec![],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "Stopped".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "AbortDrainTask".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "SetTurnBoundaryDrainSuppressed".into(),
-                        fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "AbortDrainTask".into(),
+                    fields: IndexMap::new(),
+                }],
             },
             // (Starting, StopRequested) -> Stopped
             TransitionSchema {
@@ -331,21 +256,12 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     bindings: vec![],
                 },
                 guards: vec![],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "Stopped".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "AbortDrainTask".into(),
-                        fields: IndexMap::new(),
-                    },
-                    EffectEmit {
-                        variant: "SetTurnBoundaryDrainSuppressed".into(),
-                        fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "AbortDrainTask".into(),
+                    fields: IndexMap::new(),
+                }],
             },
             // (ExitedRespawnable, EnsureRunning{mode}) -> Starting
             TransitionSchema {
@@ -356,27 +272,15 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     bindings: vec!["mode".into()],
                 },
                 guards: vec![],
-                updates: vec![
-                    Update::Assign {
-                        field: "mode".into(),
-                        expr: Expr::Some(Box::new(Expr::Binding("mode".into()))),
-                    },
-                    Update::Assign {
-                        field: "suppresses_turn_boundary_drain".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
+                updates: vec![Update::Assign {
+                    field: "mode".into(),
+                    expr: Expr::Some(Box::new(Expr::Binding("mode".into()))),
+                }],
                 to: "Starting".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SpawnDrainTask".into(),
-                        fields: IndexMap::from([("mode".into(), Expr::Binding("mode".into()))]),
-                    },
-                    EffectEmit {
-                        variant: "SetTurnBoundaryDrainSuppressed".into(),
-                        fields: IndexMap::from([("active".into(), Expr::Bool(true))]),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "SpawnDrainTask".into(),
+                    fields: IndexMap::from([("mode".into(), Expr::Binding("mode".into()))]),
+                }],
             },
             // (ExitedRespawnable, StopRequested) -> Stopped
             TransitionSchema {
@@ -400,27 +304,15 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     bindings: vec!["mode".into()],
                 },
                 guards: vec![],
-                updates: vec![
-                    Update::Assign {
-                        field: "mode".into(),
-                        expr: Expr::Some(Box::new(Expr::Binding("mode".into()))),
-                    },
-                    Update::Assign {
-                        field: "suppresses_turn_boundary_drain".into(),
-                        expr: Expr::Bool(true),
-                    },
-                ],
+                updates: vec![Update::Assign {
+                    field: "mode".into(),
+                    expr: Expr::Some(Box::new(Expr::Binding("mode".into()))),
+                }],
                 to: "Starting".into(),
-                emit: vec![
-                    EffectEmit {
-                        variant: "SpawnDrainTask".into(),
-                        fields: IndexMap::from([("mode".into(), Expr::Binding("mode".into()))]),
-                    },
-                    EffectEmit {
-                        variant: "SetTurnBoundaryDrainSuppressed".into(),
-                        fields: IndexMap::from([("active".into(), Expr::Bool(true))]),
-                    },
-                ],
+                emit: vec![EffectEmit {
+                    variant: "SpawnDrainTask".into(),
+                    fields: IndexMap::from([("mode".into(), Expr::Binding("mode".into()))]),
+                }],
             },
             // (Running|Starting, AbortObserved) -> Stopped
             TransitionSchema {
@@ -431,15 +323,9 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                     bindings: vec![],
                 },
                 guards: vec![],
-                updates: vec![Update::Assign {
-                    field: "suppresses_turn_boundary_drain".into(),
-                    expr: Expr::Bool(false),
-                }],
+                updates: vec![],
                 to: "Stopped".into(),
-                emit: vec![EffectEmit {
-                    variant: "SetTurnBoundaryDrainSuppressed".into(),
-                    fields: IndexMap::from([("active".into(), Expr::Bool(false))]),
-                }],
+                emit: vec![],
             },
         ],
         effect_dispositions: vec![
@@ -448,21 +334,12 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                 disposition: EffectDisposition::Local,
                 handoff_protocol: Some("comms_drain_spawn".into()),
             },
-            disposition("SetTurnBoundaryDrainSuppressed", EffectDisposition::Local),
             EffectDispositionRule {
                 effect_variant: "AbortDrainTask".into(),
                 disposition: EffectDisposition::Local,
                 handoff_protocol: Some("comms_drain_abort".into()),
             },
         ],
-    }
-}
-
-fn disposition(name: &str, d: EffectDisposition) -> EffectDispositionRule {
-    EffectDispositionRule {
-        effect_variant: name.into(),
-        disposition: d,
-        handoff_protocol: None,
     }
 }
 

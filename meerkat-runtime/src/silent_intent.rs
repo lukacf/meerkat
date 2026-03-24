@@ -33,9 +33,7 @@ pub fn apply_silent_intent_override(
     if silent_intents.iter().any(|s| s == intent) {
         // Keep the input queued so its content is injected into the session
         // as context for the next LLM turn, but suppress waking so it does
-        // not trigger a turn by itself. Previously ApplyMode::Ignore caused
-        // the content to be dropped entirely — a regression from the old
-        // drain_comms_inbox path that explicitly pushed a UserMessage.
+        // not trigger a turn by itself.
         decision.apply_mode = ApplyMode::StageRunStart;
         decision.wake_mode = WakeMode::None;
         true

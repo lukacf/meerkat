@@ -357,12 +357,8 @@ impl MobMcpState {
     pub async fn mob_list_members(
         &self,
         mob_id: &MobId,
-    ) -> Result<Vec<meerkat_mob::RosterEntry>, MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .list_all_members()
-            .await
-            .pipe(Ok)
+    ) -> Result<Vec<meerkat_mob::runtime::MobMemberListEntry>, MobError> {
+        self.handle_for(mob_id).await?.list_members().await.pipe(Ok)
     }
 
     pub async fn mob_append_system_context(
@@ -371,11 +367,12 @@ impl MobMcpState {
         meerkat_id: &MeerkatId,
         req: AppendSystemContextRequest,
     ) -> Result<(SessionId, AppendSystemContextResult), SessionControlError> {
-        let members = self.mob_list_members(mob_id).await.map_err(|error| {
-            SessionControlError::InvalidRequest {
+        let members: Vec<meerkat_mob::runtime::MobMemberListEntry> = self
+            .mob_list_members(mob_id)
+            .await
+            .map_err(|error| SessionControlError::InvalidRequest {
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         let session_id = members
             .into_iter()
             .find(|member| member.meerkat_id == *meerkat_id)
@@ -1603,7 +1600,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobIdArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let rows = self
+                let rows: Vec<meerkat_mob::runtime::MobMemberListEntry> = self
                     .state
                     .mob_list_members(&MobId::from(args.mob_id))
                     .await
@@ -2196,7 +2193,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2236,7 +2233,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2271,7 +2268,7 @@ mod tests {
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
-                    host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                    host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -2307,7 +2304,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2393,7 +2390,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2438,7 +2435,7 @@ mod tests {
                 max_tokens: None,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 build: None,
@@ -2461,7 +2458,7 @@ mod tests {
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
                     host_mode: false,
-                    host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                    host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

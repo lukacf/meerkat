@@ -15,7 +15,7 @@ use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
@@ -171,12 +171,36 @@ pub(super) struct MobActor {
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) restore_diagnostics:
+        Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
 }
 
 impl MobActor {
+    async fn restore_failure_for(
+        &self,
+        meerkat_id: &MeerkatId,
+    ) -> Option<super::handle::RestoreFailureDiagnostic> {
+        self.restore_diagnostics
+            .read()
+            .await
+            .get(meerkat_id)
+            .cloned()
+    }
+
+    async fn ensure_member_not_broken(&self, meerkat_id: &MeerkatId) -> Result<(), MobError> {
+        if let Some(diag) = self.restore_failure_for(meerkat_id).await {
+            return Err(MobError::MemberRestoreFailed {
+                member_id: meerkat_id.clone(),
+                session_id: diag.session_id,
+                reason: diag.reason,
+            });
+        }
+        Ok(())
+    }
+
     fn state(&self) -> MobState {
         self.lifecycle_authority.phase()
     }
@@ -192,6 +216,7 @@ impl MobActor {
             mcp_servers: self.mcp_servers.clone(),
             flow_streams: self.flow_streams.clone(),
             session_service: self.session_service.clone(),
+            restore_diagnostics: self.restore_diagnostics.clone(),
         }
     }
 
@@ -278,7 +303,7 @@ impl MobActor {
                                 event_tx: None,
                                 host_mode: false,
                                 host_mode_owner:
-                                    meerkat_core::service::HostModeOwner::SessionService,
+                                    meerkat_core::service::HostModeOwner::ExternalRuntime,
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,
@@ -607,18 +632,11 @@ impl MobActor {
         let runtime_adapter = self.session_service.runtime_adapter();
         let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
         let drain_session_id = member_ref.session_id().cloned();
-        let drain_control = match &drain_session_id {
-            Some(session_id) => self.session_service.comms_drain_control(session_id).await,
-            None => None,
-        };
 
         let handle = tokio::spawn(async move {
             // Spawn comms drain alongside the host loop when all wiring is available.
             let drain_spawned = match (&runtime_adapter, &drain_session_id) {
                 (Some(adapter), Some(session_id)) => {
-                    adapter
-                        .set_comms_drain_control(session_id, drain_control.clone())
-                        .await;
                     let spawned = adapter
                         .maybe_spawn_comms_drain(session_id, true, comms_runtime.clone())
                         .await;
@@ -1586,51 +1604,115 @@ impl MobActor {
                             "resume session check failed for '{meerkat_id}': {e}"
                         ))
                     })?;
-                if !is_active.unwrap_or(false) {
-                    return Err(MobError::Internal(
-                        format!("resumed session '{resume_id}' not found or inactive for '{meerkat_id}'"),
+                if is_active.unwrap_or(false) {
+                    // Validate event injector for autonomous mode.
+                    if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                        && self.provisioner.interaction_event_injector(&resume_id).await.is_none()
+                    {
+                        return Err(MobError::Internal(format!(
+                            "resumed session '{resume_id}' has no event injector for autonomous '{meerkat_id}'"
+                        )));
+                    }
+
+                    // Validate comms if wiring rules exist.
+                    let has_wiring = self.definition.wiring.auto_wire_orchestrator
+                        || !self.definition.wiring.role_wiring.is_empty();
+                    if has_wiring
+                        && self
+                            .provisioner
+                            .comms_runtime(&member_ref)
+                            .await
+                            .is_none()
+                    {
+                        return Err(MobError::Internal(format!(
+                            "resumed session '{resume_id}' has no comms runtime for '{meerkat_id}'"
+                        )));
+                    }
+
+                    let prompt = initial_message.clone().unwrap_or_else(|| {
+                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+                    });
+                    let resolved_labels = labels.unwrap_or_default();
+
+                    return Ok((
+                        profile_name,
+                        meerkat_id,
+                        prompt,
+                        selected_runtime_mode,
+                        resolved_labels,
+                        Some(member_ref),
+                        None,
+                        auto_wire_parent,
                     ));
                 }
 
-                // Validate event injector for autonomous mode.
-                if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                    && self.provisioner.interaction_event_injector(&resume_id).await.is_none()
-                {
-                    return Err(MobError::Internal(format!(
-                        "resumed session '{resume_id}' has no event injector for autonomous '{meerkat_id}'"
-                    )));
-                }
-
-                // Validate comms if wiring rules exist.
-                let has_wiring = self.definition.wiring.auto_wire_orchestrator
-                    || !self.definition.wiring.role_wiring.is_empty();
-                if has_wiring
-                    && self
-                        .provisioner
-                        .comms_runtime(&member_ref)
+                if self.session_service.supports_persistent_sessions() {
+                    let stored_session = self
+                        .session_service
+                        .load_persisted_session(&resume_id)
                         .await
-                        .is_none()
-                {
-                    return Err(MobError::Internal(format!(
-                        "resumed session '{resume_id}' has no comms runtime for '{meerkat_id}'"
-                    )));
+                        .map_err(MobError::from)?
+                        .ok_or_else(|| {
+                            MobError::Internal(format!(
+                                "missing durable session snapshot for '{resume_id}'"
+                            ))
+                        })?;
+
+                    let external_tools = self.external_tools_for_profile(profile)?;
+                    let mut config = build::build_resumed_agent_config(
+                        build::BuildResumedAgentConfigParams {
+                            base: build::BuildAgentConfigParams {
+                                mob_id: &self.definition.id,
+                                profile_name: &profile_name,
+                                meerkat_id: &meerkat_id,
+                                profile,
+                                definition: &self.definition,
+                                external_tools,
+                                context,
+                                labels: labels.clone(),
+                                additional_instructions,
+                                shell_env,
+                            },
+                            expected_session_id: &resume_id,
+                            resumed_session: stored_session,
+                        },
+                    )
+                    .await?;
+                    if let Some(ref client) = self.default_llm_client {
+                        config.llm_client_override = Some(client.clone());
+                    }
+
+                    let prompt = initial_message.clone().unwrap_or_else(|| {
+                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+                    });
+                    let req = build::to_create_session_request(&config, prompt.clone());
+                    let selected_backend = backend
+                        .or(profile.backend)
+                        .unwrap_or(self.definition.backend.default);
+                    let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
+                    let provision_request = ProvisionMemberRequest {
+                        create_session: req,
+                        backend: selected_backend,
+                        peer_name,
+                        owner_session_id: owner_session_id.clone(),
+                        ops_registry: ops_registry.clone(),
+                    };
+                    let resolved_labels = labels.unwrap_or_default();
+                    return Ok((
+                        profile_name,
+                        meerkat_id,
+                        prompt,
+                        selected_runtime_mode,
+                        resolved_labels,
+                        None::<MemberRef>,
+                        Some(provision_request),
+                        auto_wire_parent,
+                    ));
                 }
 
-                let prompt = initial_message.clone().unwrap_or_else(|| {
-                    ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
-                });
-                let resolved_labels = labels.unwrap_or_default();
-
-                return Ok((
-                    profile_name,
-                    meerkat_id,
-                    prompt,
-                    selected_runtime_mode,
-                    resolved_labels,
-                    Some(member_ref),
-                    None,
-                    auto_wire_parent,
-                ));
+                return Err(MobError::Internal(format!(
+                    "resumed session '{resume_id}' not found or inactive for '{meerkat_id}'"
+                )));
             }
 
             // ---------- Fork path ----------
@@ -2278,6 +2360,7 @@ impl MobActor {
                 "duplicate meerkat insert should be prevented before add()"
             );
         }
+        self.restore_diagnostics.write().await.remove(meerkat_id);
         tracing::debug!(
             meerkat_id = %meerkat_id,
             "MobActor::finalize_spawn_from_pending roster updated"
@@ -2978,6 +3061,11 @@ impl MobActor {
     pub(super) async fn dispose_remove_from_roster(&self, ctx: &DisposalContext) {
         let mut roster = self.roster.write().await;
         roster.remove_member(&ctx.meerkat_id);
+        drop(roster);
+        self.restore_diagnostics
+            .write()
+            .await
+            .remove(&ctx.meerkat_id);
     }
 
     /// P1-T06: wire() establishes local or external trust.
@@ -2987,6 +3075,7 @@ impl MobActor {
         target: super::handle::PeerTarget,
     ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_wire preflight")?;
+        self.ensure_member_not_broken(&local).await?;
         match target {
             super::handle::PeerTarget::Local(peer) => {
                 if local == peer {
@@ -3003,6 +3092,7 @@ impl MobActor {
                         return Err(MobError::MeerkatNotFound(peer.clone()));
                     }
                 }
+                self.ensure_member_not_broken(&peer).await?;
                 self.do_wire(&local, &peer).await?;
             }
             super::handle::PeerTarget::External(spec) => {
@@ -3804,6 +3894,7 @@ impl MobActor {
                 if e.state != crate::roster::MemberState::Active {
                     return Err(MobError::MeerkatNotFound(meerkat_id));
                 }
+                self.ensure_member_not_broken(&e.meerkat_id).await?;
                 e
             }
             None => {
@@ -3868,6 +3959,7 @@ impl MobActor {
         if entry.state != crate::roster::MemberState::Active {
             return Err(MobError::MeerkatNotFound(meerkat_id));
         }
+        self.ensure_member_not_broken(&entry.meerkat_id).await?;
 
         self.dispatch_member_turn(
             &entry,
@@ -3949,7 +4041,7 @@ impl MobActor {
                     handling_mode,
                     event_tx: None,
                     host_mode: false,
-                    host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                    host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                     skill_references: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

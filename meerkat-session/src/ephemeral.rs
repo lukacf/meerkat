@@ -7,8 +7,6 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
-use meerkat_core::generated::protocol_comms_drain_abort;
-use meerkat_core::generated::protocol_comms_drain_spawn;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest, HostModeOwner,
     SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
@@ -18,10 +16,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
-use meerkat_core::{
-    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, HostModePollOutcome,
-    PendingSystemContextAppend, SessionLlmIdentity, SessionSystemContextState,
-};
+use meerkat_core::{PendingSystemContextAppend, SessionLlmIdentity, SessionSystemContextState};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,7 +96,6 @@ enum SessionCommand {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
     },
-    HostModePump,
     Shutdown,
 }
 
@@ -136,8 +130,6 @@ struct SessionHandle {
     interaction_event_injector: Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>>,
     /// Optional comms runtime for host-mode commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    /// Shared turn-boundary drain suppression control.
-    comms_drain_control: Option<Arc<AtomicBool>>,
     /// Shared runtime control state for system-context appends.
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
     /// Out-of-band interrupt signal consumed by the running turn loop.
@@ -270,32 +262,12 @@ pub trait SessionAgent: Send {
         None
     }
 
-    /// Set whether a host-mode comms drain owns inbox consumption.
-    fn set_comms_drain_active(&mut self, _active: bool) {}
-
-    /// Poll one host-mode cycle using the comms inbox as the next turn source.
-    async fn poll_host_mode(
-        &mut self,
-        _event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<HostModePollOutcome, meerkat_core::error::AgentError> {
-        Ok(HostModePollOutcome::Idle)
-    }
-
-    /// Persist the current session snapshot after a host-mode interaction.
-    #[doc(hidden)]
-    async fn checkpoint_current_session(&mut self) {}
-
     /// Get the comms runtime used by this agent, if any.
     ///
     /// Called once before the agent moves into its dedicated task. The returned
     /// runtime is stored in the session handle for surfaces that need comms
     /// command execution and stream attachment.
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
-        None
-    }
-
-    /// Shared control flag for turn-boundary comms drain suppression.
-    fn comms_drain_control(&self) -> Option<Arc<AtomicBool>> {
         None
     }
 }
@@ -504,13 +476,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .and_then(|h| h.comms_runtime.clone())
     }
 
-    pub async fn comms_drain_control(&self, session_id: &SessionId) -> Option<Arc<AtomicBool>> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)
-            .and_then(|h| h.comms_drain_control.clone())
-    }
-
     /// Wait for a session to be registered.
     ///
     /// Returns when the next session handle is stored. Used by CLI `--stdin`
@@ -588,6 +553,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        // Host mode requires a runtime-backed surface. Direct ephemeral session
+        // service callers cannot own the host-mode drain lifecycle.
+        if req.host_mode {
+            return Err(SessionError::Unsupported(
+                "host_mode requires a runtime-backed surface".to_string(),
+            ));
+        }
+
         // Reserve capacity up front so two concurrent create_session calls cannot race
         // past max_sessions between check and insert.
         let capacity_permit = match self.session_capacity.clone().try_acquire_owned() {
@@ -627,7 +600,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let event_injector = agent.event_injector();
         let interaction_event_injector = agent.interaction_event_injector();
         let comms_runtime = agent.comms_runtime();
-        let comms_drain_control = agent.comms_drain_control();
         let system_context_state = agent.system_context_state();
 
         // Create session task channels
@@ -678,7 +650,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             event_injector,
             interaction_event_injector,
             comms_runtime,
-            comms_drain_control,
             system_context_state,
             interrupt_requested,
             interrupt_notify,
@@ -772,6 +743,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        // Host mode requires a runtime-backed surface. Direct ephemeral session
+        // service callers cannot own the host-mode drain lifecycle.
+        if req.host_mode {
+            return Err(SessionError::Unsupported(
+                "host_mode requires a runtime-backed surface".to_string(),
+            ));
+        }
+
         let (result_tx, result_rx) = oneshot::channel();
 
         // Prepend additional instructions as system notices to the prompt.
@@ -1107,10 +1086,6 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for EphemeralSessi
     ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
         EphemeralSessionService::<B>::interaction_event_injector(self, session_id).await
     }
-
-    async fn comms_drain_control(&self, session_id: &SessionId) -> Option<Arc<AtomicBool>> {
-        EphemeralSessionService::<B>::comms_drain_control(self, session_id).await
-    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1157,34 +1132,6 @@ fn stamp_event_envelope(
     EventEnvelope::new(source_id, *next_seq, None, event)
 }
 
-fn apply_comms_drain_effects<A: SessionAgent>(
-    agent: &mut A,
-    effects: &[CommsDrainLifecycleEffect],
-) {
-    for effect in effects {
-        if let CommsDrainLifecycleEffect::SetTurnBoundaryDrainSuppressed { active } = effect {
-            agent.set_comms_drain_active(*active);
-        }
-    }
-}
-
-fn flush_pending_agent_events(
-    control: &SessionTaskControl,
-    agent_event_rx: &mut mpsc::Receiver<AgentEvent>,
-    next_seq: &mut u64,
-    source_id: &str,
-) -> bool {
-    let mut saw_run_failed = false;
-    while let Ok(event) = agent_event_rx.try_recv() {
-        if matches!(event, AgentEvent::RunFailed { .. }) {
-            saw_run_failed = true;
-        }
-        let envelope = stamp_event_envelope(next_seq, source_id, event);
-        let _ = control.session_event_tx.send(envelope);
-    }
-    saw_run_failed
-}
-
 async fn session_task<A: SessionAgent>(
     mut agent: A,
     agent_event_tx: mpsc::Sender<AgentEvent>,
@@ -1194,28 +1141,9 @@ async fn session_task<A: SessionAgent>(
 ) {
     let mut next_seq: u64 = 0;
     let source_id = format!("session:{}", agent.session_id());
-    let mut host_mode_drain = CommsDrainLifecycleAuthority::new();
-    let mut host_mode_owner: Option<HostModeOwner> = None;
 
     loop {
-        let host_notify = if host_mode_owner == Some(HostModeOwner::SessionService)
-            && host_mode_drain.suppresses_turn_boundary_drain()
-        {
-            agent.comms_runtime().map(|runtime| runtime.inbox_notify())
-        } else {
-            None
-        };
-
-        let next_cmd = if let Some(notify) = host_notify {
-            tokio::select! {
-                maybe_cmd = commands.recv() => maybe_cmd,
-                () = notify.notified() => Some(SessionCommand::HostModePump),
-            }
-        } else {
-            commands.recv().await
-        };
-
-        let Some(cmd) = next_cmd else {
+        let Some(cmd) = commands.recv().await else {
             break;
         };
 
@@ -1245,58 +1173,13 @@ async fn session_task<A: SessionAgent>(
                 prompt,
                 render_metadata,
                 handling_mode,
-                host_mode,
-                host_mode_owner: requested_host_mode_owner,
+                host_mode: _,
+                host_mode_owner: _,
                 event_tx,
                 result_tx,
                 skill_references,
                 flow_tool_overlay,
             } => {
-                if host_mode {
-                    host_mode_owner = Some(requested_host_mode_owner);
-                    if requested_host_mode_owner == HostModeOwner::SessionService
-                        && agent.comms_runtime().is_some()
-                    {
-                        match protocol_comms_drain_spawn::execute_ensure_running(
-                            &mut host_mode_drain,
-                            CommsDrainMode::PersistentHost,
-                        ) {
-                            Ok(result) => {
-                                apply_comms_drain_effects(&mut agent, &result.effects);
-                                let Some(obligation) = result.obligation else {
-                                    tracing::warn!(
-                                        "host-mode drain transition emitted no spawn obligation"
-                                    );
-                                    continue;
-                                };
-                                // The session-service host spawns the drain
-                                // task synchronously (as a poll loop inside
-                                // session_task), so we immediately submit
-                                // TaskSpawned feedback to close the obligation.
-                                match protocol_comms_drain_spawn::submit_task_spawned(
-                                    &mut host_mode_drain,
-                                    obligation,
-                                ) {
-                                    Ok(effects) => {
-                                        apply_comms_drain_effects(&mut agent, &effects);
-                                    }
-                                    Err(error) => {
-                                        tracing::trace!(
-                                            error = %error,
-                                            "host-mode drain authority rejected TaskSpawned"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::trace!(
-                                    error = %error,
-                                    "host-mode drain authority rejected EnsureRunning"
-                                );
-                            }
-                        }
-                    }
-                }
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     control.turn_lock.store(false, Ordering::Release);
@@ -1409,76 +1292,6 @@ async fn session_task<A: SessionAgent>(
                 control.interrupt_requested.store(false, Ordering::Release);
                 let _ = result_tx.send(result);
             }
-            SessionCommand::HostModePump => {
-                if host_mode_owner != Some(HostModeOwner::SessionService) {
-                    continue;
-                }
-                if control
-                    .turn_lock
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
-                    continue;
-                }
-
-                control.state_tx.send_replace(SessionState::Running);
-                let pump_result = agent.poll_host_mode(agent_event_tx.clone()).await;
-
-                let snap = agent.snapshot();
-                control.summary_tx.send_replace(SessionSummaryCache {
-                    updated_at: snap.updated_at,
-                    message_count: snap.message_count,
-                    total_tokens: snap.total_tokens,
-                    usage: snap.usage,
-                    last_assistant_text: snap.last_assistant_text,
-                });
-                let saw_run_failed = flush_pending_agent_events(
-                    &control,
-                    &mut agent_event_rx,
-                    &mut next_seq,
-                    &source_id,
-                );
-                control.state_tx.send_replace(SessionState::Idle);
-                control.turn_lock.store(false, Ordering::Release);
-                control.interrupt_requested.store(false, Ordering::Release);
-
-                match pump_result {
-                    Ok(HostModePollOutcome::Idle) => {}
-                    Ok(HostModePollOutcome::Ran(_)) => {
-                        agent.checkpoint_current_session().await;
-                    }
-                    Ok(HostModePollOutcome::Dismissed) => {
-                        if let Ok(effects) = protocol_comms_drain_spawn::notify_task_exited(
-                            &mut host_mode_drain,
-                            meerkat_core::DrainExitReason::Dismissed,
-                        ) {
-                            apply_comms_drain_effects(&mut agent, &effects);
-                        }
-                        host_mode_owner = None;
-                    }
-                    Err(error) => {
-                        if !saw_run_failed {
-                            let envelope = stamp_event_envelope(
-                                &mut next_seq,
-                                &source_id,
-                                AgentEvent::RunFailed {
-                                    session_id: agent.session_id(),
-                                    error: error.to_string(),
-                                },
-                            );
-                            let _ = control.session_event_tx.send(envelope);
-                        }
-                        tracing::warn!(error = %error, "host-mode drain poll failed");
-                        if let Ok(effects) = protocol_comms_drain_spawn::notify_task_exited(
-                            &mut host_mode_drain,
-                            meerkat_core::DrainExitReason::Failed,
-                        ) {
-                            apply_comms_drain_effects(&mut agent, &effects);
-                        }
-                        host_mode_owner = None;
-                    }
-                }
-            }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
@@ -1495,18 +1308,6 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(());
             }
             SessionCommand::Shutdown => {
-                if host_mode_owner == Some(HostModeOwner::SessionService)
-                    && let Ok(result) =
-                        protocol_comms_drain_abort::execute_stop_requested(&mut host_mode_drain)
-                {
-                    apply_comms_drain_effects(&mut agent, &result.effects);
-                    // The abort obligation is implicitly closed under
-                    // TerminalClosure policy when the machine reaches
-                    // Stopped phase (which StopRequested transitions to).
-                    // No explicit AbortObserved feedback is needed here
-                    // because the session is shutting down.
-                    let _ = result.obligation;
-                }
                 control.state_tx.send_replace(SessionState::ShuttingDown);
                 break;
             }

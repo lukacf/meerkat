@@ -446,7 +446,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             {
                 meerkat_core::service::HostModeOwner::ExternalRuntime
             } else {
-                meerkat_core::service::HostModeOwner::SessionService
+                meerkat_core::service::HostModeOwner::ExternalRuntime
             },
             skill_references: primitive
                 .turn_metadata()

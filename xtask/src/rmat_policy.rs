@@ -65,7 +65,6 @@ impl AuditPolicy {
                         "reset",
                     ],
                 ),
-                ProtectedFieldRule::new("comms_drain_active", &["set_comms_drain_active"]),
             ],
             routed_effect_realizations: default_routed_effect_realizations(),
             required_live_symbols: vec![],

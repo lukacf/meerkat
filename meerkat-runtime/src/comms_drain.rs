@@ -171,9 +171,8 @@ pub fn spawn_comms_drain(
                     }
                     PeerInputClass::PeerLifecycleAdded | PeerInputClass::PeerLifecycleRetired => {
                         // Lifecycle events must be injected as session context
-                        // so the LLM knows when peers connect/disconnect. The
-                        // inner agent loop's drain_comms_inbox is suppressed in
-                        // host mode, so comms_drain owns this injection.
+                        // so the LLM knows when peers connect/disconnect.
+                        // comms_drain is the sole host-mode inbox consumer.
                         let input = classified_interaction_to_runtime_input(&ci, &runtime_id);
                         if let Err(err) = adapter.accept_input(&session_id, input).await {
                             tracing::warn!(

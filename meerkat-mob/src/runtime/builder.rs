@@ -2,6 +2,7 @@ use super::mob_orchestrator_authority::MobOrchestratorMutator;
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // MobBuilder
@@ -28,6 +29,7 @@ struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
     task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
+    restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     command_tx: mpsc::Sender<MobCommand>,
     command_rx: mpsc::Receiver<MobCommand>,
@@ -334,10 +336,12 @@ impl MobBuilder {
                 .collect::<BTreeMap<_, _>>(),
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
+        let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
             state: state.clone(),
+            restore_diagnostics: restore_diagnostics.clone(),
             mcp_servers: mcp_servers.clone(),
             command_tx: command_tx.clone(),
             command_rx,
@@ -352,6 +356,7 @@ impl MobBuilder {
             mcp_servers: mcp_servers.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: session_service.clone(),
+            restore_diagnostics,
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -413,6 +418,7 @@ impl MobBuilder {
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         tool_handle: &MobHandle,
     ) -> Result<(), MobError> {
+        tool_handle.restore_diagnostics.write().await.clear();
         let provisioner = MultiBackendProvisioner::new(
             session_service.clone(),
             runtime_adapter,
@@ -445,11 +451,96 @@ impl MobBuilder {
         }
         // Recreate missing sessions referenced by MeerkatSpawned events.
         for entry in &roster_entries {
-            if entry
-                .session_id()
-                .is_some_and(|session_id| active_ids.contains(session_id))
-            {
+            let Some(session_id) = entry.session_id().cloned() else {
                 continue;
+            };
+            if active_ids.contains(&session_id) {
+                continue;
+            }
+            let record_restore_failure = |reason: String| async {
+                tool_handle.restore_diagnostics.write().await.insert(
+                    entry.meerkat_id.clone(),
+                    super::handle::RestoreFailureDiagnostic {
+                        session_id: session_id.clone(),
+                        reason,
+                    },
+                );
+            };
+
+            if matches!(entry.member_ref, MemberRef::Session { .. }) {
+                if session_service.supports_persistent_sessions() {
+                    let Some(stored_session) =
+                        session_service.load_persisted_session(&session_id).await?
+                    else {
+                        record_restore_failure(format!(
+                            "missing durable session snapshot for '{}'",
+                            session_id
+                        ))
+                        .await;
+                        continue;
+                    };
+                    let profile = definition
+                        .profiles
+                        .get(&entry.profile)
+                        .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+                    let resumed_config =
+                        build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
+                            base: build::BuildAgentConfigParams {
+                                mob_id: &definition.id,
+                                profile_name: &entry.profile,
+                                meerkat_id: &entry.meerkat_id,
+                                profile,
+                                definition,
+                                external_tools: compose_external_tools_for_profile(
+                                    profile,
+                                    tool_bundles,
+                                    tool_handle.clone(),
+                                )?,
+                                context: None,
+                                labels: Some(entry.labels.clone()),
+                                additional_instructions: None,
+                                shell_env: None,
+                            },
+                            expected_session_id: &session_id,
+                            resumed_session: stored_session,
+                        })
+                        .await;
+                    let mut resumed_config = match resumed_config {
+                        Ok(config) => config,
+                        Err(error) => {
+                            record_restore_failure(error.to_string()).await;
+                            continue;
+                        }
+                    };
+                    let reconcile_client: Arc<dyn LlmClient> = default_llm_client
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
+                    resumed_config.llm_client_override = Some(reconcile_client);
+                    let prompt = format!(
+                        "You have been spawned as '{}' (role: {}) in mob '{}'.",
+                        entry.meerkat_id, entry.profile, definition.id
+                    );
+                    let req = build::to_create_session_request(&resumed_config, prompt.into());
+                    match session_service.create_session(req).await {
+                        Ok(created) => {
+                            let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
+                            tool_handle
+                                .restore_diagnostics
+                                .write()
+                                .await
+                                .remove(&entry.meerkat_id);
+                        }
+                        Err(error) => {
+                            record_restore_failure(format!(
+                                "failed to restore durable session '{}': {}",
+                                session_id, error
+                            ))
+                            .await;
+                        }
+                    }
+                    continue;
+                }
+                // Ephemeral services can still fall back to fresh-create.
             }
             let profile = definition
                 .profiles
@@ -487,12 +578,28 @@ impl MobBuilder {
             let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
             let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
+            tool_handle
+                .restore_diagnostics
+                .write()
+                .await
+                .remove(&entry.meerkat_id);
         }
 
         // Re-establish trust from projected wiring and prune stale trust so
         // live comms truth matches the canonical roster projection.
         let entries = roster.list().cloned().collect::<Vec<_>>();
+        let broken_members = tool_handle
+            .restore_diagnostics
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
         for entry in &entries {
+            if broken_members.contains(&entry.meerkat_id) {
+                let _ = roster.set_peer_id(&entry.meerkat_id, None);
+                continue;
+            }
             let comms_a = match provisioner.comms_runtime(&entry.member_ref).await {
                 Some(comms) => comms,
                 None if entry.wired_to.is_empty() => continue,
@@ -523,6 +630,9 @@ impl MobBuilder {
                         peer_id, entry.meerkat_id
                     ))
                 })?;
+                if broken_members.contains(peer_id) {
+                    continue;
+                }
                 let comms_b = provisioner
                     .comms_runtime(&peer_entry.member_ref)
                     .await
@@ -567,6 +677,13 @@ impl MobBuilder {
             && let Some(orchestrator) = &definition.orchestrator
             && let Some(orchestrator_entry) = roster.by_profile(&orchestrator.profile).next()
         {
+            if broken_members.contains(&orchestrator_entry.meerkat_id) {
+                tracing::warn!(
+                    member_id = %orchestrator_entry.meerkat_id,
+                    "Skipping orchestrator resume notification because the orchestrator is Broken"
+                );
+                return Ok(());
+            }
             let active_count = roster.len();
             let wired_edges = roster
                 .list()
@@ -615,7 +732,7 @@ impl MobBuilder {
                                 event_tx: None,
                                 host_mode: false,
                                 host_mode_owner:
-                                    meerkat_core::service::HostModeOwner::SessionService,
+                                    meerkat_core::service::HostModeOwner::ExternalRuntime,
                                 skill_references: None,
                                 flow_tool_overlay: None,
                                 additional_instructions: None,
@@ -661,10 +778,12 @@ impl MobBuilder {
                 .collect::<BTreeMap<_, _>>(),
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
+        let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster,
             task_board,
             state,
+            restore_diagnostics,
             mcp_servers,
             command_tx,
             command_rx,
@@ -697,6 +816,7 @@ impl MobBuilder {
             roster,
             task_board,
             state,
+            restore_diagnostics,
             mcp_servers,
             command_tx,
             command_rx,
@@ -713,6 +833,7 @@ impl MobBuilder {
             mcp_servers: mcp_servers.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: handle_session_service.clone(),
+            restore_diagnostics: restore_diagnostics.clone(),
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
             session_service,
@@ -817,6 +938,7 @@ impl MobBuilder {
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             session_service: handle_session_service,
+            restore_diagnostics,
             task_board_service,
             spawn_policy,
             lifecycle_authority,

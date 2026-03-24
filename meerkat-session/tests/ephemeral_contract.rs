@@ -741,7 +741,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         max_tokens: None,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::SessionService,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -763,7 +763,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         handling_mode: HandlingMode::Queue,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::SessionService,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,
@@ -1622,43 +1622,6 @@ async fn test_interrupt_when_idle_returns_not_running() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), "SESSION_NOT_RUNNING");
-}
-
-#[tokio::test]
-async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
-    let service = Arc::new(EphemeralSessionService::new(
-        MockAgentBuilder::with_delay(600),
-        10,
-    ));
-    let _ = service.create_session(create_req("Hello")).await.unwrap();
-
-    let sessions = service.list(SessionQuery::default()).await.unwrap();
-    let session_id = sessions[0].session_id.clone();
-
-    let service_clone = service.clone();
-    let sid_clone = session_id.clone();
-    let host_turn = tokio::spawn(async move {
-        service_clone
-            .start_turn(
-                &sid_clone,
-                StartTurnRequest {
-                    host_mode: true,
-                    ..turn_req("host turn")
-                },
-            )
-            .await
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    let started = std::time::Instant::now();
-    service.interrupt(&session_id).await.unwrap();
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < tokio::time::Duration::from_millis(200),
-        "interrupt should return promptly for host_mode turns (elapsed={elapsed:?})"
-    );
-
-    let _ = host_turn.await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

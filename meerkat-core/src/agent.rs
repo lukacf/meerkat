@@ -36,10 +36,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 pub use builder::AgentBuilder;
-pub use runner::{AgentRunner, HostModePollOutcome};
+pub use runner::AgentRunner;
 
 /// Special error prefix to signal tool calls that must be routed externally.
 ///
@@ -577,9 +576,12 @@ where
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
     pub(crate) silent_comms_intents: Vec<String>,
     /// Runtime policy for inline peer lifecycle context injection.
+    /// Consumed by runtime-backed drain path via AgentBuildConfig.
+    #[allow(dead_code)]
     pub(crate) inline_peer_notification_policy: InlinePeerNotificationPolicy,
     /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
-    /// Used to inject suppression notice only on transition into suppressed mode.
+    /// Consumed by runtime-backed drain path via AgentBuildConfig.
+    #[allow(dead_code)]
     pub(crate) peer_notification_suppression_active: bool,
     /// Optional shared lifecycle registry for async operations.
     ///
@@ -605,13 +607,6 @@ where
     pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
     /// Last validation error (for retry prompt).
     pub(crate) extraction_last_error: Option<String>,
-    /// Session-level infrastructure delegation flag.
-    ///
-    /// When `true`, turn-boundary `drain_comms_inbox()` is suppressed because
-    /// an external or session-owned host-mode drain owns inbox consumption.
-    /// Shared so service/runtime shells can realize the canonical drain
-    /// lifecycle without mutating the `Agent` directly.
-    pub(crate) comms_drain_active: Arc<AtomicBool>,
 }
 
 #[cfg(test)]

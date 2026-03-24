@@ -236,10 +236,6 @@ where
             });
         }
 
-        // Only commit boundary side effects after hooks accept the transition.
-        self.drain_comms_inbox(crate::DrainCaller::TurnBoundary)
-            .await;
-
         Ok(())
     }
 
@@ -254,8 +250,10 @@ where
         Ok(transition)
     }
 
-    /// Execute side effects from a transition. Handles DrainCommsInbox and
-    /// CheckCompaction effects that the authority emits on CallingLlm entry.
+    /// Execute side effects from a transition. Handles CheckCompaction
+    /// effects that the authority emits on CallingLlm entry.
+    /// DrainCommsInbox is a no-op: runtime-backed ingress is now the sole
+    /// comms admission path.
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
@@ -265,8 +263,8 @@ where
         for effect in &transition.effects {
             match effect {
                 TurnExecutionEffect::DrainCommsInbox => {
-                    self.drain_comms_inbox(crate::DrainCaller::TurnBoundary)
-                        .await;
+                    // No-op: direct agent drain deleted; comms admission
+                    // flows through runtime ingress exclusively.
                 }
                 TurnExecutionEffect::CheckCompaction => {
                     let current_boundary_index = self.compaction_cadence.session_boundary_index;
@@ -2078,33 +2076,6 @@ mod tests {
         }
     }
 
-    struct MockDrainCommsRuntime {
-        queued: tokio::sync::Mutex<Vec<String>>,
-        notify: Arc<Notify>,
-    }
-
-    impl MockDrainCommsRuntime {
-        fn with_messages(messages: Vec<String>) -> Self {
-            Self {
-                queued: tokio::sync::Mutex::new(messages),
-                notify: Arc::new(Notify::new()),
-            }
-        }
-    }
-
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    impl crate::agent::CommsRuntime for MockDrainCommsRuntime {
-        async fn drain_messages(&self) -> Vec<String> {
-            let mut guard = self.queued.lock().await;
-            std::mem::take(&mut *guard)
-        }
-
-        fn inbox_notify(&self) -> Arc<Notify> {
-            self.notify.clone()
-        }
-    }
-
     struct StagedDrainCommsRuntime {
         batches: tokio::sync::Mutex<Vec<Vec<String>>>,
         notify: Arc<Notify>,
@@ -2218,57 +2189,6 @@ mod tests {
         let result = agent.run_loop(None).await.unwrap();
         assert_eq!(result.turns, 0);
         assert_eq!(agent.state, LoopState::Completed);
-    }
-
-    #[tokio::test]
-    async fn error_recovery_drains_comms_message_when_transitioning_to_calling_llm() {
-        let client = Arc::new(RecordingLlmClient::new());
-        let comms = Arc::new(MockDrainCommsRuntime::with_messages(vec![
-            "queued during recovery".to_string(),
-        ]));
-
-        let mut agent = AgentBuilder::new()
-            .with_comms_runtime(comms)
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
-            .await;
-
-        agent.config.max_turns = Some(1);
-        agent.state = LoopState::ErrorRecovery;
-
-        let result = agent.run_loop(None).await.unwrap();
-        assert_eq!(result.turns, 1);
-
-        let seen = client.seen();
-        assert!(
-            seen.iter().any(|m| m.contains("queued during recovery")),
-            "expected queued comms message to be drained into LLM input, saw: {seen:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn no_tool_completion_drains_late_comms_before_returning() {
-        let comms = Arc::new(StagedDrainCommsRuntime::with_batches(vec![
-            Vec::new(),
-            vec!["late boundary message".to_string()],
-        ]));
-        let mut agent = AgentBuilder::new()
-            .with_comms_runtime(comms)
-            .build(
-                Arc::new(StaticLlmClient),
-                Arc::new(NoTools),
-                Arc::new(NoopStore),
-            )
-            .await;
-
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "ok");
-        assert!(
-            agent.session().messages().iter().any(|message| matches!(
-                message,
-                Message::User(user) if user.text_content().contains("late boundary message")
-            )),
-            "completion path should drain late comms messages into the final session transcript"
-        );
     }
 
     #[tokio::test]

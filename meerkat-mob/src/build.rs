@@ -10,7 +10,10 @@ use crate::ids::{MeerkatId, MobId, ProfileName};
 use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
 use meerkat_core::PeerMeta;
+use meerkat_core::Session;
 use meerkat_core::service::CreateSessionRequest;
+use meerkat_core::session::SessionMetadata;
+use meerkat_core::types::SessionId;
 use std::sync::Arc;
 
 /// Parameters for building an agent config from a mob profile.
@@ -25,6 +28,12 @@ pub struct BuildAgentConfigParams<'a> {
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     pub additional_instructions: Option<Vec<String>>,
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+}
+
+pub struct BuildResumedAgentConfigParams<'a> {
+    pub base: BuildAgentConfigParams<'a>,
+    pub expected_session_id: &'a SessionId,
+    pub resumed_session: Session,
 }
 
 /// Build an [`AgentBuildConfig`] from a mob profile.
@@ -138,6 +147,80 @@ pub async fn build_agent_config(
     Ok(config)
 }
 
+/// Build an [`AgentBuildConfig`] for a resumed mob member.
+///
+/// This preserves durable session identity from the stored session while still
+/// composing current runtime mechanics such as external tool dispatchers and
+/// realm attachment.
+pub async fn build_resumed_agent_config(
+    params: BuildResumedAgentConfigParams<'_>,
+) -> Result<AgentBuildConfig, MobError> {
+    let BuildResumedAgentConfigParams {
+        base,
+        expected_session_id,
+        resumed_session,
+    } = params;
+    if resumed_session.id() != expected_session_id {
+        return Err(MobError::Internal(format!(
+            "resume session id mismatch: expected '{}', got '{}'",
+            expected_session_id,
+            resumed_session.id()
+        )));
+    }
+    let mut config = build_agent_config(base).await?;
+    let metadata = resumed_session
+        .session_metadata()
+        .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
+    apply_resumed_session_metadata(&mut config, &metadata)?;
+    config.resume_session = Some(resumed_session);
+    // Preserve the durable session prompt/history exactly as stored.
+    config.system_prompt = None;
+    // Do not silently reapply prompt-affecting surface-local context on resume.
+    config.additional_instructions = None;
+    config.app_context = None;
+    config.shell_env = None;
+    Ok(config)
+}
+
+fn apply_resumed_session_metadata(
+    config: &mut AgentBuildConfig,
+    metadata: &SessionMetadata,
+) -> Result<(), MobError> {
+    if metadata.host_mode {
+        return Err(MobError::Internal(
+            "mob-managed resume requires persisted host_mode=false".to_string(),
+        ));
+    }
+
+    let current_comms_name = config.comms_name.clone();
+    let Some(stored_comms_name) = metadata.comms_name.clone() else {
+        return Err(MobError::Internal(
+            "missing durable comms_name for resumed mob member".to_string(),
+        ));
+    };
+    if current_comms_name.as_deref() != Some(stored_comms_name.as_str()) {
+        return Err(MobError::Internal(format!(
+            "persisted comms_name '{}' does not match current mob identity '{}'",
+            stored_comms_name,
+            current_comms_name.unwrap_or_else(|| "<none>".to_string())
+        )));
+    }
+
+    config.model = metadata.model.clone();
+    config.max_tokens = Some(metadata.max_tokens);
+    config.provider = Some(metadata.provider);
+    config.provider_params = metadata.provider_params.clone();
+    config.override_builtins = Some(metadata.tooling.builtins);
+    config.override_shell = Some(metadata.tooling.shell);
+    config.override_memory = Some(metadata.tooling.memory);
+    config.override_mob = Some(metadata.tooling.mob);
+    config.preload_skills = metadata.tooling.active_skills.clone();
+    config.host_mode = metadata.host_mode;
+    config.comms_name = Some(stored_comms_name);
+    config.peer_meta = metadata.peer_meta.clone();
+    Ok(())
+}
+
 /// Bridge an [`AgentBuildConfig`] to a [`CreateSessionRequest`].
 ///
 /// This is the second step: the config is converted to the service-level
@@ -156,7 +239,7 @@ pub fn to_create_session_request(
         max_tokens: config.max_tokens,
         event_tx: None,
         host_mode: config.host_mode,
-        host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+        host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
         skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution

@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
 /// Controls whether `create_session()` should execute an initial turn.
@@ -370,10 +369,8 @@ pub struct TurnToolOverlay {
 /// Owner of the background host-mode comms drain lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HostModeOwner {
-    /// SessionService owns host-mode draining directly.
-    #[default]
-    SessionService,
     /// An external runtime/surface owns the host-mode drain lifecycle.
+    #[default]
     ExternalRuntime,
 }
 
@@ -606,12 +603,6 @@ pub trait SessionServiceCommsExt: SessionService {
         self.comms_runtime(session_id)
             .await
             .and_then(|runtime| runtime.interaction_event_injector())
-    }
-
-    /// Shared turn-boundary drain suppression control for this session, if available.
-    #[doc(hidden)]
-    async fn comms_drain_control(&self, _session_id: &SessionId) -> Option<Arc<AtomicBool>> {
-        None
     }
 }
 

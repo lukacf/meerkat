@@ -2511,7 +2511,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             {
                 HostModeOwner::ExternalRuntime
             } else {
-                HostModeOwner::SessionService
+                HostModeOwner::ExternalRuntime
             },
             skill_references: primitive
                 .turn_metadata()
@@ -3403,10 +3403,6 @@ async fn run_agent(
         #[cfg(feature = "comms")]
         {
             let comms_rt = service.comms_runtime(&session_id).await;
-            let control = service.comms_drain_control(&session_id).await;
-            runtime_adapter
-                .set_comms_drain_control(&session_id, control)
-                .await;
             runtime_adapter
                 .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
                 .await;
@@ -3867,10 +3863,6 @@ async fn resume_session_with_llm_override(
         #[cfg(feature = "comms")]
         {
             let comms_rt = service.comms_runtime(&session_id).await;
-            let control = service.comms_drain_control(&session_id).await;
-            resume_adapter
-                .set_comms_drain_control(&session_id, control)
-                .await;
             resume_adapter
                 .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
                 .await;
@@ -9017,7 +9009,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             max_tokens: Some(32),
             event_tx: None,
             host_mode: false,
-            host_mode_owner: HostModeOwner::SessionService,
+            host_mode_owner: HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),

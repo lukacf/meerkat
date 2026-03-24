@@ -83,13 +83,11 @@ impl SessionAgent for FactoryAgent {
         render_metadata: Option<RenderMetadata>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        if handling_mode == HandlingMode::Queue && render_metadata.is_none() {
-            return self.agent.run_with_events(prompt, event_tx).await;
-        }
-
-        self.agent
-            .run_injected_turn_with_events(prompt, handling_mode, render_metadata, event_tx)
-            .await
+        // TODO: Phase 3 will reintroduce interaction-id-scoped admission for
+        // non-Queue handling (Steer) and render_metadata turns. For now, all
+        // turns go through run_with_events.
+        let _ = (handling_mode, render_metadata);
+        self.agent.run_with_events(prompt, event_tx).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -192,28 +190,8 @@ impl SessionAgent for FactoryAgent {
         self.agent.comms_arc()?.interaction_event_injector()
     }
 
-    fn set_comms_drain_active(&mut self, active: bool) {
-        self.agent.set_comms_drain_active(active);
-    }
-
-    async fn poll_host_mode(
-        &mut self,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<meerkat_core::HostModePollOutcome, meerkat_core::error::AgentError> {
-        self.agent.poll_host_mode_with_events(event_tx).await
-    }
-
-    async fn checkpoint_current_session(&mut self) {
-        self.agent.checkpoint_current_session().await;
-    }
-
     fn comms_runtime(&self) -> Option<Arc<dyn meerkat_core::agent::CommsRuntime>> {
         self.agent.comms_arc()
-    }
-
-    fn comms_drain_control(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
-        self.agent.comms_arc()?;
-        Some(self.agent.comms_drain_control())
     }
 }
 
@@ -504,7 +482,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: Some(SessionBuildOptions {
@@ -600,7 +578,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -638,7 +616,7 @@ mod tests {
             max_tokens: None,
             event_tx: None,
             host_mode: false,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: None,

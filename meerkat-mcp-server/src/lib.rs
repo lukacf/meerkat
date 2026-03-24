@@ -3,8 +3,6 @@
 //! This crate provides an MCP server that exposes Meerkat agent capabilities
 //! as MCP tools: meerkat_run and meerkat_resume.
 
-#[cfg(feature = "comms")]
-use meerkat::SessionServiceCommsExt;
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::surface::{RequestContext, prepare_surface_session, request_action};
@@ -2408,11 +2406,6 @@ async fn handle_meerkat_run(
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
-        let control = state.service.comms_drain_control(&session_id).await;
-        state
-            .runtime_adapter
-            .set_comms_drain_control(&session_id, control)
-            .await;
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
@@ -2735,11 +2728,6 @@ async fn handle_meerkat_resume(
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
-        let control = state.service.comms_drain_control(&session_id).await;
-        state
-            .runtime_adapter
-            .set_comms_drain_control(&session_id, control)
-            .await;
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)

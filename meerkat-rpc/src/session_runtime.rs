@@ -17,8 +17,6 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use indexmap::IndexMap;
-#[cfg(feature = "comms")]
-use meerkat::SessionServiceCommsExt;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
     PersistentSessionService, encode_llm_client_override_for_service,
@@ -1184,10 +1182,6 @@ impl SessionRuntime {
                     #[cfg(feature = "comms")]
                     {
                         let comms_rt = self.service.comms_runtime(session_id).await;
-                        let control = self.service.comms_drain_control(session_id).await;
-                        self.runtime_adapter
-                            .set_comms_drain_control(session_id, control)
-                            .await;
                         self.runtime_adapter
                             .maybe_spawn_comms_drain(session_id, build_config.host_mode, comms_rt)
                             .await;
@@ -1363,10 +1357,6 @@ impl SessionRuntime {
         #[cfg(feature = "comms")]
         {
             let comms_rt = self.service.comms_runtime(session_id).await;
-            let control = self.service.comms_drain_control(session_id).await;
-            self.runtime_adapter
-                .set_comms_drain_control(session_id, control)
-                .await;
             self.runtime_adapter
                 .maybe_spawn_comms_drain(session_id, host_mode, comms_rt)
                 .await;

@@ -16,14 +16,12 @@ use meerkat_core::service::{
 use meerkat_core::types::{
     HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
 };
-use meerkat_core::{CommsRuntime, HostModePollOutcome};
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::SystemTime;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // Mock agent (copied from ephemeral_contract.rs pattern)
@@ -49,167 +47,6 @@ struct RecordingTurnAgent {
     session_id: SessionId,
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
-}
-
-#[derive(Default)]
-struct TestHostCommsRuntime {
-    notify: Arc<Notify>,
-    messages: std::sync::Mutex<Vec<String>>,
-}
-
-impl TestHostCommsRuntime {
-    fn push_message(&self, message: impl Into<String>) {
-        self.messages
-            .lock()
-            .expect("messages lock poisoned")
-            .push(message.into());
-        self.notify.notify_waiters();
-    }
-}
-
-#[async_trait]
-impl CommsRuntime for TestHostCommsRuntime {
-    async fn drain_messages(&self) -> Vec<String> {
-        std::mem::take(&mut *self.messages.lock().expect("messages lock poisoned"))
-    }
-
-    fn inbox_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.notify)
-    }
-}
-
-struct HostModeAgent {
-    session_id: SessionId,
-    message_count: usize,
-    comms_runtime: Arc<TestHostCommsRuntime>,
-    host_polls: Arc<AtomicUsize>,
-    checkpoint_count: Arc<AtomicUsize>,
-    fail_next_poll: Arc<AtomicBool>,
-    system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
-}
-
-#[async_trait]
-impl SessionAgent for HostModeAgent {
-    async fn run_with_events(
-        &mut self,
-        _prompt: meerkat_core::types::ContentInput,
-        _event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.message_count += 2;
-        Ok(RunResult {
-            text: "host turn".to_string(),
-            session_id: self.session_id.clone(),
-            usage: Usage::default(),
-            turns: 1,
-            tool_calls: 0,
-            structured_output: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        })
-    }
-
-    fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
-
-    fn set_flow_tool_overlay(
-        &mut self,
-        _overlay: Option<TurnToolOverlay>,
-    ) -> Result<(), meerkat_core::error::AgentError> {
-        Ok(())
-    }
-
-    fn cancel(&mut self) {}
-
-    fn hot_swap_llm_identity(
-        &mut self,
-        _client: Arc<dyn meerkat_core::AgentLlmClient>,
-        _identity: meerkat_core::SessionLlmIdentity,
-    ) -> Result<(), meerkat_core::error::AgentError> {
-        Ok(())
-    }
-
-    fn session_id(&self) -> SessionId {
-        self.session_id.clone()
-    }
-
-    fn snapshot(&self) -> SessionSnapshot {
-        SessionSnapshot {
-            created_at: SystemTime::now(),
-            updated_at: SystemTime::now(),
-            message_count: self.message_count,
-            total_tokens: 0,
-            usage: Usage::default(),
-            last_assistant_text: Some("host turn".to_string()),
-        }
-    }
-
-    fn session_clone(&self) -> meerkat_core::Session {
-        let mut session = meerkat_core::Session::with_id(self.session_id.clone());
-        session
-            .set_system_context_state(
-                self.system_context_state
-                    .lock()
-                    .expect("system-context lock poisoned")
-                    .clone(),
-            )
-            .expect("serialize system-context state");
-        session
-    }
-
-    fn apply_runtime_system_context(
-        &mut self,
-        appends: &[meerkat_core::PendingSystemContextAppend],
-    ) {
-        let mut session = self.session_clone();
-        session.append_system_context_blocks(appends);
-        self.message_count = session.messages().len();
-    }
-
-    fn system_context_state(
-        &self,
-    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
-        Arc::clone(&self.system_context_state)
-    }
-
-    async fn poll_host_mode(
-        &mut self,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<HostModePollOutcome, meerkat_core::error::AgentError> {
-        let drained = self.comms_runtime.drain_messages().await;
-        if drained.is_empty() {
-            return Ok(HostModePollOutcome::Idle);
-        }
-        if self.fail_next_poll.swap(false, Ordering::AcqRel) {
-            let _ = event_tx
-                .send(AgentEvent::RunFailed {
-                    session_id: self.session_id.clone(),
-                    error: "simulated host-mode poll failure".to_string(),
-                })
-                .await;
-            return Err(meerkat_core::error::AgentError::InternalError(
-                "simulated host-mode poll failure".to_string(),
-            ));
-        }
-        self.host_polls.fetch_add(drained.len(), Ordering::AcqRel);
-        self.message_count += drained.len() * 2;
-        Ok(HostModePollOutcome::Ran(RunResult {
-            text: drained.join("\n"),
-            session_id: self.session_id.clone(),
-            usage: Usage::default(),
-            turns: 1,
-            tool_calls: 0,
-            structured_output: None,
-            schema_warnings: None,
-            skill_diagnostics: None,
-        }))
-    }
-
-    async fn checkpoint_current_session(&mut self) {
-        self.checkpoint_count.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn comms_runtime(&self) -> Option<Arc<dyn CommsRuntime>> {
-        Some(self.comms_runtime.clone() as Arc<dyn CommsRuntime>)
-    }
 }
 
 #[async_trait]
@@ -544,34 +381,6 @@ impl SessionAgent for RecordingTurnAgent {
     }
 }
 
-struct HostModeAgentBuilder {
-    comms_runtime: Arc<TestHostCommsRuntime>,
-    host_polls: Arc<AtomicUsize>,
-    checkpoint_count: Arc<AtomicUsize>,
-    fail_next_poll: Arc<AtomicBool>,
-}
-
-#[async_trait]
-impl SessionAgentBuilder for HostModeAgentBuilder {
-    type Agent = HostModeAgent;
-
-    async fn build_agent(
-        &self,
-        _req: &CreateSessionRequest,
-        _event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<HostModeAgent, SessionError> {
-        Ok(HostModeAgent {
-            session_id: SessionId::new(),
-            message_count: 0,
-            comms_runtime: Arc::clone(&self.comms_runtime),
-            host_polls: Arc::clone(&self.host_polls),
-            checkpoint_count: Arc::clone(&self.checkpoint_count),
-            fail_next_poll: Arc::clone(&self.fail_next_poll),
-            system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -609,7 +418,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
         max_tokens: None,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::SessionService,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -638,7 +447,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         handling_mode: HandlingMode::Queue,
         event_tx: None,
         host_mode: false,
-        host_mode_owner: HostModeOwner::SessionService,
+        host_mode_owner: HostModeOwner::ExternalRuntime,
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,
@@ -819,178 +628,6 @@ async fn interrupt_idle_session_returns_not_running() {
     // Session is idle now — interrupt should fail
     let err = service.interrupt(&sid).await.unwrap_err();
     assert_eq!(err.code(), "SESSION_NOT_RUNNING");
-}
-
-// ---------------------------------------------------------------------------
-// 6. Interrupt host-mode session returns without blocking
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn interrupt_host_mode_returns_without_blocking() {
-    let service = make_slow_service(600);
-
-    // Create with deferred turn so we can start host_mode turn manually
-    let created = service
-        .create_session(create_req_deferred("host"))
-        .await
-        .unwrap();
-    let sid = created.session_id;
-
-    // Start a host-mode turn in the background
-    let svc = service.clone();
-    let sid2 = sid.clone();
-    let _turn_handle = tokio::spawn(async move {
-        svc.start_turn(
-            &sid2,
-            StartTurnRequest {
-                host_mode: true,
-                ..turn_req("Host mode turn")
-            },
-        )
-        .await
-    });
-
-    // Give the turn time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    // Interrupt should return promptly
-    let start = tokio::time::Instant::now();
-    let interrupt_result = service.interrupt(&sid).await;
-    let elapsed = start.elapsed();
-
-    assert!(interrupt_result.is_ok(), "interrupt should succeed");
-    assert!(
-        elapsed < tokio::time::Duration::from_millis(200),
-        "interrupt should return promptly for host-mode, took {elapsed:?}"
-    );
-}
-
-#[tokio::test]
-async fn direct_host_mode_session_continues_draining_after_first_turn() {
-    let comms_runtime = Arc::new(TestHostCommsRuntime::default());
-    let host_polls = Arc::new(AtomicUsize::new(0));
-    let checkpoint_count = Arc::new(AtomicUsize::new(0));
-    let service = Arc::new(EphemeralSessionService::new(
-        HostModeAgentBuilder {
-            comms_runtime: Arc::clone(&comms_runtime),
-            host_polls: Arc::clone(&host_polls),
-            checkpoint_count: Arc::clone(&checkpoint_count),
-            fail_next_poll: Arc::new(AtomicBool::new(false)),
-        },
-        10,
-    ));
-
-    let created = service
-        .create_session(create_req_deferred("host"))
-        .await
-        .unwrap();
-    let sid = created.session_id;
-
-    service
-        .start_turn(
-            &sid,
-            StartTurnRequest {
-                host_mode: true,
-                host_mode_owner: HostModeOwner::SessionService,
-                ..turn_req("Host mode turn")
-            },
-        )
-        .await
-        .unwrap();
-
-    comms_runtime.push_message("peer message 1");
-    tokio::time::timeout(tokio::time::Duration::from_millis(300), async {
-        loop {
-            if host_polls.load(Ordering::Acquire) >= 1 {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("first host-mode pump should run");
-
-    comms_runtime.push_message("peer message 2");
-    tokio::time::timeout(tokio::time::Duration::from_millis(300), async {
-        loop {
-            if host_polls.load(Ordering::Acquire) >= 2 {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("second host-mode pump should run");
-
-    assert_eq!(
-        checkpoint_count.load(Ordering::Acquire),
-        2,
-        "each successful host-mode poll should checkpoint once",
-    );
-}
-
-#[tokio::test]
-async fn direct_host_mode_poll_failure_is_broadcast_and_stops_drain() {
-    let comms_runtime = Arc::new(TestHostCommsRuntime::default());
-    let host_polls = Arc::new(AtomicUsize::new(0));
-    let checkpoint_count = Arc::new(AtomicUsize::new(0));
-    let fail_next_poll = Arc::new(AtomicBool::new(true));
-    let service = Arc::new(EphemeralSessionService::new(
-        HostModeAgentBuilder {
-            comms_runtime: Arc::clone(&comms_runtime),
-            host_polls: Arc::clone(&host_polls),
-            checkpoint_count,
-            fail_next_poll: Arc::clone(&fail_next_poll),
-        },
-        10,
-    ));
-
-    let created = service
-        .create_session(create_req_deferred("host"))
-        .await
-        .unwrap();
-    let sid = created.session_id;
-
-    let mut stream = service
-        .subscribe_session_events(&sid)
-        .await
-        .expect("should subscribe to session events");
-
-    service
-        .start_turn(
-            &sid,
-            StartTurnRequest {
-                host_mode: true,
-                host_mode_owner: HostModeOwner::SessionService,
-                ..turn_req("Host mode turn")
-            },
-        )
-        .await
-        .unwrap();
-
-    comms_runtime.push_message("peer failure");
-
-    let mut saw_run_failed = false;
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
-    while let Ok(Some(envelope)) = tokio::time::timeout_at(deadline, stream.next()).await {
-        if matches!(envelope.payload, AgentEvent::RunFailed { .. }) {
-            saw_run_failed = true;
-            break;
-        }
-    }
-
-    assert!(
-        saw_run_failed,
-        "host-mode poll failures should surface on the session event stream",
-    );
-
-    comms_runtime.push_message("peer after failure");
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    assert_eq!(
-        host_polls.load(Ordering::Acquire),
-        0,
-        "host-mode drain should stop after a poll failure",
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,7 +990,7 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
                 handling_mode: HandlingMode::Steer,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: HostModeOwner::SessionService,
+                host_mode_owner: HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,

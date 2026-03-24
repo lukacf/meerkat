@@ -1559,7 +1559,6 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 path_suffix: "meerkat-runtime/src/session_adapter.rs".into(),
                 type_name: "RuntimeSessionAdapter".into(),
                 method_names: vec![
-                    "set_comms_drain_control",
                     "register_session",
                     "set_session_silent_intents",
                     "register_session_with_executor",
@@ -2162,19 +2161,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
     vec![
         semantic_operation_entry!(
             "meerkat-runtime/src/session_adapter.rs",
-            "set_comms_drain_control",
-            BoundaryKind::PublicInherent,
-            "RuntimeSessionAdapter",
-            &["comms_drain_slots"],
-            "registered-session contract + CommsDrainLifecycleMachine",
-            &[
-                "drain control reachability follows registered-session lifetime and active drain slot truth",
-            ],
-            &["drain slot control linkage cannot outlive registered session"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-runtime/src/session_adapter.rs",
             "register_session",
             BoundaryKind::PublicInherent,
             "RuntimeSessionAdapter",
@@ -2324,7 +2310,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["comms_drain_slots"],
             "CommsDrainLifecycleMachine",
             &["abort requests transition all tracked drains through canonical abort protocol"],
-            &["no slot remains suppressing turn-boundary drain after abort completion"],
+            &["no slot remains in running state after abort completion"],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
@@ -2335,7 +2321,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["comms_drain_slots"],
             "CommsDrainLifecycleMachine",
             &["single-session abort request follows canonical drain abort protocol"],
-            &["aborted drain slot cannot retain stale running/suppression state"],
+            &["aborted drain slot cannot retain stale running state"],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

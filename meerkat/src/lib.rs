@@ -23,7 +23,7 @@
 //!         max_tokens: None,
 //!         event_tx: None,
 //!         host_mode: false,
-//!         host_mode_owner: HostModeOwner::SessionService,
+//!         host_mode_owner: HostModeOwner::ExternalRuntime,
 //!         skill_references: None,
 //!         initial_turn: InitialTurnPolicy::RunImmediately,
 //!         build: None,

@@ -28,11 +28,12 @@ use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, SessionSummary, SessionUsage, SessionView,
-    StartTurnRequest, TurnToolOverlay,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
+    SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+    AssistantBlock, Message, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult,
+    Usage,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
@@ -40,7 +41,7 @@ use meerkat_core::{
     PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
-use meerkat_core::{Session, SessionSystemContextState};
+use meerkat_core::{Session, SessionMetadata, SessionSystemContextState, SessionTooling};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
@@ -322,6 +323,8 @@ struct CreateSessionRecord {
 /// A mock session service that creates sessions with mock comms runtimes.
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
+    live_session_data: RwLock<HashMap<SessionId, Session>>,
+    persisted_sessions: RwLock<HashMap<SessionId, Session>>,
     host_mode_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
     session_comms_names: RwLock<HashMap<SessionId, String>>,
     runtime_adapter: Mutex<Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>>,
@@ -366,6 +369,8 @@ impl MockSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            live_session_data: RwLock::new(HashMap::new()),
+            persisted_sessions: RwLock::new(HashMap::new()),
             host_mode_notifiers: RwLock::new(HashMap::new()),
             session_comms_names: RwLock::new(HashMap::new()),
             runtime_adapter: Mutex::new(None),
@@ -401,6 +406,34 @@ impl MockSessionService {
 
     async fn active_session_count(&self) -> usize {
         self.sessions.read().await.len()
+    }
+
+    async fn live_session_clone(&self, session_id: &SessionId) -> Option<Session> {
+        self.live_session_data.read().await.get(session_id).cloned()
+    }
+
+    async fn persisted_session_clone(&self, session_id: &SessionId) -> Option<Session> {
+        self.persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+    }
+
+    async fn replace_live_session(&self, session: Session) {
+        let session_id = session.id().clone();
+        self.live_session_data
+            .write()
+            .await
+            .insert(session_id.clone(), session.clone());
+        self.persisted_sessions
+            .write()
+            .await
+            .insert(session_id, session);
+    }
+
+    async fn delete_persisted_session(&self, session_id: &SessionId) {
+        self.persisted_sessions.write().await.remove(session_id);
     }
 
     fn enable_runtime_adapter(&self) -> Arc<meerkat_runtime::RuntimeSessionAdapter> {
@@ -726,7 +759,12 @@ impl SessionService for MockSessionService {
             tokio::time::sleep(std::time::Duration::from_millis(create_delay_ms)).await;
         }
 
-        let session_id = SessionId::new();
+        let mut session = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.clone())
+            .unwrap_or_default();
+        let session_id = session.id().clone();
         let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
 
         // Extract comms_name from build options for mock runtime naming
@@ -748,6 +786,46 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), comms);
+        if let Some(system_prompt) = req.system_prompt.clone() {
+            session.set_system_prompt(system_prompt);
+        }
+        if session.session_metadata().is_none() {
+            let build = req.build.as_ref();
+            let metadata = SessionMetadata {
+                model: req.model.clone(),
+                max_tokens: req.max_tokens.unwrap_or(4096),
+                provider: build
+                    .and_then(|b| b.provider)
+                    .unwrap_or(Provider::Anthropic),
+                provider_params: build.and_then(|b| b.provider_params.clone()),
+                tooling: SessionTooling {
+                    builtins: build.and_then(|b| b.override_builtins).unwrap_or(true),
+                    shell: build.and_then(|b| b.override_shell).unwrap_or(false),
+                    comms: build.and_then(|b| b.comms_name.as_ref()).is_some(),
+                    mob: build.and_then(|b| b.override_mob).unwrap_or(false),
+                    memory: build.and_then(|b| b.override_memory).unwrap_or(false),
+                    active_skills: build.and_then(|b| b.preload_skills.clone()),
+                },
+                host_mode: req.host_mode,
+                comms_name: build.and_then(|b| b.comms_name.clone()),
+                peer_meta: build.and_then(|b| b.peer_meta.clone()),
+                realm_id: build.and_then(|b| b.realm_id.clone()),
+                instance_id: build.and_then(|b| b.instance_id.clone()),
+                backend: build.and_then(|b| b.backend.clone()),
+                config_generation: build.and_then(|b| b.config_generation),
+            };
+            session
+                .set_session_metadata(metadata)
+                .expect("mock session metadata should serialize");
+        }
+        self.live_session_data
+            .write()
+            .await
+            .insert(session_id.clone(), session.clone());
+        self.persisted_sessions
+            .write()
+            .await
+            .insert(session_id.clone(), session);
         self.host_mode_notifiers
             .write()
             .await
@@ -931,40 +1009,50 @@ impl SessionService for MockSessionService {
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
-        let sessions = self.sessions.read().await;
-        if !sessions.contains_key(id) {
+        let session = self
+            .live_session_clone(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let metadata = session.session_metadata();
+        if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         Ok(SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
-                created_at: SystemTime::now(),
-                updated_at: SystemTime::now(),
-                message_count: 0,
-                is_active: false,
-                model: "claude-sonnet-4-5".to_string(),
-                provider: Provider::Anthropic,
-                last_assistant_text: None,
+                created_at: session.created_at(),
+                updated_at: session.updated_at(),
+                message_count: session.messages().len(),
+                is_active: true,
+                model: metadata
+                    .as_ref()
+                    .map(|meta| meta.model.clone())
+                    .unwrap_or_else(|| "claude-sonnet-4-5".to_string()),
+                provider: metadata
+                    .as_ref()
+                    .map(|meta| meta.provider)
+                    .unwrap_or(Provider::Anthropic),
+                last_assistant_text: session.last_assistant_text(),
                 labels: Default::default(),
             },
             billing: SessionUsage {
-                total_tokens: 0,
-                usage: Usage::default(),
+                total_tokens: session.total_tokens(),
+                usage: session.total_usage(),
             },
         })
     }
 
     async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        let sessions = self.sessions.read().await;
+        let sessions = self.live_session_data.read().await;
         Ok(sessions
-            .keys()
-            .map(|id| SessionSummary {
-                session_id: id.clone(),
-                created_at: SystemTime::now(),
-                updated_at: SystemTime::now(),
-                message_count: 0,
-                total_tokens: 0,
-                is_active: false,
+            .values()
+            .map(|session| SessionSummary {
+                session_id: session.id().clone(),
+                created_at: session.created_at(),
+                updated_at: session.updated_at(),
+                message_count: session.messages().len(),
+                total_tokens: session.total_tokens(),
+                is_active: true,
                 labels: Default::default(),
             })
             .collect())
@@ -984,6 +1072,7 @@ impl SessionService for MockSessionService {
         if let Some(runtime) = sessions.remove(id) {
             self.session_comms_names.write().await.remove(id);
             self.external_tools_by_session.write().await.remove(id);
+            self.live_session_data.write().await.remove(id);
             if let Some(notifier) = self.host_mode_notifiers.write().await.remove(id) {
                 notifier.notify_waiters();
             }
@@ -1142,12 +1231,13 @@ impl meerkat_core::service::SessionServiceHistoryExt for MockSessionService {
         id: &SessionId,
         query: meerkat_core::service::SessionHistoryQuery,
     ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
-        if !self.sessions.read().await.contains_key(id) {
-            return Err(SessionError::NotFound { id: id.clone() });
-        }
+        let session = self
+            .live_session_clone(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         Ok(meerkat_core::service::SessionHistoryPage::from_messages(
             id.clone(),
-            &[],
+            session.messages(),
             query,
         ))
     }
@@ -1203,6 +1293,13 @@ impl MobSessionService for MockSessionService {
             .is_some_and(|name| name.starts_with(&format!("{mob_id}/")))
     }
 
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        Ok(self.persisted_session_clone(session_id).await)
+    }
+
     async fn apply_runtime_turn(
         &self,
         session_id: &SessionId,
@@ -1224,6 +1321,18 @@ impl MobSessionService for MockSessionService {
             session_snapshot: None,
             run_result: None,
         })
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.sessions.write().await.remove(session_id);
+        self.live_session_data.write().await.remove(session_id);
+        self.host_mode_notifiers.write().await.remove(session_id);
+        self.session_comms_names.write().await.remove(session_id);
+        self.external_tools_by_session
+            .write()
+            .await
+            .remove(session_id);
+        Ok(())
     }
 }
 
@@ -3618,7 +3727,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
                 host_mode: false,
-                host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+                host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -4024,7 +4133,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
                 ..Default::default()
             }),
             host_mode: true,
-            host_mode_owner: meerkat_core::service::HostModeOwner::SessionService,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             labels: None,
@@ -4050,7 +4159,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
 }
 
 #[tokio::test]
-async fn test_resume_recreates_missing_sessions() {
+async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
@@ -4072,6 +4181,15 @@ async fn test_resume_recreates_missing_sessions() {
         .session_id()
         .cloned()
         .expect("session-backed member");
+    let mut persisted = service
+        .live_session_clone(&old_sid)
+        .await
+        .expect("live session");
+    persisted.set_system_prompt("Persisted worker prompt".to_string());
+    persisted.push(meerkat_core::Message::User(
+        meerkat_core::types::UserMessage::text("Remember session continuity.".to_string()),
+    ));
+    service.replace_live_session(persisted).await;
     service
         .archive(&old_sid)
         .await
@@ -4083,19 +4201,35 @@ async fn test_resume_recreates_missing_sessions() {
         .await
         .expect("resume");
 
-    let new_sid = resumed
+    let restored_sid = resumed
         .get_member(&MeerkatId::from("w-1"))
         .await
-        .expect("recreated entry")
+        .expect("restored entry")
         .session_id()
         .cloned()
         .expect("session-backed member");
-    assert_ne!(new_sid, old_sid, "resume should recreate missing session");
+    assert_eq!(
+        restored_sid, old_sid,
+        "persistent resume should restore the original session id"
+    );
+    let history = service
+        .read_history(
+            &restored_sid,
+            meerkat_core::service::SessionHistoryQuery::default(),
+        )
+        .await
+        .expect("history for restored session");
+    assert!(
+        history.messages.iter().any(|message| message
+            .as_indexable_text()
+            .contains("Remember session continuity.")),
+        "restored session should preserve persisted history"
+    );
     assert_eq!(service.active_session_count().await, 1);
 }
 
 #[tokio::test]
-async fn test_resume_recreates_missing_sessions_with_tool_wiring() {
+async fn test_resume_restores_missing_sessions_with_tool_wiring() {
     let mut definition = sample_definition_with_mob_tools();
     let worker = definition
         .profiles
@@ -4137,27 +4271,889 @@ async fn test_resume_recreates_missing_sessions_with_tool_wiring() {
         .await
         .expect("resume");
 
-    let new_sid = resumed
+    let restored_sid = resumed
         .get_member(&MeerkatId::from("w-1"))
         .await
-        .expect("recreated entry")
+        .expect("restored entry")
         .session_id()
         .cloned()
         .expect("session-backed member");
-    assert_ne!(new_sid, old_sid, "resume should recreate missing session");
+    assert_eq!(
+        restored_sid, old_sid,
+        "persistent resume should restore the original session id"
+    );
 
-    let names = service.external_tool_names(&new_sid).await;
+    let names = service.external_tool_names(&restored_sid).await;
     assert!(
         names.contains(&"spawn_meerkat".to_string()),
-        "mob tools must be wired on recreated sessions"
+        "mob tools must be wired on restored sessions"
     );
     assert!(
         names.contains(&"mob_task_create".to_string()),
-        "mob task tools must be wired on recreated sessions"
+        "mob task tools must be wired on restored sessions"
     );
     assert!(
         names.contains(&"bundle_echo".to_string()),
-        "rust bundle tools must be wired on recreated sessions"
+        "rust bundle tools must be wired on restored sessions"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_marks_missing_persisted_session_as_broken() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+
+    let snapshot = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(snapshot.is_final, "broken members should be terminal");
+    assert_eq!(snapshot.current_session_id, Some(old_sid.clone()));
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("missing durable session")),
+        "broken member should surface restore failure reason"
+    );
+
+    let members = resumed.list_members().await;
+    let broken = members
+        .into_iter()
+        .find(|entry| entry.meerkat_id == MeerkatId::from("w-1"))
+        .expect("broken member should remain visible in list_members");
+    assert_eq!(
+        broken.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(broken.is_final);
+    assert_eq!(broken.current_session_id, Some(old_sid));
+    assert!(
+        broken
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("missing durable session")),
+        "projected member listing should carry the restore failure"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let sid_1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_2 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .wire(MeerkatId::from("w-1"), MeerkatId::from("w-2"))
+        .await
+        .expect("wire");
+    handle.stop().await.expect("stop");
+
+    service
+        .archive(&sid_2)
+        .await
+        .expect("archive broken session");
+    service.delete_persisted_session(&sid_2).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume should stay partial even with broken wired member");
+
+    let left = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("healthy member status");
+    assert_eq!(left.status, crate::runtime::handle::MobMemberStatus::Active);
+    assert_eq!(left.current_session_id, Some(sid_1.clone()));
+
+    let right = resumed
+        .member_status(&MeerkatId::from("w-2"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        right.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert_eq!(right.current_session_id, Some(sid_2.clone()));
+
+    let trusted_by_left = service.trusted_peer_names(&sid_1).await;
+    assert!(
+        !trusted_by_left.contains(&test_comms_name("worker", "w-2")),
+        "healthy members must prune trust to broken peers during partial resume"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_resume() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn orchestrator");
+    handle.stop().await.expect("stop");
+
+    let orchestrator_sid = handle
+        .get_member(&MeerkatId::from("lead-1"))
+        .await
+        .expect("orchestrator entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&orchestrator_sid)
+        .await
+        .expect("archive orchestrator");
+    service.delete_persisted_session(&orchestrator_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume should succeed when orchestrator is broken");
+
+    let orchestrator = resumed
+        .member_status(&MeerkatId::from("lead-1"))
+        .await
+        .expect("orchestrator status");
+    assert_eq!(
+        orchestrator.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert_eq!(orchestrator.current_session_id, Some(orchestrator_sid));
+}
+
+#[tokio::test]
+async fn test_broken_member_turn_returns_restore_failed_error() {
+    let service = Arc::new(MockSessionService::new());
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+    match resumed.resume().await {
+        Ok(()) => {}
+        Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        Err(error) => {
+            panic!(
+                "broken members should still surface restore failures after lifecycle resume: {error}"
+            )
+        }
+    }
+
+    let error = resumed
+        .internal_turn(
+            MeerkatId::from("w-1"),
+            ContentInput::from("repair me".to_string()),
+        )
+        .await
+        .expect_err("Broken members must reject turn delivery");
+
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-1"));
+            assert_eq!(session_id, old_sid);
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_retire_broken_member_succeeds_and_removes_it() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+
+    resumed
+        .retire(MeerkatId::from("w-1"))
+        .await
+        .expect("retire should work on broken member");
+
+    assert!(
+        resumed.get_member(&MeerkatId::from("w-1")).await.is_none(),
+        "retire should remove the broken member from the roster"
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_broken_member_clears_restore_diagnostic() {
+    let service = Arc::new(MockSessionService::new());
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+    match resumed.resume().await {
+        Ok(()) => {}
+        Err(MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Running,
+        }) => {}
+        Err(error) => {
+            panic!("broken members should still be repairable after lifecycle resume: {error}")
+        }
+    }
+
+    let receipt = resumed
+        .respawn(MeerkatId::from("w-1"), None)
+        .await
+        .expect("respawn should repair broken member");
+    let new_sid = receipt
+        .new_session_id
+        .clone()
+        .expect("respawned member should have a new session");
+    assert_ne!(
+        new_sid, old_sid,
+        "respawn should rotate the session identity"
+    );
+
+    let snapshot = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("member status after repair");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    assert_eq!(snapshot.current_session_id, Some(new_sid.clone()));
+    assert!(
+        snapshot.error.is_none(),
+        "repair should clear the old broken diagnostic"
+    );
+
+    let members = resumed.list_members().await;
+    let repaired = members
+        .into_iter()
+        .find(|entry| entry.meerkat_id == MeerkatId::from("w-1"))
+        .expect("repaired member remains listed");
+    assert_eq!(
+        repaired.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    assert!(repaired.error.is_none());
+    assert_eq!(repaired.current_session_id, Some(new_sid));
+}
+
+#[tokio::test]
+async fn test_resume_restores_persisted_behavior_metadata() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    let mut persisted = service
+        .live_session_clone(&old_sid)
+        .await
+        .expect("live session");
+    persisted.set_system_prompt("Persisted worker prompt".to_string());
+    let mut metadata = persisted
+        .session_metadata()
+        .expect("seeded session metadata should exist");
+    metadata.model = "gpt-5.4-pro".to_string();
+    metadata.provider = Provider::OpenAI;
+    metadata.provider_params = Some(serde_json::json!({
+        "reasoning": { "effort": "high" }
+    }));
+    metadata.max_tokens = 8192;
+    metadata.tooling.builtins = false;
+    metadata.tooling.shell = true;
+    metadata.tooling.mob = true;
+    metadata.tooling.memory = true;
+    metadata.tooling.active_skills = Some(vec![meerkat_core::skills::SkillId(
+        "mob-communication".into(),
+    )]);
+    metadata.host_mode = false;
+    metadata.comms_name = Some(test_comms_name("worker", "w-1"));
+    let mut peer_meta = metadata.peer_meta.clone().expect("peer metadata");
+    peer_meta.labels.insert("resume".into(), "yes".into());
+    metadata.peer_meta = Some(peer_meta.clone());
+    persisted
+        .set_session_metadata(metadata.clone())
+        .expect("metadata update");
+    service.replace_live_session(persisted).await;
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive missing session");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume");
+
+    let restored_sid = resumed
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("restored entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    let restored = service
+        .live_session_clone(&restored_sid)
+        .await
+        .expect("restored live session");
+    let restored_metadata = restored
+        .session_metadata()
+        .expect("restored session metadata");
+
+    assert_eq!(restored_sid, old_sid);
+    assert_eq!(restored_metadata.model, metadata.model);
+    assert_eq!(restored_metadata.provider, metadata.provider);
+    assert_eq!(restored_metadata.provider_params, metadata.provider_params);
+    assert_eq!(restored_metadata.max_tokens, metadata.max_tokens);
+    assert_eq!(restored_metadata.tooling, metadata.tooling);
+    assert_eq!(restored_metadata.host_mode, metadata.host_mode);
+    assert_eq!(restored_metadata.comms_name, metadata.comms_name);
+    assert_eq!(restored_metadata.peer_meta, metadata.peer_meta);
+    assert!(
+        matches!(
+            restored.messages().first(),
+            Some(Message::System(system)) if system.content.contains("Persisted worker prompt")
+        ),
+        "restored session should keep the persisted system prompt"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_marks_persisted_host_mode_session_as_broken() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    let mut persisted = service
+        .live_session_clone(&old_sid)
+        .await
+        .expect("live session");
+    let mut metadata = persisted.session_metadata().expect("metadata");
+    metadata.host_mode = true;
+    persisted
+        .set_session_metadata(metadata)
+        .expect("set metadata");
+    service.replace_live_session(persisted).await;
+    service.archive(&old_sid).await.expect("archive session");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume should succeed with Broken projection");
+    let snapshot = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("host_mode=false")),
+        "host_mode mismatch should surface as a restore failure"
+    );
+}
+
+#[tokio::test]
+async fn test_attach_existing_session_rejects_persisted_host_mode_true() {
+    let service = Arc::new(MockSessionService::new());
+    let initial = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            render_metadata: None,
+            system_prompt: Some("Persisted resume prompt".to_string()),
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-resume".to_string()),
+                ..Default::default()
+            }),
+            host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            labels: None,
+        })
+        .await
+        .expect("seed session");
+    let session_id = initial.session_id.clone();
+    let mut persisted = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("live session");
+    let mut metadata = persisted.session_metadata().expect("metadata");
+    metadata.host_mode = true;
+    persisted
+        .set_session_metadata(metadata)
+        .expect("set metadata");
+    service.replace_live_session(persisted).await;
+    service.archive(&session_id).await.expect("archive session");
+
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let error = handle
+        .attach_existing_session_as_member(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-resume"),
+            session_id.clone(),
+        )
+        .await
+        .expect_err("host_mode=true session should be rejected for mob-managed resume");
+    assert!(
+        error.to_string().contains("host_mode=false"),
+        "explicit member resume should fail with the host_mode incompatibility"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_marks_comms_name_mismatch_as_broken() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    let mut persisted = service
+        .live_session_clone(&old_sid)
+        .await
+        .expect("live session");
+    let mut metadata = persisted.session_metadata().expect("metadata");
+    metadata.comms_name = Some("test-mob/worker/other-name".to_string());
+    persisted
+        .set_session_metadata(metadata)
+        .expect("set metadata");
+    service.replace_live_session(persisted).await;
+    service.archive(&old_sid).await.expect("archive session");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume should succeed with Broken projection");
+    let snapshot = resumed
+        .member_status(&MeerkatId::from("w-1"))
+        .await
+        .expect("broken member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("persisted comms_name")),
+        "comms_name mismatch should surface as a restore failure"
+    );
+}
+
+#[tokio::test]
+async fn test_attach_existing_session_rejects_comms_name_mismatch() {
+    let service = Arc::new(MockSessionService::new());
+    let initial = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            render_metadata: None,
+            system_prompt: Some("Persisted resume prompt".to_string()),
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-resume".to_string()),
+                ..Default::default()
+            }),
+            host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            labels: None,
+        })
+        .await
+        .expect("seed session");
+    let session_id = initial.session_id.clone();
+    let mut persisted = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("live session");
+    let mut metadata = persisted.session_metadata().expect("metadata");
+    metadata.comms_name = Some("test-mob/worker/not-w-resume".to_string());
+    persisted
+        .set_session_metadata(metadata)
+        .expect("set metadata");
+    service.replace_live_session(persisted).await;
+    service.archive(&session_id).await.expect("archive session");
+
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let error = handle
+        .attach_existing_session_as_member(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-resume"),
+            session_id.clone(),
+        )
+        .await
+        .expect_err("comms_name mismatch should be rejected for explicit resume");
+    assert!(
+        error.to_string().contains("persisted comms_name"),
+        "explicit member resume should fail with the comms_name mismatch"
+    );
+}
+
+#[tokio::test]
+async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
+    let definition = sample_definition();
+    let mob_id = MobId::from("test-mob");
+    let profile_name = ProfileName::from("worker");
+    let meerkat_id = MeerkatId::from("w-1");
+    let profile = definition
+        .profiles
+        .get(&profile_name)
+        .expect("worker profile");
+    let mut resumed = Session::new();
+    resumed
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: true,
+                shell: false,
+                comms: true,
+                mob: false,
+                memory: false,
+                active_skills: Some(vec![meerkat_core::skills::SkillId(
+                    "mob-communication".into(),
+                )]),
+            },
+            host_mode: false,
+            comms_name: Some(test_comms_name("worker", "w-1")),
+            peer_meta: Some(
+                meerkat_core::PeerMeta::default()
+                    .with_label("mob_id", "test-mob")
+                    .with_label("role", "worker")
+                    .with_label("meerkat_id", "w-1"),
+            ),
+            realm_id: Some("mob:test-mob".to_string()),
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .expect("resume metadata");
+
+    let wrong_session_id = SessionId::new();
+    let error =
+        crate::build::build_resumed_agent_config(crate::build::BuildResumedAgentConfigParams {
+            base: crate::build::BuildAgentConfigParams {
+                mob_id: &mob_id,
+                profile_name: &profile_name,
+                meerkat_id: &meerkat_id,
+                profile,
+                definition: &definition,
+                external_tools: None,
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                shell_env: None,
+            },
+            expected_session_id: &wrong_session_id,
+            resumed_session: resumed,
+        })
+        .await
+        .expect_err("resume helper must validate the target session identity");
+    assert!(
+        error.to_string().contains("resume session id mismatch"),
+        "mismatched injected resume_session should fail immediately"
+    );
+}
+
+#[tokio::test]
+async fn test_attach_existing_session_restores_persisted_inactive_session() {
+    let service = Arc::new(MockSessionService::new());
+    let initial = service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            render_metadata: None,
+            system_prompt: Some("Persisted resume prompt".to_string()),
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some("test-mob/worker/w-resume".to_string()),
+                ..Default::default()
+            }),
+            host_mode: false,
+            host_mode_owner: meerkat_core::service::HostModeOwner::ExternalRuntime,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            labels: None,
+        })
+        .await
+        .expect("seed session");
+    let session_id = initial.session_id.clone();
+    let mut persisted = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("live session");
+    persisted.push(meerkat_core::Message::User(
+        meerkat_core::types::UserMessage::text("Persist this resume target.".to_string()),
+    ));
+    service.replace_live_session(persisted).await;
+    service
+        .archive(&session_id)
+        .await
+        .expect("archive seeded session");
+
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let member_ref = handle
+        .attach_existing_session_as_member(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-resume"),
+            session_id.clone(),
+        )
+        .await
+        .expect("attach should restore persisted session");
+
+    assert_eq!(
+        member_ref.session_id(),
+        Some(&session_id),
+        "explicit member resume should preserve the requested session id"
+    );
+    let history = service
+        .read_history(
+            &session_id,
+            meerkat_core::service::SessionHistoryQuery::default(),
+        )
+        .await
+        .expect("restored history");
+    assert!(
+        history.messages.iter().any(|message| message
+            .as_indexable_text()
+            .contains("Persist this resume target.")),
+        "explicit member resume should restore persisted history"
     );
 }
 
@@ -4300,9 +5296,9 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         MemberRef::Session { ref session_id } => session_id.clone(),
         ref other => panic!("expected session member ref, got {other:?}"),
     };
-    assert_ne!(
+    assert_eq!(
         resumed_sub_sid, old_sub_sid,
-        "resume should recreate missing session-backed member session"
+        "resume should restore missing session-backed member session with the same session_id"
     );
 
     let resumed_ext = resumed

@@ -158,6 +158,14 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
     } else {
         standard_params_schema()
     };
+    // Reasoning-heavy models (Opus) get longer default call timeouts.
+    // Sonnet/Haiku are faster models with shorter expected call envelopes.
+    let call_timeout_secs = match family {
+        "claude-opus-4" => Some(300),   // 5 minutes: reasoning-heavy flagship
+        "claude-sonnet-4" => Some(120), // 2 minutes: balanced mid-tier
+        "claude-haiku-4" => Some(60),   // 1 minute: fast model
+        _ => None,                      // Unknown family: no profiled default
+    };
     Some(ModelProfile {
         provider: "anthropic".to_string(),
         model_family: family.to_string(),
@@ -167,6 +175,7 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
         vision: true,
         image_tool_results: true,
         params_schema: schema.clone(),
+        call_timeout_secs,
     })
 }
 

@@ -415,6 +415,10 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
     }
 
     // Mock LLM client that always fails.
@@ -441,6 +445,10 @@ mod tests {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
         }
     }
 

@@ -335,6 +335,9 @@ impl Config {
         if other.multiplier != defaults.multiplier {
             self.retry.multiplier = other.multiplier;
         }
+        if other.call_timeout_override != defaults.call_timeout_override {
+            self.retry.call_timeout_override = other.call_timeout_override.clone();
+        }
     }
 
     fn merge_tools(&mut self, other: &ToolsConfig) {
@@ -410,6 +413,9 @@ impl Config {
         }
         if retry.contains_key("multiplier") {
             self.retry.multiplier = layer.multiplier;
+        }
+        if retry.contains_key("call_timeout") {
+            self.retry.call_timeout_override = layer.call_timeout_override.clone();
         }
     }
 
@@ -1053,6 +1059,69 @@ pub struct BudgetConfig {
     pub max_tool_calls: Option<usize>,
 }
 
+/// Tri-state override for per-call LLM timeout policy.
+///
+/// This type exists because `Option<Duration>` cannot distinguish between
+/// "inherit lower-layer/profile default" and "explicitly disable timeout."
+/// Build and config seams use this type; the resolved effective policy on
+/// `RetryPolicy` collapses to `Option<Duration>`.
+///
+/// TOML representation:
+/// - omitted key => `Inherit`
+/// - `call_timeout = "disabled"` => `Disabled`
+/// - `call_timeout = "45s"` => `Value(45s)`
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CallTimeoutOverride {
+    /// Inherit the lower-layer or profile-derived default.
+    Inherit,
+    /// Explicitly disable call timeout (no timeout applied regardless of profile).
+    Disabled,
+    /// Explicitly set the call timeout to this duration.
+    Value(Duration),
+}
+
+impl Default for CallTimeoutOverride {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+impl Serialize for CallTimeoutOverride {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Inherit is the default; serialized as absence (skip_serializing_if handles this)
+            Self::Inherit => serializer.serialize_none(),
+            Self::Disabled => serializer.serialize_str("disabled"),
+            Self::Value(d) => {
+                let s = humantime_serde::re::humantime::format_duration(*d).to_string();
+                serializer.serialize_str(&s)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CallTimeoutOverride {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        if s == "disabled" {
+            return Ok(Self::Disabled);
+        }
+        let d: Duration = s
+            .parse::<humantime_serde::re::humantime::Duration>()
+            .map(|ht| *ht)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::Value(d))
+    }
+}
+
+impl CallTimeoutOverride {
+    /// Returns `true` when this override is `Inherit` (the default / absent state).
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
 /// Retry configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1067,6 +1136,17 @@ pub struct RetryConfig {
     pub max_delay: Duration,
     /// Multiplier for exponential backoff
     pub multiplier: f64,
+    /// Tri-state call-timeout override for per-LLM-call timeout policy.
+    ///
+    /// - `Inherit` (default / omitted): defer to profile-derived or build-override default
+    /// - `Disabled`: explicitly disable call timeout
+    /// - `Value(duration)`: explicitly set call timeout
+    #[serde(
+        default,
+        rename = "call_timeout",
+        skip_serializing_if = "CallTimeoutOverride::is_inherit"
+    )]
+    pub call_timeout_override: CallTimeoutOverride,
 }
 
 impl Default for RetryConfig {
@@ -1077,17 +1157,26 @@ impl Default for RetryConfig {
             initial_delay: policy.initial_delay,
             max_delay: policy.max_delay,
             multiplier: policy.multiplier,
+            call_timeout_override: CallTimeoutOverride::default(),
         }
     }
 }
 
 impl From<RetryConfig> for RetryPolicy {
     fn from(config: RetryConfig) -> Self {
+        // Resolve explicit config override into effective call_timeout.
+        // `Inherit` means None here — the agent loop resolves profile defaults later.
+        let call_timeout = match config.call_timeout_override {
+            CallTimeoutOverride::Inherit => None,
+            CallTimeoutOverride::Disabled => None,
+            CallTimeoutOverride::Value(d) => Some(d),
+        };
         RetryPolicy {
             max_retries: config.max_retries,
             initial_delay: config.initial_delay,
             max_delay: config.max_delay,
             multiplier: config.multiplier,
+            call_timeout,
         }
     }
 }
@@ -1978,5 +2067,161 @@ event_address = "127.0.0.1:4201"
     fn test_comms_config_event_address_defaults_none() {
         let config = CommsRuntimeConfig::default();
         assert!(config.event_address.is_none());
+    }
+
+    // ── CallTimeoutOverride tests ──
+
+    #[test]
+    fn call_timeout_override_default_is_inherit() {
+        assert_eq!(CallTimeoutOverride::default(), CallTimeoutOverride::Inherit);
+        assert!(CallTimeoutOverride::default().is_inherit());
+    }
+
+    #[test]
+    fn call_timeout_override_disabled_is_not_inherit() {
+        assert!(!CallTimeoutOverride::Disabled.is_inherit());
+    }
+
+    #[test]
+    fn call_timeout_override_value_is_not_inherit() {
+        assert!(!CallTimeoutOverride::Value(Duration::from_secs(45)).is_inherit());
+    }
+
+    #[test]
+    fn call_timeout_override_toml_deserialize_disabled() {
+        let toml_str = r#"call_timeout = "disabled""#;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            call_timeout: CallTimeoutOverride,
+        }
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(w.call_timeout, CallTimeoutOverride::Disabled);
+    }
+
+    #[test]
+    fn call_timeout_override_toml_deserialize_duration() {
+        let toml_str = r#"call_timeout = "45s""#;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            call_timeout: CallTimeoutOverride,
+        }
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            w.call_timeout,
+            CallTimeoutOverride::Value(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn call_timeout_override_toml_deserialize_complex_duration() {
+        let toml_str = r#"call_timeout = "2m 30s""#;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            call_timeout: CallTimeoutOverride,
+        }
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            w.call_timeout,
+            CallTimeoutOverride::Value(Duration::from_secs(150))
+        );
+    }
+
+    #[test]
+    fn retry_config_default_has_inherit_call_timeout() {
+        let config = RetryConfig::default();
+        assert_eq!(config.call_timeout_override, CallTimeoutOverride::Inherit);
+    }
+
+    #[test]
+    fn retry_config_from_toml_with_call_timeout_value() {
+        let toml_str = r#"
+[retry]
+max_retries = 5
+call_timeout = "60s"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(
+            config.retry.call_timeout_override,
+            CallTimeoutOverride::Value(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn retry_config_from_toml_with_call_timeout_disabled() {
+        let toml_str = r#"
+[retry]
+call_timeout = "disabled"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.retry.call_timeout_override,
+            CallTimeoutOverride::Disabled
+        );
+    }
+
+    #[test]
+    fn retry_config_from_toml_omitted_is_inherit() {
+        let toml_str = r#"
+[retry]
+max_retries = 2
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.retry.call_timeout_override,
+            CallTimeoutOverride::Inherit
+        );
+    }
+
+    #[test]
+    fn retry_policy_from_config_with_value_override() {
+        let config = RetryConfig {
+            call_timeout_override: CallTimeoutOverride::Value(Duration::from_secs(90)),
+            ..RetryConfig::default()
+        };
+        let policy: crate::retry::RetryPolicy = config.into();
+        assert_eq!(policy.call_timeout, Some(Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn retry_policy_from_config_with_disabled_override() {
+        let config = RetryConfig {
+            call_timeout_override: CallTimeoutOverride::Disabled,
+            ..RetryConfig::default()
+        };
+        let policy: crate::retry::RetryPolicy = config.into();
+        // Disabled collapses to None — the agent loop treats None as "no timeout"
+        assert_eq!(policy.call_timeout, None);
+    }
+
+    #[test]
+    fn retry_policy_from_config_with_inherit_override() {
+        let config = RetryConfig {
+            call_timeout_override: CallTimeoutOverride::Inherit,
+            ..RetryConfig::default()
+        };
+        let policy: crate::retry::RetryPolicy = config.into();
+        assert_eq!(policy.call_timeout, None);
+    }
+
+    #[test]
+    fn config_merge_preserves_call_timeout_override() {
+        let toml_base = r#"
+[retry]
+max_retries = 2
+"#;
+        let toml_overlay = r#"
+[retry]
+call_timeout = "30s"
+"#;
+        let mut config: Config = toml::from_str(toml_base).unwrap();
+        let overlay: Config = toml::from_str(toml_overlay).unwrap();
+        let overlay_parsed: toml::Value = toml::from_str(toml_overlay).unwrap();
+        config.merge_retry_from_toml_presence(&overlay_parsed, &overlay.retry);
+        assert_eq!(config.retry.max_retries, 2); // Not overridden
+        assert_eq!(
+            config.retry.call_timeout_override,
+            CallTimeoutOverride::Value(Duration::from_secs(30))
+        );
     }
 }

@@ -862,6 +862,10 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
     )?;
     writeln!(
         &mut out,
+        "        TurnTerminalOutcome::TimeBudgetExceeded => Some(SurfaceResultClass::HardFailure),"
+    )?;
+    writeln!(
+        &mut out,
         "        TurnTerminalOutcome::StructuredOutputValidationFailed => Some(SurfaceResultClass::HardFailure),"
     )?;
     writeln!(&mut out, "    }}")?;

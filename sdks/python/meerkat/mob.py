@@ -48,6 +48,45 @@ MobRespawnResult = TypedDict(
     },
 )
 
+MobUnreachablePeer = TypedDict(
+    "MobUnreachablePeer",
+    {
+        "peer": str,
+        "reason": NotRequired[str],
+    },
+)
+
+MobPeerConnectivitySnapshot = TypedDict(
+    "MobPeerConnectivitySnapshot",
+    {
+        "reachable_peer_count": int,
+        "unknown_peer_count": int,
+        "unreachable_peers": list[MobUnreachablePeer],
+    },
+)
+
+MobMemberSnapshot = TypedDict(
+    "MobMemberSnapshot",
+    {
+        "status": str,
+        "output_preview": NotRequired[str],
+        "error": NotRequired[str],
+        "tokens_used": int,
+        "is_final": bool,
+        "current_session_id": NotRequired[str],
+        "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+    },
+)
+
+MobHelperResult = TypedDict(
+    "MobHelperResult",
+    {
+        "output": NotRequired[str],
+        "tokens_used": int,
+        "session_id": NotRequired[str],
+    },
+)
+
 
 class Member:
     """Capability-bearing mob member handle."""
@@ -128,7 +167,7 @@ class Mob:
     async def force_cancel(self, meerkat_id: str) -> None:
         await self._client.force_cancel_mob_member(self.id, meerkat_id)
 
-    async def member_status(self, meerkat_id: str) -> dict[str, Any]:
+    async def member_status(self, meerkat_id: str) -> MobMemberSnapshot:
         return await self._client.mob_member_status(self.id, meerkat_id)
 
     async def spawn_helper(
@@ -137,7 +176,7 @@ class Mob:
         *,
         meerkat_id: str | None = None,
         profile_name: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobHelperResult:
         return await self._client.spawn_mob_helper(
             self.id,
             prompt,
@@ -153,7 +192,7 @@ class Mob:
         meerkat_id: str | None = None,
         profile_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobHelperResult:
         return await self._client.fork_mob_helper(
             self.id,
             source_member_id,

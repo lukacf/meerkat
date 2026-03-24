@@ -25,13 +25,55 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult};
 
+/// Pre-selected timeout source — determined before the LLM await, not inferred after.
+///
+/// This ensures timeout classification is deterministic and not guessed from
+/// merged elapsed durations.
+enum CallTimeoutSource {
+    /// Hard per-call timeout fired (from override or profile default).
+    CallBudget,
+    /// Explicit whole-turn time budget fired.
+    TurnBudget,
+}
+
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized + 'static,
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
-    /// Call LLM with retry logic
+    /// Resolve the effective call timeout for this LLM call.
+    ///
+    /// Resolution order:
+    ///   1. Explicit override (Value/Disabled) — from build/config tri-state
+    ///   2. Profile default — from injected model resolver + current model identity
+    ///   3. RetryPolicy.call_timeout — from builder-level policy (direct Rust API)
+    ///   4. None — no timeout
+    ///
+    /// `Disabled` suppresses ALL lower-layer defaults (profile and retry policy).
+    fn resolve_effective_call_timeout(&self) -> Option<std::time::Duration> {
+        use crate::config::CallTimeoutOverride;
+        match &self.call_timeout_override {
+            CallTimeoutOverride::Value(d) => Some(*d),
+            CallTimeoutOverride::Disabled => None,
+            CallTimeoutOverride::Inherit => {
+                // Consult the injected resolver with the current model/provider.
+                self.model_defaults_resolver
+                    .as_ref()
+                    .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
+                    // Fall through to RetryPolicy.call_timeout for direct builder users.
+                    .or(self.retry_policy.call_timeout)
+            }
+        }
+    }
+
+    /// Call LLM with retry logic, budget-aware at all liveness points.
+    ///
+    /// This is the single LLM-call liveness gate. It enforces:
+    /// - budget check at loop entry and after retry sleep
+    /// - retry delay capped by remaining turn budget
+    /// - per-call timeout from override/profile, wrapped with remaining turn budget
+    /// - typed timeout-origin selection before await
     async fn call_llm_with_retry(
         &self,
         messages: &[Message],
@@ -43,20 +85,108 @@ where
         let mut attempt = 0u32;
 
         loop {
-            // Wait for retry delay if not first attempt
+            // 1. Budget gate at loop entry
+            self.budget.check()?;
+
+            // 2. Retry delay (capped by remaining duration)
             if attempt > 0 {
                 let delay = self.retry_policy.delay_for_attempt(attempt);
-                tokio::time::sleep(delay).await;
+                let capped_delay = match self.budget.remaining_duration() {
+                    Some(remaining) => delay.min(remaining),
+                    None => delay,
+                };
+                tokio::time::sleep(capped_delay).await;
+                // Re-check budget after sleep
+                self.budget.check()?;
             }
 
-            match self
-                .client
-                .stream_response(messages, tools, max_tokens, temperature, provider_params)
-                .await
-            {
+            // 3. Compute effective timeout for this call
+            let effective_call_timeout = self.resolve_effective_call_timeout();
+            let remaining_turn = self.budget.remaining_duration();
+
+            // If remaining turn budget is zero, surface immediately
+            if remaining_turn == Some(std::time::Duration::ZERO) {
+                self.budget.check()?;
+                // check() should have returned Err; unreachable, but be safe
+            }
+
+            // 4. Determine whether to wrap the call and select timeout source
+            let call_result = match (effective_call_timeout, remaining_turn) {
+                (None, None) => {
+                    // No timeout wrapper needed
+                    self.client
+                        .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                        .await
+                }
+                (call_to, turn_remaining) => {
+                    // At least one timeout is active — select source and wrap
+                    let (effective_timeout, source) = match (call_to, turn_remaining) {
+                        (Some(ct), None) => (ct, CallTimeoutSource::CallBudget),
+                        (None, Some(tr)) => (tr, CallTimeoutSource::TurnBudget),
+                        (Some(ct), Some(tr)) => {
+                            if tr < ct {
+                                (tr, CallTimeoutSource::TurnBudget)
+                            } else {
+                                (ct, CallTimeoutSource::CallBudget)
+                            }
+                        }
+                        (None, None) => unreachable!(), // Already handled above
+                    };
+
+                    match tokio::time::timeout(
+                        effective_timeout,
+                        self.client.stream_response(
+                            messages,
+                            tools,
+                            max_tokens,
+                            temperature,
+                            provider_params,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(inner_result) => inner_result,
+                        Err(_elapsed) => {
+                            // Timeout fired — classify by pre-selected source
+                            match source {
+                                CallTimeoutSource::CallBudget => {
+                                    return Err(AgentError::Llm {
+                                        provider: self.client.provider(),
+                                        reason: crate::error::LlmFailureReason::CallTimeout {
+                                            duration_ms: effective_timeout.as_millis() as u64,
+                                        },
+                                        message: format!(
+                                            "LLM call timed out after {}s",
+                                            effective_timeout.as_secs()
+                                        ),
+                                    });
+                                }
+                                CallTimeoutSource::TurnBudget => {
+                                    let limit = self
+                                        .budget
+                                        .time_usage()
+                                        .map(|(_, l)| l / 1000)
+                                        .unwrap_or(0);
+                                    let elapsed = self
+                                        .budget
+                                        .time_usage()
+                                        .map(|(e, _)| e / 1000)
+                                        .unwrap_or(0);
+                                    return Err(AgentError::TimeBudgetExceeded {
+                                        elapsed_secs: elapsed,
+                                        limit_secs: limit,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            // 5. Handle call result
+            match call_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    // Check if we should retry
                     if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
                         tracing::warn!(
                             "LLM call failed (attempt {}), retrying: {}",
@@ -270,17 +400,47 @@ where
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
-            // Check budget
-            if self.budget.is_exhausted() {
-                emit_event!(AgentEvent::BudgetWarning {
-                    budget_type: BudgetType::Tokens,
-                    used: self.session.total_tokens(),
-                    limit: self.budget.remaining(),
-                    percent: 1.0,
-                });
-                self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
-                    run_id: run_id.clone(),
-                })?;
+            // Check budget — typed routing per budget kind
+            if let Err(budget_err) = self.budget.check() {
+                match &budget_err {
+                    AgentError::TimeBudgetExceeded {
+                        elapsed_secs,
+                        limit_secs,
+                    } => {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::Time,
+                            used: *elapsed_secs,
+                            limit: *limit_secs,
+                            percent: 1.0,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    AgentError::TokenBudgetExceeded { used, limit } => {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::Tokens,
+                            used: *used,
+                            limit: *limit,
+                            percent: 1.0,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    AgentError::ToolCallBudgetExceeded { count, limit } => {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::ToolCalls,
+                            used: *count as u64,
+                            limit: *limit as u64,
+                            percent: 1.0,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    _ => return Err(budget_err),
+                }
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
@@ -467,11 +627,11 @@ where
                         &tool_defs
                     };
 
-                    // Call LLM with retry
+                    // Call LLM with retry — route errors through machine authority
                     let boundary_system_context = self.take_pending_system_context_boundary();
                     let request_messages =
                         self.llm_messages_with_runtime_system_context(&boundary_system_context);
-                    let result = self
+                    let result = match self
                         .call_llm_with_retry(
                             &request_messages,
                             call_tool_defs,
@@ -479,7 +639,36 @@ where
                             effective_temperature,
                             effective_provider_params.as_ref(),
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(AgentError::TimeBudgetExceeded {
+                            elapsed_secs,
+                            limit_secs,
+                        }) => {
+                            // Dedicated time-budget terminal path — same as loop-top
+                            emit_event!(AgentEvent::BudgetWarning {
+                                budget_type: BudgetType::Time,
+                                used: elapsed_secs,
+                                limit: limit_secs,
+                                percent: 1.0,
+                            });
+                            self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(e @ AgentError::Llm { .. }) => {
+                            // Exhausted hard LLM-call failure — route through
+                            // machine-owned FatalFailure and preserve diagnostics.
+                            self.pending_fatal_diagnostic = Some(e);
+                            self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(e) => return Err(e),
+                    };
 
                     // Update budget + session usage
                     self.budget.record_usage(&result.usage);
@@ -1161,18 +1350,29 @@ where
 
     /// Build a RunResult from current state, using the generated terminal
     /// classification to decide Ok vs Err.
-    async fn build_result(&self, turns: u32, tool_calls: u32) -> Result<RunResult, AgentError> {
+    async fn build_result(&mut self, turns: u32, tool_calls: u32) -> Result<RunResult, AgentError> {
         use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
 
         let outcome = self.turn_authority.terminal_outcome();
         let classification = classify_terminal(&outcome);
 
         match classification {
-            Some(SurfaceResultClass::HardFailure) => Err(AgentError::TerminalFailure {
-                outcome: format!("{outcome:?}"),
-            }),
+            Some(SurfaceResultClass::HardFailure) => {
+                // Consume the pending diagnostic once — prefer the originating
+                // typed error over a generic TerminalFailure so that
+                // provider/reason/message truth is preserved on the surface.
+                if let Some(diagnostic) = self.pending_fatal_diagnostic.take() {
+                    Err(diagnostic)
+                } else {
+                    Err(AgentError::TerminalFailure {
+                        outcome: format!("{outcome:?}"),
+                    })
+                }
+            }
             _ => {
-                // Success, Cancelled, or no terminal outcome yet (early exit)
+                // Success, Cancelled, or no terminal outcome yet (early exit).
+                // Clear any stale diagnostic so it cannot bleed into a later run.
+                self.pending_fatal_diagnostic = None;
                 Ok(RunResult {
                     text: self.session.last_assistant_text().unwrap_or_default(),
                     session_id: self.session.id().clone(),
@@ -1344,6 +1544,10 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
     }
 
     struct RecordingLlmClient {
@@ -1505,6 +1709,10 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
     }
 
     struct CompactionAwareLlmClient {
@@ -1562,6 +1770,10 @@ mod tests {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
         }
     }
 
@@ -1760,6 +1972,10 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
     }
 
     #[async_trait]
@@ -1807,6 +2023,10 @@ mod tests {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
         }
     }
 

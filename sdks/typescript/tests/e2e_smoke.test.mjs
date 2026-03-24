@@ -313,8 +313,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
 
       const subscription = await mob.subscribeMemberEvents("reviewer-1");
       try {
-        await mob.sendMessage(
-          "reviewer-1",
+        await mob.member("reviewer-1").send(
           "Repeat the swarm marker and say reviewer ready.",
         );
         const iterator = subscription[Symbol.asyncIterator]();
@@ -365,8 +364,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         (payload) => payload.state === "attached" || payload.state === "idle",
         { timeoutMs: 120000, intervalMs: 200 },
       );
-      await mob.sendMessage(
-        "reviewer-1",
+      await mob.member("reviewer-1").send(
         "Reply with REVIEWER_RESPAWN_44.",
       );
       await waitFor(
@@ -391,8 +389,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         });
         assert.ok(broken.session_id);
         await assert.rejects(
-          () => mob.sendMessage(
-            "broken-1",
+          () => mob.member("broken-1").send(
             "This turn must fail because the member model is invalid.",
           ),
         );

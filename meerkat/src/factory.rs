@@ -283,6 +283,12 @@ pub struct AgentBuildConfig {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Optional session checkpointer for host-mode persistence.
     pub checkpointer: Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>,
+    /// Explicit call-timeout override at the build seam.
+    ///
+    /// - `Inherit` (default): defer to config override, then profile default
+    /// - `Disabled`: explicitly disable call timeout regardless of profile
+    /// - `Value(d)`: explicitly set call timeout to `d`
+    pub call_timeout_override: meerkat_core::CallTimeoutOverride,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -386,6 +392,7 @@ impl AgentBuildConfig {
             wait_for_mcp: false,
             shell_env: None,
             checkpointer: None,
+            call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
         }
     }
 
@@ -509,6 +516,22 @@ pub enum BuildAgentError {
     #[error("host_mode requires comms_name to be set")]
     #[cfg(feature = "comms")]
     HostModeRequiresCommsName,
+}
+
+/// Resolver that delegates to `meerkat_models::profile::profile_for()`
+/// to look up model-specific operational defaults at call time.
+///
+/// This struct bridges the dependency gap: `meerkat-core` owns the
+/// `ModelOperationalDefaultsResolver` trait, and this facade-layer
+/// implementation provides the concrete `meerkat-models` lookup.
+struct ProfileBasedDefaultsResolver;
+
+impl meerkat_core::ModelOperationalDefaultsResolver for ProfileBasedDefaultsResolver {
+    fn call_timeout_for(&self, provider: &str, model: &str) -> Option<std::time::Duration> {
+        meerkat_models::profile::profile_for(provider, model)
+            .and_then(|p| p.call_timeout_secs)
+            .map(std::time::Duration::from_secs)
+    }
 }
 
 /// Return the canonical string key for a provider.
@@ -1623,13 +1646,26 @@ impl AgentFactory {
             .budget_limits
             .unwrap_or_else(|| config.budget_limits());
 
+        // 12a. Resolve effective call-timeout override: build > config > Inherit
+        let effective_call_timeout_override = {
+            let build_override = build_config.call_timeout_override;
+            if !build_override.is_inherit() {
+                build_override
+            } else {
+                // Fall through to config-level override
+                config.retry.call_timeout_override.clone()
+            }
+        };
+
         let mut builder = AgentBuilder::new()
             .model(model.clone())
             .max_tokens_per_turn(max_tokens)
             .budget(budget_limits)
             .system_prompt(system_prompt)
             .structured_output_retries(build_config.structured_output_retries)
-            .with_hook_run_overrides(build_config.hooks_override);
+            .with_hook_run_overrides(build_config.hooks_override)
+            .with_model_defaults_resolver(Arc::new(ProfileBasedDefaultsResolver))
+            .with_call_timeout_override(effective_call_timeout_override);
 
         if let Some(schema) = build_config.output_schema {
             builder = builder.output_schema(schema);

@@ -16,6 +16,10 @@ import type {
   MobAppendSystemContextResult,
   RenderMetadata,
   ContentBlock,
+  MemberDeliveryReceipt,
+  MobRespawnResult,
+  MobMemberSnapshot,
+  MobHelperResult,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -35,7 +39,11 @@ interface MobWasmBindings {
     requestJson: string,
   ) => Promise<string>;
   mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
+  mob_member_status: (mobId: string, meerkatId: string) => Promise<string>;
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
+  mob_force_cancel: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
+  mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
   mob_lifecycle: (mobId: string, action: string) => Promise<void>;
   mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
@@ -64,7 +72,7 @@ export class Member {
     content: ContentInput,
     handlingMode: HandlingMode = 'queue',
     renderMetadata?: RenderMetadata,
-  ): Promise<{ member_id: string; session_id: string; handling_mode: HandlingMode }> {
+  ): Promise<MemberDeliveryReceipt> {
     const json = await this.bindings.mob_member_send(
       this.mobId,
       this.meerkatId,
@@ -74,11 +82,7 @@ export class Member {
         render_metadata: renderMetadata,
       }),
     );
-    const receipt = JSON.parse(json) as {
-      member_id?: string;
-      session_id?: string;
-      handling_mode?: HandlingMode;
-    };
+    const receipt = JSON.parse(json) as Partial<MemberDeliveryReceipt>;
     if (typeof receipt.session_id !== 'string' || receipt.session_id.length === 0) {
       throw new Error('Invalid mob/send response: missing session_id');
     }
@@ -184,31 +188,11 @@ export class Mob {
   }
 
   /**
-   * Compatibility facade for direct member turns.
-   *
-   * Canonical 0.5 callers should prefer `member(meerkatId).send(...)`. This
-   * method intentionally adds no runtime semantics of its own and preserves the
-   * legacy browser contract of returning the session ID.
-   */
-  async sendMessage(
-    meerkatId: string,
-    content: ContentInput,
-    handlingMode: HandlingMode = 'queue',
-    renderMetadata?: RenderMetadata,
-  ): Promise<string> {
-    const receipt = await this.member(meerkatId).send(
-      content,
-      handlingMode,
-      renderMetadata,
-    );
-    return receipt.session_id;
-  }
-
   /** Retire and re-spawn an agent with the same profile. Returns a result envelope with receipt. */
   async respawn(
     meerkatId: string,
     initialMessage?: string | ContentBlock[],
-  ): Promise<Record<string, unknown>> {
+  ): Promise<MobRespawnResult> {
     const payload =
       initialMessage != null
         ? typeof initialMessage === 'string'
@@ -216,7 +200,63 @@ export class Mob {
           : JSON.stringify(initialMessage)
         : undefined;
     const json = await this.bindings.mob_respawn(this.mobId, meerkatId, payload);
-    return JSON.parse(json) as Record<string, unknown>;
+    return JSON.parse(json) as MobRespawnResult;
+  }
+
+  /** Force-cancel an active member turn. */
+  async forceCancel(meerkatId: string): Promise<void> {
+    await this.bindings.mob_force_cancel(this.mobId, meerkatId);
+  }
+
+  /** Read the current execution snapshot for a member. */
+  async memberStatus(meerkatId: string): Promise<MobMemberSnapshot> {
+    const json = await this.bindings.mob_member_status(this.mobId, meerkatId);
+    return JSON.parse(json) as MobMemberSnapshot;
+  }
+
+  /** Spawn a short-lived helper and return its terminal result. */
+  async spawnHelper(
+    prompt: string,
+    options?: { meerkatId?: string; profileName?: string; runtimeMode?: string; backend?: string },
+  ): Promise<MobHelperResult> {
+    const json = await this.bindings.mob_spawn_helper(
+      this.mobId,
+      JSON.stringify({
+        prompt,
+        meerkat_id: options?.meerkatId,
+        profile_name: options?.profileName,
+        runtime_mode: options?.runtimeMode,
+        backend: options?.backend,
+      }),
+    );
+    return JSON.parse(json) as MobHelperResult;
+  }
+
+  /** Fork a helper from an existing member and return its terminal result. */
+  async forkHelper(
+    sourceMemberId: string,
+    prompt: string,
+    options?: {
+      meerkatId?: string;
+      profileName?: string;
+      forkContext?: Record<string, unknown>;
+      runtimeMode?: string;
+      backend?: string;
+    },
+  ): Promise<MobHelperResult> {
+    const json = await this.bindings.mob_fork_helper(
+      this.mobId,
+      JSON.stringify({
+        source_member_id: sourceMemberId,
+        prompt,
+        meerkat_id: options?.meerkatId,
+        profile_name: options?.profileName,
+        fork_context: options?.forkContext,
+        runtime_mode: options?.runtimeMode,
+        backend: options?.backend,
+      }),
+    );
+    return JSON.parse(json) as MobHelperResult;
   }
 
   /** Get mob status. */
@@ -258,7 +298,7 @@ export class Mob {
   }
 
   /** Subscribe to events for a specific member. */
-  async subscribe(meerkatId: string): Promise<EventSubscription<MemberEventItem>> {
+  async subscribeMemberEvents(meerkatId: string): Promise<EventSubscription<MemberEventItem>> {
     const handle = await this.bindings.mob_member_subscribe(this.mobId, meerkatId);
     return new EventSubscription<MemberEventItem>(
       () => this.bindings.poll_subscription(handle),
@@ -268,7 +308,7 @@ export class Mob {
   }
 
   /** Subscribe to all mob-wide attributed events. */
-  async subscribeAll(): Promise<EventSubscription<AttributedEventItem>> {
+  async subscribeEvents(): Promise<EventSubscription<AttributedEventItem>> {
     const handle = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
       () => this.bindings.poll_subscription(handle),

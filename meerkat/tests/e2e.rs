@@ -1399,6 +1399,10 @@ mod sanity {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
     }
 
     struct MockClient;

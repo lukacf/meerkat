@@ -135,6 +135,21 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
     } else {
         standard_params_schema()
     };
+    // GPT-5 family models have reasoning and may take much longer per call.
+    // Pro variants (gpt-5.4-pro, gpt-5.2-pro) are heavy reasoning models that
+    // can legitimately take very long for a single call.
+    // Codex models are coding-oriented with extended reasoning.
+    let m_lower = model.to_ascii_lowercase();
+    let call_timeout_secs = if m_lower.contains("-pro") && is_gpt5_family(model) {
+        Some(7200) // 2 hours: heavy reasoning pro model
+    } else {
+        match family {
+            "gpt-5" => Some(600), // 10 minutes: standard reasoning model
+            "codex" => Some(600), // 10 minutes: coding-oriented with reasoning
+            "gpt" => Some(90),    // 90 seconds: standard chat model
+            _ => None,
+        }
+    };
     Some(ModelProfile {
         provider: "openai".to_string(),
         model_family: family.to_string(),
@@ -144,6 +159,7 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
         vision: true,
         image_tool_results: false,
         params_schema: schema.clone(),
+        call_timeout_secs,
     })
 }
 

@@ -104,7 +104,11 @@ export interface WasmModule {
     requestJson: string,
   ) => Promise<string>;
   mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
+  mob_member_status: (mobId: string, meerkatId: string) => Promise<string>;
   mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
+  mob_force_cancel: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
+  mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
@@ -245,7 +249,8 @@ export class MeerkatRuntime {
    * When the agent calls this tool, it receives `"acknowledged"` immediately
    * and continues processing. The host should watch `ToolCallRequested` events
    * in the event stream to capture args and act on them. Any response (e.g.
-   * human approval) comes back via {@link Mob.sendMessage}.
+   * human approval) comes back through the normal session or mob member send
+   * APIs.
    *
    * @param wasm - The WASM module (same one passed to init).
    * @param name - Tool name the agent will call.
@@ -315,7 +320,11 @@ export class MeerkatRuntime {
       mob_list_members: this.wasm.mob_list_members,
       mob_append_system_context: this.wasm.mob_append_system_context,
       mob_member_send: this.wasm.mob_member_send,
+      mob_member_status: this.wasm.mob_member_status,
       mob_respawn: this.wasm.mob_respawn,
+      mob_force_cancel: this.wasm.mob_force_cancel,
+      mob_spawn_helper: this.wasm.mob_spawn_helper,
+      mob_fork_helper: this.wasm.mob_fork_helper,
       mob_status: this.wasm.mob_status,
       mob_lifecycle: this.wasm.mob_lifecycle,
       mob_events: this.wasm.mob_events,

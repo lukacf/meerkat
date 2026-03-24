@@ -252,6 +252,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BudgetExhaustedFromErrorRecovery`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
+- `TimeBudgetExceededFromApplyingPrimitive`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TimeBudgetExceededFromCallingLlm`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TimeBudgetExceededFromWaitingForOps`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TimeBudgetExceededFromDrainingBoundary`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TimeBudgetExceededFromExtracting`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
+- `TimeBudgetExceededFromErrorRecovery`
+  - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
+  - scenarios: `conversation-run`
 - `ForceCancelNoRunFromReady`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `cancel-and-fail`

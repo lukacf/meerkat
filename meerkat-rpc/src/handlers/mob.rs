@@ -464,62 +464,13 @@ fn respawn_result_response(
 #[derive(Debug, Deserialize)]
 pub struct MobWireParams {
     pub mob_id: String,
-    #[serde(default)]
-    pub member: Option<String>,
-    #[serde(default)]
-    pub peer: Option<meerkat_mob::PeerTarget>,
-    #[serde(default)]
-    pub local: Option<String>,
-    #[serde(default)]
-    pub target: Option<meerkat_mob::PeerTarget>,
-    #[serde(default)]
-    pub a: Option<String>,
-    #[serde(default)]
-    pub b: Option<String>,
+    pub member: String,
+    pub peer: meerkat_mob::PeerTarget,
 }
 
 impl MobWireParams {
-    fn resolve(self) -> Result<(MeerkatId, meerkat_mob::PeerTarget), String> {
-        let has_canonical = self.member.is_some() || self.peer.is_some();
-        let has_compat = self.local.is_some() || self.target.is_some();
-        let has_legacy = self.a.is_some() || self.b.is_some();
-
-        if has_legacy && (has_canonical || has_compat) {
-            return Err(
-                "provide either canonical {member, peer}, compatibility {local, target}, or legacy {a, b}, but not both"
-                    .to_string(),
-            );
-        }
-        if has_canonical && has_compat {
-            return Err(
-                "do not mix canonical {member, peer} with compatibility {local, target}"
-                    .to_string(),
-            );
-        }
-
-        match (
-            self.member,
-            self.peer,
-            self.local,
-            self.target,
-            self.a,
-            self.b,
-        ) {
-            (Some(member), Some(peer), None, None, None, None) => {
-                Ok((MeerkatId::from(member), peer))
-            }
-            (None, None, Some(member), Some(peer), None, None) => {
-                Ok((MeerkatId::from(member), peer))
-            }
-            (None, None, None, None, Some(a), Some(b)) => Ok((
-                MeerkatId::from(a),
-                meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
-            )),
-            _ => Err(
-                "mob wire requires canonical {member, peer}, compatibility {local, target}, or legacy {a, b}"
-                    .to_string(),
-            ),
-        }
+    fn resolve(self) -> (MeerkatId, meerkat_mob::PeerTarget) {
+        (MeerkatId::from(self.member), self.peer)
     }
 }
 
@@ -536,10 +487,7 @@ pub async fn handle_wire(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let (local, target) = match params.resolve() {
-        Ok(resolved) => resolved,
-        Err(err) => return invalid_params(id, err),
-    };
+    let (local, target) = params.resolve();
     match state.mob_wire(&mob_id, local, target).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"wired": true})),
         Err(err) => invalid_params(id, err.to_string()),
@@ -559,10 +507,7 @@ pub async fn handle_unwire(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let (local, target) = match params.resolve() {
-        Ok(resolved) => resolved,
-        Err(err) => return invalid_params(id, err),
-    };
+    let (local, target) = params.resolve();
     match state.mob_unwire(&mob_id, local, target).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"unwired": true})),
         Err(err) => invalid_params(id, err.to_string()),
@@ -609,7 +554,6 @@ pub async fn handle_lifecycle(
 pub struct MobSendParams {
     pub mob_id: String,
     pub meerkat_id: String,
-    #[serde(alias = "message")]
     pub content: ContentInput,
     #[serde(default)]
     pub handling_mode: HandlingMode,
@@ -1096,54 +1040,44 @@ mod tests {
     }
 
     #[test]
-    fn mob_send_params_accept_legacy_message_alias() -> Result<(), Box<dyn std::error::Error>> {
+    fn mob_send_params_require_canonical_content_field() {
         let value = serde_json::json!({
             "mob_id": "mob-1",
             "meerkat_id": "worker-1",
             "message": "hello from legacy caller"
         });
-        let params: MobSendParams = serde_json::from_value(value)?;
-        assert_eq!(params.mob_id, "mob-1");
-        assert_eq!(params.meerkat_id, "worker-1");
-        assert_eq!(params.content.text_content(), "hello from legacy caller");
-        Ok(())
+        let err = serde_json::from_value::<MobSendParams>(value)
+            .expect_err("legacy message alias must be rejected");
+        assert!(err.to_string().contains("content"));
     }
 
     #[test]
-    fn mob_wire_params_reject_mixed_canonical_and_compatibility_fields() {
-        let params = MobWireParams {
-            mob_id: "mob-1".to_string(),
-            member: Some("worker-a".to_string()),
-            peer: None,
-            local: None,
-            target: Some(meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))),
-            a: None,
-            b: None,
-        };
-        let err = params
-            .resolve()
-            .expect_err("mixed canonical/compat fields must fail");
-        assert!(err.contains("do not mix canonical"));
-    }
-
-    #[test]
-    fn mob_wire_params_resolve_compatibility_shape() {
-        let params = MobWireParams {
-            mob_id: "mob-1".to_string(),
-            member: None,
-            peer: None,
-            local: Some("worker-a".to_string()),
-            target: Some(meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))),
-            a: None,
-            b: None,
-        };
-        let (member, target) = params
-            .resolve()
-            .expect("compatibility shape should resolve");
+    fn mob_wire_params_require_canonical_member_and_peer_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "member": "worker-a",
+            "peer": { "local": "worker-b" }
+        });
+        let params: MobWireParams = serde_json::from_value(value)?;
+        let (member, target) = params.resolve();
         assert_eq!(member, MeerkatId::from("worker-a"));
         assert_eq!(
             target,
             meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mob_wire_params_reject_compatibility_shapes() {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "local": "worker-a",
+            "target": { "local": "worker-b" }
+        });
+        let err = serde_json::from_value::<MobWireParams>(value)
+            .expect_err("compatibility fields must be rejected");
+        assert!(err.to_string().contains("member"));
     }
 }

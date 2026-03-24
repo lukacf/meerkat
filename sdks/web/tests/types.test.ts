@@ -18,6 +18,9 @@ import type {
   AgentEvent,
   ToolCallback,
   MobLifecycleAction,
+  MemberDeliveryReceipt,
+  MobMemberSnapshot,
+  MobHelperResult,
 } from '../src/index.js';
 
 // ─── RuntimeConfig ──────────────────────────────────────────────
@@ -149,10 +152,18 @@ const myTool: ToolCallback = async (args: string) => {
 
 // ─── MobLifecycleAction ─────────────────────────────────────────
 
-const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'destroy'];
+const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'reset', 'destroy'];
 
 declare const mob: Mob;
-const sendMessageResult: Promise<string> = mob.sendMessage('worker-1', 'hello');
+const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
+const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
+const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
+const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
+  'worker-1',
+  'Review the draft and suggest one improvement.',
+);
+const memberSubscription = mob.member('worker-1').subscribe();
+const mobSubscription = mob.subscribeEvents();
 
 // ─── Ensure all exports type-check (suppress unused warnings) ───
 
@@ -168,4 +179,9 @@ void spawnSpec;
 void handleEvent;
 void myTool;
 void actions;
-void sendMessageResult;
+void memberSendResult;
+void memberStatusResult;
+void helperResult;
+void forkedHelperResult;
+void memberSubscription;
+void mobSubscription;

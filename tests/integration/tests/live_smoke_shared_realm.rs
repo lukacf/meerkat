@@ -1414,7 +1414,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     rpc_send_line(
         &mut rpc,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":4,"method":"mob/wire","params":{{"mob_id":"{mob_id}","a":"lead-1","b":"worker-1"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":4,"method":"mob/wire","params":{{"mob_id":"{mob_id}","member":"lead-1","peer":{{"local":"worker-1"}}}}}}"#
         ),
     )
     .await?;
@@ -1427,7 +1427,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     rpc_send_line(
         &mut rpc,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":5,"method":"mob/unwire","params":{{"mob_id":"{mob_id}","a":"lead-1","b":"worker-1"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":5,"method":"mob/unwire","params":{{"mob_id":"{mob_id}","member":"lead-1","peer":{{"local":"worker-1"}}}}}}"#
         ),
     )
     .await?;

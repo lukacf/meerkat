@@ -2273,6 +2273,10 @@ impl AgentLlmClient for OverlayProbeLlmClient {
     fn provider(&self) -> &'static str {
         "overlay-probe"
     }
+
+    fn model(&self) -> &str {
+        "mock-model"
+    }
 }
 
 type OverlayProbeInnerAgent =

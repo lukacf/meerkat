@@ -750,8 +750,8 @@ injector.inject(
 **Observation** — subscribe at the scope you need:
 
 - **session-scoped**: use the session's primary `event_tx` or `session/stream_open` (RPC) / `Session.subscribe()` (Web SDK) / `session.subscribe_events()` (Python SDK) / `session.subscribeEvents()` (TypeScript SDK)
-- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribe(meerkatId)` (Web SDK) / `mob.subscribe_member_events(meerkat_id)` (Python/TypeScript SDK)
-- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeAll()` (Web SDK) / `mob.subscribe_events()` (Python/TypeScript SDK)
+- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Member.subscribe()` or `Mob.subscribeMemberEvents(meerkatId)` (Web SDK) / `mob.subscribe_member_events(meerkat_id)` (Python/TypeScript SDK)
+- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeEvents()` (Web SDK) / `mob.subscribe_events()` (Python/TypeScript SDK)
 
 This makes the public contract explicit: comms delivers work, and observability chooses scope.
 

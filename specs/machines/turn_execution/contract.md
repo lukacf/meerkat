@@ -44,6 +44,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcknowledgeTerminal`(run_id: RunId)
 - `TurnLimitReached`(run_id: RunId)
 - `BudgetExhausted`(run_id: RunId)
+- `TimeBudgetExceeded`(run_id: RunId)
 - `EnterExtraction`(run_id: RunId, max_retries: u32)
 - `ExtractionValidationPassed`(run_id: RunId)
 - `ExtractionRetry`(run_id: RunId)
@@ -514,6 +515,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `BudgetExhaustedFromErrorRecovery`
 - From: `ErrorRecovery`
 - On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromCallingLlm`
+- From: `CallingLlm`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromExtracting`
+- From: `Extracting`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `TimeBudgetExceeded`(run_id)
 - Guards:
   - `run_matches_active`
 - Emits: `BoundaryApplied`, `RunCompleted`

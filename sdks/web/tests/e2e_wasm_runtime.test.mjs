@@ -141,7 +141,7 @@ test("MeerkatRuntime opens and closes a public mob subscription through the ship
       },
     });
 
-    const subscription = await mob.subscribeAll();
+    const subscription = await mob.subscribeEvents();
     assert.deepEqual(subscription.poll(), []);
     subscription.close();
     assert.equal(subscription.isClosed, true);
@@ -267,8 +267,8 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
       ]);
       assert.equal(spawned[0].status, "ok");
 
-      const subscription = await mob.subscribe("worker-1");
-      await mob.sendMessage("worker-1", "Trigger a long streamed response.");
+      const subscription = await mob.member("worker-1").subscribe();
+      await mob.member("worker-1").send("Trigger a long streamed response.");
 
       let items = [];
       for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -289,4 +289,203 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
       runtime.destroy();
     }
   });
+});
+
+test("MeerkatRuntime forwards canonical mob status/helper methods through the wasm binding surface", async () => {
+  const calls = [];
+  const wasm = {
+    async default() {},
+    runtime_version() {
+      return "0.4.13";
+    },
+    init_runtime_from_config() {
+      return JSON.stringify({ status: "initialized", model: "claude-sonnet-4-5", providers: ["anthropic"] });
+    },
+    register_tool_callback() {},
+    register_js_tool() {},
+    clear_tool_callbacks() {},
+    destroy_runtime() {},
+    async mob_create() {
+      return "mob-web-parity";
+    },
+    async mob_status(mobId) {
+      return JSON.stringify({ mob_id: mobId, state: "running" });
+    },
+    async mob_list() {
+      return JSON.stringify([]);
+    },
+    async mob_lifecycle(mobId, action) {
+      calls.push(["lifecycle", mobId, action]);
+    },
+    async mob_events() {
+      return JSON.stringify([]);
+    },
+    async mob_spawn() {
+      return JSON.stringify([]);
+    },
+    async mob_retire(mobId, meerkatId) {
+      calls.push(["retire", mobId, meerkatId]);
+    },
+    async mob_wire(mobId, member, peer) {
+      calls.push(["wire", mobId, member, peer]);
+    },
+    async mob_unwire(mobId, member, peer) {
+      calls.push(["unwire", mobId, member, peer]);
+    },
+    async mob_wire_target(mobId, member, targetJson) {
+      calls.push(["wire_target", mobId, member, JSON.parse(targetJson)]);
+    },
+    async mob_unwire_target(mobId, member, targetJson) {
+      calls.push(["unwire_target", mobId, member, JSON.parse(targetJson)]);
+    },
+    async mob_list_members() {
+      return JSON.stringify([]);
+    },
+    async mob_append_system_context(_mobId, meerkatId) {
+      return JSON.stringify({
+        mob_id: "mob-web-parity",
+        meerkat_id: meerkatId,
+        session_id: "sess-ctx",
+        status: "staged",
+      });
+    },
+    async mob_member_send(_mobId, meerkatId, requestJson) {
+      calls.push(["member_send", meerkatId, JSON.parse(requestJson)]);
+      return JSON.stringify({
+        member_id: meerkatId,
+        session_id: "sess-send",
+        handling_mode: "queue",
+      });
+    },
+    async mob_member_status(_mobId, meerkatId) {
+      return JSON.stringify({
+        status: "running",
+        tokens_used: 7,
+        is_final: false,
+        current_session_id: `${meerkatId}-session`,
+      });
+    },
+    async mob_respawn(_mobId, meerkatId) {
+      return JSON.stringify({
+        status: "completed",
+        receipt: {
+          member_id: meerkatId,
+          old_session_id: "sess-old",
+          new_session_id: "sess-new",
+        },
+      });
+    },
+    async mob_force_cancel(mobId, meerkatId) {
+      calls.push(["force_cancel", mobId, meerkatId]);
+    },
+    async mob_spawn_helper(mobId, requestJson) {
+      calls.push(["spawn_helper", mobId, JSON.parse(requestJson)]);
+      return JSON.stringify({
+        output: "helper complete",
+        tokens_used: 11,
+        session_id: "sess-helper",
+      });
+    },
+    async mob_fork_helper(mobId, requestJson) {
+      calls.push(["fork_helper", mobId, JSON.parse(requestJson)]);
+      return JSON.stringify({
+        output: "fork complete",
+        tokens_used: 13,
+        session_id: "sess-fork",
+      });
+    },
+    async mob_run_flow() {
+      return "run-1";
+    },
+    async mob_flow_status() {
+      return JSON.stringify({ run_id: "run-1", status: "running" });
+    },
+    async mob_cancel_flow(mobId, runId) {
+      calls.push(["cancel_flow", mobId, runId]);
+    },
+    async mob_member_subscribe() {
+      return 1;
+    },
+    async mob_subscribe_events() {
+      return 2;
+    },
+    poll_subscription() {
+      return "[]";
+    },
+    close_subscription(handle) {
+      calls.push(["close_subscription", handle]);
+    },
+  };
+
+  const runtime = await MeerkatRuntime.init(wasm, {
+    anthropicApiKey: "sk-test",
+    model: "claude-sonnet-4-5",
+  });
+  try {
+    const mob = await runtime.createMob({
+      id: "mob-web-parity",
+      profiles: {
+        worker: {
+          model: "claude-sonnet-4-5",
+        },
+      },
+    });
+
+    const receipt = await mob.member("worker-1").send("hello");
+    assert.equal(receipt.session_id, "sess-send");
+
+    const snapshot = await mob.memberStatus("worker-1");
+    assert.equal(snapshot.current_session_id, "worker-1-session");
+
+    await mob.forceCancel("worker-1");
+
+    const helper = await mob.spawnHelper("Summarize the thread.", {
+      meerkatId: "helper-1",
+      profileName: "worker",
+    });
+    assert.equal(helper.session_id, "sess-helper");
+
+    const fork = await mob.forkHelper("worker-1", "Review the draft.", {
+      meerkatId: "fork-1",
+      profileName: "worker",
+      forkContext: { mode: "full_history" },
+    });
+    assert.equal(fork.session_id, "sess-fork");
+
+    assert.deepEqual(
+      calls.filter(([name]) =>
+        ["member_send", "force_cancel", "spawn_helper", "fork_helper"].includes(name),
+      ),
+      [
+        [
+          "member_send",
+          "worker-1",
+          { content: "hello", handling_mode: "queue" },
+        ],
+        ["force_cancel", "mob-web-parity", "worker-1"],
+        [
+          "spawn_helper",
+          "mob-web-parity",
+          {
+            prompt: "Summarize the thread.",
+            meerkat_id: "helper-1",
+            profile_name: "worker",
+          },
+        ],
+        [
+          "fork_helper",
+          "mob-web-parity",
+          {
+            source_member_id: "worker-1",
+            prompt: "Review the draft.",
+            meerkat_id: "fork-1",
+            profile_name: "worker",
+            fork_context: { mode: "full_history" },
+          },
+        ],
+      ],
+    );
+  } finally {
+    runtime.destroy();
+  }
 });

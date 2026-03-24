@@ -24,6 +24,9 @@ The package is organized by role rather than by chronology:
   Rust-native authority/catalog workflow and CI contract
 - [meerkat_sm_nomenclature.md](/Users/luka/src/meerkat/docs/architecture/0.5/meerkat_sm_nomenclature.md)
   vocabulary and naming reference
+- [meerkat_0_5_dogma.md](/Users/luka/src/meerkat/docs/architecture/0.5/meerkat_0_5_dogma.md)
+  hardline doctrine for ownership, terminalization, projection, and surface
+  truth
 
 Ground-truth rule:
 

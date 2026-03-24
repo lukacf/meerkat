@@ -18,6 +18,37 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 7. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
 8. **Seams are formal too** — async owner handoffs, wait barriers, and surfaced terminal classes are part of the architecture and should be modeled/protocolized, not left to shell convention.
 
+## 0.5 Dogma
+
+Use this as the first review lens for any cross-cutting design or cleanup. The full doctrine lives in:
+
+- `docs/architecture/0.5/meerkat_0_5_dogma.md`
+
+The short version:
+
+1. **One semantic fact, one owner** — if a fact matters semantically, it must have exactly one canonical owner.
+2. **Machines own semantics** — lifecycle, routing truth, barrier membership, terminal class, and similar facts belong in machines/compositions/protocols, not helper code.
+3. **Shell owns mechanics, not meaning** — shell may execute IO, hold handles, and rebuild projections; it may not invent lifecycle truth or terminal meaning.
+4. **One semantic condition, one terminal path** — loop-top vs in-call detection must not create divergent terminalization.
+5. **Typed truth, never string folklore** — no JSON `"kind"` classifiers or error-text parsing where typed reasons are required.
+6. **App-facing APIs expose domain handles** — public control nouns should be `job_id`, `MemberRef`, `member_id`, etc., not raw infra IDs.
+7. **Raw infra identity must be canonical** — if raw operation identity escapes, it must resolve in the real owning registry.
+8. **`Option` must not hide ownership uncertainty** — if owner context is required, require it in the type.
+9. **Inherit / disable / set are different facts** — when all three meanings matter, use a tri-state override type.
+10. **Dynamic policy follows dynamic identity** — if model/provider/session identity can change at runtime, policy derived from it must be recomputed at that seam.
+11. **Derived projections are rebuildable, never authoritative** — if stale projection state can affect semantics, it is shadow truth.
+12. **Surfaces are skins, not authorities** — CLI/REST/RPC/MCP/SDK/WASM may adapt transport; they must not own semantics.
+
+When reviewing a proposal, ask first:
+
+- What semantic facts are introduced or changed?
+- Who is the one canonical owner of each fact?
+- Is any shell/helper/cache still carrying parallel truth?
+- Are app-facing APIs exposing domain handles rather than infra identity?
+- If raw infra identity escapes, is it definitely canonical?
+- If policy depends on dynamic identity, where is recomputation defined?
+- Did the change reduce ambiguity, or merely relocate it?
+
 ## Crate Ownership
 
 | Crate | Owns | Key Trait |
@@ -68,6 +99,15 @@ Use this mental model when reviewing changes:
 - single-machine mutators protect local truth
 - compositions protect routed truth
 - seam protocols protect owner-realized async truth
+
+Use the dogma above to reject designs that still leave semantic truth in:
+
+- caches
+- helper wrappers
+- side maps
+- broad surface handlers
+- provider-name heuristics
+- handwritten terminal mapping branches
 
 ## Agent Construction Pipeline
 
@@ -254,6 +294,8 @@ MobActor is composed of narrowly-scoped service objects:
 8. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
 9. **No backward compatibility aliases** — 0.5 is a clean cut. No serde aliases for old names.
 10. **No `.unwrap()`/`.expect()`/`panic!()` in library code** — use `?` propagation or explicit error handling.
+11. **No shadow semantic truth** — if a helper, cache, queue, or surface carries authoritative meaning beside the machine/composition/protocol owner, the design is wrong.
+12. **No raw infra IDs as app-facing control nouns** — use domain handles publicly and keep canonical raw identity infra-only unless there is a very strong reason not to.
 
 ## Key Files
 

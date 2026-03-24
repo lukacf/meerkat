@@ -199,6 +199,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
+                    name: "TimeBudgetExceeded".into(),
+                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                },
+                VariantSchema {
                     name: "EnterExtraction".into(),
                     fields: vec![
                         field("run_id", TypeRef::Named("RunId".into())),
@@ -405,6 +409,10 @@ pub fn turn_execution_machine() -> MachineSchema {
                         Expr::Eq(
                             Box::new(Expr::Field("terminal_outcome".into())),
                             Box::new(Expr::String("BudgetExhausted".into())),
+                        ),
+                        Expr::Eq(
+                            Box::new(Expr::Field("terminal_outcome".into())),
+                            Box::new(Expr::String("TimeBudgetExceeded".into())),
                         ),
                     ]),
                     Expr::Or(vec![
@@ -2560,6 +2568,278 @@ pub fn turn_execution_machine() -> MachineSchema {
                     Update::Assign {
                         field: "terminal_outcome".into(),
                         expr: Expr::String("BudgetExhausted".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            // ---------------------------------------------------------------
+            // TimeBudgetExceeded: any active phase -> Completed
+            // Same shape as BudgetExhausted but with TimeBudgetExceeded outcome.
+            // ---------------------------------------------------------------
+            TransitionSchema {
+                name: "TimeBudgetExceededFromApplyingPrimitive".into(),
+                from: vec!["ApplyingPrimitive".into()],
+                on: InputMatch {
+                    variant: "TimeBudgetExceeded".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("TimeBudgetExceeded".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TimeBudgetExceededFromCallingLlm".into(),
+                from: vec!["CallingLlm".into()],
+                on: InputMatch {
+                    variant: "TimeBudgetExceeded".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("TimeBudgetExceeded".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TimeBudgetExceededFromWaitingForOps".into(),
+                from: vec!["WaitingForOps".into()],
+                on: InputMatch {
+                    variant: "TimeBudgetExceeded".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "pending_op_refs".into(),
+                        expr: Expr::None,
+                    },
+                    Update::Assign {
+                        field: "barrier_operation_ids".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
+                        field: "has_barrier_ops".into(),
+                        expr: Expr::Bool(false),
+                    },
+                    Update::Assign {
+                        field: "barrier_satisfied".into(),
+                        expr: Expr::Bool(true),
+                    },
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("TimeBudgetExceeded".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TimeBudgetExceededFromDrainingBoundary".into(),
+                from: vec!["DrainingBoundary".into()],
+                on: InputMatch {
+                    variant: "TimeBudgetExceeded".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("TimeBudgetExceeded".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TimeBudgetExceededFromExtracting".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "TimeBudgetExceeded".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("TimeBudgetExceeded".into()),
+                    },
+                ],
+                to: "Completed".into(),
+                emit: vec![
+                    EffectEmit {
+                        variant: "BoundaryApplied".into(),
+                        fields: IndexMap::from([
+                            ("run_id".into(), Expr::Binding("run_id".into())),
+                            (
+                                "boundary_sequence".into(),
+                                Expr::Field("boundary_count".into()),
+                            ),
+                        ]),
+                    },
+                    EffectEmit {
+                        variant: "RunCompleted".into(),
+                        fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
+                    },
+                ],
+            },
+            TransitionSchema {
+                name: "TimeBudgetExceededFromErrorRecovery".into(),
+                from: vec!["ErrorRecovery".into()],
+                on: InputMatch {
+                    variant: "TimeBudgetExceeded".into(),
+                    bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![
+                    Update::Increment {
+                        field: "boundary_count".into(),
+                        amount: 1,
+                    },
+                    Update::Assign {
+                        field: "terminal_outcome".into(),
+                        expr: Expr::String("TimeBudgetExceeded".into()),
                     },
                 ],
                 to: "Completed".into(),

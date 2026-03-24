@@ -22,6 +22,7 @@ pub fn classify_terminal(outcome: &TurnTerminalOutcome) -> Option<SurfaceResultC
         TurnTerminalOutcome::Failed => Some(SurfaceResultClass::HardFailure),
         TurnTerminalOutcome::Cancelled => Some(SurfaceResultClass::Cancelled),
         TurnTerminalOutcome::BudgetExhausted => Some(SurfaceResultClass::Success),
+        TurnTerminalOutcome::TimeBudgetExceeded => Some(SurfaceResultClass::HardFailure),
         TurnTerminalOutcome::StructuredOutputValidationFailed => {
             Some(SurfaceResultClass::HardFailure)
         }

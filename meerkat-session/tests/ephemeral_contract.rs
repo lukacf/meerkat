@@ -385,6 +385,10 @@ impl AgentLlmClient for RecordingLlmClient {
     fn provider(&self) -> &'static str {
         "recording-mock"
     }
+
+    fn model(&self) -> &str {
+        "mock-model"
+    }
 }
 
 type RealInnerAgent = Agent<RecordingLlmClient, StaticToolDispatcher, NoopSessionStore>;
@@ -574,6 +578,10 @@ impl AgentLlmClient for CompactionTrackingLlmClient {
 
     fn provider(&self) -> &'static str {
         "compaction-mock"
+    }
+
+    fn model(&self) -> &str {
+        "mock-model"
     }
 }
 

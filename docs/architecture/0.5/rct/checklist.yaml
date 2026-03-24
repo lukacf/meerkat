@@ -1351,9 +1351,9 @@ phases:
   # Phase 9 audit note (2026-03-18):
   # - MCP keeps only a per-session `McpRouterAdapter` bridge; runtime admission
   #   and completion waiting remain owned by the shared session service.
-  # - Browser `Session.handle` and `Mob.sendMessage()` are compatibility façades
-  #   only. They must not grow their own runtime semantics and `sendMessage()`
-  #   is scheduled for deletion after the phase-10 caller migration.
+  # - Browser `Session.handle` remains a façade only. Member-directed mob turns
+  #   now use `member(...).send(...)`; removed convenience aliases must not
+  #   reappear on the public surface.
   - id: TASK-057
     spec_id: INV-009
     related_spec_ids:

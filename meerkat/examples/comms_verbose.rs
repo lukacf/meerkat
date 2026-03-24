@@ -203,6 +203,10 @@ impl AgentLlmClient for LoggingLlmAdapter {
     fn provider(&self) -> &'static str {
         "anthropic"
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 /// Wrapper to log tool dispatches

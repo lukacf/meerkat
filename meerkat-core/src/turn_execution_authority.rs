@@ -11,15 +11,15 @@
 //!
 //! - 11 states: Ready, ApplyingPrimitive, CallingLlm, WaitingForOps,
 //!   DrainingBoundary, Extracting, ErrorRecovery, Cancelling, Completed, Failed, Cancelled
-//! - 27 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
+//! - 28 inputs: StartConversationRun, StartImmediateAppend, StartImmediateContext,
 //!   PrimitiveApplied, LlmReturnedToolCalls, LlmReturnedTerminal,
 //!   RegisterPendingOps, ToolCallsResolved, OpsBarrierSatisfied,
 //!   BoundaryContinue, BoundaryComplete, EnterExtraction,
 //!   ExtractionValidationPassed, ExtractionRetry, ExtractionExhausted,
 //!   RecoverableFailure, FatalFailure, RetryRequested, CancelNow,
 //!   CancelAfterBoundary, CancellationObserved, AcknowledgeTerminal,
-//!   TurnLimitReached, BudgetExhausted, ForceCancelNoRun, RunCompleted,
-//!   RunFailed, RunCancelled
+//!   TurnLimitReached, BudgetExhausted, TimeBudgetExceeded, ForceCancelNoRun,
+//!   RunCompleted, RunFailed, RunCancelled
 //! - 14 fields: active_run, primitive_kind, admitted_content_shape,
 //!   vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs,
 //!   has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary,
@@ -115,6 +115,8 @@ pub enum TurnTerminalOutcome {
     Failed,
     Cancelled,
     BudgetExhausted,
+    /// Explicit whole-turn time budget exhausted.
+    TimeBudgetExceeded,
     /// Structured output extraction retries exhausted without valid output.
     StructuredOutputValidationFailed,
 }
@@ -204,6 +206,13 @@ pub enum TurnExecutionInput {
         run_id: RunId,
     },
     BudgetExhausted {
+        run_id: RunId,
+    },
+    /// Explicit whole-turn time budget exhausted.
+    ///
+    /// Distinct from BudgetExhausted (token/tool-call limits).
+    /// Routes to a dedicated terminal path classified as HardFailure.
+    TimeBudgetExceeded {
         run_id: RunId,
     },
     /// Enter extraction phase after the conversation turn completes.
@@ -527,8 +536,8 @@ impl TurnExecutionAuthority {
             ExtractionExhausted, ExtractionRetry, ExtractionValidationPassed, FatalFailure,
             ForceCancelNoRun, LlmReturnedTerminal, LlmReturnedToolCalls, OpsBarrierSatisfied,
             PrimitiveApplied, RecoverableFailure, RegisterPendingOps, RetryRequested,
-            StartConversationRun, StartImmediateAppend, StartImmediateContext, ToolCallsResolved,
-            TurnLimitReached,
+            StartConversationRun, StartImmediateAppend, StartImmediateContext, TimeBudgetExceeded,
+            ToolCallsResolved, TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
@@ -1054,6 +1063,37 @@ impl TurnExecutionAuthority {
                 }
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
+                effects.push(TurnExecutionEffect::BoundaryApplied {
+                    run_id: run_id.clone(),
+                    boundary_sequence: u64::from(fields.boundary_count),
+                });
+                effects.push(TurnExecutionEffect::RunCompleted {
+                    run_id: run_id.clone(),
+                });
+                Completed
+            }
+
+            // ---------------------------------------------------------------
+            // TimeBudgetExceeded: any active phase -> Completed
+            // Same as BudgetExhausted but with TimeBudgetExceeded outcome.
+            // Classified as HardFailure at the surface level.
+            // ---------------------------------------------------------------
+            (
+                ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting
+                | ErrorRecovery,
+                TimeBudgetExceeded { run_id },
+            ) => {
+                if !self.guard_run_matches(run_id) {
+                    return Err(Self::invalid(phase, input));
+                }
+                if matches!(phase, WaitingForOps) {
+                    fields.pending_op_refs = None;
+                    fields.barrier_operation_ids = Vec::new();
+                    fields.has_barrier_ops = false;
+                    fields.barrier_satisfied = true;
+                }
+                fields.boundary_count += 1;
+                fields.terminal_outcome = TurnTerminalOutcome::TimeBudgetExceeded;
                 effects.push(TurnExecutionEffect::BoundaryApplied {
                     run_id: run_id.clone(),
                     boundary_sequence: u64::from(fields.boundary_count),
@@ -2525,5 +2565,86 @@ mod tests {
             .apply(TurnExecutionInput::ToolCallsResolved { run_id: rid })
             .expect("resolved again");
         assert_eq!(t.next_phase, TurnPhase::DrainingBoundary);
+    }
+
+    // === TimeBudgetExceeded ===
+
+    #[test]
+    fn time_budget_exceeded_from_various_phases() {
+        for phase_fn in [
+            authority_at_calling_llm as fn() -> TurnExecutionAuthority,
+            authority_at_waiting_for_ops,
+            authority_at_draining_boundary,
+        ] {
+            let mut auth = phase_fn();
+            let t = auth
+                .apply(TurnExecutionInput::TimeBudgetExceeded {
+                    run_id: test_run_id(),
+                })
+                .expect("time budget exceeded should work");
+            assert_eq!(t.next_phase, TurnPhase::Completed);
+            assert_eq!(
+                auth.terminal_outcome(),
+                TurnTerminalOutcome::TimeBudgetExceeded
+            );
+            assert!(auth.boundary_count() > 0);
+            assert!(
+                t.effects
+                    .iter()
+                    .any(|e| matches!(e, TurnExecutionEffect::BoundaryApplied { .. }))
+            );
+            assert!(
+                t.effects
+                    .iter()
+                    .any(|e| matches!(e, TurnExecutionEffect::RunCompleted { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn time_budget_exceeded_classified_as_hard_failure() {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+        assert_eq!(
+            classify_terminal(&TurnTerminalOutcome::TimeBudgetExceeded),
+            Some(SurfaceResultClass::HardFailure)
+        );
+    }
+
+    #[test]
+    fn budget_exhausted_still_classified_as_success() {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+        assert_eq!(
+            classify_terminal(&TurnTerminalOutcome::BudgetExhausted),
+            Some(SurfaceResultClass::Success)
+        );
+    }
+
+    #[test]
+    fn fatal_failure_classified_as_hard_failure() {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+        assert_eq!(
+            classify_terminal(&TurnTerminalOutcome::Failed),
+            Some(SurfaceResultClass::HardFailure)
+        );
+    }
+
+    #[test]
+    fn time_budget_exceeded_from_error_recovery() {
+        let mut auth = authority_at_calling_llm();
+        auth.apply(TurnExecutionInput::RecoverableFailure {
+            run_id: test_run_id(),
+        })
+        .expect("recoverable");
+        assert_eq!(auth.phase(), TurnPhase::ErrorRecovery);
+        let t = auth
+            .apply(TurnExecutionInput::TimeBudgetExceeded {
+                run_id: test_run_id(),
+            })
+            .expect("time budget exceeded from error recovery");
+        assert_eq!(t.next_phase, TurnPhase::Completed);
+        assert_eq!(
+            auth.terminal_outcome(),
+            TurnTerminalOutcome::TimeBudgetExceeded
+        );
     }
 }

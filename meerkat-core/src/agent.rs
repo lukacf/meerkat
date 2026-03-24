@@ -68,6 +68,13 @@ pub trait AgentLlmClient: Send + Sync {
     /// Get the provider name
     fn provider(&self) -> &'static str;
 
+    /// Get the current effective model identifier.
+    ///
+    /// Used by the agent loop for profile-default resolution (e.g., call timeout
+    /// defaults that vary per model family). Must reflect the current model even
+    /// after hot-swap.
+    fn model(&self) -> &str;
+
     /// Compile an output schema for this provider.
     ///
     /// Default implementation normalizes the schema without provider-specific lowering.
@@ -557,6 +564,14 @@ where
     /// Optional session checkpointer for host-mode persistence.
     #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    /// Run-scoped diagnostic stash for originating hard-failure errors.
+    ///
+    /// When an exhausted hard LLM-call failure (e.g., CallTimeout, NetworkTimeout)
+    /// routes through machine-owned FatalFailure, the originating `AgentError` is
+    /// stashed here so `build_result()` can surface it instead of a generic
+    /// `TerminalFailure`. This is ephemeral, consumed once, and non-authoritative
+    /// for terminal phase/classification.
+    pub(crate) pending_fatal_diagnostic: Option<AgentError>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
@@ -573,6 +588,13 @@ where
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Machine authority for turn-execution state transitions (RMAT).
     pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
+    /// Optional resolver for model-specific operational defaults (e.g., call timeout).
+    /// Consulted at each LLM call for hot-swap-aware profile default resolution.
+    pub(crate) model_defaults_resolver:
+        Option<Arc<dyn crate::model_defaults::ModelOperationalDefaultsResolver>>,
+    /// Explicit call-timeout override from the build/config composition seam.
+    /// Takes precedence over profile-derived defaults.
+    pub(crate) call_timeout_override: crate::config::CallTimeoutOverride,
     /// True after the agentic loop completes when `output_schema` is set.
     /// Causes the next `CallingLlm` iteration to use extraction parameters
     /// (no tools, temperature 0.0, structured_output provider params).

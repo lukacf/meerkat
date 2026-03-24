@@ -238,6 +238,10 @@ impl AgentLlmClient for LlmClientAdapter {
         self.client.provider()
     }
 
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
         self.client.compile_schema(output_schema)
     }

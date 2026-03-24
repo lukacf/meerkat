@@ -36,6 +36,7 @@ pub mod interaction;
 pub mod lifecycle;
 pub mod mcp_config;
 pub mod memory;
+pub mod model_defaults;
 pub mod ops;
 pub mod ops_lifecycle;
 pub mod peer_meta;
@@ -83,10 +84,11 @@ pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;
 
 pub use config::{
-    AgentConfig, BudgetConfig, CommsAuthMode, CommsRuntimeConfig, CommsRuntimeMode, Config,
-    ConfigDelta, ConfigError, ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig,
-    HooksConfig, LimitsConfig, ModelDefaults, PlainEventSource, ProviderConfig, ProviderSettings,
-    RetryConfig, ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
+    AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
+    CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
+    HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig, ModelDefaults,
+    PlainEventSource, ProviderConfig, ProviderSettings, RetryConfig, ShellDefaults, StorageConfig,
+    StoreConfig, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{
@@ -125,6 +127,7 @@ pub use lifecycle::{
     RunControlCommand, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
+pub use model_defaults::ModelOperationalDefaultsResolver;
 pub use ops::{
     AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
     OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec,

@@ -132,12 +132,9 @@ impl LlmError {
                 "retryable": true,
                 "message": self.to_string(),
             })),
-            Self::NetworkTimeout { duration_ms } => LlmFailureReason::ProviderError(json!({
-                "kind": "network_timeout",
-                "retryable": true,
-                "duration_ms": duration_ms,
-                "message": self.to_string(),
-            })),
+            Self::NetworkTimeout { duration_ms } => LlmFailureReason::NetworkTimeout {
+                duration_ms: *duration_ms,
+            },
             Self::ConnectionReset => LlmFailureReason::ProviderError(json!({
                 "kind": "connection_reset",
                 "retryable": true,
@@ -276,5 +273,15 @@ mod tests {
             let _: LlmError = serde_json::from_str(&json)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_network_timeout_maps_to_typed_reason() {
+        let err = LlmError::NetworkTimeout { duration_ms: 30000 };
+        let reason = err.failure_reason();
+        assert_eq!(
+            reason,
+            LlmFailureReason::NetworkTimeout { duration_ms: 30000 }
+        );
     }
 }

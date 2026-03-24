@@ -656,6 +656,70 @@ BudgetExhaustedFromErrorRecovery(run_id) ==
     /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
+TimeBudgetExceededFromApplyingPrimitive(run_id) ==
+    /\ phase = "ApplyingPrimitive"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "TimeBudgetExceeded"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+TimeBudgetExceededFromCallingLlm(run_id) ==
+    /\ phase = "CallingLlm"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "TimeBudgetExceeded"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+TimeBudgetExceededFromWaitingForOps(run_id) ==
+    /\ phase = "WaitingForOps"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_op_refs' = None
+    /\ barrier_operation_ids' = <<>>
+    /\ has_barrier_ops' = FALSE
+    /\ barrier_satisfied' = TRUE
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "TimeBudgetExceeded"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+TimeBudgetExceededFromDrainingBoundary(run_id) ==
+    /\ phase = "DrainingBoundary"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "TimeBudgetExceeded"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+TimeBudgetExceededFromExtracting(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "TimeBudgetExceeded"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
+TimeBudgetExceededFromErrorRecovery(run_id) ==
+    /\ phase = "ErrorRecovery"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ boundary_count' = (boundary_count) + 1
+    /\ terminal_outcome' = "TimeBudgetExceeded"
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
+
+
 ForceCancelNoRunFromReady ==
     /\ phase = "Ready"
     /\ phase' = "Cancelled"
@@ -838,6 +902,12 @@ Next ==
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromDrainingBoundary(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromExtracting(run_id)
     \/ \E run_id \in RunIdValues : BudgetExhaustedFromErrorRecovery(run_id)
+    \/ \E run_id \in RunIdValues : TimeBudgetExceededFromApplyingPrimitive(run_id)
+    \/ \E run_id \in RunIdValues : TimeBudgetExceededFromCallingLlm(run_id)
+    \/ \E run_id \in RunIdValues : TimeBudgetExceededFromWaitingForOps(run_id)
+    \/ \E run_id \in RunIdValues : TimeBudgetExceededFromDrainingBoundary(run_id)
+    \/ \E run_id \in RunIdValues : TimeBudgetExceededFromExtracting(run_id)
+    \/ \E run_id \in RunIdValues : TimeBudgetExceededFromErrorRecovery(run_id)
     \/ ForceCancelNoRunFromReady
     \/ ForceCancelNoRunFromApplyingPrimitive
     \/ ForceCancelNoRunFromCallingLlm
@@ -858,7 +928,7 @@ waiting_for_ops_implies_pending_tools == ((phase # "WaitingForOps") \/ (tool_cal
 pending_op_refs_only_used_while_waiting == ((phase = "WaitingForOps") \/ (pending_op_refs = None))
 ready_has_no_boundary_cancel_request == ((phase # "Ready") \/ (cancel_after_boundary = FALSE))
 immediate_primitives_skip_llm_and_recovery == ((primitive_kind = "ConversationTurn") \/ ((phase # "CallingLlm") /\ (phase # "WaitingForOps") /\ (phase # "ErrorRecovery")))
-terminal_states_match_terminal_outcome == (((phase # "Completed") \/ (terminal_outcome = "Completed") \/ (terminal_outcome = "BudgetExhausted")) /\ ((phase # "Failed") \/ (terminal_outcome = "Failed")) /\ ((phase # "Cancelled") \/ (terminal_outcome = "Cancelled")))
+terminal_states_match_terminal_outcome == (((phase # "Completed") \/ (terminal_outcome = "Completed") \/ (terminal_outcome = "BudgetExhausted") \/ (terminal_outcome = "TimeBudgetExceeded")) /\ ((phase # "Failed") \/ (terminal_outcome = "Failed")) /\ ((phase # "Cancelled") \/ (terminal_outcome = "Cancelled")))
 completed_runs_have_seen_a_boundary == ((phase # "Completed") \/ (boundary_count > 0))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Len(barrier_operation_ids) <= 1

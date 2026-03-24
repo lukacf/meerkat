@@ -140,6 +140,27 @@ export interface MobAppendSystemContextResult {
   status: 'staged' | 'duplicate';
 }
 
+/** Delivery receipt for a direct mob member turn. */
+export interface MemberDeliveryReceipt {
+  member_id: string;
+  session_id: string;
+  handling_mode: HandlingMode;
+}
+
+/** Respawn receipt for a mob member. */
+export interface MemberRespawnReceipt {
+  member_id: string;
+  old_session_id?: string | null;
+  new_session_id?: string | null;
+}
+
+/** Result envelope for a member respawn operation. */
+export interface MobRespawnResult {
+  status: 'completed' | 'topology_restore_failed';
+  receipt: MemberRespawnReceipt;
+  failed_peer_ids?: string[];
+}
+
 /** Result of a turn execution. */
 export interface TurnResult {
   /** Canonical text returned by the runtime. */
@@ -288,6 +309,37 @@ export type MobPeerTarget = string | ExternalPeerTarget;
 export interface MobStatus {
   mob_id: string;
   state: string;
+}
+
+/** Unreachable peer entry from a live member connectivity snapshot. */
+export interface MobUnreachablePeer {
+  peer: string;
+  reason?: string;
+}
+
+/** Live peer connectivity projection for a mob member snapshot. */
+export interface MobPeerConnectivitySnapshot {
+  reachable_peer_count: number;
+  unknown_peer_count: number;
+  unreachable_peers: MobUnreachablePeer[];
+}
+
+/** Point-in-time execution snapshot for a mob member. */
+export interface MobMemberSnapshot {
+  status: string;
+  output_preview?: string;
+  error?: string;
+  tokens_used: number;
+  is_final: boolean;
+  current_session_id?: string;
+  peer_connectivity?: MobPeerConnectivitySnapshot;
+}
+
+/** Result envelope for helper-style mob flows. */
+export interface MobHelperResult {
+  output?: string;
+  tokens_used: number;
+  session_id?: string;
 }
 
 /** Mob lifecycle actions. */

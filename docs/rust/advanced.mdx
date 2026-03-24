@@ -144,6 +144,7 @@ impl AgentLlmClient for MyCustomClient {
     }
 
     fn provider(&self) -> &'static str { "my-provider" }
+    fn model(&self) -> &str { "my-model" }
 }
 ```
 </Accordion>

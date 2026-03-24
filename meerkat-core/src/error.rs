@@ -4,6 +4,7 @@ use crate::hooks::{HookPoint, HookReasonCode};
 use crate::types::SessionId;
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LlmFailureReason {
     RateLimited {
         retry_after: Option<std::time::Duration>,
@@ -15,6 +16,14 @@ pub enum LlmFailureReason {
     AuthError,
     InvalidModel(String),
     ProviderError(serde_json::Value),
+    /// Provider/client-native network timeout (owned by client layer)
+    NetworkTimeout {
+        duration_ms: u64,
+    },
+    /// Agent-loop hard call timeout (owned by agent loop policy)
+    CallTimeout {
+        duration_ms: u64,
+    },
 }
 
 /// Errors that can occur during tool validation
@@ -283,6 +292,8 @@ impl AgentError {
         match self {
             Self::Llm { reason, .. } => match reason {
                 LlmFailureReason::RateLimited { .. } => true,
+                LlmFailureReason::NetworkTimeout { .. } => true,
+                LlmFailureReason::CallTimeout { .. } => true,
                 LlmFailureReason::ProviderError(value) => {
                     value.get("retryable").and_then(serde_json::Value::as_bool) == Some(true)
                 }
@@ -304,4 +315,82 @@ pub fn store_error_message(err: impl std::fmt::Display) -> String {
 }
 pub fn invalid_session_id_message(err: impl std::fmt::Display) -> String {
     format!("Invalid session ID: {err}")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_timeout_is_recoverable() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 30000 },
+            "network timeout after 30s",
+        );
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_call_timeout_is_recoverable() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::CallTimeout { duration_ms: 45000 },
+            "call timeout after 45s",
+        );
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_network_timeout_typed_mapping() {
+        let reason = LlmFailureReason::NetworkTimeout { duration_ms: 5000 };
+        match reason {
+            LlmFailureReason::NetworkTimeout { duration_ms } => {
+                assert_eq!(duration_ms, 5000);
+            }
+            _ => panic!("expected NetworkTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_call_timeout_typed_mapping() {
+        let reason = LlmFailureReason::CallTimeout { duration_ms: 60000 };
+        match reason {
+            LlmFailureReason::CallTimeout { duration_ms } => {
+                assert_eq!(duration_ms, 60000);
+            }
+            _ => panic!("expected CallTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_timeout_variants_are_distinct() {
+        let net = LlmFailureReason::NetworkTimeout { duration_ms: 1000 };
+        let call = LlmFailureReason::CallTimeout { duration_ms: 1000 };
+        assert_ne!(net, call);
+    }
+
+    #[test]
+    fn test_auth_error_not_recoverable() {
+        let err = AgentError::llm("anthropic", LlmFailureReason::AuthError, "bad key");
+        assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn test_timeout_variants_not_graceful() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 1000 },
+            "timeout",
+        );
+        assert!(!err.is_graceful());
+
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::CallTimeout { duration_ms: 1000 },
+            "timeout",
+        );
+        assert!(!err.is_graceful());
+    }
 }

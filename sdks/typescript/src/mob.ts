@@ -181,20 +181,6 @@ export class Mob {
     return new Member(this.client, this.mobId, meerkatId);
   }
 
-  /**
-   * Compatibility facade for direct member turns.
-   *
-   * Canonical 0.5 callers should prefer `member(meerkatId).send(...)`. This
-   * method intentionally adds no runtime semantics of its own.
-   */
-  async sendMessage(
-    meerkatId: string,
-    content: string | ContentBlock[],
-    options?: MemberSendOptions,
-  ): Promise<void> {
-    await this.member(meerkatId).send(content, options);
-  }
-
   async appendSystemContext(
     meerkatId: string,
     text: string,

@@ -94,6 +94,10 @@ impl AgentLlmClient for ScenarioClient {
     fn provider(&self) -> &'static str {
         "mock"
     }
+
+    fn model(&self) -> &str {
+        "mock-model"
+    }
 }
 
 struct RecordingToolDispatcher {

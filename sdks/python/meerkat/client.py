@@ -43,7 +43,7 @@ from .generated.types import (
     WireInputState,
     WireInputStateHistoryEntry,
 )
-from .mob import Mob
+from .mob import Mob, MobHelperResult, MobMemberSnapshot
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .tools import ToolRegistry
@@ -733,7 +733,7 @@ class MeerkatClient:
     async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
-    async def mob_member_status(self, mob_id: str, meerkat_id: str) -> dict[str, Any]:
+    async def mob_member_status(self, mob_id: str, meerkat_id: str) -> MobMemberSnapshot:
         return await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
     async def spawn_mob_helper(
@@ -745,7 +745,7 @@ class MeerkatClient:
         profile_name: str | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobHelperResult:
         return await self._request("mob/spawn_helper", {
             "mob_id": mob_id,
             "prompt": prompt,
@@ -766,7 +766,7 @@ class MeerkatClient:
         fork_context: dict[str, Any] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> MobHelperResult:
         return await self._request("mob/fork_helper", {
             "mob_id": mob_id,
             "source_member_id": source_member_id,

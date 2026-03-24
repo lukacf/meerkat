@@ -3025,6 +3025,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-wasm",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

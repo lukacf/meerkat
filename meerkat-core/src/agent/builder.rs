@@ -1,8 +1,9 @@
 //! Agent builder.
 
 use crate::budget::{Budget, BudgetLimits};
-use crate::config::{AgentConfig, HookRunOverrides};
+use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides};
 use crate::hooks::HookEngine;
+use crate::model_defaults::ModelOperationalDefaultsResolver;
 use crate::ops::ConcurrencyLimits;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::prompt::SystemPromptConfig;
@@ -44,6 +45,8 @@ pub struct AgentBuilder {
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
+    pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
+    pub(super) call_timeout_override: CallTimeoutOverride,
 }
 
 impl AgentBuilder {
@@ -69,6 +72,8 @@ impl AgentBuilder {
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
+            model_defaults_resolver: None,
+            call_timeout_override: CallTimeoutOverride::default(),
         }
     }
 
@@ -231,6 +236,7 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
+            pending_fatal_diagnostic: None,
             silent_comms_intents: self.silent_comms_intents,
             inline_peer_notification_policy: {
                 match InlinePeerNotificationPolicy::try_from_raw(self.max_inline_peer_notifications)
@@ -256,6 +262,8 @@ impl AgentBuilder {
             default_event_tx: self.default_event_tx,
             ops_lifecycle: self.ops_lifecycle,
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
+            model_defaults_resolver: self.model_defaults_resolver,
+            call_timeout_override: self.call_timeout_override,
             extraction_mode: false,
             extraction_result: None,
             extraction_schema_warnings: None,
@@ -350,6 +358,29 @@ impl AgentBuilder {
         self.default_event_tx = Some(event_tx);
         self
     }
+
+    /// Set the model operational defaults resolver for profile-derived call timeouts.
+    ///
+    /// The resolver is consulted at each LLM call to look up model-specific
+    /// operational defaults (e.g., call timeout) for the current effective
+    /// model/provider. This enables hot-swap-aware default resolution.
+    pub fn with_model_defaults_resolver(
+        mut self,
+        resolver: Arc<dyn ModelOperationalDefaultsResolver>,
+    ) -> Self {
+        self.model_defaults_resolver = Some(resolver);
+        self
+    }
+
+    /// Set the explicit call-timeout override from the build/config composition seam.
+    ///
+    /// - `Inherit`: defer to profile-derived default via the resolver
+    /// - `Disabled`: explicitly suppress call timeout
+    /// - `Value(d)`: explicitly set call timeout to `d`
+    pub fn with_call_timeout_override(mut self, override_value: CallTimeoutOverride) -> Self {
+        self.call_timeout_override = override_value;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -390,6 +421,10 @@ mod tests {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
         }
     }
 

@@ -256,7 +256,7 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
     await mob.spawn(profile="lead", meerkat_id="lead-1")
     lead = mob.member("lead-1")
     await lead.send("Coordinate the release triage.")
-    events = await mob.subscribe_member("lead-1")
+    events = await lead.events()
     ```
   </Tab>
   <Tab title="TypeScript">

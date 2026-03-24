@@ -844,11 +844,11 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/flow_status",
         "mob/flow_cancel",
     ]
-    assert calls[7][1] == {"mob_id": "mob-1", "local": "a", "target": {"local": "b"}}
+    assert calls[7][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
     assert calls[8][1] == {
         "mob_id": "mob-1",
-        "local": "a",
-        "target": {
+        "member": "a",
+        "peer": {
             "external": {
                 "name": "remote",
                 "peer_id": "ed25519:remote",

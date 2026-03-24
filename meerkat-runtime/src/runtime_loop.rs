@@ -278,19 +278,16 @@ async fn process_queue(
                 return false;
             }
 
-            // Stage the input batch (Queued → Staged).
+            // Stage the input batch atomically (Queued → Staged).
             // Do NOT apply here — apply only after successful execution.
             // If we pre-applied and the executor failed, the input would
             // be stranded in AppliedPendingConsumption because RunFailed
             // only rolls back Staged inputs.
-            let mut staged_ids = Vec::with_capacity(staged_inputs.len());
-            for (staged_input_id, _) in &staged_inputs {
-                if d.stage_input(staged_input_id, &run_id).is_err() {
-                    let _ = d.rollback_staged(&staged_ids);
-                    let _ = d.complete_run();
-                    return false;
-                }
-                staged_ids.push(staged_input_id.clone());
+            let staged_ids: Vec<_> = staged_inputs.iter().map(|(id, _)| id.clone()).collect();
+            if d.stage_batch(&staged_ids, &run_id).is_err() {
+                let _ = d.rollback_staged(&staged_ids);
+                let _ = d.complete_run();
+                return false;
             }
 
             // Use the authority's boundary classification (derived from stored metadata)

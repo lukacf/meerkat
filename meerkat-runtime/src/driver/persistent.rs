@@ -150,6 +150,15 @@ impl PersistentRuntimeDriver {
         self.inner.stage_input(input_id, run_id)
     }
 
+    /// Stage a batch of inputs atomically (delegates to inner).
+    pub fn stage_batch(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+        self.inner.stage_batch(input_ids, run_id)
+    }
+
     /// Apply input (delegates to inner).
     pub fn apply_input(
         &mut self,

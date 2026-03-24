@@ -77,7 +77,14 @@ fn render_fork_context(
                         .join("");
                     if !text.is_empty() {
                         let preview = if text.len() > 200 {
-                            format!("{}...", &text[..200])
+                            // Find a valid UTF-8 char boundary at or before byte 200
+                            let end = text
+                                .char_indices()
+                                .map(|(i, _)| i)
+                                .take_while(|&i| i <= 200)
+                                .last()
+                                .unwrap_or(0);
+                            format!("{}...", &text[..end])
                         } else {
                             text
                         };

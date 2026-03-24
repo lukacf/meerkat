@@ -563,13 +563,27 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
+        self.stage_batch(&[input_id.clone()], run_id)
+    }
+
+    /// Stage a batch of inputs in a single `StageDrainSnapshot` call.
+    ///
+    /// All input IDs are passed as contributing work IDs to the ingress
+    /// authority atomically, avoiding the guard rejection that occurs when
+    /// `stage_input` is called one-at-a-time (since the first call sets
+    /// `current_run` and subsequent calls fail the `no_current_run` guard).
+    pub fn stage_batch(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &RunId,
+    ) -> Result<(), InputLifecycleError> {
         // Ingress authority: StageDrainSnapshot — the authority owns the Staged
         // transition. It emits StageInput effects that drive the per-input lifecycle
         // authority and Staged events (handled in process_ingress_effects).
         // No independent shell StageForRun call — single source of truth.
         match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
             run_id: run_id.clone(),
-            contributing_work_ids: vec![input_id.clone()],
+            contributing_work_ids: input_ids.to_vec(),
         }) {
             Ok(transition) => {
                 self.process_ingress_effects(&transition.effects);
@@ -578,7 +592,7 @@ impl EphemeralRuntimeDriver {
             }
             Err(err) => {
                 tracing::warn!(
-                    input_id = ?input_id,
+                    input_ids = ?input_ids,
                     run_id = ?run_id,
                     error = %err,
                     "ingress authority rejected StageDrainSnapshot"

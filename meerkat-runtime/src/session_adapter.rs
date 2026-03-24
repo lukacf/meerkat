@@ -182,6 +182,18 @@ impl DriverEntry {
         }
     }
 
+    /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
+    pub(crate) fn stage_batch(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &RunId,
+    ) -> Result<(), InputLifecycleError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.stage_batch(input_ids, run_id),
+            DriverEntry::Persistent(d) => d.stage_batch(input_ids, run_id),
+        }
+    }
+
     /// Roll back staged inputs after a failed staging attempt.
     pub(crate) fn rollback_staged(
         &mut self,

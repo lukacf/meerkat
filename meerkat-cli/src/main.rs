@@ -192,25 +192,95 @@ impl CliOutputPipeline {
         drop(event_tx);
         drop(scoped_event_tx);
 
-        after_sender_drop.await?;
+        let mut shutdown_err = after_sender_drop.await.err();
 
         if let Some(task) = primary_to_scoped_bridge_task {
-            let _ = task.await;
+            if let Err(err) = task.await {
+                accumulate_anyhow_error(
+                    &mut shutdown_err,
+                    anyhow::anyhow!("primary stream bridge task failed: {err}"),
+                );
+            }
         }
 
         if let Some(task) = verbose_task {
-            let _ = task.await;
+            if let Err(err) = task.await {
+                accumulate_anyhow_error(
+                    &mut shutdown_err,
+                    anyhow::anyhow!("verbose event task failed: {err}"),
+                );
+            }
         }
 
         if let Some(task) = stream_task {
-            let summary = task
-                .await
-                .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
-            println!();
-            validate_stream_render_summary(&summary)?;
+            match task.await {
+                Ok(summary) => {
+                    println!();
+                    if let Err(err) = validate_stream_render_summary(&summary) {
+                        accumulate_anyhow_error(&mut shutdown_err, err);
+                    }
+                }
+                Err(err) => accumulate_anyhow_error(
+                    &mut shutdown_err,
+                    anyhow::anyhow!("stream renderer task failed: {err}"),
+                ),
+            }
         }
 
-        Ok(())
+        if let Some(err) = shutdown_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn accumulate_anyhow_error(slot: &mut Option<anyhow::Error>, err: anyhow::Error) {
+    match slot.take() {
+        Some(existing) => {
+            *slot = Some(anyhow::anyhow!(
+                "{existing}; additionally failed during shutdown: {err}"
+            ));
+        }
+        None => {
+            *slot = Some(err);
+        }
+    }
+}
+
+fn completion_outcome_to_result(
+    outcome: meerkat_runtime::completion::CompletionOutcome,
+) -> anyhow::Result<meerkat_core::types::RunResult> {
+    match outcome {
+        meerkat_runtime::completion::CompletionOutcome::Completed(result) => Ok(result),
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+            Err(anyhow::anyhow!("turn completed without result"))
+        }
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+            Err(anyhow::anyhow!("turn abandoned: {reason}"))
+        }
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            Err(anyhow::anyhow!("runtime terminated: {reason}"))
+        }
+    }
+}
+
+async fn finalize_cli_runtime_backed_turn<T, F>(
+    output_pipeline: CliOutputPipeline,
+    turn_result: anyhow::Result<T>,
+    after_sender_drop: F,
+) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let shutdown_result = output_pipeline.shutdown_after(after_sender_drop).await;
+    match (turn_result, shutdown_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Ok(_), Err(shutdown_err)) => Err(shutdown_err),
+        (Err(turn_err), Ok(())) => Err(turn_err),
+        (Err(turn_err), Err(shutdown_err)) => Err(anyhow::anyhow!(
+            "{turn_err}; additionally failed during CLI shutdown: {shutdown_err}"
+        )),
     }
 }
 
@@ -3092,15 +3162,10 @@ async fn run_agent(
         )
     };
     let session = Session::new();
+    let session_id = session.id().clone();
     let primary_scope_path = vec![StreamScopeFrame::Primary {
-        session_id: session.id().to_string(),
+        session_id: session_id.to_string(),
     }];
-
-    let output_pipeline =
-        CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
-
-    // Load optional MCP tools; we compose these with CLI-local mob tools below.
-    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
 
     // Resolve comms_name for the factory
     let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
@@ -3149,18 +3214,6 @@ async fn run_agent(
     // Build the parent session service.
     let service = build_cli_service(factory, config.clone());
 
-    // Create ephemeral runtime adapter for single-authority execution.
-    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-    // Pre-register session so we can obtain the canonical ops lifecycle registry
-    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
-    runtime_adapter.register_session(session.id().clone()).await;
-    let ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = runtime_adapter
-        .ops_lifecycle_registry(session.id())
-        .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
-
     if host_mode {
         eprintln!(
             "Running in host mode{} (Ctrl+C to exit)...",
@@ -3179,8 +3232,32 @@ async fn run_agent(
     } else {
         None
     };
+    // Load optional MCP tools immediately before external tool composition so
+    // later early-return windows cannot skip adapter shutdown.
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+
+    let parsed_app_context = app_context
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?;
+
+    let output_pipeline =
+        CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
+
+    // Create ephemeral runtime adapter for single-authority execution.
+    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    // Pre-register session so we can obtain the canonical ops lifecycle registry
+    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
+    runtime_adapter.register_session(session_id.clone()).await;
+    let ops_lifecycle: Option<
+        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    > = runtime_adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
 
     let build = SessionBuildOptions {
         provider: Some(provider.as_core()),
@@ -3206,11 +3283,7 @@ async fn run_agent(
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
-        app_context: app_context
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?,
+        app_context: parsed_app_context,
         additional_instructions: if instructions.is_empty() {
             None
         } else {
@@ -3259,126 +3332,116 @@ async fn run_agent(
     #[cfg(feature = "comms")]
     let mut stdin_reader_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-    #[cfg(feature = "comms")]
-    let create_result = service
-        .create_session(create_req)
-        .await
-        .map_err(session_err_to_anyhow)?;
-
-    #[cfg(not(feature = "comms"))]
-    let create_result = {
-        let _ = stdin_events;
-        service
+    let turn_result = async {
+        #[cfg(feature = "comms")]
+        let create_result = service
             .create_session(create_req)
             .await
-            .map_err(session_err_to_anyhow)?
-    };
+            .map_err(session_err_to_anyhow)?;
 
-    // Register executor and route turn through runtime adapter.
-    let session_id = create_result.session_id.clone();
-    let executor = Box::new(CliRuntimeExecutor {
-        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-        persistent_service: None,
-        session_id: session_id.clone(),
-        runtime_adapter: runtime_adapter.clone(),
-        event_tx: output_pipeline.event_sender(),
-    });
-    runtime_adapter
-        .register_session_with_executor(session_id.clone(), executor)
-        .await;
+        #[cfg(not(feature = "comms"))]
+        let create_result = {
+            let _ = stdin_events;
+            service
+                .create_session(create_req)
+                .await
+                .map_err(session_err_to_anyhow)?
+        };
 
-    #[cfg(feature = "comms")]
-    if stdin_events && host_mode {
-        stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
-            runtime_adapter.clone(),
-            session_id.clone(),
-            match line_format {
-                LineFormat::Text => stdin_events::StdinLineFormat::Text,
-                LineFormat::Json => stdin_events::StdinLineFormat::Json,
-            },
-        ));
-    }
-
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
-        prompt.to_string(),
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: if host_mode { Some(true) } else { None },
-                skill_references: canonical_skill_refs,
-                flow_tool_overlay,
-                additional_instructions: None,
-                ..Default::default()
-            },
-        ),
-    ));
-    let (_outcome, handle) = runtime_adapter
-        .accept_input_with_completion(&session_id, input)
-        .await
-        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
-
-    // Spawn the comms drain in host mode so inbound peer interactions are
-    // routed through the runtime adapter and automatically trigger new turns.
-    #[cfg(feature = "comms")]
-    {
-        let comms_rt = service.comms_runtime(&session_id).await;
-        let control = service.comms_drain_control(&session_id).await;
+        // Register executor and route turn through runtime adapter.
+        let session_id = create_result.session_id.clone();
+        let executor = Box::new(CliRuntimeExecutor {
+            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            event_tx: output_pipeline.event_sender(),
+        });
         runtime_adapter
-            .set_comms_drain_control(&session_id, control)
+            .register_session_with_executor(session_id.clone(), executor)
             .await;
-        runtime_adapter
-            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
-            .await;
-    }
 
-    let result = match handle {
-        Some(handle) => match handle.wait().await {
-            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
-                anyhow::bail!("turn completed without result")
-            }
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                anyhow::bail!("turn abandoned: {reason}")
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                anyhow::bail!("runtime terminated: {reason}")
-            }
-        },
-        None => {
-            // Dedup — shouldn't happen on first turn but handle gracefully
-            eprintln!("Warning: duplicate input — already processed");
-            create_result
+        #[cfg(feature = "comms")]
+        if stdin_events && host_mode {
+            stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
+                runtime_adapter.clone(),
+                session_id.clone(),
+                match line_format {
+                    LineFormat::Text => stdin_events::StdinLineFormat::Text,
+                    LineFormat::Json => stdin_events::StdinLineFormat::Json,
+                },
+            ));
         }
-    };
 
-    // The initial turn is complete — abort the comms drain so the CLI can
-    // return. run_agent is a one-shot command; persistent host-mode draining
-    // is only appropriate for interactive sessions (chat).
-    #[cfg(feature = "comms")]
-    {
-        runtime_adapter.abort_comms_drain(&session_id).await;
-    }
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            prompt.to_string(),
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    host_mode: if host_mode { Some(true) } else { None },
+                    skill_references: canonical_skill_refs,
+                    flow_tool_overlay,
+                    additional_instructions: None,
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_outcome, handle) = runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
 
-    // Abort stdin reader if it was running
-    #[cfg(feature = "comms")]
-    if let Some(h) = stdin_reader_handle {
-        h.abort();
-    }
+        // Spawn the comms drain in host mode so inbound peer interactions are
+        // routed through the runtime adapter and automatically trigger new turns.
+        #[cfg(feature = "comms")]
+        {
+            let comms_rt = service.comms_runtime(&session_id).await;
+            let control = service.comms_drain_control(&session_id).await;
+            runtime_adapter
+                .set_comms_drain_control(&session_id, control)
+                .await;
+            runtime_adapter
+                .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+                .await;
+        }
 
-    output_pipeline
-        .shutdown_after(async {
-            // Shutdown the session service and MCP connections gracefully.
-            // Unregister the runtime-backed executor before awaiting stream tasks.
-            // The adapter owns the boxed executor, and the executor now holds the
-            // caller stream sender for runtime-backed turns.
-            runtime_adapter.unregister_session(&session_id).await;
-            service.shutdown().await;
-            shutdown_mcp(&mcp_adapter).await;
-            if let Some(ref mut mob_ctx) = run_mob_tools {
-                mob_ctx.persist(scope).await?;
+        match handle {
+            Some(handle) => completion_outcome_to_result(handle.wait().await),
+            None => {
+                eprintln!("Warning: duplicate input — already processed");
+                Ok(create_result)
             }
-            Ok(())
-        })
-        .await?;
+        }
+    }
+    .await;
+
+    let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
+        // The initial turn is complete — abort the comms drain so the CLI can
+        // return. run_agent is a one-shot command; persistent host-mode draining
+        // is only appropriate for interactive sessions (chat).
+        #[cfg(feature = "comms")]
+        {
+            runtime_adapter.abort_comms_drain(&session_id).await;
+        }
+
+        // Abort stdin reader if it was running.
+        #[cfg(feature = "comms")]
+        if let Some(h) = stdin_reader_handle {
+            h.abort();
+        }
+
+        // Shutdown the session service and MCP connections gracefully.
+        // Unregister the runtime-backed executor before awaiting stream tasks.
+        // The adapter owns the boxed executor, and the executor now holds the
+        // caller stream sender for runtime-backed turns.
+        runtime_adapter.unregister_session(&session_id).await;
+        service.shutdown().await;
+        shutdown_mcp(&mcp_adapter).await;
+        if let Some(ref mut mob_ctx) = run_mob_tools {
+            mob_ctx.persist(scope).await?;
+        }
+        Ok(())
+    })
+    .await?;
 
     // Output the result
     match output {
@@ -3601,9 +3664,6 @@ async fn resume_session_with_llm_override(
     );
     log_stage("load_mcp_external_tools");
 
-    // Load optional MCP tools; compose with CLI-local mob tools after service setup.
-    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
-
     // Build factory with flags restored from stored session metadata
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3654,6 +3714,9 @@ async fn resume_session_with_llm_override(
     } else {
         None
     };
+    // Load optional MCP tools immediately before external tool composition so
+    // later early-return windows cannot skip adapter shutdown.
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
     let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
 
@@ -3719,125 +3782,117 @@ async fn resume_session_with_llm_override(
         ops_lifecycle_override: resume_ops_lifecycle,
     };
 
-    // Route through SessionService::create_session() with the resumed session
-    // staged in the build config. The service builds the agent (which picks up
-    // the resume_session), runs the first turn, and returns RunResult.
-    log_stage("service.create_session(start)");
-    let create_result = service
-        .create_session(CreateSessionRequest {
-            model,
-            prompt: prompt.to_string().into(),
-            render_metadata: None,
-            system_prompt,
-            max_tokens: Some(max_tokens),
+    let turn_result = async {
+        // Route through SessionService::create_session() with the resumed session
+        // staged in the build config. The service builds the agent (which picks up
+        // the resume_session), runs the first turn, and returns RunResult.
+        log_stage("service.create_session(start)");
+        let create_result = service
+            .create_session(CreateSessionRequest {
+                model,
+                prompt: prompt.to_string().into(),
+                render_metadata: None,
+                system_prompt,
+                max_tokens: Some(max_tokens),
+                event_tx: output_pipeline.event_sender(),
+                host_mode,
+                host_mode_owner: HostModeOwner::ExternalRuntime,
+                skill_references: if run_initial_turn_during_create {
+                    canonical_skill_refs.clone()
+                } else {
+                    None
+                },
+                // Always defer — runtime adapter handles execution.
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                build: Some(build),
+                labels: None,
+            })
+            .await
+            .map_err(session_err_to_anyhow)?;
+
+        let additional_instructions = if instructions.is_empty() {
+            None
+        } else {
+            Some(instructions)
+        };
+
+        // Route through runtime adapter (same pattern as run command)
+        let session_id = create_result.session_id.clone();
+        let executor = Box::new(CliRuntimeExecutor {
+            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+            persistent_service: Some(service.clone()),
+            session_id: session_id.clone(),
+            runtime_adapter: resume_adapter.clone(),
             event_tx: output_pipeline.event_sender(),
-            host_mode,
-            host_mode_owner: HostModeOwner::ExternalRuntime,
-            skill_references: if run_initial_turn_during_create {
-                canonical_skill_refs.clone()
-            } else {
-                None
-            },
-            // Always defer — runtime adapter handles execution.
-            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-            build: Some(build),
-            labels: None,
-        })
-        .await
-        .map_err(session_err_to_anyhow)?;
-    let additional_instructions = if instructions.is_empty() {
-        None
-    } else {
-        Some(instructions)
-    };
-
-    // Route through runtime adapter (same pattern as run command)
-    let session_id = create_result.session_id.clone();
-    let executor = Box::new(CliRuntimeExecutor {
-        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-        persistent_service: Some(service.clone()),
-        session_id: session_id.clone(),
-        runtime_adapter: resume_adapter.clone(),
-        event_tx: output_pipeline.event_sender(),
-    });
-    resume_adapter
-        .register_session_with_executor(session_id.clone(), executor)
-        .await;
-
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
-        prompt.to_string(),
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: if host_mode { Some(true) } else { None },
-                skill_references: canonical_skill_refs,
-                flow_tool_overlay,
-                additional_instructions,
-                ..Default::default()
-            },
-        ),
-    ));
-    let (_outcome, handle) = resume_adapter
-        .accept_input_with_completion(&session_id, input)
-        .await
-        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
-
-    // Spawn the comms drain in host mode so inbound peer interactions are
-    // routed through the runtime adapter and automatically trigger new turns.
-    #[cfg(feature = "comms")]
-    {
-        let comms_rt = service.comms_runtime(&session_id).await;
-        let control = service.comms_drain_control(&session_id).await;
+        });
         resume_adapter
-            .set_comms_drain_control(&session_id, control)
+            .register_session_with_executor(session_id.clone(), executor)
             .await;
-        resume_adapter
-            .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
-            .await;
-    }
 
-    let result = match handle {
-        Some(handle) => match handle.wait().await {
-            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
-                anyhow::bail!("turn completed without result")
-            }
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                anyhow::bail!("turn abandoned: {reason}")
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                anyhow::bail!("runtime terminated: {reason}")
-            }
-        },
-        None => {
-            eprintln!("Warning: duplicate input — already processed");
-            create_result
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            prompt.to_string(),
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    host_mode: if host_mode { Some(true) } else { None },
+                    skill_references: canonical_skill_refs,
+                    flow_tool_overlay,
+                    additional_instructions,
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_outcome, handle) = resume_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+
+        // Spawn the comms drain in host mode so inbound peer interactions are
+        // routed through the runtime adapter and automatically trigger new turns.
+        #[cfg(feature = "comms")]
+        {
+            let comms_rt = service.comms_runtime(&session_id).await;
+            let control = service.comms_drain_control(&session_id).await;
+            resume_adapter
+                .set_comms_drain_control(&session_id, control)
+                .await;
+            resume_adapter
+                .maybe_spawn_comms_drain(&session_id, host_mode, comms_rt)
+                .await;
         }
-    };
 
-    // The resume turn is complete — abort the comms drain so the CLI can
-    // return. Same rationale as run_agent: one-shot commands must not block.
-    #[cfg(feature = "comms")]
-    {
-        resume_adapter.abort_comms_drain(&session_id).await;
-    }
-
-    log_stage("service.create_session(done)");
-
-    output_pipeline
-        .shutdown_after(async {
-            // Shutdown the session service and MCP connections gracefully.
-            resume_adapter.unregister_session(&session_id).await;
-            log_stage("service.shutdown");
-            service.shutdown().await;
-            log_stage("shutdown_mcp");
-            shutdown_mcp(&mcp_adapter).await;
-            log_stage("persist_mob_registry");
-            if let Some(ref mut mob_ctx) = run_mob_tools {
-                mob_ctx.persist(scope).await?;
+        match handle {
+            Some(handle) => completion_outcome_to_result(handle.wait().await),
+            None => {
+                eprintln!("Warning: duplicate input — already processed");
+                Ok(create_result)
             }
-            Ok(())
-        })
-        .await?;
+        }
+    }
+    .await;
+
+    let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
+        // The resume turn is complete — abort the comms drain so the CLI can
+        // return. Same rationale as run_agent: one-shot commands must not block.
+        #[cfg(feature = "comms")]
+        {
+            resume_adapter.abort_comms_drain(&session_id).await;
+        }
+
+        log_stage("service.create_session(done)");
+
+        // Shutdown the session service and MCP connections gracefully.
+        resume_adapter.unregister_session(&session_id).await;
+        log_stage("service.shutdown");
+        service.shutdown().await;
+        log_stage("shutdown_mcp");
+        shutdown_mcp(&mcp_adapter).await;
+        log_stage("persist_mob_registry");
+        if let Some(ref mut mob_ctx) = run_mob_tools {
+            mob_ctx.persist(scope).await?;
+        }
+        Ok(())
+    })
+    .await?;
 
     // Output the result
     log_stage("print_result");
@@ -6485,6 +6540,80 @@ mod tests {
         .await
         .expect("shutdown should finish once runtime executor is unregistered")
         .expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_still_joins_stream_tasks_when_cleanup_fails() {
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: "test-session".to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async { Err(anyhow::anyhow!("synthetic cleanup failure")) }),
+        )
+        .await
+        .expect("shutdown should not deadlock when cleanup fails")
+        .expect_err("shutdown should preserve the cleanup failure");
+
+        assert!(
+            err.to_string().contains("synthetic cleanup failure"),
+            "shutdown should return the original cleanup failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cli_runtime_turn_failure_still_releases_runtime_executor_sender_clones() {
+        let session_id = SessionId::new();
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: session_id.to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let service: Arc<dyn meerkat_core::service::SessionService> =
+            Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let executor = Box::new(CliRuntimeExecutor {
+            service,
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            event_tx: pipeline.event_sender(),
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await;
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            finalize_cli_runtime_backed_turn(
+                pipeline,
+                Err::<(), _>(anyhow::anyhow!("turn abandoned: synthetic failure")),
+                async {
+                    runtime_adapter.unregister_session(&session_id).await;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .expect("failure-path shutdown should not deadlock")
+        .expect_err("finalizer should preserve the original turn failure");
+
+        assert!(
+            err.to_string()
+                .contains("turn abandoned: synthetic failure"),
+            "failure-path finalizer should return the original turn error"
+        );
     }
 
     struct StaticDispatcher {

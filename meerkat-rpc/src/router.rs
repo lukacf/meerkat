@@ -25,6 +25,7 @@ use crate::handlers;
 use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::RequestContext;
 
 #[cfg(feature = "comms")]
 fn is_transport_internal(message: &str) -> bool {
@@ -533,6 +534,17 @@ impl MethodRouter {
     /// require a response.
     #[allow(clippy::if_not_else)]
     pub async fn dispatch(&self, request: RpcRequest) -> Option<RpcResponse> {
+        self.dispatch_with_request_context(request, None).await
+    }
+
+    /// Dispatch a request with optional host-level request context for
+    /// long-running cancel/publish coordination.
+    #[allow(clippy::if_not_else)]
+    pub async fn dispatch_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RpcResponse> {
         // Notifications (no id) are fire-and-forget
         if request.is_notification() {
             // Handle known notification methods silently
@@ -560,6 +572,7 @@ impl MethodRouter {
                     self.runtime.clone(),
                     &self.notification_sink,
                     &self.runtime_adapter,
+                    request_context.clone(),
                 )
                 .await
             }
@@ -580,6 +593,7 @@ impl MethodRouter {
                     self.runtime.clone(),
                     &self.notification_sink,
                     &self.runtime_adapter,
+                    request_context.clone(),
                 )
                 .await
             }

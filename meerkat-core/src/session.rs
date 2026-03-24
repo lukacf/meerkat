@@ -508,6 +508,8 @@ pub struct SessionMetadata {
     pub model: String,
     pub max_tokens: u32,
     pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
     pub tooling: SessionTooling,
     pub host_mode: bool,
     pub comms_name: Option<String>,
@@ -526,6 +528,34 @@ pub struct SessionMetadata {
     /// Config generation used when this session was created/resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_generation: Option<u64>,
+}
+
+/// Canonical durable LLM identity for a session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionLlmIdentity {
+    pub model: String,
+    pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<serde_json::Value>,
+}
+
+impl SessionMetadata {
+    /// Return the current durable LLM identity for this session.
+    pub fn llm_identity(&self) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: self.model.clone(),
+            provider: self.provider,
+            provider_params: self.provider_params.clone(),
+        }
+    }
+
+    /// Overwrite the durable LLM identity while preserving unrelated session metadata.
+    pub fn apply_llm_identity(&mut self, identity: &SessionLlmIdentity) {
+        self.model = identity.model.clone();
+        self.provider = identity.provider;
+        self.provider_params = identity.provider_params.clone();
+    }
 }
 
 /// Key used to store SessionMetadata in Session metadata map.

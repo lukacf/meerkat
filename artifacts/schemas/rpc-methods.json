@@ -264,6 +264,10 @@
       "name": "initialized"
     },
     {
+      "description": "Cancel an in-flight JSON-RPC request by request id",
+      "name": "cancel"
+    },
+    {
       "description": "AgentEvent payload during turns",
       "name": "session/event"
     },

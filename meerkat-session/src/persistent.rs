@@ -381,10 +381,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.export_session_with_labels(id).await
     }
 
+    pub async fn live_session_llm_identity(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::SessionLlmIdentity, SessionError> {
+        self.inner.live_session_llm_identity(id).await
+    }
+
     pub async fn discard_live_session(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.discard_live_session(id).await?;
         self.checkpointer_gates.lock().await.remove(id);
         Ok(())
+    }
+
+    pub async fn persist_live_session_now(&self, id: &SessionId) -> Result<usize, SessionError> {
+        self.persist_full_session(id).await
     }
 
     /// Create a new persistent session service.
@@ -724,6 +735,17 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         self.inner.set_session_client(id, client).await
     }
 
+    async fn hot_swap_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .hot_swap_session_llm_identity(id, client, identity)
+            .await
+    }
+
     async fn set_session_tool_filter(
         &self,
         id: &SessionId,
@@ -754,6 +776,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                         updated_at: session.updated_at(),
                         message_count: session.messages().len(),
                         is_active: false,
+                        model: session
+                            .session_metadata()
+                            .map(|meta| meta.model)
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        provider: session
+                            .session_metadata()
+                            .map(|meta| meta.provider)
+                            .unwrap_or(meerkat_core::Provider::Other),
                         last_assistant_text: session.last_assistant_text(),
                         labels,
                     },
@@ -1301,6 +1331,40 @@ mod tests {
         }
 
         fn cancel(&mut self) {}
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut metadata =
+                session
+                    .session_metadata()
+                    .unwrap_or(meerkat_core::SessionMetadata {
+                        model: identity.model.clone(),
+                        max_tokens: 0,
+                        provider: identity.provider,
+                        provider_params: identity.provider_params.clone(),
+                        tooling: meerkat_core::SessionTooling::default(),
+                        host_mode: false,
+                        comms_name: None,
+                        peer_meta: None,
+                        realm_id: None,
+                        instance_id: None,
+                        backend: None,
+                        config_generation: None,
+                    });
+            metadata.apply_llm_identity(&identity);
+            session.set_session_metadata(metadata).map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update dummy session metadata: {err}"
+                ))
+            })
+        }
 
         fn session_id(&self) -> SessionId {
             match self.session.lock() {
@@ -2242,6 +2306,7 @@ mod tests {
                 model: "test-model".to_string(),
                 max_tokens: 1024,
                 provider: meerkat_core::Provider::Anthropic,
+                provider_params: None,
                 tooling: meerkat_core::SessionTooling {
                     builtins: true,
                     shell: false,

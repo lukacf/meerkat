@@ -7,6 +7,7 @@
 use meerkat::SessionServiceCommsExt;
 #[cfg(test)]
 use meerkat::SessionStore;
+use meerkat::surface::{RequestContext, prepare_surface_session, request_action};
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService, ToolError,
     ToolResult,
@@ -20,7 +21,7 @@ use meerkat_core::service::{
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
     ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
-    RuntimeBootstrap, Session, ToolCallView, format_verbose_event,
+    RuntimeBootstrap, ToolCallView, format_verbose_event,
 };
 use meerkat_mcp::{McpReloadTarget, McpRouter};
 use schemars::JsonSchema;
@@ -351,7 +352,7 @@ fn realm_store_path(
 /// (`builtins: true`, `shell: true`). Per-request tool configuration is
 /// controlled via `override_builtins` / `override_shell` in `SessionBuildOptions`.
 pub struct MeerkatMcpState {
-    service: PersistentSessionService<FactoryAgentBuilder>,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     realm_id: String,
     backend: String,
     instance_id: Option<String>,
@@ -489,7 +490,12 @@ impl MeerkatMcpState {
 
         let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         builder.default_llm_client = default_llm_client;
-        let service = PersistentSessionService::new(builder, 100, session_store, runtime_store);
+        let service = Arc::new(PersistentSessionService::new(
+            builder,
+            100,
+            session_store,
+            runtime_store,
+        ));
 
         Ok(Self {
             service,
@@ -557,7 +563,7 @@ impl MeerkatMcpState {
         }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = PersistentSessionService::new(builder, 100, store, None);
+        let service = Arc::new(PersistentSessionService::new(builder, 100, store, None));
 
         Self {
             service,
@@ -1179,7 +1185,7 @@ pub async fn handle_tools_call(
     tool_name: &str,
     arguments: &Value,
 ) -> Result<Value, ToolCallError> {
-    handle_tools_call_with_notifier(state, tool_name, arguments, None).await
+    handle_tools_call_with_notifier(state, tool_name, arguments, None, None).await
 }
 
 /// Handle a tools/call request with optional event notifications.
@@ -1188,19 +1194,20 @@ pub async fn handle_tools_call_with_notifier(
     tool_name: &str,
     arguments: &Value,
     notifier: Option<EventNotifier>,
+    request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     match tool_name {
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_run(state, input, notifier)
+            handle_meerkat_run(state, input, notifier, request_context)
                 .await
                 .map_err(ToolCallError::internal)
         }
         "meerkat_resume" => {
             let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_resume(state, input, notifier)
+            handle_meerkat_resume(state, input, notifier, request_context)
                 .await
                 .map_err(ToolCallError::internal)
         }
@@ -2244,6 +2251,7 @@ async fn handle_meerkat_run(
     state: &MeerkatMcpState,
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
+    request_context: Option<RequestContext>,
 ) -> Result<Value, String> {
     validate_public_peer_meta(input.peer_meta.as_ref())?;
     let host_mode = resolve_host_mode(input.host_mode)?;
@@ -2296,19 +2304,36 @@ async fn handle_meerkat_run(
         None => None,
     };
 
-    // Pre-create a session to claim a stable session_id
-    let session = Session::new();
-    let session_id = session.id().clone();
-    state
-        .runtime_adapter
-        .register_session(session_id.clone())
-        .await;
-    let ops_lifecycle = state
-        .runtime_adapter
-        .ops_lifecycle_registry(&session_id)
-        .await
-        .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))?;
+    // Pre-create a session to claim a stable session_id.
+    let prepared_session = prepare_surface_session(&state.runtime_adapter).await?;
+    let session = prepared_session.session;
+    let session_id = prepared_session.session_id;
+    let ops_lifecycle = prepared_session.ops_lifecycle;
+
+    if let Some(context) = request_context.as_ref() {
+        let service = state.service.clone();
+        let session_id_for_cancel = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let service = service.clone();
+            let session_id = session_id_for_cancel.clone();
+            async move {
+                let _ = service.interrupt(&session_id).await;
+            }
+        }));
+        let service = state.service.clone();
+        let runtime_adapter = Arc::clone(&state.runtime_adapter);
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(request_action(move || {
+            let service = service.clone();
+            let runtime_adapter = runtime_adapter.clone();
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = service.archive(&session_id).await;
+                runtime_adapter.unregister_session(&session_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
+    }
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -2328,6 +2353,7 @@ async fn handle_meerkat_run(
         resume_session: Some(session),
         budget_limits: input.budget_limits.clone().map(Into::into),
         provider_params: input.provider_params.clone(),
+        call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         llm_client_override: None,
         ops_lifecycle_override: Some(ops_lifecycle),
@@ -2400,6 +2426,7 @@ async fn handle_meerkat_resume(
     state: &MeerkatMcpState,
     input: MeerkatResumeInput,
     notifier: Option<EventNotifier>,
+    request_context: Option<RequestContext>,
 ) -> Result<Value, String> {
     validate_public_peer_meta(input.peer_meta.as_ref())?;
     let config = state
@@ -2411,6 +2438,20 @@ async fn handle_meerkat_resume(
 
     let session_id =
         meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+
+    if let Some(context) = request_context.as_ref() {
+        let service = state.service.clone();
+        let session_id_for_cancel = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let service = service.clone();
+            let session_id = session_id_for_cancel.clone();
+            async move {
+                let _ = service.interrupt(&session_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
+    }
+
     let mut session = state
         .service
         .load_persisted(&session_id)
@@ -2542,6 +2583,7 @@ async fn handle_meerkat_resume(
         resume_session: Some(session),
         budget_limits: input.budget_limits.clone().map(Into::into),
         provider_params: input.provider_params.clone(),
+        call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         llm_client_override: None,
         ops_lifecycle_override: Some(ops_lifecycle),
@@ -2783,6 +2825,7 @@ impl AgentToolDispatcher for MpcToolDispatcher {
 mod tests {
     use super::*;
     use futures::stream;
+    use meerkat::Session;
     use std::path::PathBuf;
     use tokio::time::{Duration, timeout};
 
@@ -3380,6 +3423,7 @@ mod tests {
                 app_context: None,
                 shell_env: None,
             },
+            None,
             None,
         )
         .await;

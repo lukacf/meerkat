@@ -1,10 +1,12 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use meerkat::surface::{RequestContext, request_action};
 use meerkat::SessionService;
 use meerkat_core::service::{
     CreateSessionRequest, HostModeOwner, InitialTurnPolicy, SessionBuildOptions,
 };
+use meerkat_core::Session;
 
 use crate::state::ForceState;
 use super::ToolCallError;
@@ -17,7 +19,11 @@ struct ConsultInput {
     provider_params: Option<Value>,
 }
 
-pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, ToolCallError> {
+pub async fn handle(
+    state: &ForceState,
+    arguments: &Value,
+    request_context: Option<RequestContext>,
+) -> Result<Value, ToolCallError> {
     let input: ConsultInput = serde_json::from_value(arguments.clone())
         .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
 
@@ -30,11 +36,36 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
         .model
         .unwrap_or_else(|| "gpt-5.3-codex".to_string());
 
-    let build = input.provider_params.map(|pp| {
-        let mut opts = SessionBuildOptions::default();
-        opts.provider_params = Some(pp);
-        opts
-    });
+    let session = Session::new();
+    let session_id = session.id().clone();
+
+    if let Some(context) = request_context.as_ref() {
+        let service = state.session_service.clone();
+        let session_id_for_cancel = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let service = service.clone();
+            let session_id = session_id_for_cancel.clone();
+            async move {
+                let _ = service.interrupt(&session_id).await;
+            }
+        }));
+        let service = state.session_service.clone();
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(request_action(move || {
+            let service = service.clone();
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = service.archive(&session_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
+    }
+
+    let mut build = SessionBuildOptions {
+        resume_session: Some(session),
+        ..SessionBuildOptions::default()
+    };
+    build.provider_params = input.provider_params;
 
     let req = CreateSessionRequest {
         model,
@@ -51,7 +82,7 @@ pub async fn handle(state: &ForceState, arguments: &Value) -> Result<Value, Tool
         host_mode_owner: HostModeOwner::SessionService,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
-        build,
+        build: Some(build),
         labels: None,
     };
 

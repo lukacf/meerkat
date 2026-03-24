@@ -23,7 +23,7 @@ use meerkat_core::types::{
     ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, ToolCallView, ToolDef,
     ToolResult, Usage,
 };
-use meerkat_core::{AgentEvent, EventEnvelope, EventStream, StreamError};
+use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
     MobRuntimeMode, MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
@@ -789,6 +789,8 @@ impl SessionService for LocalSessionService {
                 updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
                 last_assistant_text: None,
                 labels: Default::default(),
             },
@@ -837,6 +839,8 @@ impl SessionService for LocalSessionService {
                         updated_at: SystemTime::now(),
                         message_count: 0,
                         is_active: false,
+                        model: "claude-sonnet-4-5".to_string(),
+                        provider: Provider::Anthropic,
                         last_assistant_text: None,
                         labels: Default::default(),
                     },
@@ -2030,6 +2034,8 @@ mod tests {
                             updated_at: SystemTime::now(),
                             message_count: 0,
                             is_active: false,
+                            model: "claude-sonnet-4-5".to_string(),
+                            provider: Provider::Anthropic,
                             last_assistant_text: None,
                             labels: Default::default(),
                         },
@@ -2048,6 +2054,8 @@ mod tests {
                     updated_at: SystemTime::now(),
                     message_count: 0,
                     is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: Provider::Anthropic,
                     last_assistant_text: None,
                     labels: Default::default(),
                 },
@@ -2537,6 +2545,7 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             provider: Provider::Anthropic,
+            provider_params: None,
             tooling: SessionTooling {
                 comms: true,
                 ..SessionTooling::default()
@@ -2569,6 +2578,7 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             provider: Provider::Anthropic,
+            provider_params: None,
             tooling: SessionTooling {
                 comms: true,
                 ..SessionTooling::default()
@@ -2606,6 +2616,7 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
             provider: Provider::Anthropic,
+            provider_params: None,
             tooling: SessionTooling {
                 comms: true,
                 ..SessionTooling::default()

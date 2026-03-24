@@ -258,6 +258,10 @@ pub fn rpc_notification_catalog(
             "initialized",
             "Client notification acknowledged silently (no response)",
         ),
+        RpcNotificationDescriptor::basic(
+            "cancel",
+            "Cancel an in-flight JSON-RPC request by request id",
+        ),
         RpcNotificationDescriptor::basic("session/event", "AgentEvent payload during turns"),
         RpcNotificationDescriptor::basic(
             "session/stream_event",
@@ -300,6 +304,7 @@ mod tests {
     #[test]
     fn documented_surface_keeps_live_stream_notifications() {
         let notifications = rpc_notification_names(RpcMethodCatalogOptions::documented_surface());
+        assert!(notifications.iter().any(|n| n == "cancel"));
         assert!(notifications.iter().any(|n| n == "session/stream_event"));
         assert!(notifications.iter().any(|n| n == "session/stream_end"));
         assert!(notifications.iter().any(|n| n == "mob/stream_event"));

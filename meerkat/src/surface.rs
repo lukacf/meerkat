@@ -2,6 +2,15 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
+mod request_execution;
+mod stdio_json;
+
+pub use request_execution::{
+    PreparedSurfaceSession, RequestAsyncAction, RequestContext, RequestTerminal,
+    SurfaceRequestExecutor, noop_request_action, prepare_surface_session, request_action,
+};
+pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};
+
 use meerkat_contracts::{
     CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
 };

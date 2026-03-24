@@ -135,6 +135,8 @@ fn wire_session_info_required_fields() {
         updated_at: 2000,
         message_count: 5,
         is_active: true,
+        model: "claude-sonnet-4-5".to_string(),
+        provider: "anthropic".to_string(),
         last_assistant_text: None,
         labels: Default::default(),
     };
@@ -148,6 +150,8 @@ fn wire_session_info_required_fields() {
         "missing message_count"
     );
     assert!(value.get("is_active").is_some(), "missing is_active");
+    assert!(value.get("model").is_some(), "missing model");
+    assert!(value.get("provider").is_some(), "missing provider");
 }
 
 // ---------------------------------------------------------------------------

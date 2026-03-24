@@ -20,6 +20,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::{RequestContext, request_action};
 use meerkat_runtime::SessionServiceRuntimeExt;
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ pub async fn handle_start(
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
+    request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let params: StartTurnParams = match parse_params(params) {
         Ok(p) => p,
@@ -144,6 +146,19 @@ pub async fn handle_start(
         Ok(sid) => sid,
         Err(resp) => return resp,
     };
+
+    if let Some(context) = request_context.as_ref() {
+        let runtime = Arc::clone(&runtime);
+        let session_id = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let _ = runtime.interrupt(&session_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
+    }
 
     // Set up event forwarding. The spawned task exits naturally when `event_tx`
     // is dropped at the end of the turn (the session task holds the only sender).

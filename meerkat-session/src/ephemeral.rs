@@ -20,7 +20,7 @@ use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
 use meerkat_core::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, HostModePollOutcome,
-    PendingSystemContextAppend, SessionSystemContextState,
+    PendingSystemContextAppend, SessionLlmIdentity, SessionSystemContextState,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -84,6 +84,11 @@ enum SessionCommand {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
         reply_tx: oneshot::Sender<()>,
     },
+    HotSwapLlmIdentity {
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     StageToolFilter {
         filter: meerkat_core::ToolFilter,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -115,6 +120,7 @@ struct SessionHandle {
     command_tx: mpsc::Sender<SessionCommand>,
     state_rx: watch::Receiver<SessionState>,
     summary_rx: watch::Receiver<SessionSummaryCache>,
+    llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
     /// Atomic turn-admission lock. Set to `true` by the caller before sending
     /// `StartTurn`, guaranteeing that only one turn is admitted at a time.
     /// Reset to `false` by the session task after the turn completes.
@@ -145,6 +151,7 @@ struct SessionHandle {
 struct SessionTaskControl {
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
+    llm_identity_tx: watch::Sender<SessionLlmIdentity>,
     turn_lock: Arc<AtomicBool>,
     interrupt_requested: Arc<AtomicBool>,
     interrupt_notify: Arc<tokio::sync::Notify>,
@@ -207,6 +214,13 @@ pub trait SessionAgent: Send {
 
     /// Replace the LLM client for subsequent turns.
     fn replace_client(&mut self, _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {}
+
+    /// Atomically update the live client and the session's durable LLM identity.
+    fn hot_swap_llm_identity(
+        &mut self,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError>;
 
     /// Stage an external tool visibility filter for subsequent turns.
     fn stage_external_tool_filter(
@@ -305,6 +319,24 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    fn llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
+        let provider = req
+            .build
+            .as_ref()
+            .and_then(|build| build.provider)
+            .or_else(|| meerkat_core::Provider::infer_from_model(&req.model))
+            .unwrap_or(meerkat_core::Provider::Other);
+        let provider_params = req
+            .build
+            .as_ref()
+            .and_then(|build| build.provider_params.clone());
+        SessionLlmIdentity {
+            model: req.model.clone(),
+            provider,
+            provider_params,
+        }
+    }
+
     /// Create a new ephemeral session service.
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
@@ -319,6 +351,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
     fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
         let cache = handle.summary_rx.borrow();
+        let llm_identity = handle.llm_identity_rx.borrow().clone();
         SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
@@ -326,6 +359,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 updated_at: cache.updated_at,
                 message_count: cache.message_count,
                 is_active: false,
+                model: llm_identity.model,
+                provider: llm_identity.provider,
                 last_assistant_text: cache.last_assistant_text.clone(),
                 labels: handle.labels.clone(),
             },
@@ -442,6 +477,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         sessions
             .get(session_id)
             .map(|h| Arc::clone(&h.system_context_state))
+    }
+
+    /// Get the current live durable LLM identity for a session.
+    pub async fn live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionLlmIdentity, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(session_id)
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        Ok(handle.llm_identity_rx.borrow().clone())
     }
 
     /// Get the comms runtime for a session, if available.
@@ -568,6 +617,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .builder
             .build_agent(&req, agent_event_tx.clone())
             .await?;
+        let llm_identity = Self::llm_identity_from_create_request(&req);
 
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
@@ -590,6 +640,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             usage: Usage::default(),
             last_assistant_text: None,
         });
+        let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
         let (session_event_tx, session_event_rx) =
             tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(EVENT_CHANNEL_CAPACITY);
         drop(session_event_rx);
@@ -606,6 +657,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             SessionTaskControl {
                 state_tx,
                 summary_tx,
+                llm_identity_tx,
                 turn_lock: task_turn_lock,
                 interrupt_requested: interrupt_requested.clone(),
                 interrupt_notify: interrupt_notify.clone(),
@@ -618,6 +670,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             command_tx: command_tx.clone(),
             state_rx,
             summary_rx,
+            llm_identity_rx,
             turn_lock: turn_lock.clone(),
             _capacity_permit: capacity_permit,
             created_at,
@@ -810,6 +863,40 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         })
     }
 
+    async fn hot_swap_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::HotSwapLlmIdentity {
+                client,
+                identity,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     async fn set_session_tool_filter(
         &self,
         id: &SessionId,
@@ -886,6 +973,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 updated_at: summary.updated_at,
                 message_count: summary.message_count,
                 is_active: state == SessionState::Running,
+                model: handle.llm_identity_rx.borrow().model.clone(),
+                provider: handle.llm_identity_rx.borrow().provider,
                 last_assistant_text: summary.last_assistant_text,
                 labels: handle.labels.clone(),
             },
@@ -1134,6 +1223,18 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ReplaceClient { client, reply_tx } => {
                 agent.replace_client(client);
                 let _ = reply_tx.send(());
+                continue;
+            }
+            SessionCommand::HotSwapLlmIdentity {
+                client,
+                identity,
+                reply_tx,
+            } => {
+                let result = agent.hot_swap_llm_identity(client, identity.clone());
+                if result.is_ok() {
+                    control.llm_identity_tx.send_replace(identity);
+                }
+                let _ = reply_tx.send(result);
                 continue;
             }
             SessionCommand::StageToolFilter { filter, reply_tx } => {

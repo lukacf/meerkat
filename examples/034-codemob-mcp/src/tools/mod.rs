@@ -2,9 +2,14 @@ pub mod consult;
 pub mod deliberate;
 pub mod mobs;
 
+use std::sync::Arc;
+
+use meerkat::surface::RequestContext;
 use serde_json::{Value, json};
 
 use crate::state::ForceState;
+
+pub type ProgressNotifier = Arc<dyn Fn(Value, usize, usize, String) + Send + Sync>;
 
 pub struct ToolCallError {
     pub code: i32,
@@ -237,6 +242,8 @@ pub async fn handle_tool_call(
     name: &str,
     arguments: &Value,
     progress_token: Option<Value>,
+    progress_notifier: Option<ProgressNotifier>,
+    request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     match name {
         "list_packs" => {
@@ -249,11 +256,18 @@ pub async fn handle_tool_call(
                 .collect();
             Ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&packs).unwrap_or_default()}]}))
         }
-        "consult" => consult::handle(state, arguments).await,
+        "consult" => consult::handle(state, arguments, request_context).await,
         "deliberate" => {
             // Reload user packs so newly created mobs are available
             state.reload_user_packs();
-            deliberate::handle(state, arguments, progress_token).await
+            deliberate::handle(
+                state,
+                arguments,
+                progress_token,
+                progress_notifier,
+                request_context,
+            )
+            .await
         }
         "create_mob" => {
             let result = mobs::handle_create(arguments).await?;

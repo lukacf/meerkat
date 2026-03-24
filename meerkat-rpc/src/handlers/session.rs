@@ -21,6 +21,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::{RequestContext, request_action};
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -229,6 +230,7 @@ pub async fn handle_create(
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
+    request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let params: CreateSessionParams = match parse_params(params) {
         Ok(p) => p,
@@ -367,6 +369,29 @@ pub async fn handle_create(
         runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
             .await;
+    }
+
+    if let Some(context) = request_context.as_ref() {
+        let runtime_for_cancel = Arc::clone(&runtime);
+        let session_id_for_cancel = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cancel);
+            let session_id = session_id_for_cancel.clone();
+            async move {
+                let _ = runtime.interrupt(&session_id).await;
+            }
+        }));
+
+        let runtime_for_cleanup = Arc::clone(&runtime);
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cleanup);
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = runtime.archive_session(&session_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
     }
 
     // Deferred mode: return session ID without running a turn.

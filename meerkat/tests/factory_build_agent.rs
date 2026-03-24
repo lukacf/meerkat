@@ -273,6 +273,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         model: "claude-sonnet-4-5".to_string(),
         max_tokens: 4096,
         provider: Provider::Anthropic,
+        provider_params: None,
         tooling: SessionTooling {
             builtins: true,
             shell: false,
@@ -579,6 +580,7 @@ async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surf
             model: "claude-sonnet-4-5".into(),
             max_tokens: 2048,
             provider: Provider::Anthropic,
+            provider_params: None,
             tooling: SessionTooling {
                 builtins: false,
                 shell: false,

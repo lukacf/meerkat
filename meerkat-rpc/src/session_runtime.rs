@@ -41,7 +41,8 @@ use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{
-    Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionSystemContextState,
+    Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionLlmIdentity,
+    SessionSystemContextState,
 };
 use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
 use tokio::sync::{RwLock, mpsc};
@@ -109,6 +110,7 @@ pub struct SessionInfo {
 /// Staged session data: build config + metadata not yet materialized in the service.
 struct PendingSession {
     phase: PendingSessionPhase,
+    effective_llm_identity: SessionLlmIdentity,
     labels: Option<BTreeMap<String, String>>,
     /// Prompt from `session/create` when `initial_turn` is deferred.
     /// Prepended to the first `turn/start` prompt.
@@ -378,59 +380,127 @@ impl SessionRuntime {
         self.default_llm_client.clone()
     }
 
-    /// Hot-swap the LLM client on a materialized session.
-    ///
-    /// Builds a new client for the given model/provider override and replaces
-    /// the session's client via `set_session_client`. Falls back to
-    /// `default_llm_client` when available, otherwise creates a fresh client
-    /// from the factory (which resolves API keys from env vars).
-    async fn hot_swap_llm_client(
+    fn llm_identity_from_pending_build(build_config: &AgentBuildConfig) -> SessionLlmIdentity {
+        let provider = build_config
+            .provider
+            .or_else(|| meerkat_core::Provider::infer_from_model(&build_config.model))
+            .unwrap_or(meerkat_core::Provider::Other);
+        SessionLlmIdentity {
+            model: build_config.model.clone(),
+            provider,
+            provider_params: build_config.provider_params.clone(),
+        }
+    }
+
+    fn resolve_target_llm_identity(
+        current: &SessionLlmIdentity,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<SessionLlmIdentity, RpcError> {
+        if ov.provider.is_some() && ov.model.is_none() {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "provider override requires model on an existing session".to_string(),
+                data: None,
+            });
+        }
+
+        let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
+        let provider = if let Some(provider_name) = ov.provider.as_ref() {
+            meerkat_core::Provider::from_name(provider_name)
+        } else if ov.model.is_some() {
+            meerkat_core::Provider::infer_from_model(&model).unwrap_or(current.provider)
+        } else {
+            current.provider
+        };
+        let provider_params = ov
+            .provider_params
+            .clone()
+            .or_else(|| current.provider_params.clone());
+
+        Ok(SessionLlmIdentity {
+            model,
+            provider,
+            provider_params,
+        })
+    }
+
+    fn apply_llm_identity_to_build_config(
+        build_config: &mut AgentBuildConfig,
+        identity: &SessionLlmIdentity,
+    ) {
+        build_config.model = identity.model.clone();
+        build_config.provider = Some(identity.provider);
+        build_config.provider_params = identity.provider_params.clone();
+    }
+
+    async fn current_materialized_llm_identity(
         &self,
         session_id: &SessionId,
-        ov: &crate::handlers::turn::TurnOverrides,
-    ) -> Result<(), RpcError> {
-        let catalog_default =
-            meerkat_models::default_model("anthropic").unwrap_or("claude-sonnet-4-5");
-        let model = ov.model.as_deref().unwrap_or(catalog_default);
-        let provider = ov
-            .provider
-            .as_ref()
-            .map(|p| meerkat_core::Provider::from_name(p))
-            .unwrap_or_else(|| {
-                meerkat_core::Provider::infer_from_model(model)
-                    .unwrap_or(meerkat_core::Provider::Other)
-            });
+    ) -> Result<SessionLlmIdentity, RpcError> {
+        match self.service.live_session_llm_identity(session_id).await {
+            Ok(identity) => Ok(identity),
+            Err(SessionError::NotFound { .. }) => {
+                let session = self
+                    .load_persisted_session(session_id)
+                    .await?
+                    .ok_or_else(|| RpcError {
+                        code: error::SESSION_NOT_FOUND,
+                        message: format!("session not found: {session_id}"),
+                        data: None,
+                    })?;
+                let metadata = session.session_metadata().ok_or_else(|| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "session {session_id} is missing durable llm identity metadata"
+                    ),
+                    data: None,
+                })?;
+                Ok(metadata.llm_identity())
+            }
+            Err(err) => Err(session_error_to_rpc(err)),
+        }
+    }
 
+    async fn build_adapter_for_llm_identity(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Result<Arc<dyn meerkat_core::AgentLlmClient>, RpcError> {
         let raw_client = if let Some(ref default) = self.default_llm_client {
             Arc::clone(default)
         } else {
             self.factory
-                .build_llm_client(provider, None, None)
+                .build_llm_client(identity.provider, None, None)
                 .await
                 .map_err(|e| RpcError {
                     code: error::INTERNAL_ERROR,
-                    message: format!("Failed to build LLM client for model override: {e}"),
+                    message: format!(
+                        "Failed to build LLM client for session identity hot-swap: {e}"
+                    ),
                     data: None,
                 })?
         };
 
-        let adapter: Arc<dyn meerkat_core::AgentLlmClient> =
-            Arc::new(self.factory.build_llm_adapter(raw_client, model).await);
-        self.service
-            .set_session_client(session_id, adapter)
-            .await
-            .map_err(session_error_to_rpc)?;
+        let mut adapter = self
+            .factory
+            .build_llm_adapter(raw_client, identity.model.clone())
+            .await;
+        if let Some(params) = identity.provider_params.clone() {
+            adapter = adapter.with_provider_params(Some(params));
+        }
+        Ok(Arc::new(adapter))
+    }
 
-        // Refresh view_image visibility based on the new model's capabilities,
-        // merging with any pre-existing external tool filter so we don't clobber
-        // restrictions set by other sources.
-        let provider_str = provider.as_str();
-        let Some(profile) = meerkat_models::profile::profile_for(provider_str, model) else {
-            // Unknown model — leave tool visibility unchanged.
-            return Ok(());
+    async fn refresh_view_image_filter_for_identity(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) {
+        let provider_str = identity.provider.as_str();
+        let Some(profile) = meerkat_models::profile::profile_for(provider_str, &identity.model)
+        else {
+            return;
         };
 
-        // Read the current external filter from session metadata.
         let current_filter = self
             .service
             .export_live_session(session_id)
@@ -448,8 +518,6 @@ impl SessionRuntime {
 
         let view_image = "view_image".to_string();
         let filter = if profile.image_tool_results {
-            // New model supports image tool results — remove view_image from
-            // existing deny set, or add it to existing allow set.
             match current_filter {
                 meerkat_core::ToolFilter::Deny(mut denied) => {
                     denied.remove(&view_image);
@@ -466,8 +534,6 @@ impl SessionRuntime {
                 other => other,
             }
         } else {
-            // New model does not support image tool results — add view_image
-            // to the existing deny set, preserving other denied tools.
             match current_filter {
                 meerkat_core::ToolFilter::Deny(mut denied) => {
                     denied.insert(view_image);
@@ -476,7 +542,6 @@ impl SessionRuntime {
                 meerkat_core::ToolFilter::All => {
                     meerkat_core::ToolFilter::Deny([view_image].into_iter().collect())
                 }
-                // Allow list: remove view_image so it's no longer permitted.
                 meerkat_core::ToolFilter::Allow(mut allowed) => {
                     allowed.remove(&view_image);
                     meerkat_core::ToolFilter::Allow(allowed)
@@ -484,12 +549,63 @@ impl SessionRuntime {
             }
         };
 
-        // Best-effort: if the filter references unknown tools (e.g., view_image
-        // was never registered), the session service will return an error that
-        // we intentionally ignore.
         let _ = self
             .service
             .set_session_tool_filter(session_id, filter)
+            .await;
+    }
+
+    /// Hot-swap the LLM client on a materialized session.
+    ///
+    /// Resolves a new durable session identity from the current identity plus
+    /// explicit overrides, updates the live client and durable metadata
+    /// together, then persists the updated session snapshot before the next
+    /// turn begins.
+    async fn hot_swap_llm_client(
+        &self,
+        session_id: &SessionId,
+        ov: &crate::handlers::turn::TurnOverrides,
+    ) -> Result<(), RpcError> {
+        let current_identity = self.current_materialized_llm_identity(session_id).await?;
+        let new_identity = Self::resolve_target_llm_identity(&current_identity, ov)?;
+        let adapter = self.build_adapter_for_llm_identity(&new_identity).await?;
+        self.service
+            .hot_swap_session_llm_identity(session_id, adapter, new_identity.clone())
+            .await
+            .map_err(session_error_to_rpc)?;
+
+        if let Err(err) = self.service.persist_live_session_now(session_id).await {
+            let rollback_adapter = self
+                .build_adapter_for_llm_identity(&current_identity)
+                .await?;
+            if let Err(rollback_err) = self
+                .service
+                .hot_swap_session_llm_identity(
+                    session_id,
+                    rollback_adapter,
+                    current_identity.clone(),
+                )
+                .await
+            {
+                tracing::error!(
+                    session_id = %session_id,
+                    persist_error = %err,
+                    rollback_error = %rollback_err,
+                    "failed to persist hot-swapped llm identity and rollback live session; discarding live session"
+                );
+                let _ = self.service.discard_live_session(session_id).await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "failed to persist hot-swapped llm identity and rollback live session: {rollback_err}"
+                    ),
+                    data: None,
+                });
+            }
+            return Err(session_error_to_rpc(err));
+        }
+
+        self.refresh_view_image_filter_for_identity(session_id, &new_identity)
             .await;
         Ok(())
     }
@@ -953,12 +1069,27 @@ impl SessionRuntime {
             }
 
             if let Some(ref ov) = overrides {
-                if let Some(ref model) = ov.model {
-                    build_config.model = model.clone();
+                if ov.provider.is_some() && ov.model.is_none() {
+                    self.restore_pending_from_promoting(
+                        session_id,
+                        build_config,
+                        labels,
+                        saved_deferred_prompt,
+                        created_at_secs,
+                        updated_at_secs,
+                    )
+                    .await;
+                    return Err(RpcError {
+                        code: error::INVALID_PARAMS,
+                        message: "provider override requires model on a session turn".to_string(),
+                        data: None,
+                    });
                 }
-                if let Some(ref provider) = ov.provider {
-                    build_config.provider = Some(meerkat_core::Provider::from_name(provider));
-                }
+                let resolved_identity = Self::resolve_target_llm_identity(
+                    &Self::llm_identity_from_pending_build(&build_config),
+                    ov,
+                )?;
+                Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 if let Some(max_tokens) = ov.max_tokens {
                     build_config.max_tokens = Some(max_tokens);
                 }
@@ -988,9 +1119,6 @@ impl SessionRuntime {
                 }
                 if let Some(retries) = ov.structured_output_retries {
                     build_config.structured_output_retries = retries;
-                }
-                if let Some(ref pp) = ov.provider_params {
-                    build_config.provider_params = Some(pp.clone());
                 }
                 if let Some(host_mode) = ov.host_mode {
                     build_config.host_mode = host_mode;
@@ -1165,7 +1293,10 @@ impl SessionRuntime {
                 .and_then(|meta| meta.peer_meta.clone()),
             resume_session: Some(stored_session),
             budget_limits: None,
-            provider_params: None,
+            provider_params: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.provider_params.clone()),
+            call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools: None,
             llm_client_override: self
                 .default_llm_client
@@ -1341,10 +1472,12 @@ impl SessionRuntime {
             .await?;
 
         {
+            let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
             let mut pending = self.pending.write().await;
             pending.insert(
                 session_id.clone(),
                 PendingSession {
+                    effective_llm_identity,
                     phase: PendingSessionPhase::Staged {
                         build_config: Box::new(build_config),
                     },
@@ -1452,12 +1585,27 @@ impl SessionRuntime {
             }
             // Apply per-turn overrides to the pending build config.
             if let Some(ref ov) = overrides {
-                if let Some(ref model) = ov.model {
-                    build_config.model = model.clone();
+                if ov.provider.is_some() && ov.model.is_none() {
+                    self.restore_pending_from_promoting(
+                        session_id,
+                        build_config,
+                        labels,
+                        saved_deferred_prompt,
+                        saved_created_at_secs,
+                        saved_updated_at_secs,
+                    )
+                    .await;
+                    return Err(RpcError {
+                        code: error::INVALID_PARAMS,
+                        message: "provider override requires model on a session turn".to_string(),
+                        data: None,
+                    });
                 }
-                if let Some(ref provider) = ov.provider {
-                    build_config.provider = Some(meerkat_core::Provider::from_name(provider));
-                }
+                let resolved_identity = Self::resolve_target_llm_identity(
+                    &Self::llm_identity_from_pending_build(&build_config),
+                    ov,
+                )?;
+                Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 if let Some(max_tokens) = ov.max_tokens {
                     build_config.max_tokens = Some(max_tokens);
                 }
@@ -1488,9 +1636,6 @@ impl SessionRuntime {
                 }
                 if let Some(retries) = ov.structured_output_retries {
                     build_config.structured_output_retries = retries;
-                }
-                if let Some(ref pp) = ov.provider_params {
-                    build_config.provider_params = Some(pp.clone());
                 }
                 if let Some(host_mode) = ov.host_mode {
                     build_config.host_mode = host_mode;
@@ -1569,10 +1714,13 @@ impl SessionRuntime {
                                 ),
                                 data: None,
                             })?;
+                        let effective_llm_identity =
+                            Self::llm_identity_from_pending_build(&build_config);
                         let mut pending = self.pending.write().await;
                         pending.insert(
                             session_id.clone(),
                             PendingSession {
+                                effective_llm_identity,
                                 phase: PendingSessionPhase::Staged {
                                     build_config: Box::new(build_config),
                                 },
@@ -1611,13 +1759,6 @@ impl SessionRuntime {
             }
         }
 
-        // Hot-swap LLM client if model/provider changed.
-        if let Some(ref ov) = overrides
-            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
-        {
-            self.hot_swap_llm_client(session_id, ov).await?;
-        }
-
         let host_mode = match overrides.as_ref().and_then(|ov| ov.host_mode) {
             Some(host_mode) => host_mode,
             None => self
@@ -1653,6 +1794,13 @@ impl SessionRuntime {
                 .await;
         }
 
+        // Hot-swap LLM client if model/provider/provider_params changed.
+        if let Some(ref ov) = overrides
+            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+        {
+            self.hot_swap_llm_client(session_id, ov).await?;
+        }
+
         match self.service.start_turn(session_id, req).await {
             Ok(result) => Ok(result),
             Err(SessionError::NotFound { .. }) => {
@@ -1685,10 +1833,12 @@ impl SessionRuntime {
         created_at_secs: u64,
         updated_at_secs: u64,
     ) {
+        let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
         let mut pending = self.pending.write().await;
         pending.insert(
             session_id.clone(),
             PendingSession {
+                effective_llm_identity,
                 phase: PendingSessionPhase::Staged {
                     build_config: Box::new(build_config),
                 },
@@ -1755,6 +1905,7 @@ impl SessionRuntime {
 
         if let Some(ref meta) = stored_metadata {
             build_config.provider = Some(meta.provider);
+            build_config.provider_params = meta.provider_params.clone();
             build_config.max_tokens = Some(meta.max_tokens);
             build_config.host_mode = meta.host_mode;
             build_config.comms_name = meta.comms_name.clone();
@@ -1804,10 +1955,12 @@ impl SessionRuntime {
         let labels: Option<BTreeMap<String, String>> = None;
 
         {
+            let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
             let mut pending = self.pending.write().await;
             pending.insert(
                 session_id.clone(),
                 PendingSession {
+                    effective_llm_identity,
                     phase: PendingSessionPhase::Staged {
                         build_config: Box::new(build_config),
                     },
@@ -1849,6 +2002,7 @@ impl SessionRuntime {
                     session_id.clone(),
                     PendingSession {
                         phase: PendingSessionPhase::Staged { build_config },
+                        effective_llm_identity: pending_session.effective_llm_identity,
                         labels: pending_session.labels,
                         deferred_prompt: None,
                         created_at_secs: pending_session.created_at_secs,
@@ -2156,6 +2310,8 @@ impl SessionRuntime {
                     updated_at: ps.updated_at_secs,
                     message_count: 0,
                     is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
+                    model: ps.effective_llm_identity.model.clone(),
+                    provider: ps.effective_llm_identity.provider.as_str().to_string(),
                     last_assistant_text: None,
                     labels: ps.labels.clone().unwrap_or_default(),
                 });
@@ -2176,6 +2332,11 @@ impl SessionRuntime {
                     // Active session: return summary without last_assistant_text
                     // to avoid blocking the caller during a running turn.
                     let wire: meerkat_contracts::WireSessionSummary = summary.into();
+                    let llm_identity = self
+                        .service
+                        .live_session_llm_identity(session_id)
+                        .await
+                        .ok()?;
                     return Some(meerkat_contracts::WireSessionInfo {
                         session_id: wire.session_id,
                         session_ref: None,
@@ -2183,6 +2344,8 @@ impl SessionRuntime {
                         updated_at: wire.updated_at,
                         message_count: wire.message_count,
                         is_active: wire.is_active,
+                        model: llm_identity.model,
+                        provider: llm_identity.provider.as_str().to_string(),
                         last_assistant_text: None,
                         labels: wire.labels,
                     });
@@ -4479,6 +4642,216 @@ mod tests {
             filter,
             meerkat_core::ToolFilter::Deny(["datetime".to_string()].into_iter().collect()),
             "hot-swap to Anthropic should remove view_image but keep other denied tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_provider_only_override_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let overrides = crate::handlers::turn::TurnOverrides {
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let err = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".into(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .expect_err("provider-only override should be rejected");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message.contains("provider override requires model"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_provider_params_hot_swap_persists_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let provider_params = serde_json::json!({
+            "thinking": { "budget_tokens": 10_000 }
+        });
+        let overrides = crate::handlers::turn::TurnOverrides {
+            provider_params: Some(provider_params.clone()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".into(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        let live = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live session after provider_params hot-swap");
+        let live_meta = live
+            .session_metadata()
+            .expect("live session metadata after provider_params hot-swap");
+        assert_eq!(live_meta.model, "claude-sonnet-4-5");
+        assert_eq!(live_meta.provider, meerkat_core::Provider::Anthropic);
+        assert_eq!(live_meta.provider_params, Some(provider_params.clone()));
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session after provider_params hot-swap")
+            .expect("stored session should exist");
+        let stored_meta = stored
+            .session_metadata()
+            .expect("stored session metadata after provider_params hot-swap");
+        assert_eq!(stored_meta.model, "claude-sonnet-4-5");
+        assert_eq!(stored_meta.provider, meerkat_core::Provider::Anthropic);
+        assert_eq!(stored_meta.provider_params, Some(provider_params));
+    }
+
+    #[tokio::test]
+    async fn materialized_hot_swap_updates_durable_identity_for_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let provider_params = serde_json::json!({
+            "reasoning": { "effort": "medium" }
+        });
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.2".to_string()),
+            provider_params: Some(provider_params.clone()),
+            ..Default::default()
+        };
+        let (event_tx2, _event_rx2) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Second turn".into(),
+                event_tx2,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .unwrap();
+
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .expect("read_session_rich after hot-swap");
+        assert_eq!(info.model, "gpt-5.2");
+        assert_eq!(info.provider, "openai");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session after hot-swap");
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        let recovered = runtime
+            .try_recover_persisted_session(
+                &session_id,
+                "recover".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            recovered.is_ok(),
+            "expected persisted hot-swapped session to be recoverable: {:?}",
+            recovered.err()
+        );
+
+        // After recovery the session has been promoted out of pending into a
+        // live session.  Verify the recovered run completed with the preserved
+        // hot-swapped identity by reading back the live session metadata.
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .expect("read recovered session after re-materialization");
+        assert_eq!(info.model, "gpt-5.2", "recovered model must match hot-swap");
+        assert_eq!(
+            info.provider, "openai",
+            "recovered provider must match hot-swap"
         );
     }
 

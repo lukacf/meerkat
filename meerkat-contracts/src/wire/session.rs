@@ -21,6 +21,8 @@ pub struct WireSessionInfo {
     pub updated_at: u64,
     pub message_count: usize,
     pub is_active: bool,
+    pub model: String,
+    pub provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_assistant_text: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -44,6 +46,8 @@ impl From<SessionInfo> for WireSessionInfo {
                 .unwrap_or(0),
             message_count: info.message_count,
             is_active: info.is_active,
+            model: info.model,
+            provider: info.provider.as_str().to_string(),
             last_assistant_text: info.last_assistant_text,
             labels: info.labels,
         }
@@ -468,6 +472,8 @@ mod tests {
             updated_at: 2000,
             message_count: 3,
             is_active: true,
+            model: "claude-sonnet-4-5".to_string(),
+            provider: "anthropic".to_string(),
             last_assistant_text: None,
             labels: labels.clone(),
         };
@@ -487,6 +493,8 @@ mod tests {
             updated_at: SystemTime::now(),
             message_count: 2,
             is_active: false,
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
             last_assistant_text: Some("hello".to_string()),
             labels: labels.clone(),
         };
@@ -519,7 +527,9 @@ mod tests {
             "created_at": 1000,
             "updated_at": 2000,
             "message_count": 0,
-            "is_active": false
+            "is_active": false,
+            "model": "claude-sonnet-4-5",
+            "provider": "anthropic"
         }"#;
         let parsed: WireSessionInfo = serde_json::from_str(json).unwrap();
         assert!(parsed.labels.is_empty());

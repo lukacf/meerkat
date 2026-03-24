@@ -158,8 +158,9 @@ pub use service::{
 };
 pub use session::{
     PendingSystemContextAppend, SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION,
-    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session, SessionMeta,
-    SessionMetadata, SessionSystemContextState, SessionTooling, SystemContextStageError,
+    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
+    SessionLlmIdentity, SessionMeta, SessionMetadata, SessionSystemContextState, SessionTooling,
+    SystemContextStageError,
 };
 pub use state::LoopState;
 pub use tool_scope::{

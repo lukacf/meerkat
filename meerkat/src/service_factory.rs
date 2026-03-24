@@ -109,6 +109,29 @@ impl SessionAgent for FactoryAgent {
         self.agent.replace_client(client);
     }
 
+    fn hot_swap_llm_identity(
+        &mut self,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        let Some(mut metadata) = self.agent.session().session_metadata() else {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "session metadata missing during llm identity hot-swap".to_string(),
+            ));
+        };
+        metadata.apply_llm_identity(&identity);
+        self.agent
+            .session_mut()
+            .set_session_metadata(metadata)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update session metadata during llm identity hot-swap: {err}"
+                ))
+            })?;
+        self.agent.replace_client(client);
+        Ok(())
+    }
+
     fn stage_external_tool_filter(
         &mut self,
         filter: meerkat_core::ToolFilter,

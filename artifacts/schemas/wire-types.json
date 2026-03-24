@@ -1893,6 +1893,12 @@
         "minimum": 0,
         "type": "integer"
       },
+      "model": {
+        "type": "string"
+      },
+      "provider": {
+        "type": "string"
+      },
       "session_id": {
         "type": "string"
       },
@@ -1913,7 +1919,9 @@
       "created_at",
       "updated_at",
       "message_count",
-      "is_active"
+      "is_active",
+      "model",
+      "provider"
     ],
     "title": "WireSessionInfo",
     "type": "object"

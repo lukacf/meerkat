@@ -23,6 +23,8 @@ pub const SESSION_NOT_FOUND: i32 = meerkat_contracts::ErrorCode::SessionNotFound
 pub const SESSION_BUSY: i32 = meerkat_contracts::ErrorCode::SessionBusy.jsonrpc_code();
 /// LLM provider error (missing API key, auth failure, etc.)
 pub const PROVIDER_ERROR: i32 = meerkat_contracts::ErrorCode::ProviderError.jsonrpc_code();
+/// Request was cancelled before its terminal response published.
+pub const REQUEST_CANCELLED: i32 = meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code();
 /// Budget exhausted
 pub const BUDGET_EXHAUSTED: i32 = meerkat_contracts::ErrorCode::BudgetExhausted.jsonrpc_code();
 /// Hook denied the operation

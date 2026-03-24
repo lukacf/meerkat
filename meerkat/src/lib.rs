@@ -125,6 +125,7 @@ pub use meerkat_core::{
     // Session
     Session,
     SessionId,
+    SessionLlmIdentity,
     SessionMeta,
     SessionMetadata,
     SessionTooling,

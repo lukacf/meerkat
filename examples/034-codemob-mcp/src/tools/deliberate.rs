@@ -7,14 +7,14 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use meerkat::surface::{RequestContext, request_action};
 
 use meerkat_mob::definition::FlowSpec;
 use meerkat_mob::ids::{FlowId, MeerkatId, MobId};
 use meerkat_mob::{MobDefinition, MobRun, MobRunStatus, SpawnMemberSpec, StepRunStatus};
 
 use crate::state::ForceState;
-use super::ToolCallError;
+use super::{ProgressNotifier, ToolCallError};
 
 const DEFAULT_FLOW_STEP_TIMEOUT_MS: u64 = 30_000;
 const FLOW_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -34,6 +34,8 @@ pub async fn handle(
     state: &ForceState,
     arguments: &Value,
     progress_token: Option<Value>,
+    progress_notifier: Option<ProgressNotifier>,
+    request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     let input: DeliberateInput = serde_json::from_value(arguments.clone())
         .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -58,6 +60,28 @@ pub async fn handle(
         (total_steps, has_flows, definition)
     };
     let mob_id = definition.id.clone();
+
+    if let Some(context) = request_context.as_ref() {
+        let mob_state = state.mob_state.clone();
+        let mob_id_for_cancel = mob_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let mob_state = mob_state.clone();
+            let mob_id = mob_id_for_cancel.clone();
+            async move {
+                let _ = mob_state.mob_destroy(&mob_id).await;
+            }
+        }));
+        let mob_state = state.mob_state.clone();
+        let mob_id_for_cleanup = mob_id.clone();
+        context.set_unpublished_cleanup(request_action(move || {
+            let mob_state = mob_state.clone();
+            let mob_id = mob_id_for_cleanup.clone();
+            async move {
+                let _ = mob_state.mob_destroy(&mob_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
+    }
 
     // Collect profile names and orchestrator before moving definition
     let profile_names: Vec<String> = definition.profiles.keys().map(|p| p.to_string()).collect();
@@ -141,6 +165,8 @@ pub async fn handle(
             &mob_id,
             total_steps,
             progress_token.as_ref(),
+            progress_notifier.as_ref(),
+            request_context.as_ref(),
             flow_timeout.expect("flow timeout computed when has_flows"),
         )
         .await
@@ -151,7 +177,15 @@ pub async fn handle(
         } else {
             format!("{}\n\n## Context\n\n{context}", input.task)
         };
-        run_comms(state, &mob_id, &orchestrator_name, &prompt, progress_token.as_ref()).await
+        run_comms(
+            state,
+            &mob_id,
+            &orchestrator_name,
+            &prompt,
+            progress_token.as_ref(),
+            progress_notifier.as_ref(),
+        )
+        .await
     };
 
     // Destroy mob (best-effort)
@@ -169,12 +203,14 @@ async fn run_flow(
     mob_id: &MobId,
     total_steps: usize,
     progress_token: Option<&Value>,
+    progress_notifier: Option<&ProgressNotifier>,
+    request_context: Option<&RequestContext>,
     flow_timeout: Duration,
 ) -> Result<Value, ToolCallError> {
     let flow_id = FlowId::from("main");
 
     if let Some(token) = progress_token {
-        send_progress(token, 0, total_steps, "starting flow").await;
+        send_progress(progress_notifier, token, 0, total_steps, "starting flow");
     }
 
     let run_id = state
@@ -182,6 +218,22 @@ async fn run_flow(
         .mob_run_flow(mob_id, flow_id, json!({}))
         .await
         .map_err(|e| ToolCallError::internal(format!("Flow start failed: {e}")))?;
+
+    if let Some(context) = request_context {
+        let mob_state = state.mob_state.clone();
+        let mob_id_for_cancel = mob_id.clone();
+        let run_id_for_cancel = run_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let mob_state = mob_state.clone();
+            let mob_id = mob_id_for_cancel.clone();
+            let run_id = run_id_for_cancel.clone();
+            async move {
+                let _ = mob_state.mob_cancel_flow(&mob_id, run_id.clone()).await;
+                let _ = mob_state.mob_destroy(&mob_id).await;
+            }
+        }));
+        let _ = context.run_cancel_if_requested().await;
+    }
 
     let last_completed = Arc::new(AtomicUsize::new(0));
     let progress_token = progress_token.cloned();
@@ -231,7 +283,7 @@ async fn run_flow(
                             } else {
                                 "waiting".into()
                             };
-                            send_progress(token, completed, total_steps, &label).await;
+                            send_progress(progress_notifier, token, completed, total_steps, &label);
                         }
                     }
 
@@ -392,11 +444,12 @@ async fn run_comms(
     orchestrator: &str,
     task: &str,
     progress_token: Option<&Value>,
+    progress_notifier: Option<&ProgressNotifier>,
 ) -> Result<Value, ToolCallError> {
     use meerkat_core::event::AgentEvent;
 
     if let Some(token) = progress_token {
-        send_progress(token, 0, 1, "agents deliberating").await;
+        send_progress(progress_notifier, token, 0, 1, "agents deliberating");
     }
 
     // Subscribe to mob-wide agent events (all members' streams merged)
@@ -495,12 +548,13 @@ async fn run_comms(
                     }
                 }
 
-                if total_events % 20 == 0 {
+                    if total_events % 20 == 0 {
                     if let Some(token) = progress_token {
                         send_progress(
+                            progress_notifier,
                             token, 0, 1,
                             &format!("{total_events} events, {active_turns} active"),
-                        ).await;
+                        );
                     }
                 }
             }
@@ -523,7 +577,7 @@ async fn run_comms(
     }
 
     if let Some(token) = progress_token {
-        send_progress(token, 1, 1, "complete").await;
+        send_progress(progress_notifier, token, 1, 1, "complete");
     }
 
     if last_orchestrator_text.is_empty() {
@@ -536,21 +590,16 @@ async fn run_comms(
 
 // ── Progress notifications ──────────────────────────────────────────────────
 
-async fn send_progress(token: &Value, progress: usize, total: usize, label: &str) {
-    let notification = json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/progress",
-        "params": {
-            "progressToken": token,
-            "progress": progress,
-            "total": total,
-            "message": label,
-        }
-    });
-    let mut stdout = tokio::io::stdout();
-    let msg = format!("{notification}\n");
-    let _ = stdout.write_all(msg.as_bytes()).await;
-    let _ = stdout.flush().await;
+fn send_progress(
+    notifier: Option<&ProgressNotifier>,
+    token: &Value,
+    progress: usize,
+    total: usize,
+    label: &str,
+) {
+    if let Some(notifier) = notifier {
+        notifier(token.clone(), progress, total, label.to_string());
+    }
 }
 
 #[cfg(test)]

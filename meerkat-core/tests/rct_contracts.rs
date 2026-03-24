@@ -86,6 +86,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         model: "claude-test".to_string(),
         max_tokens: 1234,
         provider: meerkat_core::Provider::Anthropic,
+        provider_params: None,
         tooling: meerkat_core::SessionTooling {
             builtins: true,
             shell: true,
@@ -249,6 +250,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         model: "model-x".to_string(),
         max_tokens: 999,
         provider: meerkat_core::Provider::OpenAI,
+        provider_params: None,
         tooling: meerkat_core::SessionTooling::default(),
         host_mode: false,
         comms_name: None,

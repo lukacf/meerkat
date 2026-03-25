@@ -551,9 +551,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
     println!("  Guesser C: GPT-5.4 (context/narrative)");
     println!("============================================================\n");
 
+    let t = Instant::now();
     let (handle, service, _tmp) = setup_mob().await.expect("mob setup failed");
     spawn_and_wait(&handle).await.expect("member spawn failed");
-    println!("All 4 members active.\n");
+    println!("All 4 members active. [setup: {:.1}s]\n", t.elapsed().as_secs_f64());
 
     let rounds = [
         ("lighthouse", "Round 1 — easy: concrete object"),
@@ -561,11 +562,14 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         ("the feeling of déjà vu", "Round 3 — hard: Rorschach"),
     ];
 
+    let test_start = Instant::now();
     let mut passed = 0;
     for (round_idx, (secret_word, label)) in rounds.iter().enumerate() {
+        let round_start = Instant::now();
         println!("--- {label}: \"{secret_word}\" ---");
 
         // 1. Generate image
+        let t = Instant::now();
         println!("  [1/4] Generating image...");
         let gen_prompt = format!(
             "Generate a simple artistic image representing: \"{secret_word}\". \
@@ -582,9 +586,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 continue;
             }
         };
-        println!("  Image: {} bytes ({mime})", img_data.len());
+        println!("  Image: {} bytes ({mime}) [{:.1}s]", img_data.len(), t.elapsed().as_secs_f64());
 
         // 2. Brief the artist on the secret word
+        let t = Instant::now();
         println!("  [2/4] Briefing artist...");
         let artist = handle
             .member(&MeerkatId::from("artist"))
@@ -600,11 +605,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             )
             .await
             .expect("artist brief");
+        println!("  Artist briefed [{:.1}s]", t.elapsed().as_secs_f64());
 
         // 3. Send image to all guessers via peer-to-peer comms (from artist)
-        //    This uses the artist's CommsRuntime to send actual peer messages,
-        //    so guessers see "[peer: artist] ..." and the comms discussion model
-        //    kicks in naturally.
+        let t = Instant::now();
         println!("  [3/4] Sending image to guessers via artist's comms...");
         let artist_session_id = {
             let members = handle.list_members().await;
@@ -646,8 +650,11 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 .unwrap_or_else(|e| panic!("artist→{peer_name} peer send: {e}"));
         }
 
+        println!("  Images sent [{:.1}s]", t.elapsed().as_secs_f64());
+
         // 4. Wait for verdict
-        println!("  [4/4] Waiting for discussion + guess + validation (up to 2 min)...");
+        let t = Instant::now();
+        println!("  [4/4] Waiting for discussion + guess + validation (up to 3 min)...");
 
         // DEBUG: After a short delay, dump guesser-a's raw history for round 1
         if round_idx == 0 {
@@ -740,14 +747,24 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         .await;
 
         if guess_reached_artist {
-            println!("  ✓ Guessers guessed \"{secret_word}\" — artist received it!");
+            println!(
+                "  ✓ Guessers guessed \"{secret_word}\" — artist received it! [wait: {:.1}s, round: {:.1}s]",
+                t.elapsed().as_secs_f64(),
+                round_start.elapsed().as_secs_f64()
+            );
             passed += 1;
         } else {
-            println!("  ✗ Timed out — guess never reached the artist");
+            println!(
+                "  ✗ Timed out — guess never reached the artist [wait: {:.1}s, round: {:.1}s]",
+                t.elapsed().as_secs_f64(),
+                round_start.elapsed().as_secs_f64()
+            );
         }
 
         // Show ALL messages (no offset) so we can see the full discussion.
+        let t_conv = Instant::now();
         print_conversation(&handle, service.as_ref(), 0).await;
+        println!("  [conversation dump: {:.1}s]", t_conv.elapsed().as_secs_f64());
 
         // Round 1 (easy) must pass to validate the pipeline works
         assert!(
@@ -760,6 +777,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
 
     println!("============================================================");
     println!("  RESULTS: {passed}/3 rounds correct");
+    println!("  Total time: {:.1}s", test_start.elapsed().as_secs_f64());
     println!("  (Round 1 required; rounds 2-3 are stretch goals)");
     println!("============================================================\n");
 }

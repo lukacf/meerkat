@@ -139,7 +139,6 @@ let result = service.create_session(CreateSessionRequest {
     system_prompt: Some("You are a helpful assistant with memory.".into()),
     max_tokens: None,
     event_tx: None,
-    keep_alive: false,
     skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     build: None,
@@ -151,10 +150,10 @@ let session_id = result.session_id;
 // Turn 2: agent remembers "Alice"
 let result = service.start_turn(&session_id, StartTurnRequest {
     prompt: "What's my name?".into(),
+    system_prompt: None,
     render_metadata: None,
     handling_mode: HandlingMode::Queue,
     event_tx: None,
-    keep_alive: false,
     skill_references: None,
     flow_tool_overlay: None,
     additional_instructions: None,
@@ -167,6 +166,41 @@ println!("Messages: {}", view.state.message_count);
 // Archive when done
 service.archive(&session_id).await?;
 ```
+
+### Deferred first-turn system prompt override
+
+```rust
+use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat_core::service::{HandlingMode, InitialTurnPolicy};
+
+let created = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4-5".into(),
+    prompt: "Let's wait before we run.".into(),
+    render_metadata: None,
+    system_prompt: Some("You are the original prompt.".into()),
+    max_tokens: None,
+    event_tx: None,
+    skill_references: None,
+    initial_turn: InitialTurnPolicy::Defer,
+    build: None,
+    labels: None,
+}).await?;
+
+let result = service.start_turn(&created.session_id, StartTurnRequest {
+    prompt: "Now run with the first-turn override.".into(),
+    system_prompt: Some("You are the deferred first-turn override.".into()),
+    render_metadata: None,
+    handling_mode: HandlingMode::Queue,
+    event_tx: None,
+    skill_references: None,
+    flow_tool_overlay: None,
+    additional_instructions: None,
+}).await?;
+```
+
+`system_prompt` on `StartTurnRequest` is only supported for a deferred session's
+first turn. Once the session has existing history/messages, turn-time
+`system_prompt` overrides are rejected.
 
 ### Error handling
 

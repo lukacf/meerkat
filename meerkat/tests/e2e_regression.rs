@@ -108,6 +108,7 @@ mod scenario_22_session_service_lifecycle {
                 &session_id,
                 StartTurnRequest {
                     prompt: "What is my name? Reply in one sentence.".to_string().into(),
+                    system_prompt: None,
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,

@@ -677,6 +677,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
             &sid_a,
             StartTurnRequest {
                 prompt: "follow up".to_string().into(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
@@ -749,6 +750,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
             &sid,
             StartTurnRequest {
                 prompt: "should fail".to_string().into(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,

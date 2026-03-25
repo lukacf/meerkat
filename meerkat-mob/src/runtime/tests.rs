@@ -4070,6 +4070,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
             &sid,
             StartTurnRequest {
                 prompt: "non-flow turn".to_string().into(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,

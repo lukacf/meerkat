@@ -146,6 +146,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                          Three other nodes in the cluster show normal metrics. \
                          The deployment log shows a new release was pushed 12 minutes ago."
                     .into(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
@@ -182,6 +183,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                          CPU is back to 40%, memory at 52%. All health checks passing. \
                          Summarize the full incident timeline and close it out."
                     .into(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),

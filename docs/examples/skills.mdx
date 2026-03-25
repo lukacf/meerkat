@@ -207,7 +207,6 @@ Pass `skill_references` to resolve and inject skill content into the system prom
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        keep_alive: false,
         skill_references: Some(vec![
             "/email-extractor".parse()?,
             "/formatting/markdown".parse()?,
@@ -358,10 +357,10 @@ Inject skills into a specific turn on an existing session. The skill content is 
     ```rust
     let result = service.start_turn(&session_id, StartTurnRequest {
         prompt: "Now format the output".into(),
+        system_prompt: None,
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,
-        keep_alive: false,
         skill_references: Some(vec!["/formatting/markdown".parse()?]),
         flow_tool_overlay: None,
         additional_instructions: None,

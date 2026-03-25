@@ -438,6 +438,7 @@ async fn apply_runtime_turn(
 
     let svc_req = SvcStartTurnRequest {
         prompt: prompt.clone(),
+        system_prompt: None,
         render_metadata: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(event_tx.clone()),
@@ -589,6 +590,7 @@ async fn apply_runtime_turn(
                     run_id,
                     SvcStartTurnRequest {
                         prompt: extract_runtime_prompt(primitive),
+                        system_prompt: None,
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx.clone()),
@@ -2613,6 +2615,7 @@ async fn continue_session(
     // First, try to start a turn on a live session in the service.
     let svc_req = SvcStartTurnRequest {
         prompt: turn_prompt.clone(),
+        system_prompt: None,
         render_metadata: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         event_tx: Some(caller_event_tx.clone()),
@@ -3713,6 +3716,7 @@ mod tests {
                 &created.session_id,
                 meerkat_core::service::StartTurnRequest {
                     prompt: "Follow up".to_string().into(),
+                    system_prompt: None,
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: None,

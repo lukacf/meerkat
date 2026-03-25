@@ -99,6 +99,10 @@ enum SessionCommand {
         keep_alive: bool,
         reply_tx: oneshot::Sender<()>,
     },
+    UpdateSystemPrompt {
+        system_prompt: String,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     Shutdown,
 }
 
@@ -266,6 +270,16 @@ pub trait SessionAgent: Send {
     /// live session. This ensures subsequent inheriting calls observe the
     /// updated value.
     fn update_keep_alive(&mut self, _keep_alive: bool) {}
+
+    /// Update the session system prompt before the first turn starts.
+    fn update_system_prompt(
+        &mut self,
+        _system_prompt: String,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "system_prompt override is not supported by this session agent".to_string(),
+        ))
+    }
 
     /// Apply runtime-owned system-context blocks immediately to the canonical session.
     fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]);
@@ -794,6 +808,40 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
             Self::try_acquire_turn(id, handle)?;
+
+            if let Some(system_prompt) = req.system_prompt {
+                if handle.summary_rx.borrow().message_count > 0 {
+                    handle.turn_lock.store(false, Ordering::Release);
+                    return Err(SessionError::Unsupported(
+                        "system_prompt override is only allowed on a deferred session's first turn"
+                            .to_string(),
+                    ));
+                }
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .command_tx
+                    .send(SessionCommand::UpdateSystemPrompt {
+                        system_prompt,
+                        reply_tx,
+                    })
+                    .await
+                    .map_err(|_| {
+                        handle.turn_lock.store(false, Ordering::Release);
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            "Session task has exited".to_string(),
+                        ))
+                    })?;
+                let update_result = reply_rx.await.map_err(|_| {
+                    handle.turn_lock.store(false, Ordering::Release);
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "Session task dropped reply channel".to_string(),
+                    ))
+                })?;
+                update_result.map_err(|error| {
+                    handle.turn_lock.store(false, Ordering::Release);
+                    SessionError::Agent(error)
+                })?;
+            }
 
             handle
                 .command_tx
@@ -1348,6 +1396,12 @@ async fn session_task<A: SessionAgent>(
             } => {
                 agent.update_keep_alive(keep_alive);
                 let _ = reply_tx.send(());
+            }
+            SessionCommand::UpdateSystemPrompt {
+                system_prompt,
+                reply_tx,
+            } => {
+                let _ = reply_tx.send(agent.update_system_prompt(system_prompt));
             }
             SessionCommand::Shutdown => {
                 control.state_tx.send_replace(SessionState::ShuttingDown);

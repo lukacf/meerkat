@@ -1046,6 +1046,7 @@ impl SessionRuntime {
 
             let req = StartTurnRequest {
                 prompt: prompt.clone(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx.clone()),
@@ -1241,6 +1242,7 @@ impl SessionRuntime {
                     run_id,
                     StartTurnRequest {
                         prompt: runtime_prompt,
+                        system_prompt: None,
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx),
@@ -1387,6 +1389,7 @@ impl SessionRuntime {
                 run_id,
                 StartTurnRequest {
                     prompt,
+                    system_prompt: None,
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
@@ -1777,6 +1780,7 @@ impl SessionRuntime {
 
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
+            system_prompt: None,
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx.clone()),

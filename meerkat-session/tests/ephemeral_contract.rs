@@ -758,6 +758,7 @@ fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
 fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         prompt: prompt.to_string().into(),
+        system_prompt: None,
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,

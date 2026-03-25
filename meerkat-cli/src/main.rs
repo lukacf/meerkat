@@ -2499,6 +2499,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
             prompt: prompt.into(),
+            system_prompt: None,
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: self.event_tx.clone(),

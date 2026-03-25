@@ -1208,6 +1208,7 @@ mod scenario_09_session_service {
         // 3. Start follow-up turn
         let turn_req = StartTurnRequest {
             prompt: "What did I just say to you?".to_string().into(),
+            system_prompt: None,
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
@@ -1672,6 +1673,7 @@ mod scenario_22_runtime_host_comms {
 
             let turn_req = StartTurnRequest {
                 prompt: prompt.into(),
+                system_prompt: None,
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,

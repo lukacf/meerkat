@@ -730,6 +730,7 @@ impl MobBuilder {
                             &orchestrator_entry.member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 prompt: resume_message.into(),
+                                system_prompt: None,
                                 render_metadata: None,
                                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,

@@ -224,6 +224,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         let req = meerkat_core::service::StartTurnRequest {
             prompt,
+            system_prompt: None,
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx),

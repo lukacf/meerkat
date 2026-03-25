@@ -297,7 +297,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: Some("You are a helpful math assistant.".into()),
         max_tokens: Some(2048),
         event_tx: None,
-        keep_alive: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -308,10 +307,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = service.start_turn(&result.session_id, StartTurnRequest {
         prompt: "Now divide that result by 5.".into(),
+        system_prompt: None,
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,
-        keep_alive: false,
         skill_references: None,
         flow_tool_overlay: None,
         additional_instructions: None,

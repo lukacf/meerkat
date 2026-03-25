@@ -353,6 +353,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         step_id,
                         StartTurnRequest {
                             prompt: message,
+                            system_prompt: None,
                             render_metadata: None,
                             handling_mode: meerkat_core::types::HandlingMode::Queue,
                             event_tx: Some(event_tx),

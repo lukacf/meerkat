@@ -429,6 +429,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .await;
         let req = StartTurnRequest {
             prompt: extract_prompt(&primitive).into(),
+            system_prompt: None,
             render_metadata: None,
             handling_mode: primitive
                 .turn_metadata()

@@ -1421,6 +1421,18 @@ mod tests {
             }
         }
 
+        fn update_system_prompt(
+            &mut self,
+            system_prompt: String,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            session.set_system_prompt(system_prompt);
+            Ok(())
+        }
+
         fn apply_runtime_system_context(
             &mut self,
             appends: &[meerkat_core::PendingSystemContextAppend],
@@ -1523,6 +1535,23 @@ mod tests {
     fn start_turn_request(prompt: &str) -> StartTurnRequest {
         StartTurnRequest {
             prompt: prompt.to_string().into(),
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: None,
+            skill_references: None,
+            flow_tool_overlay: None,
+            additional_instructions: None,
+        }
+    }
+
+    fn start_turn_request_with_system_prompt(
+        prompt: &str,
+        system_prompt: Option<&str>,
+    ) -> StartTurnRequest {
+        StartTurnRequest {
+            prompt: prompt.to_string().into(),
+            system_prompt: system_prompt.map(str::to_string),
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
@@ -2514,5 +2543,133 @@ mod tests {
             exported.session_metadata().unwrap().keep_alive,
             "should roll back to true after failed true→false (not flip to false)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_deferred_first_turn_system_prompt_is_applied_and_persisted() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create deferred session");
+        let id = created.session_id;
+
+        service
+            .start_turn(
+                &id,
+                start_turn_request_with_system_prompt(
+                    "first turn",
+                    Some("You are a deferred-session reviewer."),
+                ),
+            )
+            .await
+            .expect("deferred first turn should succeed");
+
+        let restored = service
+            .export_live_session(&id)
+            .await
+            .expect("live session");
+        let system_prompt = restored
+            .messages()
+            .first()
+            .and_then(|message| match message {
+                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .expect("restored session should contain a system prompt");
+        assert!(system_prompt.contains("deferred-session reviewer"));
+
+        let persisted = store
+            .load(&id)
+            .await
+            .expect("load should succeed")
+            .expect("session should be persisted");
+        let persisted_prompt = persisted
+            .messages()
+            .first()
+            .and_then(|message| match message {
+                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .expect("persisted session should contain a system prompt");
+        assert!(persisted_prompt.contains("deferred-session reviewer"));
+    }
+
+    #[tokio::test]
+    async fn test_deferred_first_turn_system_prompt_overrides_create_time_prompt() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+
+        let mut req = create_request_with_metadata("hello", InitialTurnPolicy::Defer);
+        req.system_prompt = Some("You are the old prompt.".to_string());
+        let created = service
+            .create_session(req)
+            .await
+            .expect("create deferred session");
+        let id = created.session_id;
+
+        service
+            .start_turn(
+                &id,
+                start_turn_request_with_system_prompt(
+                    "first turn",
+                    Some("You are the new prompt."),
+                ),
+            )
+            .await
+            .expect("deferred first turn should succeed");
+
+        let restored = service
+            .export_live_session(&id)
+            .await
+            .expect("live session");
+        let system_prompt = restored
+            .messages()
+            .first()
+            .and_then(|message| match message {
+                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .expect("restored session should contain a system prompt");
+        assert!(system_prompt.contains("new prompt"));
+        assert!(!system_prompt.contains("old prompt"));
+    }
+
+    #[tokio::test]
+    async fn test_materialized_start_turn_rejects_system_prompt_override() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create immediate session");
+        let id = created.session_id;
+
+        let error = service
+            .start_turn(
+                &id,
+                start_turn_request_with_system_prompt(
+                    "follow-up",
+                    Some("You are a different prompt."),
+                ),
+            )
+            .await
+            .expect_err("materialized session should reject turn-time system_prompt");
+
+        match error {
+            SessionError::Unsupported(message) => {
+                assert!(message.contains("deferred session's first turn"));
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
     }
 }

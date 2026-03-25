@@ -2686,6 +2686,7 @@ async fn handle_meerkat_resume(
         // from a prior meerkat_run in the same MCP server process).
         let turn_req = StartTurnRequest {
             prompt: prompt.clone().into(),
+            system_prompt: None,
             render_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: event_tx.clone(),

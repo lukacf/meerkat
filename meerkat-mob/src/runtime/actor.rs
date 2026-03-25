@@ -298,6 +298,7 @@ impl MobActor {
                             &member_ref,
                             meerkat_core::service::StartTurnRequest {
                                 prompt: message.into(),
+                                system_prompt: None,
                                 render_metadata: None,
                                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
@@ -663,6 +664,7 @@ impl MobActor {
                     &member_ref_cloned,
                     meerkat_core::service::StartTurnRequest {
                         prompt,
+                        system_prompt: None,
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: None,
@@ -4069,6 +4071,7 @@ impl MobActor {
                 })?;
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: content,
+                    system_prompt: None,
                     render_metadata,
                     handling_mode,
                     event_tx: None,

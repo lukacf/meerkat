@@ -306,6 +306,11 @@ impl std::fmt::Debug for SessionBuildOptions {
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
     pub prompt: ContentInput,
+    /// Optional system prompt override for a deferred session's first turn.
+    ///
+    /// This is only supported before the session has any conversation history.
+    /// Materialized sessions with existing messages must reject it.
+    pub system_prompt: Option<String>,
     /// Optional normalized rendering metadata for this turn prompt.
     pub render_metadata: Option<RenderMetadata>,
     /// Handling mode for this turn's ordinary content-bearing work.

@@ -442,6 +442,7 @@ fn create_req_with_labels(prompt: &str, labels: BTreeMap<String, String>) -> Cre
 fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         prompt: prompt.to_string().into(),
+        system_prompt: None,
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,
@@ -981,6 +982,7 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
             &created.session_id,
             StartTurnRequest {
                 prompt: "steer me".into(),
+                system_prompt: None,
                 render_metadata: Some(RenderMetadata {
                     class: RenderClass::ExternalEvent,
                     salience: RenderSalience::Urgent,

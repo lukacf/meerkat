@@ -127,6 +127,14 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
+    fn update_system_prompt(
+        &mut self,
+        system_prompt: String,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.session_mut().set_system_prompt(system_prompt);
+        Ok(())
+    }
+
     fn hot_swap_llm_identity(
         &mut self,
         client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,

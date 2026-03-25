@@ -513,8 +513,8 @@ impl TurnExecutionAuthority {
 
     /// Whether the authority has entered extraction flow during this run.
     ///
-    /// Returns true once ExtractionRetry has been applied at least once
-    /// (i.e., the initial extraction entry incremented attempts from 0).
+    /// Returns true once EnterExtraction has been applied
+    /// (i.e., the authority has transitioned through the Extracting phase).
     /// Used by the shell to determine whether LLM calls should use
     /// extraction parameters (no tools, temperature 0, structured_output).
     pub fn in_extraction_flow(&self) -> bool {

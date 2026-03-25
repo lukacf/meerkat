@@ -218,7 +218,7 @@ pub enum TurnExecutionInput {
     /// Enter extraction phase after the conversation turn completes.
     ///
     /// Fired by the shell when BoundaryComplete detects that extraction is
-    /// needed (output_schema is set and extraction_mode is not yet active).
+    /// needed (output_schema is set and extraction flow is not yet active).
     /// Transitions DrainingBoundary -> Extracting and initializes extraction
     /// tracking fields.
     EnterExtraction {
@@ -509,6 +509,16 @@ impl TurnExecutionAuthority {
     /// Maximum extraction retries configured for the current run.
     pub fn max_extraction_retries(&self) -> u32 {
         self.fields.max_extraction_retries
+    }
+
+    /// Whether the authority has entered extraction flow during this run.
+    ///
+    /// Returns true once ExtractionRetry has been applied at least once
+    /// (i.e., the initial extraction entry incremented attempts from 0).
+    /// Used by the shell to determine whether LLM calls should use
+    /// extraction parameters (no tools, temperature 0, structured_output).
+    pub fn in_extraction_flow(&self) -> bool {
+        self.fields.extraction_attempts > 0
     }
 
     /// Check if a transition is legal without applying it.

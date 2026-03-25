@@ -594,7 +594,8 @@ where
                     }
 
                     // In extraction mode, override tools/temperature/params
-                    if self.extraction_mode {
+                    let in_extraction = self.turn_authority.in_extraction_flow();
+                    if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
                         // Inject structured_output into provider params
@@ -610,7 +611,7 @@ where
 
                     // No tools for extraction turn (empty slice)
                     let empty_tools: Arc<[Arc<crate::types::ToolDef>]> = Arc::from([]);
-                    let call_tool_defs = if self.extraction_mode {
+                    let call_tool_defs = if in_extraction {
                         &empty_tools
                     } else {
                         &tool_defs
@@ -1087,7 +1088,7 @@ where
                         })?;
                         self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         turn_count += 1;
-                    } else if self.extraction_mode {
+                    } else if self.turn_authority.in_extraction_flow() {
                         // Extraction turn response — validate against schema
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
@@ -1115,7 +1116,7 @@ where
                                     let output_schema =
                                         self.config.output_schema.as_ref().ok_or_else(|| {
                                             AgentError::InternalError(
-                                                "extraction_mode without output_schema".into(),
+                                                "extraction flow without output_schema".into(),
                                             )
                                         })?;
                                     let normalized = super::extraction::unwrap_named_object_wrapper(
@@ -1230,10 +1231,9 @@ where
 
                         // Check if we need to perform extraction turn for structured output
                         if let Some(output_schema) = self.config.output_schema.as_ref()
-                            && !self.extraction_mode
+                            && !self.turn_authority.in_extraction_flow()
                         {
                             // Enter extraction mode via authority
-                            self.extraction_mode = true;
                             self.extraction_result = None;
                             self.extraction_last_error = None;
 
@@ -1381,9 +1381,7 @@ where
                 if let Some(diagnostic) = self.pending_fatal_diagnostic.take() {
                     Err(diagnostic)
                 } else {
-                    Err(AgentError::TerminalFailure {
-                        outcome: format!("{outcome:?}"),
-                    })
+                    Err(AgentError::TerminalFailure { outcome })
                 }
             }
             _ => {
@@ -2997,6 +2995,208 @@ mod tests {
             times.len() <= 2,
             "should not retry endlessly; got {} calls",
             times.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Extraction lifecycle integration tests
+    // -----------------------------------------------------------------------
+
+    /// A scriptable LLM client that returns a sequence of pre-configured
+    /// responses, one per call. Used to test extraction happy/retry/exhaust
+    /// paths where the agentic turn and extraction turns need different
+    /// responses.
+    struct ScriptedExtractionClient {
+        responses: Mutex<Vec<super::LlmStreamResult>>,
+        call_count: Mutex<u32>,
+    }
+
+    impl ScriptedExtractionClient {
+        fn new(responses: Vec<super::LlmStreamResult>) -> Self {
+            // Reverse so we can pop from the end
+            let mut reversed = responses;
+            reversed.reverse();
+            Self {
+                responses: Mutex::new(reversed),
+                call_count: Mutex::new(0),
+            }
+        }
+
+        fn calls_made(&self) -> u32 {
+            *self.call_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for ScriptedExtractionClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            *self.call_count.lock().unwrap() += 1;
+            let mut responses = self.responses.lock().unwrap();
+            responses.pop().ok_or_else(|| {
+                AgentError::InternalError("ScriptedExtractionClient: no more responses".into())
+            })
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+    }
+
+    fn text_response(text: &str) -> super::LlmStreamResult {
+        super::LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            Usage::default(),
+        )
+    }
+
+    /// Happy path: agent with output_schema, LLM returns valid JSON
+    /// matching schema on the extraction turn.
+    #[tokio::test]
+    async fn extraction_happy_path_returns_structured_output() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        // Call 0: agentic turn (text), Call 1: extraction turn (valid JSON)
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("I found the answer"),
+            text_response(r#"{"answer": "42"}"#),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .output_schema(schema)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("What is the answer?".to_string().into()).await;
+
+        let result = result.expect("extraction happy path should succeed");
+        assert!(
+            result.structured_output.is_some(),
+            "structured_output should be populated"
+        );
+        let output = result.structured_output.unwrap();
+        assert_eq!(output["answer"], "42");
+        assert_eq!(
+            client.calls_made(),
+            2,
+            "expect 1 agentic + 1 extraction call"
+        );
+    }
+
+    /// Retry path: LLM returns invalid JSON on the first extraction attempt,
+    /// then valid JSON on the retry.
+    #[tokio::test]
+    async fn extraction_retry_recovers_on_second_attempt() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"]
+        }))
+        .unwrap();
+
+        // Call 0: agentic turn
+        // Call 1: extraction attempt 1 — invalid JSON
+        // Call 2: extraction attempt 2 — valid JSON
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("Here is the result"),
+            text_response("not valid json {{{"),
+            text_response(r#"{"name": "meerkat"}"#),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .output_schema(schema)
+            .structured_output_retries(2)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("Get the name".to_string().into()).await;
+
+        let result = result.expect("extraction retry should eventually succeed");
+        assert!(
+            result.structured_output.is_some(),
+            "structured_output should be populated after retry"
+        );
+        let output = result.structured_output.unwrap();
+        assert_eq!(output["name"], "meerkat");
+        assert_eq!(
+            client.calls_made(),
+            3,
+            "expect 1 agentic + 1 failed extraction + 1 successful extraction"
+        );
+    }
+
+    /// Exhaust path: LLM returns invalid JSON on every extraction attempt,
+    /// exceeding max retries. Should return StructuredOutputValidationFailed.
+    #[tokio::test]
+    async fn extraction_exhaust_returns_validation_error() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" }
+            },
+            "required": ["count"]
+        }))
+        .unwrap();
+
+        // Call 0: agentic turn
+        // Call 1: extraction attempt 1 — invalid (authority: attempts 0→1 on entry, 1<2 → retry, 1→2)
+        // Call 2: extraction attempt 2 — invalid (authority: attempts=2, 2<2 false → exhaust)
+        // Error reports attempts = max_retries + 1 = 3
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("Computing count"),
+            text_response("bad json 1"),
+            text_response("bad json 2"),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .output_schema(schema)
+            .structured_output_retries(2)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("Count items".to_string().into()).await;
+
+        match result {
+            Err(AgentError::StructuredOutputValidationFailed {
+                attempts, reason, ..
+            }) => {
+                assert_eq!(attempts, 3, "should report total attempts (retries + 1)");
+                assert!(
+                    reason.contains("Invalid JSON"),
+                    "reason should mention JSON parse failure, got: {reason}"
+                );
+            }
+            Ok(_) => panic!("expected StructuredOutputValidationFailed, got Ok"),
+            Err(e) => panic!("expected StructuredOutputValidationFailed, got: {e:?}"),
+        }
+
+        assert_eq!(
+            client.calls_made(),
+            3,
+            "expect 1 agentic + 2 extraction attempts"
         );
     }
 }

@@ -2795,15 +2795,8 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
             meerkat_core::AgentError::HookDenied { .. } => error::HOOK_DENIED,
             meerkat_core::AgentError::Llm { .. } => error::PROVIDER_ERROR,
             meerkat_core::AgentError::SessionNotFound(_) => error::SESSION_NOT_FOUND,
-            meerkat_core::AgentError::InternalError(msg) => {
-                // Build errors (missing API key, unknown provider) are tunneled
-                // through InternalError from the builder.
-                if msg.contains("API key") || msg.contains("provider") {
-                    error::PROVIDER_ERROR
-                } else {
-                    error::INTERNAL_ERROR
-                }
-            }
+            meerkat_core::AgentError::BuildError(_) => error::PROVIDER_ERROR,
+            meerkat_core::AgentError::InternalError(_) => error::INTERNAL_ERROR,
             _ => error::INTERNAL_ERROR,
         },
         _ => error::INTERNAL_ERROR,
@@ -5018,5 +5011,51 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    // -- P2-6: Typed BuildError → PROVIDER_ERROR classification --
+
+    #[test]
+    fn test_build_error_missing_api_key_classifies_as_provider_error() {
+        let session_err = SessionError::Agent(meerkat_core::AgentError::BuildError(
+            "Missing API key for provider 'anthropic'".to_string(),
+        ));
+        let rpc_err = session_error_to_rpc(session_err);
+        assert_eq!(
+            rpc_err.code,
+            error::PROVIDER_ERROR,
+            "BuildError with missing API key must map to PROVIDER_ERROR, got code: {}",
+            rpc_err.code,
+        );
+    }
+
+    #[test]
+    fn test_build_error_unknown_provider_classifies_as_provider_error() {
+        let session_err = SessionError::Agent(meerkat_core::AgentError::BuildError(
+            "Unknown provider for model 'llama-3'".to_string(),
+        ));
+        let rpc_err = session_error_to_rpc(session_err);
+        assert_eq!(
+            rpc_err.code,
+            error::PROVIDER_ERROR,
+            "BuildError with unknown provider must map to PROVIDER_ERROR, got code: {}",
+            rpc_err.code,
+        );
+    }
+
+    #[test]
+    fn test_build_error_generic_classifies_as_provider_error() {
+        // ALL BuildErrors should be PROVIDER_ERROR regardless of message content.
+        // This is the point — we match on the variant, not the string.
+        let session_err = SessionError::Agent(meerkat_core::AgentError::BuildError(
+            "something completely unrelated to API keys or providers".to_string(),
+        ));
+        let rpc_err = session_error_to_rpc(session_err);
+        assert_eq!(
+            rpc_err.code,
+            error::PROVIDER_ERROR,
+            "ALL BuildErrors must map to PROVIDER_ERROR regardless of message content, got code: {}",
+            rpc_err.code,
+        );
     }
 }

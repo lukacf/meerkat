@@ -336,9 +336,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .build_agent(build_config, &config)
             .await
             .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    e.to_string(),
-                ))
+                SessionError::Agent(meerkat_core::error::AgentError::BuildError(e.to_string()))
             })?;
 
         Ok(FactoryAgent { agent })

@@ -226,6 +226,10 @@ pub enum AgentError {
     #[error("Internal error: {0}")]
     InternalError(String),
 
+    /// Agent construction failed (e.g. missing API key, unknown provider).
+    #[error("Build error: {0}")]
+    BuildError(String),
+
     /// A tool call must be routed externally (callback pending)
     #[error("Callback pending for tool '{tool_name}'")]
     CallbackPending {
@@ -263,8 +267,10 @@ pub enum AgentError {
     HookConfigInvalid { reason: String },
 
     /// Turn execution reached a terminal outcome classified as HardFailure.
-    #[error("Terminal failure: {outcome}")]
-    TerminalFailure { outcome: String },
+    #[error("Terminal failure: {outcome:?}")]
+    TerminalFailure {
+        outcome: crate::turn_execution_authority::TurnTerminalOutcome,
+    },
 }
 
 impl AgentError {
@@ -464,5 +470,95 @@ mod tests {
             "timeout",
         );
         assert!(!err.is_graceful());
+    }
+
+    // -- P2-6: Typed BuildError variant --
+
+    #[test]
+    fn test_build_error_variant_exists_and_carries_message() {
+        let err = AgentError::BuildError("Missing API key for provider 'anthropic'".to_string());
+        match &err {
+            AgentError::BuildError(msg) => {
+                assert!(
+                    msg.contains("API key"),
+                    "message should contain source text"
+                );
+            }
+            other => panic!("expected BuildError, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_build_error_is_not_recoverable() {
+        let err = AgentError::BuildError("Unknown provider for model 'llama-3'".to_string());
+        assert!(!err.is_recoverable(), "build errors are not recoverable");
+    }
+
+    #[test]
+    fn test_build_error_is_not_graceful() {
+        let err = AgentError::BuildError("Missing API key".to_string());
+        assert!(!err.is_graceful(), "build errors are not graceful");
+    }
+
+    #[test]
+    fn test_build_error_display() {
+        let err = AgentError::BuildError("Missing API key for provider 'anthropic'".to_string());
+        let display = err.to_string();
+        assert!(
+            display.contains("Build error")
+                || display.contains("build error")
+                || display.contains("Missing API key"),
+            "display should mention the build error: {display}"
+        );
+    }
+
+    // -- P2-7: Typed TerminalFailure outcome --
+
+    #[test]
+    fn test_terminal_failure_carries_typed_outcome() {
+        use crate::turn_execution_authority::TurnTerminalOutcome;
+
+        // TerminalFailure must carry the typed enum, not a Debug-formatted string.
+        let err = AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::Failed,
+        };
+        match &err {
+            AgentError::TerminalFailure { outcome } => {
+                // If this compiles, outcome is TurnTerminalOutcome, not String.
+                assert_eq!(*outcome, TurnTerminalOutcome::Failed);
+            }
+            other => panic!("expected TerminalFailure, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_terminal_failure_display_includes_outcome() {
+        use crate::turn_execution_authority::TurnTerminalOutcome;
+
+        let err = AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::TimeBudgetExceeded,
+        };
+        let display = err.to_string();
+        assert!(
+            display.contains("TimeBudgetExceeded"),
+            "display should include the outcome variant name: {display}"
+        );
+    }
+
+    #[test]
+    fn test_terminal_failure_all_hard_failure_outcomes() {
+        use crate::turn_execution_authority::TurnTerminalOutcome;
+
+        // Both hard-failure outcomes should be representable.
+        for outcome in [
+            TurnTerminalOutcome::Failed,
+            TurnTerminalOutcome::TimeBudgetExceeded,
+        ] {
+            let err = AgentError::TerminalFailure { outcome };
+            assert!(
+                !err.is_graceful(),
+                "TerminalFailure({outcome:?}) should not be graceful"
+            );
+        }
     }
 }

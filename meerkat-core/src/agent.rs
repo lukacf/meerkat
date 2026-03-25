@@ -589,10 +589,6 @@ where
     /// Explicit call-timeout override from the build/config composition seam.
     /// Takes precedence over profile-derived defaults.
     pub(crate) call_timeout_override: crate::config::CallTimeoutOverride,
-    /// True after the agentic loop completes when `output_schema` is set.
-    /// Causes the next `CallingLlm` iteration to use extraction parameters
-    /// (no tools, temperature 0.0, structured_output provider params).
-    pub(crate) extraction_mode: bool,
     /// Populated on successful extraction validation — carried into RunResult.
     pub(crate) extraction_result: Option<serde_json::Value>,
     /// Schema warnings from compilation — carried into RunResult.

@@ -2656,7 +2656,27 @@ impl MobActor {
         } else {
             Box::new(WarnAndContinue)
         };
-        self.dispose_member(&ctx, policy.as_mut()).await;
+        let report = self.dispose_member(&ctx, policy.as_mut()).await;
+
+        // ArchiveSession is critical: a skipped archive means an orphan session
+        // the caller believes was cleaned up. Surface the error.
+        // Comms steps (NotifyPeers, RemoveTrustEdges) remain best-effort.
+        if let Some((_, error)) = report
+            .skipped
+            .iter()
+            .find(|(step, _)| *step == DisposalStep::ArchiveSession)
+        {
+            return Err(MobError::Internal(format!(
+                "disposal completed but ArchiveSession failed: {error}"
+            )));
+        }
+        if let Some((step, error)) = &report.aborted_at {
+            if *step == DisposalStep::ArchiveSession {
+                return Err(MobError::Internal(format!(
+                    "disposal aborted at ArchiveSession: {error}"
+                )));
+            }
+        }
 
         Ok(())
     }

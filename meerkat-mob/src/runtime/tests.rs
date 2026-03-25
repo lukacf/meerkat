@@ -6414,14 +6414,14 @@ async fn test_retire_archive_failure_is_not_silent() {
         .clone();
     service.set_archive_failure(&session_id).await;
 
-    // Retire succeeds despite archive failure (best-effort cleanup).
+    // Archive failure is critical — retire must surface it (dogma §15).
     let result = handle.retire(MeerkatId::from("w-1")).await;
     assert!(
-        result.is_ok(),
-        "retire should succeed despite archive failure"
+        result.is_err(),
+        "retire must return Err when ArchiveSession fails"
     );
 
-    // Member is removed from roster unconditionally.
+    // Member is removed from roster unconditionally (finally block).
     assert!(
         handle.get_member(&MeerkatId::from("w-1")).await.is_none(),
         "retire must remove roster entry even when archive fails"
@@ -8420,10 +8420,11 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         .await
         .expect("wire");
     retire_service.set_archive_failure(&sid_r1).await;
-    retire_handle
-        .retire(MeerkatId::from("r-1"))
-        .await
-        .expect("retire should succeed despite archive failure (best-effort cleanup)");
+    let retire_result = retire_handle.retire(MeerkatId::from("r-1")).await;
+    assert!(
+        retire_result.is_err(),
+        "retire must return Err when ArchiveSession fails"
+    );
     assert!(
         retire_handle
             .get_member(&MeerkatId::from("r-1"))
@@ -13243,11 +13244,13 @@ async fn test_dispose_member_removes_roster_even_when_steps_fail() {
         .unwrap();
     service.set_archive_failure(&sid_w1).await;
 
-    // Retire succeeds (best-effort policy always continues).
-    handle
-        .retire(MeerkatId::from("w-1"))
-        .await
-        .expect("retire should succeed despite multiple step failures");
+    // Archive failure is critical — retire must surface it even when comms
+    // steps also failed (comms failures are still best-effort).
+    let result = handle.retire(MeerkatId::from("w-1")).await;
+    assert!(
+        result.is_err(),
+        "retire must return Err when ArchiveSession fails, regardless of other step failures"
+    );
 
     // The structural guarantee: member is gone from roster regardless.
     assert!(
@@ -13505,4 +13508,99 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
         "shutdown must not stall on stuck lifecycle notification tasks"
     );
     shutdown_result.unwrap().expect("shutdown should succeed");
+}
+
+// ---------------------------------------------------------------------------
+// P1-5: Disposal policy — archive failure must propagate as Err
+// ---------------------------------------------------------------------------
+
+/// Archive failure during retirement must return Err to the caller.
+///
+/// Dogma §15: "success means truthful" — returning Ok(()) when ArchiveSession
+/// failed creates an orphan session that the caller believes was cleaned up.
+/// The roster is still removed (unconditional finally block), but the caller
+/// must know the session was NOT archived.
+#[tokio::test]
+async fn test_retire_returns_err_when_archive_fails() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    service.set_archive_failure(&session_id).await;
+
+    // Archive failure is critical — retire must surface it.
+    let result = handle.retire(MeerkatId::from("w-1")).await;
+    assert!(
+        result.is_err(),
+        "retire must return Err when ArchiveSession fails — got Ok"
+    );
+
+    // Roster removal is unconditional (finally block) even when we return Err.
+    assert!(
+        handle.get_member(&MeerkatId::from("w-1")).await.is_none(),
+        "roster entry must be removed even when retire returns Err"
+    );
+
+    // Retire event was persisted before disposal (event-first).
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e.kind, MobEventKind::MeerkatRetired { .. })),
+        "retire event must persist regardless of archive outcome"
+    );
+}
+
+/// Comms failures (NotifyPeers, RemoveTrustEdges) during retirement remain
+/// best-effort — retire returns Ok even when they fail.
+///
+/// These steps involve peer communication that may legitimately fail during
+/// concurrent teardown. Only ArchiveSession is critical because it determines
+/// whether session data is properly cleaned up.
+#[tokio::test]
+async fn test_retire_comms_failures_remain_best_effort() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    // Set up comms to fail both NotifyPeers and RemoveTrustEdges for w-1.
+    service
+        .set_comms_behavior(
+            &test_comms_name("worker", "w-1"),
+            MockCommsBehavior {
+                fail_send_peer_retired: true,
+                fail_remove_trust: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    handle
+        .wire(MeerkatId::from("w-1"), MeerkatId::from("w-2"))
+        .await
+        .expect("wire");
+
+    // Comms failures are best-effort — retire still succeeds.
+    let result = handle.retire(MeerkatId::from("w-1")).await;
+    assert!(
+        result.is_ok(),
+        "retire must succeed when only comms steps fail (best-effort) — got {:?}",
+        result.unwrap_err()
+    );
+
+    // Roster removal still happens.
+    assert!(
+        handle.get_member(&MeerkatId::from("w-1")).await.is_none(),
+        "roster entry must be removed after best-effort comms failures"
+    );
 }

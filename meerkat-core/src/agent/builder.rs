@@ -245,7 +245,6 @@ impl AgentBuilder {
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
-            extraction_mode: false,
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,

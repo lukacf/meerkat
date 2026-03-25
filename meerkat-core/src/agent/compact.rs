@@ -53,7 +53,8 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                             tokens += IMAGE_TOKEN_ESTIMATE;
                         }
                         _ => {
-                            tokens += block.text_projection().len() as u64 / 4;
+                            let len = block.text_projection().len() as u64;
+                            tokens += if len > 0 { (len / 4).max(1) } else { 0 };
                         }
                     }
                 }
@@ -66,7 +67,8 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                                 tokens += IMAGE_TOKEN_ESTIMATE;
                             }
                             _ => {
-                                tokens += block.text_projection().len() as u64 / 4;
+                                let len = block.text_projection().len() as u64;
+                                tokens += if len > 0 { (len / 4).max(1) } else { 0 };
                             }
                         }
                     }
@@ -115,7 +117,7 @@ pub fn build_compaction_context(
 fn infer_session_boundary_index(messages: &[Message]) -> u64 {
     messages
         .iter()
-        .filter(|message| matches!(message, Message::BlockAssistant(_)))
+        .filter(|message| matches!(message, Message::BlockAssistant(_) | Message::Assistant(_)))
         .count() as u64
 }
 

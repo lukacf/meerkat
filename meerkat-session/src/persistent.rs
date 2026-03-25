@@ -900,14 +900,22 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
         keep_alive: bool,
     ) -> Result<(), SessionError> {
-        // Update the live in-memory session metadata first (persist_full_session
+        // Snapshot the previous value so we can roll back on store failure.
+        let previous = self
+            .export_session_with_labels(id)
+            .await?
+            .session_metadata()
+            .map(|m| m.keep_alive)
+            .unwrap_or(false);
+
+        // Update the live in-memory session metadata (persist_full_session
         // reads from live state, so the mutation must happen before the write).
         self.inner.update_session_keep_alive(id, keep_alive).await?;
+
         // Persist to store so recovery/resume inherits the updated intent.
-        // If the store write fails, roll back the live mutation to keep both
-        // sides consistent rather than leaving them diverged.
+        // If the store write fails, roll back to the previous value.
         if let Err(e) = self.persist_full_session(id).await {
-            let _ = self.inner.update_session_keep_alive(id, !keep_alive).await;
+            let _ = self.inner.update_session_keep_alive(id, previous).await;
             return Err(e);
         }
         Ok(())
@@ -2469,20 +2477,42 @@ mod tests {
             .expect("create session");
         let id = created.session_id;
 
-        // Now make the store fail on save.
+        // --- Transition: false → true with store failure ---
         fail_store.set_fail_save(true);
-
-        // Update keep_alive — should fail because persist_full_session fails.
         let result = service.update_session_keep_alive(&id, true).await;
-        assert!(result.is_err(), "update should fail when store write fails");
-
-        // Verify the live session was rolled back to the original value.
+        assert!(result.is_err(), "false→true should fail when store fails");
         fail_store.set_fail_save(false);
         let exported = service.export_session_with_labels(&id).await.unwrap();
-        let meta = exported.session_metadata().expect("metadata present");
         assert!(
-            !meta.keep_alive,
-            "live session keep_alive should be rolled back to false after store failure"
+            !exported.session_metadata().unwrap().keep_alive,
+            "should roll back to false after failed false→true"
+        );
+
+        // --- Bring live state to true successfully ---
+        service.update_session_keep_alive(&id, true).await.unwrap();
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        assert!(exported.session_metadata().unwrap().keep_alive);
+
+        // --- Transition: true → true with store failure (idempotent retry) ---
+        fail_store.set_fail_save(true);
+        let result = service.update_session_keep_alive(&id, true).await;
+        assert!(result.is_err(), "true→true should fail when store fails");
+        fail_store.set_fail_save(false);
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        assert!(
+            exported.session_metadata().unwrap().keep_alive,
+            "should stay true after failed true→true (not flip to false)"
+        );
+
+        // --- Transition: true → false with store failure ---
+        fail_store.set_fail_save(true);
+        let result = service.update_session_keep_alive(&id, false).await;
+        assert!(result.is_err(), "true→false should fail when store fails");
+        fail_store.set_fail_save(false);
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        assert!(
+            exported.session_metadata().unwrap().keep_alive,
+            "should roll back to true after failed true→false (not flip to false)"
         );
     }
 }

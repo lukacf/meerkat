@@ -52,7 +52,7 @@ async fn generate_image(
     let client = reqwest::Client::new();
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/\
-         gemini-2.0-flash-preview-image-generation:generateContent?key={api_key}"
+         gemini-3.1-flash-image-preview:generateContent?key={api_key}"
     );
     let body = serde_json::json!({
         "contents": [{ "parts": [{ "text": prompt }] }],
@@ -329,6 +329,9 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         let (img_data, mime) = match generate_image(&gemini_key, &gen_prompt).await {
             Ok(r) => r,
             Err(e) => {
+                if round_idx == 0 {
+                    panic!("Round 1 image generation failed — cannot validate pipeline: {e}");
+                }
                 eprintln!("  Image gen failed: {e} — skipping round");
                 continue;
             }

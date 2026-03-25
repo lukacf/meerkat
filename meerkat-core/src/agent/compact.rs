@@ -30,14 +30,57 @@ pub enum CompactionError {
     EstimationFailed(String),
 }
 
-/// Estimate token count from message history (JSON bytes / 4).
+/// Approximate token cost per image block.
 ///
-/// Returns an error if the messages cannot be serialized, rather than
-/// silently returning 0.
+/// Anthropic charges ~1600 tokens for a standard image regardless of
+/// resolution. Using a fixed estimate avoids counting raw base64 bytes
+/// (which inflate the estimate by ~200x).
+const IMAGE_TOKEN_ESTIMATE: u64 = 1_600;
+
+/// Estimate token count from message history.
+///
+/// Text content uses `json_bytes / 4` as a rough heuristic.
+/// Image blocks use a fixed per-image estimate instead of serializing
+/// the base64 payload (which would massively overcount).
 pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
-    let json = serde_json::to_string(messages)
-        .map_err(|e| CompactionError::EstimationFailed(e.to_string()))?;
-    Ok(json.len() as u64 / 4)
+    let mut tokens: u64 = 0;
+    for msg in messages {
+        match msg {
+            Message::User(u) => {
+                for block in &u.content {
+                    match block {
+                        crate::types::ContentBlock::Image { .. } => {
+                            tokens += IMAGE_TOKEN_ESTIMATE;
+                        }
+                        _ => {
+                            tokens += block.text_projection().len() as u64 / 4;
+                        }
+                    }
+                }
+            }
+            Message::ToolResults { results } => {
+                for r in results {
+                    for block in &r.content {
+                        match block {
+                            crate::types::ContentBlock::Image { .. } => {
+                                tokens += IMAGE_TOKEN_ESTIMATE;
+                            }
+                            _ => {
+                                tokens += block.text_projection().len() as u64 / 4;
+                            }
+                        }
+                    }
+                }
+            }
+            // For assistant/system messages, serialize to JSON (no image blocks).
+            other => {
+                let json = serde_json::to_string(other)
+                    .map_err(|e| CompactionError::EstimationFailed(e.to_string()))?;
+                tokens += json.len() as u64 / 4;
+            }
+        }
+    }
+    Ok(tokens)
 }
 
 /// Build a `CompactionContext` from current agent state.

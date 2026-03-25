@@ -5305,9 +5305,16 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 options.profile_name = Some(meerkat_mob::ProfileName::from(p));
             }
             let result = state
-                .mob_spawn_helper(&meerkat_mob::MobId::from(mob_id), mid, prompt, options)
+                .mob_spawn_helper(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    mid,
+                    prompt,
+                    options,
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
             if json {
                 println!(
                     "{}",
@@ -5355,7 +5362,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             }
             let result = state
                 .mob_fork_helper(
-                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::MobId::from(mob_id.clone()),
                     &source_id,
                     mid,
                     prompt,
@@ -5364,6 +5371,8 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
             if json {
                 println!(
                     "{}",
@@ -5417,11 +5426,13 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         MobCommands::ForceCancel { mob_id, meerkat_id } => {
             state
                 .mob_force_cancel(
-                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::MobId::from(mob_id.clone()),
                     meerkat_mob::MeerkatId::from(meerkat_id),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
             println!("cancelled");
             Ok(())
         }
@@ -5432,12 +5443,14 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
         } => {
             let receipt = state
                 .mob_respawn(
-                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::MobId::from(mob_id.clone()),
                     meerkat_mob::MeerkatId::from(meerkat_id),
                     initial_message.map(meerkat_core::ContentInput::from),
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
             println!(
                 "{}",
                 serde_json::json!({

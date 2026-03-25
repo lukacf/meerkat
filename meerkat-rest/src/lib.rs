@@ -2338,11 +2338,13 @@ async fn create_session(
     match result {
         Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
         Err(err) => {
-            // Clean up MCP adapter state on session creation failure.
+            // Clean up MCP adapter state on first-turn failure.
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;
-            #[cfg(feature = "comms")]
-            state.runtime_adapter.abort_comms_drain(&session_id).await;
+            // Do NOT abort the comms drain here. The session was already created
+            // successfully, and a transient LLM/tool error should not kill the
+            // drain for a keep-alive session. The drain survives turn errors,
+            // matching RPC behavior.
             Err(err)
         }
     }

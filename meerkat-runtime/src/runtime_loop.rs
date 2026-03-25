@@ -144,17 +144,38 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
             blocks: p.blocks.clone().unwrap_or_default(),
         },
-        Input::Peer(p) if p.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: p.blocks.clone().unwrap_or_default(),
-        },
+        Input::Peer(p) if p.blocks.is_some() => {
+            // Prepend the text body when it carries content not already in blocks,
+            // so multimodal messages keep the text explaining the attached media.
+            let raw_blocks = p.blocks.clone().unwrap_or_default();
+            let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
+                matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
+            });
+            if p.body.is_empty() || body_already_in_blocks {
+                CoreRenderable::Blocks { blocks: raw_blocks }
+            } else {
+                let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                    text: p.body.clone(),
+                }];
+                blocks.extend(raw_blocks);
+                CoreRenderable::Blocks { blocks }
+            }
+        }
         Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
             blocks: f.blocks.clone().unwrap_or_default(),
         },
         Input::ExternalEvent(e) if e.blocks.is_some() => {
-            // Prepend the event-type label so the model can distinguish
-            // external events from ordinary user prompts.
+            // Prepend the event-type label + payload body so the model can
+            // distinguish external events and doesn't lose the text explanation.
+            let payload_text = if e.payload.is_null() {
+                String::new()
+            } else if let Some(s) = e.payload.as_str() {
+                format!(" {s}")
+            } else {
+                format!(" {}", e.payload)
+            };
             let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                text: format!("[External Event: {}] ", e.event_type),
+                text: format!("[External Event: {}]{payload_text}", e.event_type),
             }];
             blocks.extend(e.blocks.clone().unwrap_or_default());
             CoreRenderable::Blocks { blocks }

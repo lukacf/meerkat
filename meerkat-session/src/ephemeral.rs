@@ -1062,6 +1062,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         Ok(summaries)
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let mut sessions = self.sessions.write().await;
         let handle = sessions

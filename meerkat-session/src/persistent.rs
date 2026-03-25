@@ -846,6 +846,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         Ok(summaries)
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        self.inner.has_live_session(id).await
+    }
+
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let archived_snapshot = match self.export_session_with_labels(id).await {
             Ok(session) => Some(session),

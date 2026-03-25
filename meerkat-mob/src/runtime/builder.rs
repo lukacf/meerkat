@@ -424,15 +424,21 @@ impl MobBuilder {
             runtime_adapter,
             definition.backend.external.clone(),
         );
-        let active_sessions = session_service
+        let listed_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
             .await?;
-        // Include ALL live sessions (not just actively-running ones). Idle sessions
-        // between turns are still present in the service and must not be recreated.
-        let active_ids = active_sessions
-            .iter()
-            .map(|s| s.session_id.clone())
-            .collect::<std::collections::HashSet<_>>();
+        // Live bridge existence is session-service-owned truth. Do not infer it
+        // from SessionSummary presence or `is_active`, because persisted-only
+        // summaries are not live and idle live sessions are not "active".
+        let mut active_ids = std::collections::HashSet::new();
+        for summary in &listed_sessions {
+            if session_service
+                .has_live_session(&summary.session_id)
+                .await?
+            {
+                active_ids.insert(summary.session_id.clone());
+            }
+        }
 
         let roster_entries = roster.list().cloned().collect::<Vec<_>>();
         let roster_session_ids = roster_entries

@@ -549,6 +549,15 @@ pub trait SessionService: Send + Sync {
         ))
     }
 
+    /// Whether a live in-memory session bridge currently exists for `id`.
+    ///
+    /// This is intentionally distinct from `list()` / `SessionSummary`:
+    /// persisted-only summaries must not count as live, and idle live sessions
+    /// must still count as live even when no turn is running.
+    async fn has_live_session(&self, _id: &SessionId) -> Result<bool, SessionError> {
+        Err(SessionError::Unsupported("has_live_session".to_string()))
+    }
+
     /// Stage an external tool visibility filter on a live session.
     ///
     /// Used to dynamically hide/show tools (e.g., `view_image`) after a
@@ -661,5 +670,57 @@ impl dyn SessionService {
     /// Wrap self in an Arc.
     pub fn into_arc(self: Box<Self>) -> Arc<dyn SessionService> {
         Arc::from(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnsupportedSessionService;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionService for UnsupportedSessionService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            unimplemented!()
+        }
+
+        async fn start_turn(
+            &self,
+            _id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            unimplemented!()
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unimplemented!()
+        }
+
+        async fn read(&self, _id: &SessionId) -> Result<SessionView, SessionError> {
+            unimplemented!()
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            unimplemented!()
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn has_live_session_defaults_to_unsupported() {
+        let service = UnsupportedSessionService;
+        let err = service
+            .has_live_session(&SessionId::new())
+            .await
+            .expect_err("default implementation should fail loudly");
+        assert!(matches!(err, SessionError::Unsupported(name) if name == "has_live_session"));
     }
 }

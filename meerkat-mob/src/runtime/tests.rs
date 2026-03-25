@@ -1062,6 +1062,10 @@ impl SessionService for MockSessionService {
             .collect())
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         if self.archive_fail_sessions.read().await.contains(id) {
             return Err(SessionError::Store(Box::new(std::io::Error::other(
@@ -2367,6 +2371,10 @@ impl SessionService for PersistedListingSessionService {
         Ok(summaries)
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        self.inner.has_live_session(id).await
+    }
+
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.archive(id).await
     }
@@ -2539,6 +2547,10 @@ impl SessionService for InactiveReadSessionService {
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         self.inner.archive(id).await
+    }
+
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        self.inner.has_live_session(id).await
     }
 
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
@@ -12120,6 +12132,10 @@ impl SessionService for RealCommsSessionService {
                 labels: Default::default(),
             })
             .collect())
+    }
+
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {

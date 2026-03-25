@@ -24,12 +24,15 @@
 //! ```
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
+use meerkat_core::service::SessionServiceCommsExt;
 use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
 use meerkat_mob::{
     MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
     MobSessionService, MobStorage, Profile, ProfileName, ToolConfig,
+    definition::{RoleWiringRule, WiringRules},
 };
-use meerkat_session::EphemeralSessionService;
+use meerkat_session::PersistentSessionService;
+use meerkat_store::{JsonlStore, StoreAdapter};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -134,7 +137,36 @@ fn pictionary_definition() -> MobDefinition {
         orchestrator: None,
         profiles,
         mcp_servers: BTreeMap::new(),
-        wiring: Default::default(),
+        wiring: WiringRules {
+            auto_wire_orchestrator: false,
+            role_wiring: vec![
+                // Full mesh: every profile can talk to every other
+                RoleWiringRule {
+                    a: ProfileName::from("artist"),
+                    b: ProfileName::from("guesser-a"),
+                },
+                RoleWiringRule {
+                    a: ProfileName::from("artist"),
+                    b: ProfileName::from("guesser-b"),
+                },
+                RoleWiringRule {
+                    a: ProfileName::from("artist"),
+                    b: ProfileName::from("guesser-c"),
+                },
+                RoleWiringRule {
+                    a: ProfileName::from("guesser-a"),
+                    b: ProfileName::from("guesser-b"),
+                },
+                RoleWiringRule {
+                    a: ProfileName::from("guesser-a"),
+                    b: ProfileName::from("guesser-c"),
+                },
+                RoleWiringRule {
+                    a: ProfileName::from("guesser-b"),
+                    b: ProfileName::from("guesser-c"),
+                },
+            ],
+        },
         skills: BTreeMap::new(),
         backend: Default::default(),
         flows: BTreeMap::new(),
@@ -152,15 +184,30 @@ async fn setup_mob()
     let store_path = temp_dir.path().join("sessions");
     std::fs::create_dir_all(&store_path)?;
 
-    let factory = AgentFactory::new(&store_path).comms(true);
-    let config = Config::default();
-    let session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>> =
-        Arc::new(meerkat::build_ephemeral_service(factory, config, 16));
+    let factory = AgentFactory::new(&store_path)
+        .comms(true)
+        .runtime_root(store_path.clone());
+    let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+    let store = Arc::new(JsonlStore::new(store_path.join("sessions")));
+    builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
+
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store.clone();
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
+    let session_service = Arc::new(PersistentSessionService::new(
+        builder,
+        16,
+        store_dyn,
+        Some(runtime_store),
+    ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
+
+    // RuntimeSessionAdapter is required for comms drains — without it,
+    // AutonomousHost members have no drain to pick up peer messages.
+    let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
 
     let handle = MobBuilder::new(pictionary_definition(), MobStorage::in_memory())
         .with_session_service(mob_service.clone())
-        .allow_ephemeral_sessions(true)
+        .with_runtime_adapter(runtime_adapter)
         .create()
         .await?;
 
@@ -173,22 +220,33 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
         (
             "artist",
             "You are the artist in Pictionary. You will be told a secret word. \
-             Wait for guessers to send you their guess, then say CORRECT or WRONG.",
+             Wait for a guesser to send you their FINAL guess, then say CORRECT or WRONG. \
+             Do NOT respond to peer_added notifications — just acknowledge silently.",
         ),
         (
             "guesser-a",
-            "You are guesser-a (lead). When you see an image, discuss with \
-             guesser-b and guesser-c, then send the consensus guess to 'artist'.",
+            "You are guesser-a, the LEAD guesser. IMPORTANT RULES: \
+             1) When you receive an image from the artist, DO NOT guess immediately. \
+             2) First, send a message to guesser-b AND guesser-c describing what you see (literal shapes/objects). \
+             3) WAIT for both guesser-b and guesser-c to reply with their interpretations. \
+             4) Only AFTER hearing from both, synthesize a consensus guess and send it to the artist. \
+             Use the 'send' tool with kind='message' for all peer messages. Keep messages to 1-2 sentences.",
         ),
         (
             "guesser-b",
-            "You are guesser-b. When you see an image, share your emotional/mood \
-             interpretation with guesser-a and guesser-c.",
+            "You are guesser-b. IMPORTANT RULES: \
+             1) When you receive a message from guesser-a about an image, think about the EMOTIONAL/MOOD interpretation. \
+             2) Reply to guesser-a AND guesser-c with your interpretation using the 'send' tool (kind='message'). \
+             3) Do NOT send anything to the artist — only guesser-a does that. \
+             Keep messages to 1-2 sentences.",
         ),
         (
             "guesser-c",
-            "You are guesser-c. When you see an image, share your context/narrative \
-             interpretation with guesser-a and guesser-b.",
+            "You are guesser-c. IMPORTANT RULES: \
+             1) When you receive a message from guesser-a about an image, think about the CONTEXT/NARRATIVE interpretation. \
+             2) Reply to guesser-a AND guesser-b with your interpretation using the 'send' tool (kind='message'). \
+             3) Do NOT send anything to the artist — only guesser-a does that. \
+             Keep messages to 1-2 sentences.",
         ),
     ];
 
@@ -243,10 +301,30 @@ async fn history_contains(
             )
             .await
         {
+            // Use text projection instead of full JSON serialization to avoid
+            // serializing multi-MB base64 image data on every poll.
             let blob: String = page
                 .messages
                 .iter()
-                .map(|m| serde_json::to_string(m).unwrap_or_default())
+                .map(|m| match m {
+                    meerkat_core::types::Message::Assistant(a) => a.content.clone(),
+                    meerkat_core::types::Message::BlockAssistant(ba) => ba
+                        .blocks
+                        .iter()
+                        .map(|b| match b {
+                            meerkat_core::types::AssistantBlock::Text { text, .. } => text.clone(),
+                            meerkat_core::types::AssistantBlock::ToolUse { args, .. } => {
+                                args.get().to_string()
+                            }
+                            _ => String::new(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    meerkat_core::types::Message::User(u) => {
+                        meerkat_core::types::text_content(&u.content)
+                    }
+                    _ => String::new(),
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             if blob.to_lowercase().contains(&needle.to_lowercase()) {
@@ -258,14 +336,19 @@ async fn history_contains(
 }
 
 /// Dump the cross-agent conversation for a round.
-async fn print_conversation(handle: &MobHandle, service: &dyn MobSessionService) {
+/// `skip_before` skips messages before this index per member (so repeated rounds don't replay old history).
+async fn print_conversation(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    skip_before: usize,
+) {
     println!();
     println!("  ┌─────────────────────────────────────────────────────────");
     println!("  │ CONVERSATION");
     println!("  ├─────────────────────────────────────────────────────────");
 
     // Collect all messages with timestamps from all members, then sort chronologically.
-    let mut all_messages: Vec<(String, String, String)> = Vec::new(); // (timestamp, speaker, text)
+    let mut all_messages: Vec<(String, String, String)> = Vec::new();
 
     let members = handle.list_members().await;
     for member in &members {
@@ -277,7 +360,7 @@ async fn print_conversation(handle: &MobHandle, service: &dyn MobSessionService)
             .read_history(
                 session_id,
                 meerkat_core::SessionHistoryQuery {
-                    offset: 0,
+                    offset: skip_before,
                     limit: None,
                 },
             )
@@ -319,8 +402,11 @@ async fn print_conversation(handle: &MobHandle, service: &dyn MobSessionService)
                                     if let Ok(v) =
                                         serde_json::from_str::<serde_json::Value>(args.get())
                                     {
-                                        let peer =
-                                            v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+                                        let peer = v
+                                            .get("to")
+                                            .or_else(|| v.get("peer"))
+                                            .and_then(|p| p.as_str())
+                                            .unwrap_or("?");
                                         let body =
                                             v.get("body").and_then(|b| b.as_str()).unwrap_or("");
                                         let kind = v
@@ -432,6 +518,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
     ];
 
     let mut passed = 0;
+    let mut msg_offset = 0usize; // track where previous round ended
 
     for (round_idx, (secret_word, label)) in rounds.iter().enumerate() {
         println!("--- {label}: \"{secret_word}\" ---");
@@ -471,13 +558,30 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             .await
             .expect("artist brief");
 
-        // 3. Send image to all guessers (multimodal runtime ingress)
-        println!("  [3/4] Sending image to guessers...");
-        let image_content = ContentInput::Blocks(vec![
+        // 3. Send image to all guessers via peer-to-peer comms (from artist)
+        //    This uses the artist's CommsRuntime to send actual peer messages,
+        //    so guessers see "[peer: artist] ..." and the comms discussion model
+        //    kicks in naturally.
+        println!("  [3/4] Sending image to guessers via artist's comms...");
+        let artist_session_id = {
+            let members = handle.list_members().await;
+            members
+                .iter()
+                .find(|m| m.meerkat_id == MeerkatId::from("artist"))
+                .and_then(|m| m.session_id().cloned())
+                .expect("artist session_id")
+        };
+        let artist_comms = service
+            .comms_runtime(&artist_session_id)
+            .await
+            .expect("artist comms runtime");
+
+        let image_blocks = vec![
             ContentBlock::Text {
                 text: format!(
-                    "[Pictionary {label}] The artist drew this. Discuss with the other \
-                     guessers, then guesser-a: send your consensus guess to 'artist'."
+                    "I drew this for Pictionary ({label}). \
+                     guesser-a: describe what you see to guesser-b and guesser-c FIRST, \
+                     wait for their replies, THEN send me your consensus guess."
                 ),
             },
             ContentBlock::Image {
@@ -485,18 +589,111 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 data: img_data.clone(),
                 source_path: None,
             },
-        ]);
+        ];
 
-        for name in ["guesser-a", "guesser-b", "guesser-c"] {
-            let member = handle.member(&MeerkatId::from(name)).await.expect(name);
-            member
-                .send(image_content.clone(), HandlingMode::Queue)
+        // Mob comms names follow the pattern: {mob_id}/{profile}/{meerkat_id}
+        for guesser in ["guesser-a", "guesser-b", "guesser-c"] {
+            let peer_name = format!("pictionary/{guesser}/{guesser}");
+            artist_comms
+                .send(meerkat_core::comms::CommsCommand::PeerMessage {
+                    to: meerkat_core::comms::PeerName::new(&peer_name).unwrap(),
+                    body: format!("Pictionary {label} — guess what I drew!"),
+                    blocks: Some(image_blocks.clone()),
+                })
                 .await
-                .unwrap_or_else(|e| panic!("send→{name}: {e}"));
+                .unwrap_or_else(|e| panic!("artist→{peer_name} peer send: {e}"));
         }
 
         // 4. Wait for verdict
         println!("  [4/4] Waiting for discussion + guess + validation (up to 2 min)...");
+
+        // DEBUG: After a short delay, dump guesser-a's raw history for round 1
+        if round_idx == 0 {
+            sleep(Duration::from_secs(15)).await;
+            let members = handle.list_members().await;
+            if let Some(ga) = members
+                .iter()
+                .find(|m| m.meerkat_id == MeerkatId::from("guesser-a"))
+            {
+                if let Some(sid) = ga.session_id() {
+                    if let Ok(page) = service
+                        .read_history(
+                            sid,
+                            meerkat_core::SessionHistoryQuery {
+                                offset: 0,
+                                limit: None,
+                            },
+                        )
+                        .await
+                    {
+                        println!(
+                            "\n  === DEBUG: guesser-a raw history ({} messages) ===",
+                            page.messages.len()
+                        );
+                        for (i, msg) in page.messages.iter().enumerate() {
+                            let (role, summary) = match msg {
+                                meerkat_core::types::Message::System(s) => {
+                                    ("system", format!("[{}B]", s.content.len()))
+                                }
+                                meerkat_core::types::Message::User(u) => {
+                                    let has_img = meerkat_core::has_images(&u.content);
+                                    let text = meerkat_core::types::text_content(&u.content);
+                                    let preview: String = text.chars().take(120).collect();
+                                    (
+                                        "user",
+                                        format!(
+                                            "blocks={} has_img={has_img} text={preview}",
+                                            u.content.len()
+                                        ),
+                                    )
+                                }
+                                meerkat_core::types::Message::Assistant(a) => {
+                                    let preview: String = a.content.chars().take(120).collect();
+                                    (
+                                        "assistant",
+                                        format!("tools={} text={preview}", a.tool_calls.len()),
+                                    )
+                                }
+                                meerkat_core::types::Message::BlockAssistant(ba) => {
+                                    let text_blocks = ba
+                                        .blocks
+                                        .iter()
+                                        .filter(|b| {
+                                            matches!(
+                                                b,
+                                                meerkat_core::types::AssistantBlock::Text { .. }
+                                            )
+                                        })
+                                        .count();
+                                    let tool_blocks = ba
+                                        .blocks
+                                        .iter()
+                                        .filter(|b| {
+                                            matches!(
+                                                b,
+                                                meerkat_core::types::AssistantBlock::ToolUse { .. }
+                                            )
+                                        })
+                                        .count();
+                                    (
+                                        "block_assistant",
+                                        format!(
+                                            "blocks={} text={text_blocks} tool_use={tool_blocks}",
+                                            ba.blocks.len()
+                                        ),
+                                    )
+                                }
+                                meerkat_core::types::Message::ToolResults { results } => {
+                                    ("tool_results", format!("count={}", results.len()))
+                                }
+                            };
+                            println!("    [{i}] {role}: {summary}");
+                        }
+                        println!("  === END DEBUG ===\n");
+                    }
+                }
+            }
+        }
         let got_correct = wait_for(
             &handle,
             service.as_ref(),
@@ -519,7 +716,8 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             println!("  ✗ Timed out — no verdict from artist");
         }
 
-        print_conversation(&handle, service.as_ref()).await;
+        // Show ALL messages (no offset) so we can see the full discussion.
+        print_conversation(&handle, service.as_ref(), 0).await;
 
         // Round 1 (easy) must pass to validate the pipeline works
         if round_idx == 0 && !got_correct {

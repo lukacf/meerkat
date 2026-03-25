@@ -580,6 +580,10 @@ impl SessionService for ContractSessionService {
             .collect())
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let removed = self.sessions.write().await.remove(id).is_some();
         if removed {

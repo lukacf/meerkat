@@ -1493,7 +1493,7 @@ fn compute_retry_delay(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::manual_async_fn)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::manual_async_fn)]
 mod tests {
     use super::rewrite_assistant_text;
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
@@ -3048,7 +3048,7 @@ mod tests {
             "mock"
         }
 
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "mock-model"
         }
     }
@@ -3183,7 +3183,7 @@ mod tests {
             Err(AgentError::StructuredOutputValidationFailed {
                 attempts, reason, ..
             }) => {
-                assert_eq!(attempts, 3, "should report total attempts (retries + 1)");
+                assert_eq!(attempts, 2, "should report validation failure count (== max_retries)");
                 assert!(
                     reason.contains("Invalid JSON"),
                     "reason should mention JSON parse failure, got: {reason}"

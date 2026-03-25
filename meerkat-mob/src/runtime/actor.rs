@@ -2670,12 +2670,12 @@ impl MobActor {
                 "disposal completed but ArchiveSession failed: {error}"
             )));
         }
-        if let Some((step, error)) = &report.aborted_at {
-            if *step == DisposalStep::ArchiveSession {
-                return Err(MobError::Internal(format!(
-                    "disposal aborted at ArchiveSession: {error}"
-                )));
-            }
+        if let Some((step, error)) = &report.aborted_at
+            && *step == DisposalStep::ArchiveSession
+        {
+            return Err(MobError::Internal(format!(
+                "disposal aborted at ArchiveSession: {error}"
+            )));
         }
 
         Ok(())

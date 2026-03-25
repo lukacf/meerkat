@@ -518,7 +518,7 @@ impl TurnExecutionAuthority {
     /// Used by the shell to determine whether LLM calls should use
     /// extraction parameters (no tools, temperature 0, structured_output).
     pub fn in_extraction_flow(&self) -> bool {
-        self.fields.extraction_attempts > 0
+        self.fields.max_extraction_retries > 0
     }
 
     /// Check if a transition is legal without applying it.

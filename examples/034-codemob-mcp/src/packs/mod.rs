@@ -116,7 +116,9 @@ pub fn format_context(context: &str) -> String {
     }
 }
 
-/// Build a turn-driven profile (no tools except comms). Used by most flow-based packs.
+/// Build a turn-driven profile with file-reading builtins and comms.
+/// Used by most flow-based packs so agents can read repository files
+/// during code review, architecture, and deliberation tasks.
 pub fn turn_driven_profile(
     model: String,
     skill: &str,
@@ -127,6 +129,8 @@ pub fn turn_driven_profile(
         model,
         skills: vec![skill.to_string()],
         tools: ToolConfig {
+            builtins: true,
+            shell: true,
             comms: true,
             ..ToolConfig::default()
         },

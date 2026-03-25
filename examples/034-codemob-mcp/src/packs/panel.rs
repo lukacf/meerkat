@@ -37,7 +37,7 @@ impl Pack for PanelPack {
             ("veteran",    "veteran-skill",    "Industry veteran — 20 years of war stories",      resolve_model(overrides, "veteran", "gpt-5.3-codex")),
         ];
 
-        let tools = ToolConfig { comms: true, ..ToolConfig::default() };
+        let tools = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };
 
         let mut profiles = BTreeMap::new();
         for (name, skill, desc, m) in &agents {

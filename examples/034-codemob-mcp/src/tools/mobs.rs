@@ -97,7 +97,7 @@ impl UserMobConfig {
         provider_params: Option<&Value>,
     ) -> MobDefinition {
         let ctx = format_context(context);
-        let tools = ToolConfig { comms: true, ..ToolConfig::default() };
+        let tools = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };
         let is_comms = self.mode == "comms";
         let runtime = if is_comms {
             MobRuntimeMode::AutonomousHost

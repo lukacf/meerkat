@@ -391,26 +391,45 @@ impl MobSessionRuntimeExecutor {
     }
 }
 
-fn extract_prompt(primitive: &RunPrimitive) -> String {
+fn extract_prompt_input(primitive: &RunPrimitive) -> ContentInput {
     match primitive {
-        RunPrimitive::StagedInput(staged) => staged
-            .appends
-            .iter()
-            .filter_map(|append| match &append.content {
-                CoreRenderable::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        RunPrimitive::StagedInput(staged) => {
+            let mut all_blocks = Vec::new();
+            for append in &staged.appends {
+                match &append.content {
+                    CoreRenderable::Text { text } => {
+                        all_blocks
+                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
+                    }
+                    CoreRenderable::Blocks { blocks } => {
+                        all_blocks.extend(blocks.iter().cloned());
+                    }
+                    _ => {}
+                }
+            }
+            if all_blocks.len() == 1 {
+                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
+                    ContentInput::Text(text.clone())
+                } else {
+                    ContentInput::Blocks(all_blocks)
+                }
+            } else if all_blocks.is_empty() {
+                ContentInput::Text(String::new())
+            } else {
+                ContentInput::Blocks(all_blocks)
+            }
+        }
         RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => text.clone(),
-            _ => String::new(),
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
         },
         RunPrimitive::ImmediateContextAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => text.clone(),
-            _ => String::new(),
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
         },
-        _ => String::new(),
+        _ => ContentInput::Text(String::new()),
     }
 }
 
@@ -428,7 +447,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .take_turn_context_for_inputs(&contributing_input_ids)
             .await;
         let req = StartTurnRequest {
-            prompt: extract_prompt(&primitive).into(),
+            prompt: extract_prompt_input(&primitive),
             system_prompt: None,
             render_metadata: None,
             handling_mode: primitive

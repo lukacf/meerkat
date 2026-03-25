@@ -620,61 +620,15 @@ impl MobActor {
             loops.remove(meerkat_id);
         }
 
+        self.ensure_autonomous_runtime_ready(meerkat_id, member_ref)
+            .await?;
+
         let member_ref_cloned = member_ref.clone();
         let provisioner = self.provisioner.clone();
         let loop_id = meerkat_id.clone();
         let log_id = meerkat_id.clone();
 
-        // Resolve comms drain dependencies before spawning.
-        // Both the canonical mob runtime adapter and the member's comms runtime
-        // are needed so peer interactions are routed through the same runtime
-        // authority instance the provisioner uses for runtime-backed turns.
-        let runtime_adapter = self.runtime_adapter.clone();
-        let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
-        let drain_session_id = member_ref.session_id().cloned();
-        let drain_session_service = Arc::clone(&self.session_service) as Arc<dyn MobSessionService>;
-
         let handle = tokio::spawn(async move {
-            // Spawn comms drain alongside the host loop when all wiring is available.
-            // The drain requires a registered session with an executor so that
-            // accept_input can route peer messages to the session's start_turn.
-            let drain_spawned = match (&runtime_adapter, &drain_session_id) {
-                (Some(adapter), Some(session_id)) => {
-                    // Register the session and attach an executor that routes
-                    // back to the session service. Without this, the drain's
-                    // accept_input calls have nowhere to deliver messages.
-                    adapter.register_session(session_id.clone()).await;
-                    let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
-                        drain_session_service.clone(),
-                        session_id.clone(),
-                    ));
-                    adapter
-                        .ensure_session_with_executor(session_id.clone(), executor)
-                        .await;
-
-                    let spawned = adapter
-                        .maybe_spawn_comms_drain(session_id, true, comms_runtime.clone())
-                        .await;
-                    if spawned {
-                        tracing::debug!(
-                            meerkat_id = %log_id,
-                            session_id = %session_id,
-                            "spawned comms drain for autonomous member"
-                        );
-                    }
-                    spawned
-                }
-                _ => {
-                    tracing::debug!(
-                        meerkat_id = %log_id,
-                        has_adapter = runtime_adapter.is_some(),
-                        has_session = drain_session_id.is_some(),
-                        "skipping comms drain for autonomous member (missing wiring)"
-                    );
-                    false
-                }
-            };
-
             let result = provisioner
                 .start_turn(
                     &member_ref_cloned,
@@ -692,22 +646,15 @@ impl MobActor {
                 )
                 .await;
 
-            // Abort the comms drain when the host loop exits.
-            if drain_spawned
-                && let (Some(adapter), Some(session_id)) = (&runtime_adapter, &drain_session_id)
-            {
-                adapter.abort_comms_drain(session_id).await;
-            }
-
             match &result {
                 Ok(()) => tracing::info!(
                     meerkat_id = %log_id,
-                    "autonomous host loop exited normally"
+                    "autonomous kickoff turn exited normally"
                 ),
                 Err(error) => tracing::error!(
                     meerkat_id = %log_id,
                     error = %error,
-                    "autonomous host loop failed"
+                    "autonomous kickoff turn failed"
                 ),
             }
             result
@@ -717,14 +664,20 @@ impl MobActor {
         if handle.is_finished() {
             match handle.await {
                 Ok(Ok(())) => {
-                    return Err(MobError::Internal(format!(
-                        "autonomous host loop for '{loop_id}' exited immediately"
-                    )));
+                    tracing::debug!(
+                        meerkat_id = %loop_id,
+                        "autonomous kickoff turn completed immediately; runtime stays ready"
+                    );
+                    return Ok(());
                 }
-                Ok(Err(error)) => return Err(error),
+                Ok(Err(error)) => {
+                    self.teardown_autonomous_runtime(member_ref).await;
+                    return Err(error);
+                }
                 Err(join_error) => {
+                    self.teardown_autonomous_runtime(member_ref).await;
                     return Err(MobError::Internal(format!(
-                        "autonomous host loop task join failed for '{loop_id}': {join_error}"
+                        "autonomous kickoff task join failed for '{loop_id}': {join_error}"
                     )));
                 }
             }
@@ -735,6 +688,51 @@ impl MobActor {
             .await
             .insert(meerkat_id.clone(), handle);
         Ok(())
+    }
+
+    async fn ensure_autonomous_runtime_ready(
+        &self,
+        meerkat_id: &MeerkatId,
+        member_ref: &MemberRef,
+    ) -> Result<(), MobError> {
+        let session_id = member_ref.session_id().ok_or_else(|| {
+            MobError::Internal(format!(
+                "autonomous member '{meerkat_id}' must be session-backed for runtime readiness"
+            ))
+        })?;
+
+        if let Some(adapter) = self.runtime_adapter.clone() {
+            adapter.register_session(session_id.clone()).await;
+            let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
+                Arc::clone(&self.session_service),
+                session_id.clone(),
+            ));
+            adapter
+                .ensure_session_with_executor(session_id.clone(), executor)
+                .await;
+
+            let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
+            let spawned = adapter
+                .maybe_spawn_comms_drain(session_id, true, comms_runtime)
+                .await;
+            if spawned {
+                tracing::debug!(
+                    meerkat_id = %meerkat_id,
+                    session_id = %session_id,
+                    "spawned comms drain for autonomous member"
+                );
+            }
+        }
+
+        self.ensure_autonomous_dispatch_capability(meerkat_id, member_ref)
+            .await
+    }
+
+    async fn teardown_autonomous_runtime(&self, member_ref: &MemberRef) {
+        if let (Some(adapter), Some(session_id)) = (&self.runtime_adapter, member_ref.session_id())
+        {
+            adapter.unregister_session(session_id).await;
+        }
     }
 
     async fn start_autonomous_host_loops_from_roster(&self) -> Result<(), MobError> {
@@ -840,6 +838,7 @@ impl MobActor {
         if let Some(handle) = self.autonomous_host_loops.lock().await.remove(meerkat_id) {
             handle.abort();
         }
+        self.teardown_autonomous_runtime(member_ref).await;
         // Ensure stop semantics are strong: do not report completion while the
         // session still appears active, otherwise immediate resume can race into
         // SessionError::Busy.
@@ -918,8 +917,6 @@ impl MobActor {
         &self,
         entry: RosterEntry,
     ) -> Result<(), MobError> {
-        self.ensure_autonomous_dispatch_capability(&entry.meerkat_id, &entry.member_ref)
-            .await?;
         self.start_autonomous_host_loop(
             &entry.meerkat_id,
             &entry.member_ref,
@@ -4037,45 +4034,32 @@ impl MobActor {
                     ))
                 })?;
 
-                let loop_dead = {
-                    let loops = self.autonomous_host_loops.lock().await;
-                    loops
-                        .get(&entry.meerkat_id)
-                        .map_or(true, |h| h.is_finished())
-                };
+                self.ensure_autonomous_runtime_ready(&entry.meerkat_id, &entry.member_ref)
+                    .await?;
 
-                if loop_dead {
-                    tracing::info!(
-                        meerkat_id = %entry.meerkat_id,
-                        "autonomous host loop exited, restarting for incoming message"
-                    );
-                    self.start_autonomous_host_loop(&entry.meerkat_id, &entry.member_ref, content)
-                        .await?;
-                } else {
-                    let injector = self
-                        .provisioner
-                        .interaction_event_injector(session_id)
-                        .await
-                        .ok_or_else(|| {
-                            MobError::Internal(format!(
-                                "missing event injector for autonomous member '{}'",
-                                entry.meerkat_id
-                            ))
-                        })?;
-                    injector
-                        .inject(
-                            content,
-                            meerkat_core::PlainEventSource::Rpc,
-                            handling_mode,
-                            render_metadata,
-                        )
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "autonomous dispatch inject failed for '{}': {}",
-                                entry.meerkat_id, error
-                            ))
-                        })?;
-                }
+                let injector = self
+                    .provisioner
+                    .interaction_event_injector(session_id)
+                    .await
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "missing event injector for autonomous member '{}'",
+                            entry.meerkat_id
+                        ))
+                    })?;
+                injector
+                    .inject(
+                        content,
+                        meerkat_core::PlainEventSource::Rpc,
+                        handling_mode,
+                        render_metadata,
+                    )
+                    .map_err(|error| {
+                        MobError::Internal(format!(
+                            "autonomous dispatch inject failed for '{}': {}",
+                            entry.meerkat_id, error
+                        ))
+                    })?;
                 Ok(session_id.clone())
             }
             crate::MobRuntimeMode::TurnDriven => {

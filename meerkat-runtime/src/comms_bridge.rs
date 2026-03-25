@@ -118,16 +118,24 @@ fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
 }
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
-    if !interaction.rendered_text.is_empty() {
-        return interaction.rendered_text.clone();
-    }
-
     match &interaction.content {
-        InteractionContent::Message { body, .. } => body.clone(),
+        InteractionContent::Message { body, .. } => {
+            if interaction.from.starts_with("event:") && !interaction.rendered_text.is_empty() {
+                interaction.rendered_text.clone()
+            } else {
+                body.clone()
+            }
+        }
         InteractionContent::Request { params, .. } => {
+            if !interaction.rendered_text.is_empty() {
+                return interaction.rendered_text.clone();
+            }
             serde_json::to_string(params).unwrap_or_default()
         }
         InteractionContent::Response { result, .. } => {
+            if !interaction.rendered_text.is_empty() {
+                return interaction.rendered_text.clone();
+            }
             serde_json::to_string(result).unwrap_or_default()
         }
     }
@@ -338,7 +346,37 @@ mod tests {
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
+            assert_eq!(peer.body, "see image");
             assert_eq!(peer.blocks, Some(blocks));
+        } else {
+            panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn multimodal_message_prefers_raw_body_over_rendered_projection() {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption text".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+                source_path: None,
+            },
+        ];
+        let interaction = InboxInteraction {
+            from: "peer-1".into(),
+            content: InteractionContent::Message {
+                body: "please inspect this image".into(),
+                blocks: Some(blocks),
+            },
+            id: make_interaction_id(),
+            rendered_text: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+        };
+        let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
+        if let Input::Peer(peer) = input {
+            assert_eq!(peer.body, "please inspect this image");
         } else {
             panic!("Expected PeerInput");
         }

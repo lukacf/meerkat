@@ -348,6 +348,7 @@ struct MockSessionService {
     fail_start_turn: std::sync::atomic::AtomicBool,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
+    keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
@@ -386,6 +387,7 @@ impl MockSessionService {
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
+            keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             inject_calls: Arc::new(AtomicU64::new(0)),
@@ -596,6 +598,11 @@ impl MockSessionService {
         self.keep_alive_start_turn_calls.load(Ordering::Relaxed)
     }
 
+    fn set_keep_alive_turns_complete_immediately(&self, enabled: bool) {
+        self.keep_alive_turns_complete_immediately
+            .store(enabled, Ordering::Relaxed);
+    }
+
     async fn keep_alive_prompts(&self) -> Vec<(SessionId, String)> {
         self.keep_alive_prompts.read().await.clone()
     }
@@ -793,6 +800,7 @@ impl SessionService for MockSessionService {
             let metadata = SessionMetadata {
                 model: req.model.clone(),
                 max_tokens: req.max_tokens.unwrap_or(4096),
+                structured_output_retries: 2,
                 provider: build
                     .and_then(|b| b.provider)
                     .unwrap_or(Provider::Anthropic),
@@ -932,6 +940,15 @@ impl SessionService for MockSessionService {
         drop(sessions);
 
         if is_keep_alive {
+            let complete_immediately = self
+                .keep_alive_turns_complete_immediately
+                .load(Ordering::Relaxed);
+            if complete_immediately {
+                return Ok(mock_run_result(
+                    id.clone(),
+                    "Autonomous kickoff completed".to_string(),
+                ));
+            }
             let notifier = self
                 .keep_alive_notifiers
                 .read()
@@ -5395,6 +5412,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
@@ -8858,6 +8876,47 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
 }
 
 #[tokio::test]
+async fn test_external_turn_autonomous_mode_keeps_injector_dispatch_after_kickoff_completion() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-idle-autonomous"),
+            None,
+            Some(crate::MobRuntimeMode::AutonomousHost),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead");
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let baseline_keep_alive_turns = service.keep_alive_start_turn_call_count();
+    let baseline_injects = service.inject_call_count();
+
+    handle
+        .member(&MeerkatId::from("l-idle-autonomous"))
+        .await
+        .expect("member handle")
+        .send(
+            "inject after kickoff",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("external turn should execute");
+
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        baseline_keep_alive_turns,
+        "idle autonomous dispatch must not restart a new kickoff turn after the original one completed"
+    );
+    assert!(
+        service.inject_call_count() > baseline_injects,
+        "idle autonomous dispatch should still route through the live injector"
+    );
+}
+
+#[tokio::test]
 async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     handle
@@ -8928,6 +8987,47 @@ async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() 
         baseline_start_turn_calls + 1,
         "runtime-backed dispatch should still attempt exactly one turn"
     );
+}
+
+#[tokio::test]
+async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain() {
+    let service = Arc::new(MockSessionService::new());
+    let service_adapter = service.enable_runtime_adapter();
+    let builder_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service)
+        .with_runtime_adapter(builder_adapter.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let session_id = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-override"),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert!(
+        builder_adapter.contains_session(&session_id).await,
+        "the builder-selected runtime adapter should own the autonomous member session"
+    );
+    assert!(
+        !service_adapter.contains_session(&session_id).await,
+        "the session service's default adapter must stay unused when an explicit mob runtime adapter override is provided"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timed out")
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -12230,6 +12330,390 @@ async fn create_test_mob_with_real_comms(
     (handle, service)
 }
 
+/// Real comms + runtime-backed session service for autonomous idle-delivery regressions.
+///
+/// Uses real inproc comms delivery, a real RuntimeSessionAdapter, and records
+/// runtime-applied prompts so tests can prove peer inbox traffic still reaches
+/// `apply_runtime_turn()` after the initial autonomous kickoff turn has exited.
+struct RuntimeBackedRealCommsSessionService {
+    sessions: RwLock<HashMap<SessionId, Arc<meerkat_comms::CommsRuntime>>>,
+    keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<tokio::sync::Notify>>>,
+    session_comms_names: RwLock<HashMap<SessionId, String>>,
+    session_counter: AtomicU64,
+    runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
+    applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
+}
+
+impl RuntimeBackedRealCommsSessionService {
+    fn new() -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            keep_alive_notifiers: RwLock::new(HashMap::new()),
+            session_comms_names: RwLock::new(HashMap::new()),
+            session_counter: AtomicU64::new(0),
+            runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+            keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
+            applied_runtime_prompts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn set_keep_alive_turns_complete_immediately(&self, enabled: bool) {
+        self.keep_alive_turns_complete_immediately
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    async fn real_comms(&self, session_id: &SessionId) -> Option<Arc<meerkat_comms::CommsRuntime>> {
+        self.sessions.read().await.get(session_id).cloned()
+    }
+
+    async fn applied_runtime_prompts(&self, session_id: &SessionId) -> Vec<ContentInput> {
+        self.applied_runtime_prompts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl SessionService for RuntimeBackedRealCommsSessionService {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        let session_id = SessionId::new();
+        let n = self.session_counter.fetch_add(1, Ordering::Relaxed);
+
+        let comms_name = req
+            .build
+            .as_ref()
+            .and_then(|b| b.comms_name.clone())
+            .unwrap_or_else(|| format!("real-runtime-comms-session-{n}"));
+
+        let comms = meerkat_comms::CommsRuntime::inproc_only(&comms_name)
+            .expect("create inproc CommsRuntime");
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::new(comms));
+        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
+        if is_keep_alive {
+            self.keep_alive_notifiers
+                .write()
+                .await
+                .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
+        }
+        self.session_comms_names
+            .write()
+            .await
+            .insert(session_id.clone(), comms_name);
+
+        Ok(mock_run_result(session_id, "Session created".to_string()))
+    }
+
+    async fn start_turn(
+        &self,
+        id: &SessionId,
+        _req: StartTurnRequest,
+    ) -> Result<RunResult, SessionError> {
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            if self
+                .keep_alive_turns_complete_immediately
+                .load(Ordering::Relaxed)
+            {
+                return Ok(mock_run_result(
+                    id.clone(),
+                    "Autonomous kickoff completed".to_string(),
+                ));
+            }
+            notifier.notified().await;
+            return Ok(mock_run_result(
+                id.clone(),
+                "Host loop interrupted".to_string(),
+            ));
+        }
+        Ok(mock_run_result(id.clone(), "Turn completed".to_string()))
+    }
+
+    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
+        }
+        Ok(())
+    }
+
+    async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(SessionView {
+            state: SessionInfo {
+                session_id: id.clone(),
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
+                last_assistant_text: None,
+                labels: Default::default(),
+            },
+            billing: SessionUsage {
+                total_tokens: 0,
+                usage: Usage::default(),
+            },
+        })
+    }
+
+    async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+        let sessions = self.sessions.read().await;
+        Ok(sessions
+            .keys()
+            .map(|id| SessionSummary {
+                session_id: id.clone(),
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            })
+            .collect())
+    }
+
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
+    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        self.sessions.write().await.remove(id);
+        if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
+            notifier.notify_waiters();
+        }
+        self.session_comms_names.write().await.remove(id);
+        self.applied_runtime_prompts.write().await.remove(id);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SessionServiceCommsExt for RuntimeBackedRealCommsSessionService {
+    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|c| Arc::clone(c) as Arc<dyn CoreCommsRuntime>)
+    }
+}
+
+#[async_trait]
+impl meerkat_core::service::SessionServiceHistoryExt for RuntimeBackedRealCommsSessionService {
+    async fn read_history(
+        &self,
+        id: &SessionId,
+        query: meerkat_core::service::SessionHistoryQuery,
+    ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok(meerkat_core::service::SessionHistoryPage::from_messages(
+            id.clone(),
+            &[],
+            query,
+        ))
+    }
+}
+
+#[async_trait]
+impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
+    async fn append_system_context(
+        &self,
+        id: &SessionId,
+        _req: AppendSystemContextRequest,
+    ) -> Result<AppendSystemContextResult, SessionControlError> {
+        if !self.sessions.read().await.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() }.into());
+        }
+        Ok(AppendSystemContextResult {
+            status: AppendSystemContextStatus::Staged,
+        })
+    }
+}
+
+#[async_trait]
+impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    fn supports_persistent_sessions(&self) -> bool {
+        true
+    }
+
+    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+        Some(Arc::clone(&self.runtime_adapter))
+    }
+
+    async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
+        let names = self.session_comms_names.read().await;
+        names
+            .get(session_id)
+            .is_some_and(|name| name.starts_with(&format!("{mob_id}/")))
+    }
+
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        self.applied_runtime_prompts
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push(req.prompt);
+
+        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                run_id,
+                boundary,
+                contributing_input_ids,
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            run_result: None,
+        })
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.sessions.write().await.remove(session_id);
+        self.keep_alive_notifiers.write().await.remove(session_id);
+        self.session_comms_names.write().await.remove(session_id);
+        self.applied_runtime_prompts
+            .write()
+            .await
+            .remove(session_id);
+        Ok(())
+    }
+}
+
+async fn create_test_mob_with_runtime_backed_real_comms(
+    definition: MobDefinition,
+) -> (MobHandle, Arc<RuntimeBackedRealCommsSessionService>) {
+    let service = Arc::new(RuntimeBackedRealCommsSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    (handle, service)
+}
+
+#[tokio::test]
+async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completion() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_a = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_b = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(MeerkatId::from("l-1"), MeerkatId::from("w-1"))
+        .await
+        .expect("wire should succeed");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let baseline_prompts = service.applied_runtime_prompts(&sid_b).await.len();
+
+    let comms_a = service.real_comms(&sid_a).await.expect("comms for l-1");
+    let receipt = CoreCommsRuntime::send(
+        &*comms_a,
+        CommsCommand::PeerMessage {
+            to: PeerName::new(&test_comms_name("worker", "w-1")).expect("valid peer name"),
+            body: "body: please inspect this image".to_string(),
+            blocks: Some(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "caption: this block text should survive".to_string(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                    source_path: None,
+                },
+            ]),
+        },
+    )
+    .await
+    .expect("PeerMessage should succeed");
+    assert!(
+        matches!(receipt, SendReceipt::PeerMessageSent { .. }),
+        "expected PeerMessageSent receipt, got: {receipt:?}"
+    );
+
+    let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_b).await;
+            if let Some(prompt) = prompts
+                .iter()
+                .skip(baseline_prompts)
+                .find(|prompt| {
+                    let text = prompt.text_content();
+                    prompt.has_images()
+                        || text.contains("body: please inspect this image")
+                        || text.contains("caption: this block text should survive")
+                })
+                .cloned()
+            {
+                break prompt;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("peer message should reach runtime apply path");
+    let delivered_text = delivered.text_content();
+    assert!(
+        delivered_text.contains("body: please inspect this image"),
+        "peer message body should survive runtime delivery: {delivered_text:?}"
+    );
+    assert!(
+        delivered_text.contains("caption: this block text should survive"),
+        "peer message block text should survive runtime delivery: {delivered_text:?}"
+    );
+    assert!(
+        delivered.has_images(),
+        "peer message image block should survive runtime delivery: {delivered:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_member_status_keeps_idle_live_session_active() {
     let inner = Arc::new(MockSessionService::new());
@@ -13022,44 +13506,3 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     );
     shutdown_result.unwrap().expect("shutdown should succeed");
 }
-#[tokio::test]
-async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain() {
-    let service = Arc::new(MockSessionService::new());
-    let service_adapter = service.enable_runtime_adapter();
-    let builder_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
-        .with_session_service(service)
-        .with_runtime_adapter(builder_adapter.clone())
-        .create()
-        .await
-        .expect("create mob");
-
-    let session_id = handle
-        .spawn(
-            ProfileName::from("lead"),
-            MeerkatId::from("l-override"),
-            None,
-        )
-        .await
-        .expect("spawn autonomous lead")
-        .session_id()
-        .expect("session-backed")
-        .clone();
-
-    tokio::time::sleep(Duration::from_millis(25)).await;
-
-    assert!(
-        builder_adapter.contains_session(&session_id).await,
-        "the builder-selected runtime adapter should own the autonomous member session"
-    );
-    assert!(
-        !service_adapter.contains_session(&session_id).await,
-        "the session service's default adapter must stay unused when an explicit mob runtime adapter override is provided"
-    );
-
-    tokio::time::timeout(Duration::from_secs(2), handle.stop())
-        .await
-        .expect("stop timed out")
-        .expect("stop");
-}
-

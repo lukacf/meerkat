@@ -12,8 +12,8 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
-    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, ResumeOverrideMask, SessionBuildOptions, SessionError, SessionQuery,
+    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
@@ -3288,6 +3288,7 @@ async fn run_agent(
         },
         shell_env: None,
         ops_lifecycle_override: ops_lifecycle,
+        resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
     };
 
@@ -3586,6 +3587,7 @@ async fn resume_session_with_llm_override(
     let parsed_params = parse_provider_params(&params)?;
     let parsed_params_json = parse_provider_params_json(provider_params_json)?;
     let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+    let provider_params_override = merged_provider_params.is_some();
     let mut limits = config.budget_limits();
     if let Some(dur) = duration {
         limits.max_duration = Some(dur);
@@ -3781,6 +3783,10 @@ async fn resume_session_with_llm_override(
         additional_instructions: None,
         shell_env: None,
         ops_lifecycle_override: resume_ops_lifecycle,
+        resume_override_mask: ResumeOverrideMask {
+            provider_params: provider_params_override,
+            ..Default::default()
+        },
         call_timeout_override: Default::default(),
     };
 

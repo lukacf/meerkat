@@ -834,13 +834,6 @@ impl SessionRuntime {
                     .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
                     .unwrap_or(false),
             };
-            // Persist explicit override so subsequent inheriting calls observe it.
-            if keep_alive_override.is_some() {
-                self.service
-                    .update_session_keep_alive(session_id, keep_alive)
-                    .await
-                    .map_err(session_error_to_rpc)?;
-            }
             let comms_rt = self.service.comms_runtime(session_id).await;
             if keep_alive && comms_rt.is_none() {
                 return Err(RpcError {
@@ -848,6 +841,13 @@ impl SessionRuntime {
                     message: "keep_alive requires a session created with comms_name".to_string(),
                     data: None,
                 });
+            }
+            // Persist explicit override so subsequent inheriting calls observe it.
+            if keep_alive_override.is_some() {
+                self.service
+                    .update_session_keep_alive(session_id, keep_alive)
+                    .await
+                    .map_err(session_error_to_rpc)?;
             }
             self.runtime_adapter
                 .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
@@ -1346,6 +1346,7 @@ impl SessionRuntime {
             app_context: None,
             additional_instructions: None,
             shell_env: None,
+            resume_override_mask: Default::default(),
         };
         self.service
             .create_session(CreateSessionRequest {
@@ -1803,22 +1804,36 @@ impl SessionRuntime {
                 .await;
         }
 
-        // Hot-swap LLM client if model/provider/provider_params changed.
-        if let Some(ref ov) = overrides
-            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
-        {
-            self.hot_swap_llm_client(session_id, ov).await?;
-        }
-
         // Persist explicit keep_alive override so subsequent inheriting calls
         // (REST/MCP resume with None) observe the updated intent.
         // This is not fire-and-forget: if the update fails, the turn must not
         // proceed with divergent runtime vs persisted state.
         if overrides.as_ref().and_then(|ov| ov.keep_alive).is_some() {
+            #[cfg(feature = "comms")]
+            let comms_rt = self.service.comms_runtime(session_id).await;
+            #[cfg(feature = "comms")]
+            if keep_alive && comms_rt.is_none() {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: "keep_alive requires a session created with comms_name".to_string(),
+                    data: None,
+                });
+            }
             self.service
                 .update_session_keep_alive(session_id, keep_alive)
                 .await
                 .map_err(session_error_to_rpc)?;
+            #[cfg(feature = "comms")]
+            self.runtime_adapter
+                .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
+                .await;
+        }
+
+        // Hot-swap LLM client if model/provider/provider_params changed.
+        if let Some(ref ov) = overrides
+            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+        {
+            self.hot_swap_llm_client(session_id, ov).await?;
         }
 
         match self.service.start_turn(session_id, req).await {

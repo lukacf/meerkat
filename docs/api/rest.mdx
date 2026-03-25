@@ -201,8 +201,8 @@ Create and run a new session.
   JSON schema for structured output extraction (wrapper or raw schema).
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null">
+  Max retries for structured output validation. `null`/omitted uses the server default on create and inherits the persisted session value on continue.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
@@ -446,8 +446,8 @@ Continue an existing session.
   Structured output schema for this turn.
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null">
+  Max retries for structured output validation. Omit / `null` to inherit the persisted session value on continue.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">

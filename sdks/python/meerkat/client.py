@@ -291,12 +291,12 @@ class MeerkatClient:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -342,12 +342,12 @@ class MeerkatClient:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -408,12 +408,12 @@ class MeerkatClient:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -1260,12 +1260,12 @@ class MeerkatClient:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -1284,29 +1284,29 @@ class MeerkatClient:
             params["system_prompt"] = system_prompt
         if max_tokens:
             params["max_tokens"] = max_tokens
-        if output_schema:
+        if output_schema is not None:
             params["output_schema"] = output_schema
-        if structured_output_retries != 2:
+        if structured_output_retries is not None:
             params["structured_output_retries"] = structured_output_retries
-        if hooks_override:
+        if hooks_override is not None:
             params["hooks_override"] = hooks_override
-        if enable_builtins:
-            params["enable_builtins"] = True
-        if enable_shell:
-            params["enable_shell"] = True
-        if enable_memory:
-            params["enable_memory"] = True
-        if enable_mob:
-            params["enable_mob"] = True
-        if keep_alive:
-            params["keep_alive"] = True
+        if enable_builtins is not None:
+            params["enable_builtins"] = enable_builtins
+        if enable_shell is not None:
+            params["enable_shell"] = enable_shell
+        if enable_memory is not None:
+            params["enable_memory"] = enable_memory
+        if enable_mob is not None:
+            params["enable_mob"] = enable_mob
+        if keep_alive is not None:
+            params["keep_alive"] = keep_alive
         if comms_name:
             params["comms_name"] = comms_name
         if peer_meta is not None:
             params["peer_meta"] = peer_meta
         if budget_limits is not None:
             params["budget_limits"] = budget_limits
-        if provider_params:
+        if provider_params is not None:
             params["provider_params"] = provider_params
         if preload_skills is not None:
             params["preload_skills"] = preload_skills

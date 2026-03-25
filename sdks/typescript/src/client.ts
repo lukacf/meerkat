@@ -1570,20 +1570,20 @@ export class MeerkatClient {
     if (options.provider) params.provider = options.provider;
     if (options.systemPrompt) params.system_prompt = options.systemPrompt;
     if (options.maxTokens) params.max_tokens = options.maxTokens;
-    if (options.outputSchema) params.output_schema = options.outputSchema;
-    if (options.structuredOutputRetries != null && options.structuredOutputRetries !== 2) {
+    if (options.outputSchema != null) params.output_schema = options.outputSchema;
+    if (options.structuredOutputRetries != null) {
       params.structured_output_retries = options.structuredOutputRetries;
     }
-    if (options.hooksOverride) params.hooks_override = options.hooksOverride;
-    if (options.enableBuiltins) params.enable_builtins = true;
-    if (options.enableShell) params.enable_shell = true;
-    if (options.enableMemory) params.enable_memory = true;
-    if (options.enableMob) params.enable_mob = true;
-    if (options.keepAlive) params.keep_alive = true;
+    if (options.hooksOverride != null) params.hooks_override = options.hooksOverride;
+    if (options.enableBuiltins != null) params.enable_builtins = options.enableBuiltins;
+    if (options.enableShell != null) params.enable_shell = options.enableShell;
+    if (options.enableMemory != null) params.enable_memory = options.enableMemory;
+    if (options.enableMob != null) params.enable_mob = options.enableMob;
+    if (options.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
-    if (options.providerParams) params.provider_params = options.providerParams;
+    if (options.providerParams != null) params.provider_params = options.providerParams;
     if (options.preloadSkills != null) params.preload_skills = options.preloadSkills;
     const wireRefs = skillRefsToWire(options.skillRefs);
     if (wireRefs) params.skill_refs = wireRefs;

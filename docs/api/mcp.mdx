@@ -282,8 +282,8 @@ Start a new Meerkat agent session with the given prompt.
   JSON schema for structured output (wrapper or raw schema).
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null">
+  Max retries for structured output validation. Omit / `null` to use the product default on run or inherit the persisted session value on resume.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">
@@ -298,16 +298,16 @@ Start a new Meerkat agent session with the given prompt.
   Tool definitions for the agent (see [McpToolDef schema](#mcptooldef-schema) below).
 </ParamField>
 
-<ParamField body="enable_builtins" type="bool" default="false">
-  Enable built-in tools (task management, etc.).
+<ParamField body="enable_builtins" type="bool | null" default="null">
+  Builtins override. Omit / `null` to use the default on run or inherit the persisted session value on resume.
 </ParamField>
 
 <ParamField body="builtin_config" type="object | null" default="null">
   Config for builtins (only used when `enable_builtins` is true).
 </ParamField>
 
-<ParamField body="builtin_config.enable_shell" type="bool" default="false">
-  Enable shell tools.
+<ParamField body="builtin_config.enable_shell" type="bool | null" default="null">
+  Shell-tools override. Omit / `null` to use the default on run or inherit the persisted session value on resume.
 </ParamField>
 
 <ParamField body="builtin_config.shell_timeout_secs" type="u64 | null" default="30">
@@ -433,12 +433,16 @@ tool calls. The call waits for the resumed turn to complete and returns the same
   Whether this is an error result.
 </ParamField>
 
-<ParamField body="enable_builtins" type="bool" default="false">
-  Enable built-in tools.
+<ParamField body="enable_builtins" type="bool | null" default="null">
+  Builtins override. Omit / `null` to inherit the persisted session value.
 </ParamField>
 
 <ParamField body="builtin_config" type="object | null" default="null">
   Builtin tool config.
+</ParamField>
+
+<ParamField body="builtin_config.enable_shell" type="bool | null" default="null">
+  Shell-tools override. Omit / `null` to inherit the persisted session value.
 </ParamField>
 
 <ParamField body="keep_alive" type="bool | null" default="null">

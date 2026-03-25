@@ -13,8 +13,8 @@ use meerkat::{
 use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
-    SessionServiceHistoryExt, StartTurnRequest,
+    CreateSessionRequest, InitialTurnPolicy, ResumeOverrideMask, SessionBuildOptions, SessionError,
+    SessionService, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
@@ -91,9 +91,10 @@ pub struct MeerkatRunInput {
     /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
-    /// Max retries for structured output validation (default: 2).
-    #[serde(default = "default_structured_output_retries")]
-    pub structured_output_retries: u32,
+    /// Max retries for structured output validation.
+    /// Omit to use the product default.
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
     /// Stream agent events to the MCP client via notifications.
     #[serde(default)]
     pub stream: bool,
@@ -103,9 +104,10 @@ pub struct MeerkatRunInput {
     /// Tool definitions for the agent to use
     #[serde(default)]
     pub tools: Vec<McpToolDef>,
-    /// Enable built-in tools (task management, shell, etc.)
+    /// Enable built-in tools (task management, shell, etc.).
+    /// Omit to use the product default.
     #[serde(default)]
-    pub enable_builtins: bool,
+    pub enable_builtins: Option<bool>,
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
@@ -162,12 +164,36 @@ fn default_structured_output_retries() -> u32 {
     2
 }
 
+fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
+    !input.tool_results.is_empty()
+        || !input.tools.is_empty()
+        || input.model.is_some()
+        || input.provider.is_some()
+        || input.max_tokens.is_some()
+        || input.system_prompt.is_some()
+        || input.output_schema.is_some()
+        || input.structured_output_retries.is_some()
+        || input.provider_params.is_some()
+        || input.hooks_override.is_some()
+        || input.enable_builtins.is_some()
+        || input
+            .builtin_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.enable_shell.is_some())
+        || input.enable_memory.is_some()
+        || input.enable_mob.is_some()
+        || input.budget_limits.is_some()
+        || input.preload_skills.is_some()
+        || input.comms_name.is_some()
+        || input.peer_meta.is_some()
+}
+
 /// Configuration options for built-in tools
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct BuiltinConfigInput {
-    /// Enable shell tools (default: false)
+    /// Enable shell tools. Omit to inherit/default.
     #[serde(default)]
-    pub enable_shell: bool,
+    pub enable_shell: Option<bool>,
     /// Default timeout for shell commands in seconds (default: 30)
     #[serde(default)]
     pub shell_timeout_secs: Option<u64>,
@@ -221,6 +247,10 @@ impl ToolCallError {
 
     fn internal(message: impl Into<String>) -> Self {
         Self::new(-32603, message, None)
+    }
+
+    fn internal_with_data(message: impl Into<String>, data: Value) -> Self {
+        Self::new(-32603, message, Some(data))
     }
 }
 
@@ -662,9 +692,10 @@ pub struct MeerkatResumeInput {
     /// Tool results to provide for pending tool calls
     #[serde(default)]
     pub tool_results: Vec<ToolResultInput>,
-    /// Enable built-in tools (task management, shell, etc.)
+    /// Enable built-in tools (task management, shell, etc.).
+    /// Omit to inherit the resumed session's setting.
     #[serde(default)]
-    pub enable_builtins: bool,
+    pub enable_builtins: Option<bool>,
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
@@ -690,9 +721,10 @@ pub struct MeerkatResumeInput {
     /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
-    /// Max retries for structured output validation (default: 2).
-    #[serde(default = "default_structured_output_retries")]
-    pub structured_output_retries: u32,
+    /// Max retries for structured output validation.
+    /// Omit to inherit the resumed session's setting.
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
@@ -992,6 +1024,28 @@ fn format_agent_result(
     }
 }
 
+fn format_agent_result_tool(
+    result: Result<meerkat_core::types::RunResult, SessionError>,
+    session_id: &meerkat::SessionId,
+) -> Result<Value, ToolCallError> {
+    format_agent_result(result, session_id).map_err(ToolCallError::internal)
+}
+
+fn post_commit_session_created_error(
+    session_id: &meerkat::SessionId,
+    err: &SessionError,
+) -> ToolCallError {
+    ToolCallError::internal_with_data(
+        format!("Agent error: {err}"),
+        json!({
+            "session_id": session_id.to_string(),
+            "session_ref": session_id.to_string(),
+            "session_created": true,
+            "resumable": true,
+        }),
+    )
+}
+
 #[cfg(test)]
 const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5;
 #[cfg(not(test))]
@@ -1201,16 +1255,12 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_run(state, input, notifier, request_context)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_run(state, input, notifier, request_context).await
         }
         "meerkat_resume" => {
             let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_resume(state, input, notifier, request_context)
-                .await
-                .map_err(ToolCallError::internal)
+            handle_meerkat_resume(state, input, notifier, request_context).await
         }
         "meerkat_config" => {
             let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
@@ -2253,9 +2303,10 @@ async fn handle_meerkat_run(
     input: MeerkatRunInput,
     notifier: Option<EventNotifier>,
     request_context: Option<RequestContext>,
-) -> Result<Value, String> {
-    validate_public_peer_meta(input.peer_meta.as_ref())?;
-    let keep_alive_override = resolve_keep_alive(input.keep_alive)?;
+) -> Result<Value, ToolCallError> {
+    validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    let keep_alive_override =
+        resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
     if keep_alive
@@ -2264,7 +2315,9 @@ async fn handle_meerkat_run(
             .as_ref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err("keep_alive requires comms_name".to_string());
+        return Err(ToolCallError::invalid_params(
+            "keep_alive requires comms_name",
+        ));
     }
     let config = state
         .config_runtime
@@ -2285,30 +2338,30 @@ async fn handle_meerkat_run(
     let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new()));
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
     let external_tools = compose_external_tool_dispatchers(callback_tools, Some(mcp_tools))
-        .map_err(|e| format!("failed to compose external tools: {e}"))?;
+        .map_err(ToolCallError::internal)?;
 
-    let enable_shell = input
-        .builtin_config
-        .as_ref()
-        .is_some_and(|c| c.enable_shell);
+    let enable_shell_override = input.builtin_config.as_ref().and_then(|c| c.enable_shell);
     let preload_skills = preload_skill_ids(input.preload_skills.clone());
     let skill_references = canonical_skill_keys(
         &config,
         input.skill_refs.clone(),
         input.skill_references.clone(),
-    )?;
+    )
+    .map_err(ToolCallError::invalid_params)?;
 
     // Parse output schema if provided
-    let output_schema = match input.output_schema.clone() {
-        Some(schema) => Some(
-            OutputSchema::from_json_value(schema)
-                .map_err(|e| format!("Invalid output_schema: {e}"))?,
-        ),
-        None => None,
-    };
+    let output_schema =
+        match input.output_schema.clone() {
+            Some(schema) => Some(OutputSchema::from_json_value(schema).map_err(|e| {
+                ToolCallError::invalid_params(format!("Invalid output_schema: {e}"))
+            })?),
+            None => None,
+        };
 
     // Pre-create a session to claim a stable session_id.
-    let prepared_session = prepare_surface_session(&state.runtime_adapter).await?;
+    let prepared_session = prepare_surface_session(&state.runtime_adapter)
+        .await
+        .map_err(ToolCallError::internal)?;
     let session = prepared_session.session;
     let session_id = prepared_session.session_id;
     let ops_lifecycle = prepared_session.ops_lifecycle;
@@ -2349,7 +2402,9 @@ async fn handle_meerkat_run(
     let build = SessionBuildOptions {
         provider: input.provider.map(ProviderInput::to_provider),
         output_schema,
-        structured_output_retries: input.structured_output_retries,
+        structured_output_retries: input
+            .structured_output_retries
+            .unwrap_or(default_structured_output_retries()),
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
         comms_name: input.comms_name.clone(),
         peer_meta: input.peer_meta.clone(),
@@ -2360,8 +2415,8 @@ async fn handle_meerkat_run(
         external_tools,
         llm_client_override: None,
         ops_lifecycle_override: Some(ops_lifecycle),
-        override_builtins: Some(input.enable_builtins),
-        override_shell: Some(input.enable_builtins && enable_shell),
+        override_builtins: input.enable_builtins,
+        override_shell: enable_shell_override,
         override_memory: input.enable_memory,
         override_mob: input.enable_mob,
         preload_skills,
@@ -2376,6 +2431,21 @@ async fn handle_meerkat_run(
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
         shell_env: input.shell_env.clone(),
+        resume_override_mask: ResumeOverrideMask {
+            provider: input.provider.is_some(),
+            max_tokens: input.max_tokens.is_some(),
+            structured_output_retries: input.structured_output_retries.is_some(),
+            provider_params: input.provider_params.is_some(),
+            override_builtins: input.enable_builtins.is_some(),
+            override_shell: enable_shell_override.is_some(),
+            override_memory: input.enable_memory.is_some(),
+            override_mob: input.enable_mob.is_some(),
+            preload_skills: input.preload_skills.is_some(),
+            keep_alive: keep_alive_override.is_some(),
+            comms_name: input.comms_name.is_some(),
+            peer_meta: input.peer_meta.is_some(),
+            ..Default::default()
+        },
     };
 
     let req = CreateSessionRequest {
@@ -2393,9 +2463,6 @@ async fn handle_meerkat_run(
     };
 
     let result = state.service.create_session(req).await;
-    if result.is_err() {
-        state.runtime_adapter.unregister_session(&session_id).await;
-    }
     drop(event_tx);
     if let Some(task) = event_task
         && let Err(e) = task.await
@@ -2403,21 +2470,34 @@ async fn handle_meerkat_run(
         tracing::warn!("event task panicked: {e}");
     }
 
-    if state.service.read(&session_id).await.is_ok() {
+    let session_exists = state.service.read(&session_id).await.is_ok();
+    if session_exists {
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
     // Manage comms drain lifecycle for the new session.
+    // keep_alive is a session-level mutation that may commit independently of
+    // first-turn success, so once the session exists we align the drain state
+    // even when the initial turn fails.
     #[cfg(feature = "comms")]
-    if result.is_ok() {
+    if session_exists {
         let comms_rt = state.service.comms_runtime(&session_id).await;
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
     }
-
-    format_agent_result(result, &session_id)
+    match result {
+        Ok(run_result) => format_agent_result_tool(Ok(run_result), &session_id),
+        Err(err) => {
+            if session_exists {
+                Err(post_commit_session_created_error(&session_id, &err))
+            } else {
+                state.runtime_adapter.unregister_session(&session_id).await;
+                format_agent_result_tool(Err(err), &session_id)
+            }
+        }
+    }
 }
 
 async fn handle_meerkat_resume(
@@ -2425,8 +2505,8 @@ async fn handle_meerkat_resume(
     input: MeerkatResumeInput,
     notifier: Option<EventNotifier>,
     request_context: Option<RequestContext>,
-) -> Result<Value, String> {
-    validate_public_peer_meta(input.peer_meta.as_ref())?;
+) -> Result<Value, ToolCallError> {
+    validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
     let config = state
         .config_runtime
         .get()
@@ -2434,8 +2514,8 @@ async fn handle_meerkat_resume(
         .map(|snapshot| snapshot.config)
         .unwrap_or_default();
 
-    let session_id =
-        meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
+    let session_id = meerkat::SessionId::parse(&input.session_id)
+        .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
     if let Some(context) = request_context.as_ref() {
         let service = state.service.clone();
@@ -2454,8 +2534,14 @@ async fn handle_meerkat_resume(
         .service
         .load_persisted(&session_id)
         .await
-        .map_err(|e| format!("Failed to load session: {e}"))?
-        .ok_or_else(|| format!("Session not found: {}", input.session_id))?;
+        .map_err(|e| ToolCallError::internal(format!("Failed to load session: {e}")))?
+        .ok_or_else(|| {
+            ToolCallError::new(
+                -32004,
+                format!("Session not found: {}", input.session_id),
+                None,
+            )
+        })?;
 
     // Inject tool results into the session before resuming
     if !input.tool_results.is_empty() {
@@ -2470,43 +2556,15 @@ async fn handle_meerkat_resume(
     // Resolve settings from stored metadata, falling back to input overrides
     let stored_metadata = session.session_metadata();
 
-    // Capture override presence before fields are consumed by or_else.
-    let has_model_override = input.model.is_some();
-    let has_provider_override = input.provider.is_some();
-    let has_provider_params_override = input.provider_params.is_some();
-    let has_hooks_override = input.hooks_override.is_some();
-    let has_memory_override = input.enable_memory.is_some();
-    let has_mob_override = input.enable_mob.is_some();
-    let has_budget_override = input.budget_limits.is_some();
-    let has_skills_override = input.preload_skills.is_some();
-    let has_max_tokens_override = input.max_tokens.is_some();
-    let has_callback_tools = !input.tools.is_empty();
-
-    let enable_builtins = input.enable_builtins
-        || stored_metadata
-            .as_ref()
-            .is_some_and(|meta| meta.tooling.builtins);
-    let enable_shell = input
+    let enable_builtins_override = input.enable_builtins;
+    let enable_shell_override = input
         .builtin_config
         .as_ref()
-        .map(|c| c.enable_shell)
-        .unwrap_or_else(|| {
-            stored_metadata
-                .as_ref()
-                .is_some_and(|meta| meta.tooling.shell)
-        });
-    let enable_mob = input
-        .enable_mob
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.tooling.mob));
-    let enable_memory = input.enable_memory.or_else(|| {
-        stored_metadata
-            .as_ref()
-            .map(|meta| meta.tooling.memory)
-            .filter(|&v| v)
-    });
+        .and_then(|cfg| cfg.enable_shell);
     // §10: inherit, disable, and set are different facts.
     // None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    let keep_alive_override = resolve_keep_alive(input.keep_alive)?;
+    let keep_alive_override =
+        resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
     let keep_alive = match keep_alive_override {
         Some(val) => val,
         None => stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive),
@@ -2521,10 +2579,13 @@ async fn handle_meerkat_resume(
             .as_ref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err("keep_alive requires comms_name".to_string());
+        return Err(ToolCallError::invalid_params(
+            "keep_alive requires comms_name",
+        ));
     }
     let model = input
         .model
+        .clone()
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
         .unwrap_or_else(|| config.agent.model.clone());
     let max_tokens = input
@@ -2554,7 +2615,10 @@ async fn handle_meerkat_resume(
         .unwrap_or_else(|| Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())));
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
     let external_tools = compose_external_tool_dispatchers(callback_tools, Some(mcp_tools))
-        .map_err(|e| format!("failed to compose external tools: {e}"))?;
+        .map_err(ToolCallError::internal)?;
+
+    // Decide the branch before moving any owned request fields.
+    let needs_rebuild = existing_adapter.is_none() || mcp_resume_requires_rebuild(&input);
 
     // Use empty prompt when only providing tool results
     let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
@@ -2567,7 +2631,8 @@ async fn handle_meerkat_resume(
         &config,
         input.skill_refs.clone(),
         input.skill_references.clone(),
-    )?;
+    )
+    .map_err(ToolCallError::invalid_params)?;
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -2577,13 +2642,13 @@ async fn handle_meerkat_resume(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let output_schema = match input.output_schema.clone() {
-        Some(schema) => Some(
-            OutputSchema::from_json_value(schema)
-                .map_err(|e| format!("Invalid output_schema: {e}"))?,
-        ),
-        None => None,
-    };
+    let output_schema =
+        match input.output_schema.clone() {
+            Some(schema) => Some(OutputSchema::from_json_value(schema).map_err(|e| {
+                ToolCallError::invalid_params(format!("Invalid output_schema: {e}"))
+            })?),
+            None => None,
+        };
     state
         .runtime_adapter
         .register_session(session_id.clone())
@@ -2593,39 +2658,32 @@ async fn handle_meerkat_resume(
         .ops_lifecycle_registry(&session_id)
         .await
         .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))?;
+        .ok_or_else(|| {
+            ToolCallError::internal(format!(
+                "failed to obtain runtime ops registry for session {session_id}"
+            ))
+        })?;
     let build = SessionBuildOptions {
         provider,
         output_schema,
-        structured_output_retries: input.structured_output_retries,
+        structured_output_retries: input
+            .structured_output_retries
+            .unwrap_or(default_structured_output_retries()),
         hooks_override: input.hooks_override.clone().unwrap_or_default(),
-        comms_name,
+        comms_name: input.comms_name.clone(),
         resume_session: Some(session),
         budget_limits: input.budget_limits.clone().map(Into::into),
-        provider_params: input.provider_params.clone().or_else(|| {
-            stored_metadata
-                .as_ref()
-                .and_then(|m| m.provider_params.clone())
-        }),
+        provider_params: input.provider_params.clone(),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         llm_client_override: None,
         ops_lifecycle_override: Some(ops_lifecycle),
-        override_builtins: Some(enable_builtins),
-        override_shell: Some(enable_builtins && enable_shell),
-        override_memory: enable_memory,
-        override_mob: enable_mob,
-        preload_skills: if preload_skills.is_some() {
-            preload_skills
-        } else {
-            stored_metadata
-                .as_ref()
-                .and_then(|m| m.tooling.active_skills.clone())
-        },
-        peer_meta: input
-            .peer_meta
-            .clone()
-            .or_else(|| stored_metadata.as_ref().and_then(|m| m.peer_meta.clone())),
+        override_builtins: enable_builtins_override,
+        override_shell: enable_shell_override,
+        override_memory: input.enable_memory,
+        override_mob: input.enable_mob,
+        preload_skills,
+        peer_meta: input.peer_meta.clone(),
         realm_id: stored_metadata
             .as_ref()
             .and_then(|m| m.realm_id.clone())
@@ -2646,25 +2704,22 @@ async fn handle_meerkat_resume(
         app_context: None,
         additional_instructions: input.additional_instructions.clone(),
         shell_env: None,
+        resume_override_mask: ResumeOverrideMask {
+            model: input.model.is_some(),
+            provider: input.provider.is_some(),
+            max_tokens: input.max_tokens.is_some(),
+            structured_output_retries: input.structured_output_retries.is_some(),
+            provider_params: input.provider_params.is_some(),
+            override_builtins: enable_builtins_override.is_some(),
+            override_shell: enable_shell_override.is_some(),
+            override_memory: input.enable_memory.is_some(),
+            override_mob: input.enable_mob.is_some(),
+            preload_skills: input.preload_skills.is_some(),
+            keep_alive: keep_alive_override.is_some(),
+            comms_name: input.comms_name.is_some(),
+            peer_meta: input.peer_meta.is_some(),
+        },
     };
-
-    // Rebuild the session whenever any config-affecting input is set.
-    // start_turn cannot apply these; they only take effect through the
-    // full create_session → build pipeline.
-    let needs_rebuild = existing_adapter.is_none()
-        || input.system_prompt.is_some()
-        || input.output_schema.is_some()
-        || input.structured_output_retries != default_structured_output_retries()
-        || has_model_override
-        || has_provider_override
-        || has_provider_params_override
-        || has_hooks_override
-        || has_memory_override
-        || has_mob_override
-        || has_budget_override
-        || has_skills_override
-        || has_max_tokens_override
-        || has_callback_tools;
 
     let result = if needs_rebuild {
         let req = CreateSessionRequest {
@@ -2682,6 +2737,26 @@ async fn handle_meerkat_resume(
         };
         state.service.create_session(req).await
     } else {
+        if keep_alive_override.is_some() {
+            let comms_rt = state.service.comms_runtime(&session_id).await;
+            if keep_alive && comms_rt.is_none() {
+                state.runtime_adapter.unregister_session(&session_id).await;
+                return Err(ToolCallError::invalid_params(
+                    "keep_alive requires a session created with comms_name",
+                ));
+            }
+            state
+                .service
+                .update_session_keep_alive(&session_id, keep_alive)
+                .await
+                .map_err(|e| {
+                    ToolCallError::internal(format!("failed to persist keep_alive: {e}"))
+                })?;
+            state
+                .runtime_adapter
+                .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
+                .await;
+        }
         // Try start_turn on the live session first (it may still be alive
         // from a prior meerkat_run in the same MCP server process).
         let turn_req = StartTurnRequest {
@@ -2717,7 +2792,8 @@ async fn handle_meerkat_resume(
             Err(other) => Err(other),
         }
     };
-    if result.is_err() {
+    let session_exists = state.service.read(&session_id).await.is_ok();
+    if result.is_err() && !session_exists {
         state.runtime_adapter.unregister_session(&session_id).await;
     }
 
@@ -2728,33 +2804,22 @@ async fn handle_meerkat_resume(
         tracing::warn!("event task panicked: {e}");
     }
 
-    if state.service.read(&session_id).await.is_ok() {
+    if session_exists {
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Persist explicit keep_alive override and manage comms drain lifecycle.
+    // Manage comms drain lifecycle for rebuilt sessions after the session
+    // commit boundary. keep_alive may commit independently of turn success.
     #[cfg(feature = "comms")]
-    if result.is_ok() {
-        if keep_alive_override.is_some()
-            && let Err(e) = state
-                .service
-                .update_session_keep_alive(&session_id, keep_alive)
-                .await
-        {
-            tracing::warn!(error = %e, "failed to persist keep_alive on MCP resume");
-            return Err(format!("failed to persist keep_alive: {e}"));
-        }
+    if session_exists && needs_rebuild {
         let comms_rt = state.service.comms_runtime(&session_id).await;
-        if keep_alive && comms_rt.is_none() {
-            return Err("keep_alive requires a session created with comms_name".to_string());
-        }
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
     }
 
-    format_agent_result(result, &session_id)
+    format_agent_result_tool(result, &session_id)
 }
 
 fn wrap_tool_payload(payload: Value) -> Value {
@@ -3135,7 +3200,7 @@ mod tests {
         assert_eq!(input.prompt, "Hello");
         assert_eq!(input.model, Some("claude-sonnet-4".to_string()));
         assert_eq!(input.max_tokens, None);
-        assert_eq!(input.structured_output_retries, 2);
+        assert_eq!(input.structured_output_retries, None);
         assert!(input.output_schema.is_none());
         assert!(!input.verbose);
     }
@@ -3152,7 +3217,7 @@ mod tests {
         assert_eq!(input.prompt, "Continue");
         assert!(input.system_prompt.is_none());
         assert!(input.output_schema.is_none());
-        assert_eq!(input.structured_output_retries, 2);
+        assert_eq!(input.structured_output_retries, None);
         assert!(!input.verbose);
     }
 
@@ -3416,6 +3481,43 @@ mod tests {
         assert!(input.comms_name.is_none());
     }
 
+    #[test]
+    fn test_meerkat_resume_input_preserves_optional_override_presence() {
+        let omitted: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "Resume"
+        }))
+        .unwrap();
+        assert_eq!(omitted.enable_builtins, None);
+        assert_eq!(omitted.structured_output_retries, None);
+        assert!(
+            omitted
+                .builtin_config
+                .as_ref()
+                .is_none_or(|cfg| cfg.enable_shell.is_none())
+        );
+
+        let explicit: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "Resume",
+            "enable_builtins": false,
+            "structured_output_retries": 4,
+            "builtin_config": {
+                "enable_shell": false
+            }
+        }))
+        .unwrap();
+        assert_eq!(explicit.enable_builtins, Some(false));
+        assert_eq!(explicit.structured_output_retries, Some(4));
+        assert_eq!(
+            explicit
+                .builtin_config
+                .as_ref()
+                .and_then(|cfg| cfg.enable_shell),
+            Some(false)
+        );
+    }
+
     #[cfg(feature = "comms")]
     #[test]
     fn test_normalize_mcp_comms_send_error_includes_structured_details() {
@@ -3451,11 +3553,11 @@ mod tests {
                 max_tokens: Some(4096),
                 provider: None,
                 output_schema: None,
-                structured_output_retries: 2,
+                structured_output_retries: Some(2),
                 stream: false,
                 verbose: false,
                 tools: vec![],
-                enable_builtins: false,
+                enable_builtins: Some(false),
                 builtin_config: None,
                 keep_alive: Some(true),
                 comms_name: None, // Missing!
@@ -3480,7 +3582,61 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("comms_name"));
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("comms_name"));
+    }
+
+    #[test]
+    fn test_mcp_resume_requires_rebuild_for_tool_results_and_config_changes() {
+        let mut input: MeerkatResumeInput = serde_json::from_value(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "Continue"
+        }))
+        .unwrap();
+        assert!(!mcp_resume_requires_rebuild(&input));
+
+        input.tool_results = vec![ToolResultInput {
+            tool_use_id: "tool-1".to_string(),
+            content: "done".to_string(),
+            is_error: false,
+        }];
+        assert!(mcp_resume_requires_rebuild(&input));
+        input.tool_results.clear();
+
+        input.enable_builtins = Some(false);
+        assert!(mcp_resume_requires_rebuild(&input));
+        input.enable_builtins = None;
+
+        input.builtin_config = Some(BuiltinConfigInput {
+            enable_shell: Some(false),
+            shell_timeout_secs: None,
+        });
+        assert!(mcp_resume_requires_rebuild(&input));
+        input.builtin_config = None;
+
+        input.comms_name = Some("agent-a".to_string());
+        assert!(mcp_resume_requires_rebuild(&input));
+    }
+
+    #[test]
+    fn test_post_commit_session_created_error_includes_identity() {
+        let session_id = meerkat::SessionId::new();
+        let session_id_string = session_id.to_string();
+        let err = post_commit_session_created_error(
+            &session_id,
+            &SessionError::Agent(meerkat::AgentError::InternalError("boom".to_string())),
+        );
+        let data = err.data.as_ref().expect("structured error data");
+        assert_eq!(err.code, -32603);
+        assert_eq!(
+            data.get("session_created").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(data.get("resumable").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            data.get("session_id").and_then(Value::as_str),
+            Some(session_id_string.as_str())
+        );
     }
 
     #[cfg(feature = "comms")]

@@ -427,9 +427,10 @@ impl MobBuilder {
         let active_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
             .await?;
+        // Include ALL live sessions (not just actively-running ones). Idle sessions
+        // between turns are still present in the service and must not be recreated.
         let active_ids = active_sessions
             .iter()
-            .filter(|summary| summary.is_active)
             .map(|s| s.session_id.clone())
             .collect::<std::collections::HashSet<_>>();
 
@@ -468,81 +469,79 @@ impl MobBuilder {
                 );
             };
 
-            if matches!(entry.member_ref, MemberRef::Session { .. }) {
-                if session_service.supports_persistent_sessions() {
-                    let Some(stored_session) =
-                        session_service.load_persisted_session(&session_id).await?
-                    else {
+            if matches!(entry.member_ref, MemberRef::Session { .. })
+                && session_service.supports_persistent_sessions()
+            {
+                let Some(stored_session) =
+                    session_service.load_persisted_session(&session_id).await?
+                else {
+                    record_restore_failure(format!(
+                        "missing durable session snapshot for '{session_id}'"
+                    ))
+                    .await;
+                    continue;
+                };
+                let profile = definition
+                    .profiles
+                    .get(&entry.profile)
+                    .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+                let resumed_config =
+                    build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
+                        base: build::BuildAgentConfigParams {
+                            mob_id: &definition.id,
+                            profile_name: &entry.profile,
+                            meerkat_id: &entry.meerkat_id,
+                            profile,
+                            definition,
+                            external_tools: compose_external_tools_for_profile(
+                                profile,
+                                tool_bundles,
+                                tool_handle.clone(),
+                            )?,
+                            context: None,
+                            labels: Some(entry.labels.clone()),
+                            additional_instructions: None,
+                            shell_env: None,
+                        },
+                        expected_session_id: &session_id,
+                        resumed_session: stored_session,
+                    })
+                    .await;
+                let mut resumed_config = match resumed_config {
+                    Ok(config) => config,
+                    Err(error) => {
+                        record_restore_failure(error.to_string()).await;
+                        continue;
+                    }
+                };
+                resumed_config.keep_alive =
+                    entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+                let reconcile_client: Arc<dyn LlmClient> = default_llm_client
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
+                resumed_config.llm_client_override = Some(reconcile_client);
+                let prompt = format!(
+                    "You have been spawned as '{}' (role: {}) in mob '{}'.",
+                    entry.meerkat_id, entry.profile, definition.id
+                );
+                let req = build::to_create_session_request(&resumed_config, prompt.into());
+                match session_service.create_session(req).await {
+                    Ok(created) => {
+                        let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
+                        tool_handle
+                            .restore_diagnostics
+                            .write()
+                            .await
+                            .remove(&entry.meerkat_id);
+                    }
+                    Err(error) => {
                         record_restore_failure(format!(
-                            "missing durable session snapshot for '{}'",
-                            session_id
+                            "failed to restore durable session '{session_id}': {error}"
                         ))
                         .await;
-                        continue;
-                    };
-                    let profile = definition
-                        .profiles
-                        .get(&entry.profile)
-                        .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
-                    let resumed_config =
-                        build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
-                            base: build::BuildAgentConfigParams {
-                                mob_id: &definition.id,
-                                profile_name: &entry.profile,
-                                meerkat_id: &entry.meerkat_id,
-                                profile,
-                                definition,
-                                external_tools: compose_external_tools_for_profile(
-                                    profile,
-                                    tool_bundles,
-                                    tool_handle.clone(),
-                                )?,
-                                context: None,
-                                labels: Some(entry.labels.clone()),
-                                additional_instructions: None,
-                                shell_env: None,
-                            },
-                            expected_session_id: &session_id,
-                            resumed_session: stored_session,
-                        })
-                        .await;
-                    let mut resumed_config = match resumed_config {
-                        Ok(config) => config,
-                        Err(error) => {
-                            record_restore_failure(error.to_string()).await;
-                            continue;
-                        }
-                    };
-                    resumed_config.keep_alive =
-                        entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
-                    let reconcile_client: Arc<dyn LlmClient> = default_llm_client
-                        .clone()
-                        .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
-                    resumed_config.llm_client_override = Some(reconcile_client);
-                    let prompt = format!(
-                        "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                        entry.meerkat_id, entry.profile, definition.id
-                    );
-                    let req = build::to_create_session_request(&resumed_config, prompt.into());
-                    match session_service.create_session(req).await {
-                        Ok(created) => {
-                            let _ = roster.set_session_id(&entry.meerkat_id, created.session_id);
-                            tool_handle
-                                .restore_diagnostics
-                                .write()
-                                .await
-                                .remove(&entry.meerkat_id);
-                        }
-                        Err(error) => {
-                            record_restore_failure(format!(
-                                "failed to restore durable session '{}': {}",
-                                session_id, error
-                            ))
-                            .await;
-                        }
                     }
-                    continue;
                 }
+                continue;
                 // Ephemeral services can still fall back to fresh-create.
             }
             let profile = definition

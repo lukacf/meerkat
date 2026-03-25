@@ -8,6 +8,9 @@
 //! - Spawning stage-specific workers
 //! - Running turns on individual pipeline stages
 //! - The pipeline prefab pattern
+//!
+//! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
+//! Production pipelines use the runtime-backed path.
 //! - Task board for tracking stage results
 //!
 //! ## Run

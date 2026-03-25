@@ -183,6 +183,9 @@ pub use meerkat_core::{
 };
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;
+// PersistentSessionService: used by runtime-backed surfaces (REST, RPC, MCP).
+// EphemeralSessionService: in-memory substrate for testing/embedded use only.
+// Both implement SessionService. Production paths add RuntimeSessionAdapter on top.
 #[cfg(feature = "session-store")]
 pub use meerkat_session::PersistentSessionService;
 pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};

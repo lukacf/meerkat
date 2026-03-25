@@ -8,6 +8,9 @@
 //! - The research team prefab pattern
 //! - Custom profiles with specialized skills
 //! - Spawning multiple agents from a definition
+//!
+//! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
+//! Production mob deployments use the runtime-backed path.
 //! - Running turns on specific agents and reading mob events
 //! - Task board usage for tracking research items
 //!

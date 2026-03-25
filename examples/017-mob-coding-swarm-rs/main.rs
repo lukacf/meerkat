@@ -11,6 +11,9 @@
 //! - Prefab templates — ready-made mob configurations
 //! - The coding swarm pattern (lead + workers)
 //!
+//! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
+//! Production mob deployments use the runtime-backed path.
+//!
 //! ## Run
 //! ```bash
 //! ANTHROPIC_API_KEY=... cargo run --example 017-mob-coding-swarm --features comms

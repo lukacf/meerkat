@@ -249,7 +249,7 @@ Create a new session and run the first turn.
     "enable_builtins": false,
     "enable_shell": false,
     "enable_memory": false,
-    "keep_alive": false,
+    "keep_alive": null,
     "comms_name": null,
     "provider_params": null,
     "preload_skills": ["extraction/email"],
@@ -346,8 +346,8 @@ Only `prompt` is required. All other fields are optional and fall back to config
   Enable semantic memory (`memory_search` tool + compaction indexing).
 </ParamField>
 
-<ParamField body="keep_alive" type="bool" default="false">
-  Run in keep-alive mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">

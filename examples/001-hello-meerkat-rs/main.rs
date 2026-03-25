@@ -1,12 +1,16 @@
 //! # 001 — Hello Meerkat (Rust)
 //!
-//! The simplest possible runtime-backed Meerkat session: send one prompt, get one response.
+//! The simplest possible Meerkat session: send one prompt, get one response.
 //! This is the Rust SDK equivalent of "Hello, World!"
 //!
 //! ## What you'll learn
-//! - Loading config for the runtime-backed Rust surface
-//! - Building a `SessionService` with `build_ephemeral_service`
+//! - Loading config and building a `SessionService`
+//! - Using `build_ephemeral_service` (in-memory substrate for testing/embedded use)
 //! - Running a single-turn session and reading the result
+//!
+//! Note: Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path
+//! with `PersistentSessionService` + `RuntimeSessionAdapter` for keep-alive,
+//! Queue/Steer routing, and comms. This example uses the direct path for simplicity.
 //!
 //! ## Run
 //! ```bash

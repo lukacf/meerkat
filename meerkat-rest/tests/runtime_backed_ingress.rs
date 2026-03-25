@@ -122,6 +122,9 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: runtime_adapter.clone(),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

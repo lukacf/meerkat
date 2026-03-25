@@ -36,6 +36,11 @@ pub fn noop_request_action() -> RequestAsyncAction {
     request_action(|| async {})
 }
 
+/// Returned by [`SurfaceRequestExecutor::try_begin_request`] when the key
+/// is already tracked as an in-flight request.
+#[derive(Debug)]
+pub struct RequestAlreadyExists;
+
 #[derive(Debug)]
 pub enum RequestTerminal<T> {
     Publish(T),
@@ -138,6 +143,26 @@ impl SurfaceRequestExecutor {
         let mut entries = lock_or_recover(&self.entries);
         entries.insert(key.clone(), Arc::clone(&entry));
         RequestContext { key, entry }
+    }
+
+    /// Fallible variant of `begin_request` that rejects duplicate in-flight keys.
+    ///
+    /// Returns `Err(RequestAlreadyExists)` if a request with the same key is
+    /// already tracked. This prevents REST callers from silently overwriting an
+    /// in-flight request's cancel/cleanup state.
+    pub fn try_begin_request(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+    ) -> Result<RequestContext, RequestAlreadyExists> {
+        let key = key.into();
+        let mut entries = lock_or_recover(&self.entries);
+        if entries.contains_key(&key) {
+            return Err(RequestAlreadyExists);
+        }
+        let entry = Arc::new(RequestEntry::new(initial_cancel));
+        entries.insert(key.clone(), Arc::clone(&entry));
+        Ok(RequestContext { key, entry })
     }
 
     pub fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
@@ -387,5 +412,29 @@ mod tests {
         assert!(executor.cancel_request("req-3").await);
         assert_eq!(initial_count.load(Ordering::SeqCst), 0);
         assert_eq!(upgraded_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn try_begin_request_rejects_duplicate_key() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let _ctx = executor
+            .try_begin_request("dup-key", noop_request_action())
+            .expect("first registration should succeed");
+        let result = executor.try_begin_request("dup-key", noop_request_action());
+        assert!(result.is_err(), "duplicate key should be rejected");
+    }
+
+    #[tokio::test]
+    async fn try_begin_request_allows_after_removal() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let _ctx = executor
+            .try_begin_request("reuse-key", noop_request_action())
+            .expect("first registration should succeed");
+        executor.finish_unpublished("reuse-key").await;
+        let result = executor.try_begin_request("reuse-key", noop_request_action());
+        assert!(
+            result.is_ok(),
+            "key should be available after previous request is removed"
+        );
     }
 }

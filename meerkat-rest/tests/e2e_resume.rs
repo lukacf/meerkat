@@ -91,6 +91,9 @@ async fn inner_test_rest_resume_metadata() {
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
@@ -190,6 +193,9 @@ async fn inner_test_rest_resume_metadata() {
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

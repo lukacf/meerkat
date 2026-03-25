@@ -17,12 +17,14 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+use meerkat_core::hydrate_content_blocks;
 use meerkat_core::comms::{
     CommsCommand, EventStream, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName,
     PeerReachabilityReason, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
     TrustedPeerSpec,
 };
 use meerkat_core::config::PlainEventSource;
+use meerkat_core::{BlobStore, MissingBlobBehavior};
 use meerkat_core::time_compat::Instant;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -818,6 +820,7 @@ pub struct CommsRuntime {
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.
     actionable_notify: Option<Arc<tokio::sync::Notify>>,
+    blob_store: Option<Arc<dyn BlobStore>>,
 }
 
 impl CommsRuntime {
@@ -883,6 +886,7 @@ impl CommsRuntime {
             )),
             silent_intents,
             actionable_notify,
+            blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -977,6 +981,7 @@ impl CommsRuntime {
             )),
             silent_intents,
             actionable_notify,
+            blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1057,6 +1062,7 @@ impl CommsRuntime {
             )),
             silent_intents,
             actionable_notify,
+            blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1076,6 +1082,53 @@ impl CommsRuntime {
         #[cfg(target_arch = "wasm32")]
         {
             &self.name
+        }
+    }
+
+    /// Set the blob store used to resolve blob-backed image blocks before
+    /// transport send. Comms stays byte-oriented; refs never cross the peer
+    /// boundary.
+    pub fn set_blob_store(&mut self, blob_store: Arc<dyn BlobStore>) {
+        self.blob_store = Some(blob_store);
+    }
+
+    async fn hydrate_message_kind_for_transport(
+        &self,
+        kind: crate::types::MessageKind,
+    ) -> Result<crate::types::MessageKind, SendError> {
+        match kind {
+            crate::types::MessageKind::Message {
+                body,
+                blocks: Some(mut blocks),
+            } => {
+                if blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        meerkat_core::types::ContentBlock::Image {
+                            data: meerkat_core::types::ImageData::Blob { .. },
+                            ..
+                        }
+                    )
+                }) {
+                    let blob_store = self.blob_store.as_ref().ok_or_else(|| {
+                        SendError::Internal(
+                            "blob-backed comms message requires blob store".to_string(),
+                        )
+                    })?;
+                    hydrate_content_blocks(
+                        blob_store.as_ref(),
+                        &mut blocks,
+                        MissingBlobBehavior::Error,
+                    )
+                    .await
+                    .map_err(|err| SendError::Internal(err.to_string()))?;
+                }
+                Ok(crate::types::MessageKind::Message {
+                    body,
+                    blocks: Some(blocks),
+                })
+            }
+            other => Ok(other),
         }
     }
 
@@ -1355,6 +1408,7 @@ impl CommsRuntime {
         let resolved_peer = resolved
             .into_iter()
             .find(|peer| peer.name.as_str() == peer_name);
+        let kind = self.hydrate_message_kind_for_transport(kind).await?;
         let result = self.router.send(peer_name, kind).await;
         match result {
             Ok(envelope_id) => {
@@ -1721,19 +1775,62 @@ mod tests {
     use crate::event_injector::CommsEventInjector;
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};
+    use async_trait::async_trait;
     use futures::StreamExt;
     use meerkat_core::event_injector::SubscribableInjector;
     use meerkat_core::{
+        BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError,
         SendError,
         comms::{
             InputSource, InputStreamMode, PeerDirectorySource, PeerName, PeerReachability,
             PeerReachabilityReason, StreamError, StreamScope, TrustedPeerSpec,
         },
         interaction::InteractionId,
-        types::SessionId,
+        types::{ContentBlock, ImageData, SessionId},
     };
+    use parking_lot::Mutex;
+    use std::{collections::HashMap, sync::Arc};
     use tokio::time::{Duration, timeout};
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct TestBlobStore {
+        blobs: Mutex<HashMap<BlobId, BlobPayload>>,
+    }
+
+    #[async_trait]
+    impl BlobStore for TestBlobStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::from(format!("sha256:test-{}-{}", media_type, data));
+            let payload = BlobPayload {
+                blob_id: blob_id.clone(),
+                media_type: media_type.to_string(),
+                data: data.to_string(),
+            };
+            self.blobs.lock().insert(blob_id.clone(), payload);
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs.lock().remove(blob_id);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
 
     fn test_runtime_config(name: &str, tmp: &tempfile::TempDir) -> ResolvedCommsConfig {
         ResolvedCommsConfig {
@@ -1988,8 +2085,7 @@ mod tests {
                     },
                     meerkat_core::types::ContentBlock::Image {
                         media_type: "image/png".to_string(),
-                        data: "aGVsbG8=".to_string(),
-                        source_path: None,
+                        data: "aGVsbG8=".into(),
                     },
                 ]),
                 meerkat_core::PlainEventSource::Rpc,
@@ -2379,6 +2475,65 @@ mod tests {
             &interactions[0].content,
             meerkat_core::InteractionContent::Message { body, .. } if body == "greeting"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_core_send_hydrates_blob_refs_before_transport() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-blob-{suffix}");
+        let receiver_name = format!("receiver-blob-{suffix}");
+        let mut sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob_ref = blob_store
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+        sender.set_blob_store(blob_store);
+
+        sender.router.add_trusted_peer(crate::TrustedPeer {
+            name: receiver_name.clone(),
+            pubkey: receiver.public_key(),
+            addr: format!("inproc://{receiver_name}"),
+            meta: crate::PeerMeta::default(),
+        });
+
+        receiver.router.add_trusted_peer(crate::TrustedPeer {
+            name: sender_name.clone(),
+            pubkey: sender.public_key(),
+            addr: format!("inproc://{sender_name}"),
+            meta: crate::PeerMeta::default(),
+        });
+
+        let cmd = CommsCommand::PeerMessage {
+            blocks: Some(vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id,
+                },
+            }]),
+            to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
+            body: "blob-backed image".to_string(),
+        };
+
+        let receipt = CoreCommsRuntime::send(&sender, cmd).await;
+        assert!(matches!(receipt, Ok(SendReceipt::PeerMessageSent { .. })));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::Message { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("received blocks");
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Image {
+                        data: ImageData::Inline { data },
+                        ..
+                    } if data == "aGVsbG8="
+                ));
+            }
+            other => panic!("expected message interaction, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -210,7 +210,7 @@ Create and run a new session.
 </ParamField>
 
 <ParamField body="keep_alive" type="bool | null" default="null">
-  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
+  Keep session alive after turn for comms. On create, `null`/omitted uses the create default (`false`), `true` enables, and `false` explicitly disables. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">

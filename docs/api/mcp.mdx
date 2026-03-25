@@ -315,7 +315,7 @@ Start a new Meerkat agent session with the given prompt.
 </ParamField>
 
 <ParamField body="keep_alive" type="bool | null" default="null">
-  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
+  Keep session alive after turn for comms. On `meerkat_run`, `null`/omitted uses the run default (`false`), `true` enables, and `false` explicitly disables. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">

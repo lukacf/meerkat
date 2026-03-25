@@ -41,9 +41,10 @@ pub struct BuildResumedAgentConfigParams<'a> {
 /// This is the first step in the construction chain:
 ///   Profile -> `build_agent_config()` -> `to_create_session_request()` -> `SessionService::create_session()`
 ///
-/// Mob-managed sessions are created with `keep_alive=false` so spawn returns
-/// promptly from nested tool dispatch paths. Lifecycles are managed explicitly
-/// by mob runtime commands (`start_turn`, `retire`, etc.).
+/// Mob-managed sessions are created with `keep_alive=false` by default.
+/// Callers override `keep_alive` to `true` for `AutonomousHost` members
+/// so the agent loop blocks until interrupted. Lifecycles are managed
+/// explicitly by mob runtime commands (`start_turn`, `retire`, etc.).
 pub async fn build_agent_config(
     params: BuildAgentConfigParams<'_>,
 ) -> Result<AgentBuildConfig, MobError> {
@@ -186,12 +187,6 @@ fn apply_resumed_session_metadata(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
 ) -> Result<(), MobError> {
-    if metadata.keep_alive {
-        return Err(MobError::Internal(
-            "mob-managed resume requires persisted keep_alive=false".to_string(),
-        ));
-    }
-
     let current_comms_name = config.comms_name.clone();
     let Some(stored_comms_name) = metadata.comms_name.clone() else {
         return Err(MobError::Internal(

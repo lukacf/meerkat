@@ -1950,6 +1950,7 @@ mod tests {
         ) -> Result<RunResult, SessionError> {
             let sid = SessionId::new();
             let n = self.counter.fetch_add(1, Ordering::Relaxed);
+            let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
             let name = req
                 .build
                 .and_then(|b| b.comms_name)
@@ -1958,10 +1959,12 @@ mod tests {
                 .write()
                 .await
                 .insert(sid.clone(), Arc::new(MockComms::new(&name)));
-            self.keep_alive_notifiers
-                .write()
-                .await
-                .insert(sid.clone(), Arc::new(Notify::new()));
+            if is_keep_alive {
+                self.keep_alive_notifiers
+                    .write()
+                    .await
+                    .insert(sid.clone(), Arc::new(Notify::new()));
+            }
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: sid,
@@ -1986,15 +1989,10 @@ mod tests {
             if delay_ms > 0 {
                 sleep(Duration::from_millis(delay_ms)).await;
             }
-            // All start_turn calls block until interrupted (keep-alive behavior).
-            let notifier = self
-                .keep_alive_notifiers
-                .read()
-                .await
-                .get(id)
-                .cloned()
-                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-            notifier.notified().await;
+            // Block only for keep-alive sessions (notifier registered at create time).
+            if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+                notifier.notified().await;
+            }
             Ok(RunResult {
                 text: "ok".to_string(),
                 session_id: id.clone(),

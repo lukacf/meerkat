@@ -551,6 +551,7 @@ async fn apply_runtime_turn(
                     .and_then(|meta| meta.backend.clone())
                     .or_else(|| Some(context.backend.clone())),
                 config_generation: current_generation,
+                keep_alive: false,
                 checkpointer: None,
                 silent_comms_intents: Vec::new(),
                 max_inline_peer_notifications: None,
@@ -2217,6 +2218,7 @@ async fn create_session(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        keep_alive: false,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,

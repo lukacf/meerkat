@@ -513,6 +513,8 @@ impl MobBuilder {
                             continue;
                         }
                     };
+                    resumed_config.keep_alive =
+                        entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                     let reconcile_client: Arc<dyn LlmClient> = default_llm_client
                         .clone()
                         .unwrap_or_else(|| Arc::new(meerkat_client::TestClient::default()));
@@ -564,6 +566,7 @@ impl MobBuilder {
                 shell_env: None,
             })
             .await?;
+            config.keep_alive = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             // Resume reconciliation needs live comms runtimes, but this path is
             // infrastructure restoration and should not consume provider quota.
             // If no explicit override is configured, use the local test client

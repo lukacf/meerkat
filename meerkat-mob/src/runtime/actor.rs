@@ -1685,6 +1685,8 @@ impl MobActor {
                         },
                     )
                     .await?;
+                    config.keep_alive =
+                        selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                     if let Some(ref client) = self.default_llm_client {
                         config.llm_client_override = Some(client.clone());
                     }
@@ -1799,6 +1801,8 @@ impl MobActor {
                 shell_env,
             })
             .await?;
+            config.keep_alive =
+                selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
             }
@@ -2184,6 +2188,7 @@ impl MobActor {
             shell_env: None,
         })
         .await?;
+        config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
         }
@@ -2725,6 +2730,7 @@ impl MobActor {
             shell_env: None,
         })
         .await?;
+        config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
         }

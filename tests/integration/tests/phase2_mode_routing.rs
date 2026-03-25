@@ -26,7 +26,8 @@ use tokio::sync::{Notify, RwLock};
 
 #[derive(Default)]
 struct MockSessionService {
-    sessions: RwLock<HashMap<SessionId, Arc<Notify>>>,
+    sessions: RwLock<HashMap<SessionId, ()>>,
+    keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
     start_turn_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
 }
@@ -77,12 +78,16 @@ impl SubscribableInjector for MockInjector {
 
 #[async_trait]
 impl SessionService for MockSessionService {
-    async fn create_session(&self, _req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         let sid = SessionId::new();
-        self.sessions
-            .write()
-            .await
-            .insert(sid.clone(), Arc::new(Notify::new()));
+        self.sessions.write().await.insert(sid.clone(), ());
+        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
+        if is_keep_alive {
+            self.keep_alive_notifiers
+                .write()
+                .await
+                .insert(sid.clone(), Arc::new(Notify::new()));
+        }
         Ok(RunResult {
             text: "ok".to_string(),
             session_id: sid,
@@ -98,14 +103,26 @@ impl SessionService for MockSessionService {
     async fn start_turn(
         &self,
         id: &SessionId,
-        req: StartTurnRequest,
+        _req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
-        let sessions = self.sessions.read().await;
-        let Some(notify) = sessions.get(id).cloned() else {
+        if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
-        };
-        drop(sessions);
+        }
+        // Block indefinitely for keep-alive sessions (autonomous host loop expects this)
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notified().await;
+            return Ok(RunResult {
+                text: "Host loop interrupted".to_string(),
+                session_id: id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            });
+        }
         Ok(RunResult {
             text: "ok".to_string(),
             session_id: id.clone(),
@@ -119,8 +136,8 @@ impl SessionService for MockSessionService {
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        if let Some(notify) = self.sessions.read().await.get(id).cloned() {
-            notify.notify_waiters();
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
         }
         Ok(())
     }
@@ -153,8 +170,9 @@ impl SessionService for MockSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        if let Some(notify) = self.sessions.write().await.remove(id) {
-            notify.notify_waiters();
+        self.sessions.write().await.remove(id);
+        if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
+            notifier.notify_waiters();
         }
         Ok(())
     }

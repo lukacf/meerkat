@@ -805,7 +805,7 @@ impl SessionService for MockSessionService {
                     memory: build.and_then(|b| b.override_memory).unwrap_or(false),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
-                keep_alive: false,
+                keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
                 comms_name: build.and_then(|b| b.comms_name.clone()),
                 peer_meta: build.and_then(|b| b.peer_meta.clone()),
                 realm_id: build.and_then(|b| b.realm_id.clone()),
@@ -825,10 +825,13 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), session);
-        self.keep_alive_notifiers
-            .write()
-            .await
-            .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
+        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
+        if is_keep_alive {
+            self.keep_alive_notifiers
+                .write()
+                .await
+                .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
+        }
         self.session_comms_names
             .write()
             .await
@@ -900,7 +903,7 @@ impl SessionService for MockSessionService {
             .push((id.clone(), req.flow_tool_overlay.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         // Determine keep-alive by checking if a notifier was registered for this session
-        // (set up by the test before spawning). This replaces the old req.host_mode check.
+        // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
         if is_keep_alive {
             self.keep_alive_start_turn_calls
@@ -5198,7 +5201,6 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     metadata.tooling.active_skills = Some(vec![meerkat_core::skills::SkillId(
         "mob-communication".into(),
     )]);
-    metadata.keep_alive = false;
     metadata.comms_name = Some(test_comms_name("worker", "w-1"));
     let mut peer_meta = metadata.peer_meta.clone().expect("peer metadata");
     peer_meta.labels.insert("resume".into(), "yes".into());
@@ -5239,7 +5241,10 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     assert_eq!(restored_metadata.provider_params, metadata.provider_params);
     assert_eq!(restored_metadata.max_tokens, metadata.max_tokens);
     assert_eq!(restored_metadata.tooling, metadata.tooling);
-    assert_eq!(restored_metadata.keep_alive, metadata.keep_alive);
+    assert!(
+        restored_metadata.keep_alive,
+        "autonomous host member should be restored with keep_alive=true"
+    );
     assert_eq!(restored_metadata.comms_name, metadata.comms_name);
     assert_eq!(restored_metadata.peer_meta, metadata.peer_meta);
     assert!(
@@ -5248,117 +5253,6 @@ async fn test_resume_restores_persisted_behavior_metadata() {
             Some(Message::System(system)) if system.content.contains("Persisted worker prompt")
         ),
         "restored session should keep the persisted system prompt"
-    );
-}
-
-#[tokio::test]
-async fn test_resume_marks_persisted_keep_alive_session_as_broken() {
-    let service = Arc::new(MockSessionService::new());
-    let storage = MobStorage::in_memory();
-    let events = storage.events.clone();
-    let handle = MobBuilder::new(sample_definition(), storage)
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create mob");
-    handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
-        .await
-        .expect("spawn");
-    handle.stop().await.expect("stop");
-
-    let old_sid = handle
-        .get_member(&MeerkatId::from("w-1"))
-        .await
-        .expect("roster entry")
-        .session_id()
-        .cloned()
-        .expect("session-backed member");
-    let mut persisted = service
-        .live_session_clone(&old_sid)
-        .await
-        .expect("live session");
-    let mut metadata = persisted.session_metadata().expect("metadata");
-    metadata.keep_alive = true;
-    persisted
-        .set_session_metadata(metadata)
-        .expect("set metadata");
-    service.replace_live_session(persisted).await;
-    service.archive(&old_sid).await.expect("archive session");
-
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume should succeed with Broken projection");
-    let snapshot = resumed
-        .member_status(&MeerkatId::from("w-1"))
-        .await
-        .expect("broken member status");
-    assert_eq!(
-        snapshot.status,
-        crate::runtime::handle::MobMemberStatus::Broken
-    );
-    assert!(
-        snapshot
-            .error
-            .as_deref()
-            .is_some_and(|message| message.contains("keep_alive=false")),
-        "keep_alive mismatch should surface as a restore failure"
-    );
-}
-
-#[tokio::test]
-async fn test_attach_existing_session_rejects_persisted_keep_alive_true() {
-    let service = Arc::new(MockSessionService::new());
-    let initial = service
-        .create_session(CreateSessionRequest {
-            model: "claude-sonnet-4-5".to_string(),
-            prompt: "seed".to_string().into(),
-            render_metadata: None,
-            system_prompt: Some("Persisted resume prompt".to_string()),
-            max_tokens: Some(4096),
-            event_tx: None,
-            build: Some(meerkat_core::service::SessionBuildOptions {
-                comms_name: Some("test-mob/worker/w-resume".to_string()),
-                ..Default::default()
-            }),
-            skill_references: None,
-            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-            labels: None,
-        })
-        .await
-        .expect("seed session");
-    let session_id = initial.session_id.clone();
-    let mut persisted = service
-        .live_session_clone(&session_id)
-        .await
-        .expect("live session");
-    let mut metadata = persisted.session_metadata().expect("metadata");
-    metadata.keep_alive = true;
-    persisted
-        .set_session_metadata(metadata)
-        .expect("set metadata");
-    service.replace_live_session(persisted).await;
-    service.archive(&session_id).await.expect("archive session");
-
-    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
-        .with_session_service(service.clone())
-        .create()
-        .await
-        .expect("create mob");
-
-    let error = handle
-        .attach_existing_session_as_member(
-            ProfileName::from("worker"),
-            MeerkatId::from("w-resume"),
-            session_id.clone(),
-        )
-        .await
-        .expect_err("keep_alive=true session should be rejected for mob-managed resume");
-    assert!(
-        error.to_string().contains("keep_alive=false"),
-        "explicit member resume should fail with the keep_alive incompatibility"
     );
 }
 
@@ -12139,10 +12033,13 @@ impl SessionService for RealCommsSessionService {
             .write()
             .await
             .insert(session_id.clone(), Arc::new(comms));
-        self.keep_alive_notifiers
-            .write()
-            .await
-            .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
+        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
+        if is_keep_alive {
+            self.keep_alive_notifiers
+                .write()
+                .await
+                .insert(session_id.clone(), Arc::new(tokio::sync::Notify::new()));
+        }
         self.session_comms_names
             .write()
             .await
@@ -12161,19 +12058,15 @@ impl SessionService for RealCommsSessionService {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         drop(sessions);
-        // All start_turn calls block until interrupted (keep-alive behavior).
-        let notifier = self
-            .keep_alive_notifiers
-            .read()
-            .await
-            .get(id)
-            .cloned()
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        notifier.notified().await;
-        Ok(mock_run_result(
-            id.clone(),
-            "Host loop interrupted".to_string(),
-        ))
+        // Block only for keep-alive sessions (notifier registered at create time).
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notified().await;
+            return Ok(mock_run_result(
+                id.clone(),
+                "Host loop interrupted".to_string(),
+            ));
+        }
+        Ok(mock_run_result(id.clone(), "Turn completed".to_string()))
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {

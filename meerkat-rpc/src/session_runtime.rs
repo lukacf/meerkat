@@ -1315,6 +1315,10 @@ impl SessionRuntime {
                 .as_ref()
                 .and_then(|meta| meta.config_generation)
                 .or(current_generation),
+            keep_alive: stored_metadata
+                .as_ref()
+                .map(|meta| meta.keep_alive)
+                .unwrap_or(false),
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,

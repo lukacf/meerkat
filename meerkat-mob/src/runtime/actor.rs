@@ -171,6 +171,7 @@ pub(super) struct MobActor {
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
+    pub(super) runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     pub(super) restore_diagnostics:
         Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
@@ -625,10 +626,10 @@ impl MobActor {
         let log_id = meerkat_id.clone();
 
         // Resolve comms drain dependencies before spawning.
-        // Both the runtime adapter and the member's comms runtime are needed
-        // so that peer interactions are routed through the runtime authority
-        // while the autonomous host loop is alive.
-        let runtime_adapter = self.session_service.runtime_adapter();
+        // Both the canonical mob runtime adapter and the member's comms runtime
+        // are needed so peer interactions are routed through the same runtime
+        // authority instance the provisioner uses for runtime-backed turns.
+        let runtime_adapter = self.runtime_adapter.clone();
         let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
         let drain_session_id = member_ref.session_id().cloned();
         let drain_session_service = Arc::clone(&self.session_service) as Arc<dyn MobSessionService>;

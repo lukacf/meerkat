@@ -94,7 +94,9 @@ impl MobBuilder {
     /// Set the session service for creating meerkat sessions.
     ///
     /// The service must implement both `SessionService` and `MobSessionService`
-    /// to provide comms runtime access for wiring operations.
+    /// to provide comms runtime access for wiring operations. If no explicit
+    /// runtime adapter override has been set yet, the builder seeds its
+    /// canonical runtime adapter from `service.runtime_adapter()`.
     pub fn with_session_service(mut self, service: Arc<dyn MobSessionService>) -> Self {
         if self.runtime_adapter.is_none() {
             self.runtime_adapter = service.runtime_adapter();
@@ -103,7 +105,11 @@ impl MobBuilder {
         self
     }
 
-    /// Attach a runtime adapter so member lifecycle and turns use the v9 runtime path.
+    /// Attach the canonical runtime adapter for the mob runtime.
+    ///
+    /// When set, this override is used consistently by both provisioning and
+    /// autonomous-host comms-drain ingress instead of re-deriving an adapter
+    /// from the session service at runtime.
     pub fn with_runtime_adapter(
         mut self,
         adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
@@ -844,7 +850,7 @@ impl MobBuilder {
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
             session_service,
-            runtime_adapter,
+            runtime_adapter.clone(),
             external_backend,
         ));
         let max_orphaned_turns = definition
@@ -945,6 +951,7 @@ impl MobBuilder {
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             session_service: handle_session_service,
+            runtime_adapter,
             restore_diagnostics,
             task_board_service,
             spawn_policy,

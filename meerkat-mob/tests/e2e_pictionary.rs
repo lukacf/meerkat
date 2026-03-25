@@ -201,8 +201,9 @@ async fn setup_mob()
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
 
-    // RuntimeSessionAdapter is required for comms drains — without it,
-    // AutonomousHost members have no drain to pick up peer messages.
+    // Use an explicit RuntimeSessionAdapter override so this e2e exercises the
+    // canonical mob-runtime adapter path. AutonomousHost drains and runtime-backed
+    // turns must both use this same adapter instance.
     let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
 
     let handle = MobBuilder::new(pictionary_definition(), MobStorage::in_memory())

@@ -13022,3 +13022,44 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
     );
     shutdown_result.unwrap().expect("shutdown should succeed");
 }
+#[tokio::test]
+async fn test_autonomous_host_loop_uses_builder_runtime_adapter_for_comms_drain() {
+    let service = Arc::new(MockSessionService::new());
+    let service_adapter = service.enable_runtime_adapter();
+    let builder_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service)
+        .with_runtime_adapter(builder_adapter.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let session_id = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-override"),
+            None,
+        )
+        .await
+        .expect("spawn autonomous lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert!(
+        builder_adapter.contains_session(&session_id).await,
+        "the builder-selected runtime adapter should own the autonomous member session"
+    );
+    assert!(
+        !service_adapter.contains_session(&session_id).await,
+        "the session service's default adapter must stay unused when an explicit mob runtime adapter override is provided"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timed out")
+        .expect("stop");
+}
+

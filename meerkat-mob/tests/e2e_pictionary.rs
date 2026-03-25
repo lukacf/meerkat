@@ -286,27 +286,67 @@ async fn print_conversation(handle: &MobHandle, service: &dyn MobSessionService)
             continue;
         };
 
-        for msg in &page.messages {
-            let text = match msg {
-                meerkat_core::types::Message::Assistant(a) => a.content.clone(),
-                meerkat_core::types::Message::BlockAssistant(ba) => ba
-                    .blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        meerkat_core::types::AssistantBlock::Text { text, .. } => {
-                            Some(text.clone())
+        for (msg_idx, msg) in page.messages.iter().enumerate() {
+            let (role, text) = match msg {
+                meerkat_core::types::Message::User(u) => {
+                    // Peer messages and injected content arrive as user messages.
+                    let t = meerkat_core::types::text_content(&u.content);
+                    // Skip image-only messages (just show "[image]")
+                    let display = if t.is_empty() && meerkat_core::has_images(&u.content) {
+                        "[image received]".to_string()
+                    } else {
+                        t
+                    };
+                    ("←recv", display)
+                }
+                meerkat_core::types::Message::Assistant(a) => ("said", a.content.clone()),
+                meerkat_core::types::Message::BlockAssistant(ba) => {
+                    // Extract text + tool send calls
+                    let mut parts = Vec::new();
+                    for b in &ba.blocks {
+                        match b {
+                            meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                                if !text.trim().is_empty() {
+                                    parts.push(text.clone());
+                                }
+                            }
+                            meerkat_core::types::AssistantBlock::ToolUse {
+                                name: tool_name,
+                                args,
+                                ..
+                            } => {
+                                if tool_name == "send" {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(args.get())
+                                    {
+                                        let peer =
+                                            v.get("peer").and_then(|p| p.as_str()).unwrap_or("?");
+                                        let body =
+                                            v.get("body").and_then(|b| b.as_str()).unwrap_or("");
+                                        let kind = v
+                                            .get("kind")
+                                            .and_then(|k| k.as_str())
+                                            .unwrap_or("message");
+                                        parts.push(format!("[send {kind} → {peer}] {body}"));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
+                    }
+                    ("said", parts.join(" "))
+                }
                 _ => continue,
             };
             if text.is_empty() || text.len() < 3 {
                 continue;
             }
-            let idx = all_messages.len();
-            all_messages.push((format!("{idx:04}:{name}"), name.clone(), text));
+            // Sort key: member name + message index for chronological ordering per member
+            all_messages.push((
+                format!("{name}:{msg_idx:04}"),
+                format!("{name} {role}"),
+                text,
+            ));
         }
     }
 

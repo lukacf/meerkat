@@ -18,11 +18,11 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 7. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
 8. **Seams are formal too** — async owner handoffs, wait barriers, and surfaced terminal classes are part of the architecture and should be modeled/protocolized, not left to shell convention.
 
-## 0.5 Dogma
+## Runtime Dogma
 
 Use this as the first review lens for any cross-cutting design or cleanup. The full doctrine lives in:
 
-- `docs/architecture/0.5/meerkat_0_5_dogma.md`
+- `docs/architecture/meerkat-runtime-dogma.md`
 
 The short version:
 

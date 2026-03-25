@@ -389,7 +389,9 @@ async fn message_blocks_survive_bridge() {
 
     if let Input::Peer(peer) = input {
         assert!(peer.blocks.is_some());
-        assert_eq!(peer.body, interaction.rendered_text);
+        // peer.body is the raw message body, not the rendered_text (which
+        // includes the "[peer-name]: " prefix).
+        assert_eq!(peer.body, "look");
     } else {
         panic!("Expected PeerInput");
     }

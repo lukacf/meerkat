@@ -47,8 +47,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`(run_id: RunId)
 - `EnterExtraction`(run_id: RunId, max_retries: u32)
 - `ExtractionValidationPassed`(run_id: RunId)
-- `ExtractionRetry`(run_id: RunId)
-- `ExtractionExhausted`(run_id: RunId)
+- `ExtractionValidationFailed`(run_id: RunId, error: String)
+- `ExtractionStart`(run_id: RunId)
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
 - `RunFailed`(run_id: RunId)
@@ -238,21 +238,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RunCompleted`
 - To: `Completed`
 
-### `ExtractionRetry`
+### `ExtractionStart`
 - From: `Extracting`
-- On: `ExtractionRetry`(run_id)
+- On: `ExtractionStart`(run_id)
 - Guards:
   - `run_matches_active`
 - Emits: `CheckCompaction`
 - To: `CallingLlm`
 
-### `ExtractionExhausted`
+### `ExtractionValidationFailed`
 - From: `Extracting`
-- On: `ExtractionExhausted`(run_id)
+- On: `ExtractionValidationFailed`(run_id, error)
 - Guards:
   - `run_matches_active`
-- Emits: `RunCompleted`
-- To: `Completed`
+- Emits: `CheckCompaction`
+- To: `CallingLlm`
 
 ### `RecoverableFailureFromCallingLlm`
 - From: `CallingLlm`

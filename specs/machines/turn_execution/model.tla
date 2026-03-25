@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for TurnExecutionMachine.
 
-CONSTANTS AsyncOpRefValues, BooleanValues, ContentShapeValues, NatValues, OperationIdValues, RunIdValues
+CONSTANTS AsyncOpRefValues, BooleanValues, ContentShapeValues, NatValues, OperationIdValues, RunIdValues, StringValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -300,22 +300,21 @@ ExtractionValidationPassed(run_id) ==
     /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
-ExtractionRetry(run_id) ==
+ExtractionStart(run_id) ==
+    /\ phase = "Extracting"
+    /\ (active_run = Some(run_id))
+    /\ phase' = "CallingLlm"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, terminal_outcome, extraction_attempts, max_extraction_retries >>
+
+
+ExtractionValidationFailed(run_id, error) ==
     /\ phase = "Extracting"
     /\ (active_run = Some(run_id))
     /\ phase' = "CallingLlm"
     /\ model_step_count' = model_step_count + 1
     /\ extraction_attempts' = (extraction_attempts) + 1
     /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, terminal_outcome, max_extraction_retries >>
-
-
-ExtractionExhausted(run_id) ==
-    /\ phase = "Extracting"
-    /\ (active_run = Some(run_id))
-    /\ phase' = "Completed"
-    /\ model_step_count' = model_step_count + 1
-    /\ terminal_outcome' = "Completed"
-    /\ UNCHANGED << active_run, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, tool_calls_pending, pending_op_refs, barrier_operation_ids, has_barrier_ops, barrier_satisfied, boundary_count, cancel_after_boundary, extraction_attempts, max_extraction_retries >>
 
 
 RecoverableFailureFromCallingLlm(run_id) ==
@@ -865,8 +864,8 @@ Next ==
     \/ \E run_id \in RunIdValues : BoundaryCompleteCancelsAfterBoundary(run_id)
     \/ \E run_id \in RunIdValues : \E max_retries \in 0..2 : EnterExtraction(run_id, max_retries)
     \/ \E run_id \in RunIdValues : ExtractionValidationPassed(run_id)
-    \/ \E run_id \in RunIdValues : ExtractionRetry(run_id)
-    \/ \E run_id \in RunIdValues : ExtractionExhausted(run_id)
+    \/ \E run_id \in RunIdValues : ExtractionStart(run_id)
+    \/ \E run_id \in RunIdValues : \E error \in {"alpha", "beta"} : ExtractionValidationFailed(run_id, error)
     \/ \E run_id \in RunIdValues : RecoverableFailureFromCallingLlm(run_id)
     \/ \E run_id \in RunIdValues : RecoverableFailureFromWaitingForOps(run_id)
     \/ \E run_id \in RunIdValues : RecoverableFailureFromDrainingBoundary(run_id)

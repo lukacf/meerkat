@@ -141,10 +141,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ExtractionValidationPassed`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
-- `ExtractionRetry`
+- `ExtractionStart`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
-  - scenarios: `tool-and-retry-loop`
-- `ExtractionExhausted`
+  - scenarios: `conversation-run`
+- `ExtractionValidationFailed`
   - anchors: `turn_state`, `turn_runner`, `run_primitive`, `run_event`
   - scenarios: `conversation-run`
 - `RecoverableFailureFromCallingLlm`

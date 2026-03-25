@@ -280,6 +280,72 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
     }
 }
 
+/// Wait for the artist's assistant response to start with a verdict keyword.
+/// This avoids false-matching on instruction text like "I'll respond with CORRECT".
+async fn wait_for_artist_verdict(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    verdict: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let members = handle.list_members().await;
+        if let Some(artist) = members
+            .iter()
+            .find(|m| m.meerkat_id == MeerkatId::from("artist"))
+        {
+            if let Some(sid) = artist.session_id() {
+                if let Ok(page) = service
+                    .read_history(
+                        sid,
+                        meerkat_core::SessionHistoryQuery {
+                            offset: 0,
+                            limit: None,
+                        },
+                    )
+                    .await
+                {
+                    for msg in page.messages.iter().rev() {
+                        let text = match msg {
+                            meerkat_core::types::Message::Assistant(a) => &a.content,
+                            meerkat_core::types::Message::BlockAssistant(ba) => {
+                                // Check text blocks — must start with verdict
+                                // but NOT "CORRECT or WRONG" (instruction echo).
+                                let has_verdict = ba.blocks.iter().any(|b| match b {
+                                    meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                                        let t = text.trim();
+                                        t.starts_with(verdict)
+                                            && !t.starts_with("CORRECT or")
+                                            && !t.starts_with("WRONG or")
+                                    }
+                                    _ => false,
+                                });
+                                if has_verdict {
+                                    return true;
+                                }
+                                continue;
+                            }
+                            _ => continue,
+                        };
+                        let t = text.trim();
+                        if t.starts_with(verdict)
+                            && !t.starts_with("CORRECT or")
+                            && !t.starts_with("WRONG or")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// Check if any member's history contains a needle.
 async fn history_contains(
     handle: &MobHandle,
@@ -694,7 +760,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 }
             }
         }
-        let got_correct = wait_for(
+        // Look for the artist's verdict. The artist's response should
+        // START with "CORRECT" or "WRONG" — not just contain it in
+        // instruction text like "I'll respond with CORRECT or WRONG".
+        let got_correct = wait_for_artist_verdict(
             &handle,
             service.as_ref(),
             "CORRECT",
@@ -702,7 +771,8 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         )
         .await;
         let got_wrong = if !got_correct {
-            wait_for(&handle, service.as_ref(), "WRONG", Duration::from_secs(5)).await
+            wait_for_artist_verdict(&handle, service.as_ref(), "WRONG", Duration::from_secs(5))
+                .await
         } else {
             false
         };

@@ -631,11 +631,26 @@ impl MobActor {
         let runtime_adapter = self.session_service.runtime_adapter();
         let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
         let drain_session_id = member_ref.session_id().cloned();
+        let drain_session_service = Arc::clone(&self.session_service) as Arc<dyn MobSessionService>;
 
         let handle = tokio::spawn(async move {
             // Spawn comms drain alongside the host loop when all wiring is available.
+            // The drain requires a registered session with an executor so that
+            // accept_input can route peer messages to the session's start_turn.
             let drain_spawned = match (&runtime_adapter, &drain_session_id) {
                 (Some(adapter), Some(session_id)) => {
+                    // Register the session and attach an executor that routes
+                    // back to the session service. Without this, the drain's
+                    // accept_input calls have nowhere to deliver messages.
+                    adapter.register_session(session_id.clone()).await;
+                    let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
+                        drain_session_service.clone(),
+                        session_id.clone(),
+                    ));
+                    adapter
+                        .ensure_session_with_executor(session_id.clone(), executor)
+                        .await;
+
                     let spawned = adapter
                         .maybe_spawn_comms_drain(session_id, true, comms_runtime.clone())
                         .await;

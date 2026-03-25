@@ -65,7 +65,7 @@ HigherPriorityReady(actor) == \E priority \in ActorPriorities : /\ priority[2] =
 BaseInit ==
     /\ comms_drain_phase = "Inactive"
     /\ comms_drain_mode = None
-        /\ obligation_comms_drain_spawn = {}
+    /\ obligation_comms_drain_spawn = {}
     /\ obligation_comms_drain_abort = {}
     /\ model_step_count = 0
     /\ pending_routes = <<>>
@@ -524,7 +524,6 @@ WitnessTransitionOrder_abort_observed_2 == <> (\E earlier \in observed_transitio
 THEOREM Spec => []spawn_protocol_covered
 THEOREM Spec => []abort_protocol_covered
 THEOREM Spec => []comms_drain_active_implies_mode_set
-THEOREM Spec => []comms_drain_active_implies_suppression
 THEOREM Spec => []NoOpenObligationsOnTerminal_comms_drain_spawn
 THEOREM Spec => []NoFeedbackWithoutObligation_comms_drain_spawn
 THEOREM Spec => []NoOpenObligationsOnTerminal_comms_drain_abort

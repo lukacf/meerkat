@@ -38,7 +38,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `meerkat-rest/src/lib.rs` — REST external-event surface precursor
 - `meerkat-rpc/src/handlers/event.rs` — JSON-RPC external-event surface precursor
 - `meerkat-web-runtime/src/lib.rs` — WASM/browser external-event surface precursor
-- `docs/architecture/0.5/meerkat_surface_cutover_matrix.md` — canonical external-event surface contract
+- `meerkat-runtime/src/runtime_loop.rs` — canonical external-event surface routing (input_to_append, input_to_prompt)
 
 ### Scenarios
 - `cli-surface-event-admission` — CLI stdin and host-driven external events use canonical runtime admission

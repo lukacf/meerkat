@@ -817,9 +817,9 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "WASM/browser external-event surface precursor",
                 ),
                 anchor(
-                    "surface_cutover_matrix",
-                    "docs/architecture/0.5/meerkat_surface_cutover_matrix.md",
-                    "canonical external-event surface contract",
+                    "surface_event_runtime_loop",
+                    "meerkat-runtime/src/runtime_loop.rs",
+                    "canonical external-event surface routing (input_to_append, input_to_prompt)",
                 ),
             ],
             &[
@@ -853,9 +853,9 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
             &continuation_runtime_bundle_composition(),
             &[
                 anchor(
-                    "host_mode_cutover",
-                    "docs/architecture/0.5/meerkat_host_mode_cutover_spec.md",
-                    "runtime-owned continuation scheduling contract",
+                    "keep_alive_runtime_adapter",
+                    "meerkat-runtime/src/session_adapter.rs",
+                    "runtime-owned keep-alive drain lifecycle (maybe_spawn_comms_drain)",
                 ),
                 anchor(
                     "runtime_comms_drain",
@@ -879,8 +879,8 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "terminal peer responses schedule continuation through runtime-owned admission",
                 ),
                 scenario(
-                    "host-mode-continuation",
-                    "host-mode continuation still runs through the canonical runtime path",
+                    "keep-alive-continuation",
+                    "keep-alive continuation runs through the canonical runtime path",
                 ),
                 scenario(
                     "continuation-control-preemption",
@@ -1417,7 +1417,7 @@ fn composition_scenario_ids(
             } else {
                 select_exact_scenarios(
                     all_scenarios,
-                    &["terminal-response-continuation", "host-mode-continuation"],
+                    &["terminal-response-continuation", "keep-alive-continuation"],
                 )
             }
         }

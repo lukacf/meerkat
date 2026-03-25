@@ -106,6 +106,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat-runtime/src/comms_drain.rs` — comms drain task spawn and loop implementation
 
 ### Scenarios
-- `spawn-run-exit` — drain task spawns, runs, and exits cleanly
+- `spawn-run-exit` — drain task spawns, runs, and exits cleanly with suppression lifecycle
 - `persistent-respawn` — persistent-host drain respawns after transient failure
-- `stop-abort` — drain task is stopped or aborted
+- `stop-abort` — drain task is stopped or aborted and suppression is lifted

@@ -12,7 +12,7 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `rest_event_surface`: `meerkat-rest/src/lib.rs` — REST external-event surface precursor
 - `rpc_event_surface`: `meerkat-rpc/src/handlers/event.rs` — JSON-RPC external-event surface precursor
 - `wasm_runtime_surface`: `meerkat-web-runtime/src/lib.rs` — WASM/browser external-event surface precursor
-- `surface_cutover_matrix`: `docs/architecture/0.5/meerkat_surface_cutover_matrix.md` — canonical external-event surface contract
+- `surface_event_runtime_loop`: `meerkat-runtime/src/runtime_loop.rs` — canonical external-event surface routing (input_to_append, input_to_prompt)
 
 ### Scenarios
 - `cli-surface-event-admission` — CLI stdin and host-driven external events use canonical runtime admission
@@ -24,59 +24,59 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 
 ### Routes
 - `surface_event_enters_ingress`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_ingress_ready_starts_runtime_control`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_runtime_control_starts_execution`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_execution_boundary_updates_ingress`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_execution_completion_updates_ingress`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_execution_completion_notifies_control`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_execution_failure_updates_ingress`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `surface-event-failure`
 - `surface_execution_failure_notifies_control`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `surface-event-failure`
 - `surface_execution_cancel_updates_ingress`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_execution_cancel_notifies_control`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 
 ### Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `surface-control-preemption`
 
 ### Invariants
 - `surface_event_uses_canonical_runtime_admission`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_event_begin_run_requires_staged_drain`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_event_execution_completion_is_handled`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `surface_event_execution_failure_is_handled`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `surface-event-failure`
 - `surface_event_execution_cancel_is_handled`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `cli-surface-event-admission`, `rest-surface-event-admission`, `rpc-surface-event-admission`, `wasm-surface-event-admission`
 - `control_preempts_surface_event_ingress`
-  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_cutover_matrix`
+  - anchors: `cli_stdin_events`, `rest_event_surface`, `rpc_event_surface`, `wasm_runtime_surface`, `surface_event_runtime_loop`
   - scenarios: `surface-control-preemption`
 
 

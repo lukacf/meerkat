@@ -509,16 +509,23 @@ struct MachineOwnerInventoryRow {
 
 pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> {
     let registry = CanonicalRegistry::load();
-    let owner_inventory = parse_owner_inventory(
-        &fs::read_to_string(root.join("docs/architecture/0.5/meerkat_0_5_implementation_plan.md"))
-            .context("read canonical machine owner map")?,
-    )?;
-    let final_mode_inventory = parse_final_mode_inventory(
-        &fs::read_to_string(
-            root.join("docs/architecture/0.5/meerkat_machine_formalization_strategy.md"),
-        )
-        .context("read final machine mode inventory")?,
-    )?;
+
+    // The doc-based owner/mode inventories were in docs/architecture/0.5/ which
+    // has been removed (the machine schema catalog is the sole source of truth).
+    // Skip those cross-reference checks when the docs don't exist.
+    let impl_plan_path = root.join("docs/architecture/0.5/meerkat_0_5_implementation_plan.md");
+    let strategy_path =
+        root.join("docs/architecture/0.5/meerkat_machine_formalization_strategy.md");
+    let owner_inventory = if impl_plan_path.exists() {
+        parse_owner_inventory(&fs::read_to_string(&impl_plan_path)?)?
+    } else {
+        BTreeMap::new()
+    };
+    let final_mode_inventory = if strategy_path.exists() {
+        parse_final_mode_inventory(&fs::read_to_string(&strategy_path)?)?
+    } else {
+        BTreeMap::new()
+    };
 
     let mut mismatches = Vec::new();
     let registry_names: BTreeSet<String> = registry
@@ -526,28 +533,33 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
         .iter()
         .map(|machine| machine.machine.clone())
         .collect();
-    let owner_names: BTreeSet<String> = owner_inventory.keys().cloned().collect();
-    let final_mode_names: BTreeSet<String> = final_mode_inventory.keys().cloned().collect();
 
-    for machine in registry_names.difference(&owner_names) {
-        mismatches.push(format!(
-            "canonical machine {machine} missing from docs/architecture/0.5/meerkat_0_5_implementation_plan.md owner map"
-        ));
+    // Only cross-reference against doc inventories when the docs exist.
+    if !owner_inventory.is_empty() {
+        let owner_names: BTreeSet<String> = owner_inventory.keys().cloned().collect();
+        for machine in registry_names.difference(&owner_names) {
+            mismatches.push(format!(
+                "canonical machine {machine} missing from implementation plan owner map"
+            ));
+        }
+        for machine in owner_names.difference(&registry_names) {
+            mismatches.push(format!(
+                "untracked machine {machine} present in implementation plan owner map"
+            ));
+        }
     }
-    for machine in owner_names.difference(&registry_names) {
-        mismatches.push(format!(
-            "untracked machine {machine} present in docs/architecture/0.5/meerkat_0_5_implementation_plan.md owner map"
-        ));
-    }
-    for machine in registry_names.difference(&final_mode_names) {
-        mismatches.push(format!(
-            "canonical machine {machine} missing from docs/architecture/0.5/meerkat_machine_formalization_strategy.md final mode table"
-        ));
-    }
-    for machine in final_mode_names.difference(&registry_names) {
-        mismatches.push(format!(
-            "untracked machine {machine} present in docs/architecture/0.5/meerkat_machine_formalization_strategy.md final mode table"
-        ));
+    if !final_mode_inventory.is_empty() {
+        let final_mode_names: BTreeSet<String> = final_mode_inventory.keys().cloned().collect();
+        for machine in registry_names.difference(&final_mode_names) {
+            mismatches.push(format!(
+                "canonical machine {machine} missing from formalization strategy final mode table"
+            ));
+        }
+        for machine in final_mode_names.difference(&registry_names) {
+            mismatches.push(format!(
+                "untracked machine {machine} present in formalization strategy final mode table"
+            ));
+        }
     }
 
     let specs_machine_root = root.join("specs/machines");

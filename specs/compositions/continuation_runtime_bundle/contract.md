@@ -34,12 +34,12 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `docs/architecture/0.5/meerkat_host_mode_cutover_spec.md` — runtime-owned continuation scheduling contract
+- `meerkat-runtime/src/session_adapter.rs` — runtime-owned keep-alive drain lifecycle (maybe_spawn_comms_drain)
 - `meerkat-runtime/src/comms_drain.rs` — comms inbox drain feeding typed inputs into the runtime adapter
 - `meerkat-core/src/agent/comms_impl.rs` — terminal peer response continuation precursor
 - `meerkat-core/src/agent/runner.rs` — continuation acceptance precursor
 
 ### Scenarios
 - `terminal-response-continuation` — terminal peer responses schedule continuation through runtime-owned admission
-- `host-mode-continuation` — host-mode continuation still runs through the canonical runtime path
+- `keep-alive-continuation` — keep-alive continuation runs through the canonical runtime path
 - `continuation-control-preemption` — control-plane work preempts continuation ingress scheduling

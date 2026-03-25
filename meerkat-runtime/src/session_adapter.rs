@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
+use meerkat_core::BlobStore;
 use meerkat_core::comms_drain_lifecycle_authority::{
     CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, DrainExitReason,
 };
@@ -350,6 +351,8 @@ pub struct RuntimeSessionAdapter {
     mode: RuntimeMode,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
+    /// Blob store used by persistent drivers for durable input externalization.
+    blob_store: Option<Arc<dyn BlobStore>>,
     /// Per-session comms drain lifecycle, driven by machine authority.
     comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
 }
@@ -361,16 +364,18 @@ impl RuntimeSessionAdapter {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: None,
+            blob_store: None,
             comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
 
     /// Create a persistent adapter with a RuntimeStore.
-    pub fn persistent(store: Arc<dyn RuntimeStore>) -> Self {
+    pub fn persistent(store: Arc<dyn RuntimeStore>, blob_store: Arc<dyn BlobStore>) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
+            blob_store: Some(blob_store),
             comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
@@ -379,9 +384,14 @@ impl RuntimeSessionAdapter {
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
         match &self.store {
-            Some(store) => {
-                DriverEntry::Persistent(PersistentRuntimeDriver::new(runtime_id, store.clone()))
-            }
+            Some(store) => DriverEntry::Persistent(PersistentRuntimeDriver::new(
+                runtime_id,
+                store.clone(),
+                self.blob_store
+                    .as_ref()
+                    .expect("persistent runtime adapter requires blob store")
+                    .clone(),
+            )),
             None => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id)),
         }
     }

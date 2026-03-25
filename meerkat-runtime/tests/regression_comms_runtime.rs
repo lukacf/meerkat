@@ -51,7 +51,6 @@ fn make_message_with_blocks(from: &str, body: &str) -> InboxInteraction {
                 meerkat_core::types::ContentBlock::Image {
                     media_type: "image/png".into(),
                     data: "abc123".into(),
-                    source_path: None,
                 },
             ]),
         },

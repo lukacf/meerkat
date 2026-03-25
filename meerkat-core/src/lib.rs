@@ -15,6 +15,7 @@ pub mod tokio {
 }
 
 pub mod agent;
+pub mod blob;
 pub mod budget;
 pub mod checkpoint;
 pub mod comms;
@@ -32,6 +33,7 @@ pub mod event_tap;
 pub mod gateway;
 pub mod generated;
 pub mod hooks;
+pub mod image_content;
 pub mod interaction;
 pub mod lifecycle;
 pub mod mcp_config;
@@ -65,6 +67,7 @@ pub use agent::{
     LlmStreamResult,
 };
 pub use budget::{Budget, BudgetLimits, BudgetPool};
+pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
@@ -116,6 +119,11 @@ pub use hooks::{
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
     HookRevision, HookToolCall, HookToolResult, apply_tool_result_patch, default_failure_policy,
+};
+pub use image_content::{
+    MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,
+    externalize_content_blocks, externalize_content_input, externalize_messages_from,
+    hydrate_content_blocks, hydrate_content_input, hydrate_messages_for_execution,
 };
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
@@ -175,8 +183,8 @@ pub use turn_execution_authority::{
 };
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
-    ContentInput, HandlingMode, Message, OutputSchema, ProviderMeta, RunResult, SecurityMode,
-    SessionId, StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
-    ToolResult, Usage, UserMessage, has_images,
+    ContentInput, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta, RunResult,
+    SecurityMode, SessionId, StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView,
+    ToolDef, ToolResult, Usage, UserMessage, has_images,
 };
 pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};

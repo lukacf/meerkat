@@ -2671,11 +2671,13 @@ impl MobSessionService for InactiveReadSessionService {
 
 async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> MobHandle {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
     let service = Arc::new(meerkat_session::PersistentSessionService::new(
         PersistentMockBuilder,
         16,
         store,
         None,
+        blob_store,
     ));
     MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(service)
@@ -8760,8 +8762,7 @@ async fn test_member_handle_send_accepts_multimodal_content() {
                 },
                 meerkat_core::types::ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "aGVsbG8=".to_string(),
-                    source_path: None,
+                    data: "aGVsbG8=".into(),
                 },
             ]),
             meerkat_core::types::HandlingMode::Queue,
@@ -12666,8 +12667,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
                 },
                 meerkat_core::types::ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "aGVsbG8=".to_string(),
-                    source_path: None,
+                    data: "aGVsbG8=".into(),
                 },
             ]),
         },

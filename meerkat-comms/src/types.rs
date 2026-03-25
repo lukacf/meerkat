@@ -776,8 +776,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "iVBORw0KGgo=".to_string(),
-                    source_path: None,
+                    data: "iVBORw0KGgo=".into(),
                 },
             ]),
         };

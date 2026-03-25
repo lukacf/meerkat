@@ -7,12 +7,13 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunEvent};
 
 use crate::accept::AcceptOutcome;
 use crate::driver::ephemeral::handling_mode_from_policy;
 use crate::identifiers::LogicalRuntimeId;
-use crate::input::Input;
+use crate::input::{Input, externalize_input_images};
 use crate::input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry,
     InputTerminalOutcome,
@@ -34,16 +35,23 @@ pub struct PersistentRuntimeDriver {
     inner: EphemeralRuntimeDriver,
     /// Durable store for InputState + receipts.
     store: Arc<dyn RuntimeStore>,
+    /// Blob store used to externalize durable input payloads.
+    blob_store: Arc<dyn BlobStore>,
     /// Runtime ID for store operations.
     runtime_id: LogicalRuntimeId,
 }
 
 impl PersistentRuntimeDriver {
     /// Create a new persistent runtime driver.
-    pub fn new(runtime_id: LogicalRuntimeId, store: Arc<dyn RuntimeStore>) -> Self {
+    pub fn new(
+        runtime_id: LogicalRuntimeId,
+        store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Self {
         Self {
             inner: EphemeralRuntimeDriver::new(runtime_id.clone()),
             store,
+            blob_store,
             runtime_id,
         }
     }
@@ -251,6 +259,13 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         } = outcome
             && let Some(inner_state) = self.inner.input_state(input_id).cloned()
         {
+            let mut input_for_recovery = input_for_recovery.clone();
+            if let Err(err) = externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await {
+                self.forget_input(input_id);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "failed to externalize runtime input images: {err}"
+                )));
+            }
             let mut persisted = inner_state;
             persisted.persisted_input = Some(input_for_recovery);
             self.inner.ledger_mut().accept(persisted.clone());

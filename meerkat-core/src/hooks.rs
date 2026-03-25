@@ -374,8 +374,7 @@ mod tests {
     fn image_block(media_type: &str, data: &str) -> ContentBlock {
         ContentBlock::Image {
             media_type: media_type.to_string(),
-            data: data.to_string(),
-            source_path: None,
+            data: data.into(),
         }
     }
 
@@ -433,11 +432,13 @@ mod tests {
         );
         assert!(
             matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/png" && data == "AAAA")
+            if media_type == "image/png"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "AAAA"))
         );
         assert!(
             matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/jpeg" && data == "BBBB")
+            if media_type == "image/jpeg"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "BBBB"))
         );
     }
 
@@ -484,11 +485,13 @@ mod tests {
         assert_eq!(tr.content[0], ContentBlock::Text { text: "c".into() });
         assert!(
             matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/png" && data == "X")
+            if media_type == "image/png"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "X"))
         );
         assert!(
             matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/jpeg" && data == "Y")
+            if media_type == "image/jpeg"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "Y"))
         );
     }
 

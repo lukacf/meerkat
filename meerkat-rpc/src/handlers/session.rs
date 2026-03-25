@@ -391,7 +391,15 @@ pub async fn handle_create(
                 let _ = runtime.archive_session(&session_id).await;
             }
         }));
-        let _ = context.run_cancel_if_requested().await;
+        if context.run_cancel_if_requested().await {
+            let _ = runtime.archive_session(&session_id).await;
+            runtime_adapter.unregister_session(&session_id).await;
+            return RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            );
+        }
     }
 
     // Deferred mode: return session ID without running a turn.

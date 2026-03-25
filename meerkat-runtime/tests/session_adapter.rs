@@ -7,6 +7,7 @@ use std::sync::{
 use std::time::Duration;
 
 use chrono::Utc;
+use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
@@ -14,6 +15,11 @@ use meerkat_runtime::{
     LogicalRuntimeId, PromptInput, RuntimeDriverError, RuntimeSessionAdapter, RuntimeState,
     RuntimeStore, RuntimeStoreError, SessionDelta, SessionServiceRuntimeExt,
 };
+use meerkat_store::MemoryBlobStore;
+
+fn memory_blob_store() -> Arc<dyn BlobStore> {
+    Arc::new(MemoryBlobStore::new())
+}
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
@@ -270,7 +276,7 @@ async fn accept_input_without_wake_keeps_idle_runtime_idle() {
 #[tokio::test]
 async fn persistent_adapter_accept() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
-    let adapter = RuntimeSessionAdapter::persistent(store);
+    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -343,7 +349,7 @@ async fn recycle_preserves_ephemeral_queued_work() {
 #[tokio::test]
 async fn recycle_preserves_persistent_queued_work() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
-    let adapter = RuntimeSessionAdapter::persistent(store);
+    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -942,7 +948,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     let store = Arc::new(HarnessRuntimeStore::delayed_recover(Duration::from_millis(
         75,
     )));
-    let adapter = Arc::new(RuntimeSessionAdapter::persistent(store));
+    let adapter = Arc::new(RuntimeSessionAdapter::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     let apply_called = Arc::new(AtomicBool::new(false));
 
@@ -1227,7 +1233,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
     use meerkat_runtime::input_state::InputLifecycleState;
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = RuntimeSessionAdapter::persistent(store);
+    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1312,7 +1318,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = RuntimeSessionAdapter::persistent(store);
+    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
     adapter
@@ -1387,7 +1393,7 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = Arc::new(RuntimeSessionAdapter::persistent(store));
+    let adapter = Arc::new(RuntimeSessionAdapter::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
     adapter
@@ -1434,7 +1440,7 @@ async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
     let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = RuntimeSessionAdapter::persistent(store);
+    let adapter = RuntimeSessionAdapter::persistent(store, memory_blob_store());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 

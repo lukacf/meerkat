@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_runtime::PersistentRuntimeDriver;
@@ -14,7 +15,12 @@ use meerkat_runtime::input::{
 use meerkat_runtime::input_state::{InputLifecycleState, InputState};
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore};
 use meerkat_runtime::traits::RuntimeDriver;
+use meerkat_store::MemoryBlobStore;
 use uuid::Uuid;
+
+fn memory_blob_store() -> Arc<dyn BlobStore> {
+    Arc::new(MemoryBlobStore::new())
+}
 
 fn make_runtime_id(label: &str) -> LogicalRuntimeId {
     LogicalRuntimeId::new(format!("phase1-recovery-{label}-{}", Uuid::now_v7()))
@@ -90,7 +96,11 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
         .await
         .expect("persist second applied state");
 
-    let mut driver = PersistentRuntimeDriver::new(runtime_id.clone(), Arc::clone(&store));
+    let mut driver = PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        Arc::clone(&store),
+        memory_blob_store(),
+    );
     let report = driver.recover().await.expect("recover persistent driver");
     assert_eq!(
         report.inputs_recovered, 2,

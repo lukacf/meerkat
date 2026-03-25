@@ -1554,8 +1554,7 @@ mod template_tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "abc".to_string(),
-                    source_path: Some("/tmp/source.png".to_string()),
+                    data: "abc".into(),
                 },
             ]),
             &sample_context(),
@@ -1573,10 +1572,8 @@ mod template_tests {
                     ContentBlock::Image {
                         media_type,
                         data,
-                        source_path,
                     } if media_type == "image/png"
-                        && data == "abc"
-                        && source_path.as_deref() == Some("/tmp/source.png")
+                        && matches!(data, meerkat_core::ImageData::Inline { data } if data == "abc")
                 ));
             }
             other => panic!("expected rendered blocks, got {other:?}"),

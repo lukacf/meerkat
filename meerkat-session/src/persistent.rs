@@ -12,6 +12,8 @@ use meerkat_core::PendingSystemContextAppend;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::SessionSystemContextState;
+use meerkat_core::BlobStore;
+use meerkat_core::image_content::externalize_messages_from;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary,
@@ -81,6 +83,7 @@ struct CheckpointerGate {
 /// after `create_session` which already persists an initial snapshot.
 struct StoreCheckpointer {
     store: Arc<dyn SessionStore>,
+    blob_store: Arc<dyn BlobStore>,
     gate: Arc<CheckpointerGate>,
     last_saved_len: std::sync::atomic::AtomicUsize,
     enabled: bool,
@@ -103,7 +106,12 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
         if current_len == prev_len {
             return;
         }
-        if let Err(e) = self.store.save(session).await {
+        let mut persisted = session.clone();
+        if let Err(e) = externalize_messages_from(self.blob_store.as_ref(), persisted.messages_mut(), 0).await {
+            tracing::warn!("Host-mode checkpoint blob externalization failed: {e}");
+            return;
+        }
+        if let Err(e) = self.store.save(&persisted).await {
             tracing::warn!("Host-mode checkpoint failed: {e}");
         } else {
             self.last_saved_len
@@ -122,6 +130,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     inner: EphemeralSessionService<B>,
     store: Arc<dyn SessionStore>,
     runtime_store: Option<Arc<dyn RuntimeStore>>,
+    blob_store: Arc<dyn BlobStore>,
     /// Process-local bounded cache of archived full sessions to avoid
     /// immediately reloading durable archived snapshots on hot history reads.
     archived_sessions: Mutex<IndexMap<SessionId, Session>>,
@@ -237,15 +246,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         contributing_input_ids: &[InputId],
     ) -> Result<RunBoundaryReceipt, SessionError> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
-            self.store
-                .save(session)
-                .await
-                .map_err(|e| SessionError::Store(Box::new(e)))?;
+            let persisted = self.save_normalized_session(session.clone()).await?;
             return Self::build_runtime_receipt(
                 run_id,
                 boundary,
                 contributing_input_ids.to_vec(),
-                session,
+                &persisted,
             );
         };
         let runtime_id = Self::runtime_id_for_session(id);
@@ -404,11 +410,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         max_sessions: usize,
         store: Arc<dyn SessionStore>,
         runtime_store: Option<Arc<dyn RuntimeStore>>,
+        blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         Self {
             inner: EphemeralSessionService::new(builder, max_sessions),
             store,
             runtime_store,
+            blob_store,
             archived_sessions: Mutex::new(IndexMap::new()),
             archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
@@ -432,6 +440,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub fn runtime_store(&self) -> Option<Arc<dyn RuntimeStore>> {
         self.runtime_store.clone()
+    }
+
+    pub fn blob_store(&self) -> Arc<dyn BlobStore> {
+        self.blob_store.clone()
+    }
+
+    async fn normalized_session_for_persistence(
+        &self,
+        mut session: Session,
+    ) -> Result<Session, SessionError> {
+        externalize_messages_from(self.blob_store.as_ref(), session.messages_mut(), 0)
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to externalize session images for persistence: {err}"
+                )))
+            })?;
+        Ok(session)
+    }
+
+    async fn save_normalized_session(&self, session: Session) -> Result<Session, SessionError> {
+        let session = self.normalized_session_for_persistence(session).await?;
+        self.store
+            .save(&session)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?;
+        Ok(session)
     }
 
     async fn gate_for_session(&self, id: &SessionId) -> Arc<CheckpointerGate> {
@@ -517,7 +552,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let run_result = self.inner.start_turn(id, req).await?;
 
         let session = self.export_session_with_labels(id).await?;
-        let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
+        let persisted_session = self.normalized_session_for_persistence(session.clone()).await?;
+        let session_snapshot = serde_json::to_vec(&persisted_session).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to serialize session snapshot for runtime commit: {err}"
             )))
@@ -528,7 +564,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 id,
                 run_id,
                 boundary,
-                &session,
+                &persisted_session,
                 &session_snapshot,
                 &contributing_input_ids,
             )
@@ -587,6 +623,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .as_ref()
                     .and_then(|meta| meta.peer_meta.clone()),
                 resume_session: Some(stored),
+                blob_store_override: Some(Arc::clone(&self.blob_store)),
                 ops_lifecycle_override: match &self.ops_lifecycle_provider {
                     Some(provider) => (provider)(id).await,
                     None => None,
@@ -638,7 +675,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         let session = self.export_session_with_labels(id).await?;
-        let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
+        let persisted_session = self.normalized_session_for_persistence(session.clone()).await?;
+        let session_snapshot = serde_json::to_vec(&persisted_session).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to serialize session snapshot for runtime commit: {err}"
             )))
@@ -649,7 +687,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 id,
                 run_id,
                 RunApplyBoundary::Immediate,
-                &session,
+                &persisted_session,
                 &session_snapshot,
                 &contributing_input_ids,
             )
@@ -677,12 +715,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         });
         let checkpointer = Arc::new(StoreCheckpointer {
             store: Arc::clone(&self.store),
+            blob_store: Arc::clone(&self.blob_store),
             gate: Arc::clone(&gate),
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
             enabled: self.runtime_store.is_none(),
         });
         let build = req.build.get_or_insert_with(Default::default);
         build.checkpointer = Some(checkpointer.clone());
+        build.blob_store_override = Some(Arc::clone(&self.blob_store));
 
         let result = self.inner.create_session(req).await?;
 
@@ -880,10 +920,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .map_err(|e| SessionError::Store(Box::new(e)))?;
         if let Some(mut session) = archived_snapshot.clone() {
             session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
-            self.store
-                .save(&session)
-                .await
-                .map_err(|e| SessionError::Store(Box::new(e)))?;
+            let session = self.save_normalized_session(session).await?;
             self.remember_archived_session(session).await;
         }
 
@@ -1066,10 +1103,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
 
                 self.reject_if_archived_session(id, &session).await?;
                 write_system_context_state(&mut session, persisted_state)?;
-                self.store
-                    .save(&session)
+                self.save_normalized_session(session)
                     .await
-                    .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
+                    .map_err(SessionControlError::Session)?;
 
                 let commit_result = {
                     let mut guard = match state_arc.lock() {
@@ -1140,10 +1176,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for PersistentSe
             .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
             .map_err(|err| err.into_control_error(id))?;
         write_system_context_state(&mut session, state)?;
-        self.store
-            .save(&session)
+        self.save_normalized_session(session)
             .await
-            .map_err(|e| SessionControlError::Session(SessionError::Store(Box::new(e))))?;
+            .map_err(SessionControlError::Session)?;
         Ok(AppendSystemContextResult { status })
     }
 }
@@ -1236,11 +1271,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn persist_full_session(&self, id: &SessionId) -> Result<usize, SessionError> {
         let session = self.export_session_with_labels(id).await?;
         let message_count = session.messages().len();
-
-        self.store
-            .save(&session)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))?;
+        let _ = self.save_normalized_session(session).await?;
 
         Ok(message_count)
     }
@@ -1253,10 +1284,16 @@ mod tests {
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
     use meerkat_core::checkpoint::SessionCheckpointer;
     use meerkat_core::service::{InitialTurnPolicy, SessionService, SessionServiceControlExt};
+    use meerkat_core::types::{ContentBlock, ContentInput, ImageData, Message, UserMessage};
+    use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
     use meerkat_runtime::InMemoryRuntimeStore;
-    use meerkat_store::MemoryStore;
+    use meerkat_store::{MemoryBlobStore, MemoryStore};
     use meerkat_store::StoreError;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn memory_blob_store() -> Arc<dyn BlobStore> {
+        Arc::new(MemoryBlobStore::new())
+    }
 
     struct FailSaveStore {
         inner: MemoryStore,
@@ -1483,6 +1520,99 @@ mod tests {
         }
     }
 
+    struct ImagePreservingAgent {
+        session: Arc<std::sync::Mutex<Session>>,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgent for ImagePreservingAgent {
+        async fn run_with_events(
+            &mut self,
+            prompt: meerkat_core::types::ContentInput,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            session.push(Message::User(UserMessage::with_blocks(prompt.into_blocks())));
+            session.push(Message::Assistant(meerkat_core::types::AssistantMessage {
+                content: "ok".to_string(),
+                tool_calls: vec![],
+                stop_reason: meerkat_core::types::StopReason::EndTurn,
+                usage: meerkat_core::types::Usage::default(),
+            }));
+            Ok(RunResult::new("ok".to_string(), 1))
+        }
+
+        async fn session_snapshot(&self) -> SessionSnapshot {
+            let session = match self.session.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            let system_context_state = match self.system_context_state.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            SessionSnapshot {
+                session,
+                system_context_state,
+            }
+        }
+
+        fn session_id(&self) -> SessionId {
+            let guard = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.id().clone()
+        }
+
+        fn apply_system_context_blocks(
+            &mut self,
+            appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        ) {
+            let mut guard = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.append_system_context_blocks(appends);
+            let state = guard.system_context_state().unwrap_or_default();
+            self.system_context_state = Arc::new(std::sync::Mutex::new(state));
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    struct ImagePreservingBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for ImagePreservingBuilder {
+        type Agent = ImagePreservingAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(ImagePreservingAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+            })
+        }
+    }
+
     struct CapturingCheckpointerBuilder {
         captured:
             Arc<tokio::sync::Mutex<Option<Arc<dyn meerkat_core::checkpoint::SessionCheckpointer>>>>,
@@ -1535,6 +1665,62 @@ mod tests {
             initial_turn,
             build: None,
             labels: None,
+        }
+    }
+
+    fn inline_image_block(label: &str) -> ContentBlock {
+        ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: ImageData::Inline {
+                data: format!("base64-{label}"),
+            },
+        }
+    }
+
+    fn image_prompt(label: &str) -> ContentInput {
+        ContentInput::Blocks(vec![
+            ContentBlock::Text {
+                text: format!("look at {label}"),
+            },
+            inline_image_block(label),
+        ])
+    }
+
+    fn assert_no_inline_images_in_session(session: &Session) {
+        for message in session.messages() {
+            match message {
+                Message::User(user) => {
+                    for block in &user.content {
+                        assert!(
+                            !matches!(
+                                block,
+                                ContentBlock::Image {
+                                    data: ImageData::Inline { .. },
+                                    ..
+                                }
+                            ),
+                            "persisted session unexpectedly retained inline image bytes: {session:?}"
+                        );
+                    }
+                }
+                Message::ToolResults { results } => {
+                    for result in results {
+                        for block in &result.content {
+                            assert!(
+                                !matches!(
+                                    block,
+                                    ContentBlock::Image {
+                                        data: ImageData::Inline { .. },
+                                        ..
+                                    }
+                                ),
+                                "persisted session unexpectedly retained inline image bytes: {session:?}"
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1617,6 +1803,7 @@ mod tests {
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            blob_store: memory_blob_store(),
             gate,
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
             enabled: true,
@@ -1650,6 +1837,7 @@ mod tests {
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            blob_store: memory_blob_store(),
             gate: Arc::clone(&gate),
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
             enabled: true,
@@ -1690,6 +1878,7 @@ mod tests {
         });
         let checkpointer = super::StoreCheckpointer {
             store: Arc::clone(&store),
+            blob_store: memory_blob_store(),
             gate,
             last_saved_len: std::sync::atomic::AtomicUsize::new(0),
             enabled: true,
@@ -1726,13 +1915,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_session_externalizes_inline_images_in_persisted_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let blob_store = memory_blob_store();
+        let service = PersistentSessionService::new(
+            ImagePreservingBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            blob_store.clone(),
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                prompt: image_prompt("create"),
+                ..create_request("ignored", InitialTurnPolicy::Run)
+            })
+            .await
+            .expect("create_session should succeed");
+
+        let persisted = store
+            .load(&result.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("persisted session should exist");
+
+        assert_no_inline_images_in_session(&persisted);
+        let blob_id = persisted
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::User(user) => user.content.iter().find_map(|block| match block {
+                    ContentBlock::Image {
+                        data: ImageData::Blob { blob_id },
+                        ..
+                    } => Some(blob_id.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("persisted image should be externalized");
+        assert!(
+            blob_store
+                .get(&blob_id)
+                .await
+                .expect("blob should be persisted")
+                .data
+                .contains("base64-create")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_turn_externalizes_new_inline_images_in_persisted_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            ImagePreservingBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+
+        service
+            .start_turn(
+                &created.session_id,
+                StartTurnRequest {
+                    prompt: image_prompt("turn"),
+                    ..start_turn_request("ignored")
+                },
+            )
+            .await
+            .expect("start_turn should succeed");
+
+        let persisted = store
+            .load(&created.session_id)
+            .await
+            .expect("load should succeed")
+            .expect("persisted session should exist");
+        assert_no_inline_images_in_session(&persisted);
+    }
+
+    #[tokio::test]
+    async fn test_apply_runtime_turn_externalizes_inline_images_in_runtime_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            ImagePreservingBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+
+        let run_id = RunId::new();
+        service
+            .apply_runtime_turn_with_result(
+                &created.session_id,
+                run_id,
+                StartTurnRequest {
+                    prompt: image_prompt("runtime"),
+                    ..start_turn_request("ignored")
+                },
+                RunApplyBoundary::RunStart,
+                vec![],
+            )
+            .await
+            .expect("apply_runtime_turn should succeed");
+
+        let runtime_id = super::PersistentSessionService::<ImagePreservingBuilder>::runtime_id_for_session(&created.session_id);
+        let snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("runtime snapshot should exist");
+        let persisted: Session =
+            serde_json::from_slice(&snapshot).expect("runtime snapshot should deserialize");
+        assert_no_inline_images_in_session(&persisted);
+    }
+
+    #[tokio::test]
     async fn test_runtime_backed_create_session_installs_disabled_store_checkpointer() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let builder = CapturingCheckpointerBuilder::new();
         let captured = Arc::clone(&builder.captured);
-        let service =
-            PersistentSessionService::new(builder, 4, Arc::clone(&store), Some(runtime_store));
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -1795,7 +2118,13 @@ mod tests {
     #[tokio::test]
     async fn test_append_system_context_does_not_mutate_archived_store_row() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
         let session = Session::new();
         let id = session.id().clone();
         store.save(&session).await.unwrap();
@@ -1830,7 +2159,13 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_read_history_returns_messages_for_live_and_archived_sessions() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let created = service
             .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
@@ -1881,7 +2216,13 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_archived_history_survives_restart_and_cache_eviction() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 1, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            1,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let first = service
             .create_session(create_request("first", InitialTurnPolicy::RunImmediately))
@@ -1901,7 +2242,13 @@ mod tests {
             .await
             .expect("archive second session");
 
-        let restarted = PersistentSessionService::new(DummyBuilder, 1, Arc::clone(&store), None);
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            1,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
         let archived = restarted
             .read_history(
                 &first.session_id,
@@ -1929,7 +2276,13 @@ mod tests {
     #[tokio::test]
     async fn test_append_system_context_repersist_live_session_when_store_row_missing() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -1985,6 +2338,7 @@ mod tests {
             4,
             Arc::clone(&store) as Arc<dyn SessionStore>,
             None,
+            memory_blob_store(),
         );
 
         let result = service
@@ -2029,7 +2383,13 @@ mod tests {
     #[tokio::test]
     async fn test_append_system_context_unknown_session_does_not_allocate_gate() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
         let unknown = SessionId::new();
 
         let err = service
@@ -2054,8 +2414,13 @@ mod tests {
     async fn test_runtime_backed_create_session_persists_initial_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -2080,8 +2445,13 @@ mod tests {
     async fn test_runtime_backed_start_turn_persists_follow_up_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -2119,8 +2489,13 @@ mod tests {
     async fn test_runtime_backed_append_system_context_stages_successfully() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -2162,8 +2537,13 @@ mod tests {
     async fn test_runtime_backed_append_system_context_does_not_persist_uncommitted_live_state() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -2224,6 +2604,7 @@ mod tests {
             4,
             Arc::clone(&store),
             Some(runtime_store.clone()),
+            memory_blob_store(),
         );
 
         let result = service
@@ -2300,8 +2681,13 @@ mod tests {
     async fn test_runtime_backed_append_system_context_prefers_newer_store_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
-        let service =
-            PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), Some(runtime_store));
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
 
         let result = service
             .create_session(create_request(
@@ -2354,7 +2740,13 @@ mod tests {
     #[tokio::test]
     async fn test_apply_runtime_context_appends_recovers_stored_only_session() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let mut session = Session::new();
         let id = session.id().clone();
@@ -2468,7 +2860,13 @@ mod tests {
     #[tokio::test]
     async fn test_update_keep_alive_persists_to_store() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let created = service
             .create_session(create_request_with_metadata(
@@ -2503,7 +2901,8 @@ mod tests {
     async fn test_update_keep_alive_rolls_back_on_store_failure() {
         let fail_store = Arc::new(FailSaveStore::new());
         let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
-        let service = PersistentSessionService::new(DummyBuilder, 4, store, None);
+        let service =
+            PersistentSessionService::new(DummyBuilder, 4, store, None, memory_blob_store());
 
         let created = service
             .create_session(create_request_with_metadata(
@@ -2556,7 +2955,13 @@ mod tests {
     #[tokio::test]
     async fn test_deferred_first_turn_system_prompt_is_applied_and_persisted() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let created = service
             .create_session(create_request_with_metadata(
@@ -2611,7 +3016,13 @@ mod tests {
     #[tokio::test]
     async fn test_deferred_first_turn_system_prompt_overrides_create_time_prompt() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let mut req = create_request_with_metadata("hello", InitialTurnPolicy::Defer);
         req.system_prompt = Some("You are the old prompt.".to_string());
@@ -2651,7 +3062,13 @@ mod tests {
     #[tokio::test]
     async fn test_materialized_start_turn_rejects_system_prompt_override() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
 
         let created = service
             .create_session(create_request_with_metadata(

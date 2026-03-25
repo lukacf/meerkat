@@ -37,6 +37,7 @@ pub struct AgentBuilder {
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    pub(super) blob_store: Option<Arc<dyn crate::BlobStore>>,
     pub(super) silent_comms_intents: Vec<String>,
     pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
@@ -64,6 +65,7 @@ impl AgentBuilder {
             memory_store: None,
             skill_engine: None,
             checkpointer: None,
+            blob_store: None,
             silent_comms_intents: Vec::new(),
             ops_lifecycle: None,
             max_inline_peer_notifications: None,
@@ -236,6 +238,7 @@ impl AgentBuilder {
             pending_fatal_diagnostic: None,
             silent_comms_intents: self.silent_comms_intents,
             checkpointer: self.checkpointer,
+            blob_store: self.blob_store,
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
@@ -291,6 +294,12 @@ impl AgentBuilder {
         cp: Arc<dyn crate::checkpoint::SessionCheckpointer>,
     ) -> Self {
         self.checkpointer = Some(cp);
+        self
+    }
+
+    /// Set the blob store used to hydrate image refs before execution.
+    pub fn with_blob_store(mut self, blob_store: Arc<dyn crate::BlobStore>) -> Self {
+        self.blob_store = Some(blob_store);
         self
     }
 

@@ -332,7 +332,6 @@ mod tests {
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "abc".into(),
-                source_path: None,
             },
         ];
         let interaction = InboxInteraction {
@@ -362,7 +361,6 @@ mod tests {
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "abc".into(),
-                source_path: None,
             },
         ];
         let interaction = InboxInteraction {
@@ -391,7 +389,6 @@ mod tests {
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "abc".into(),
-                source_path: None,
             },
         ];
         let classified = ClassifiedInboxInteraction {

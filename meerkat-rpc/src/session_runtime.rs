@@ -231,7 +231,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let runtime_adapter = persistence.runtime_adapter();
-        let (store, runtime_store) = persistence.into_parts();
+        let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
         let service = Arc::new(Self::build_persistent_service(
@@ -239,6 +239,7 @@ impl SessionRuntime {
             max_sessions,
             store,
             runtime_store.clone(),
+            blob_store,
             &runtime_adapter,
         ));
 
@@ -278,7 +279,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let runtime_adapter = persistence.runtime_adapter();
-        let (store, runtime_store) = persistence.into_parts();
+        let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
@@ -287,6 +288,7 @@ impl SessionRuntime {
             max_sessions,
             store,
             runtime_store.clone(),
+            blob_store,
             &runtime_adapter,
         ));
 
@@ -324,10 +326,11 @@ impl SessionRuntime {
         max_sessions: usize,
         store: Arc<dyn meerkat_store::SessionStore>,
         runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
+        blob_store: Arc<dyn meerkat_core::BlobStore>,
         runtime_adapter: &Arc<meerkat_runtime::RuntimeSessionAdapter>,
     ) -> PersistentSessionService<FactoryAgentBuilder> {
         let mut service =
-            PersistentSessionService::new(builder, max_sessions, store, runtime_store);
+            PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
         let adapter = runtime_adapter.clone();
         service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
             let adapter = adapter.clone();
@@ -372,6 +375,10 @@ impl SessionRuntime {
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
         self.runtime_adapter.clone()
+    }
+
+    pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
+        self.service.blob_store()
     }
 
     pub fn default_llm_client(&self) -> Option<Arc<dyn LlmClient>> {
@@ -1347,6 +1354,7 @@ impl SessionRuntime {
             additional_instructions: None,
             shell_env: None,
             resume_override_mask: Default::default(),
+            blob_store_override: None,
         };
         self.service
             .create_session(CreateSessionRequest {
@@ -2954,11 +2962,13 @@ mod tests {
 
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> SessionRuntime {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
         SessionRuntime::new(
             factory,
             Config::default(),
             max_sessions,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, blob_store),
             crate::router::NotificationSink::noop(),
         )
     }

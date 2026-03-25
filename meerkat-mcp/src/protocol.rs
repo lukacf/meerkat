@@ -138,8 +138,7 @@ fn extract_content_blocks(contents: Vec<Content>) -> Vec<ContentBlock> {
             RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
             RawContent::Image(image) => Some(ContentBlock::Image {
                 media_type: image.mime_type,
-                data: image.data,
-                source_path: None,
+                data: meerkat_core::ImageData::Inline { data: image.data },
             }),
             _ => None,
         })
@@ -203,8 +202,7 @@ mod tests {
             blocks[0],
             ContentBlock::Image {
                 media_type: "image/png".to_string(),
-                data: "aW1hZ2VkYXRh".to_string(),
-                source_path: None,
+                data: "aW1hZ2VkYXRh".into(),
             }
         );
     }

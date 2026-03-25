@@ -109,7 +109,11 @@ fn persistent_service(
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
 
     let store_dyn: Arc<dyn meerkat::SessionStore> = store.clone();
-    let service = Arc::new(PersistentSessionService::new(builder, 32, store_dyn, None));
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::default());
+    let service = Arc::new(PersistentSessionService::new(
+        builder, 32, store_dyn, None, blob_store,
+    ));
     (service, store)
 }
 

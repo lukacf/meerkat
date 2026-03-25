@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ContentInput, Message, ProviderMeta, SessionHistoryPage,
+    AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta, SessionHistoryPage,
     SessionId, SessionInfo, SessionSummary, StopReason,
 };
 
@@ -139,6 +139,31 @@ impl From<ProviderMeta> for WireProviderMeta {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum WireImageData {
+    Inline { data: String },
+    Blob {
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
+        blob_id: BlobId,
+    },
+}
+
+impl From<String> for WireImageData {
+    fn from(data: String) -> Self {
+        Self::Inline { data }
+    }
+}
+
+impl From<&str> for WireImageData {
+    fn from(data: &str) -> Self {
+        Self::Inline {
+            data: data.to_string(),
+        }
+    }
+}
+
 /// Wire-safe content block (no `source_path` — internal only).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -149,7 +174,8 @@ pub enum WireContentBlock {
     },
     Image {
         media_type: String,
-        data: String,
+        #[serde(flatten)]
+        data: WireImageData,
     },
     /// Forward-compatibility for unknown block types.
     #[serde(other)]
@@ -160,9 +186,13 @@ impl From<ContentBlock> for WireContentBlock {
     fn from(block: ContentBlock) -> Self {
         match block {
             ContentBlock::Text { text } => WireContentBlock::Text { text },
-            ContentBlock::Image {
-                media_type, data, ..
-            } => WireContentBlock::Image { media_type, data },
+            ContentBlock::Image { media_type, data } => WireContentBlock::Image {
+                media_type,
+                data: match data {
+                    ImageData::Inline { data } => WireImageData::Inline { data },
+                    ImageData::Blob { blob_id } => WireImageData::Blob { blob_id },
+                },
+            },
             _ => WireContentBlock::Unknown,
         }
     }
@@ -689,7 +719,7 @@ mod tests {
     fn test_wire_content_block_image_roundtrip() {
         let block = WireContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "iVBOR...".to_string(),
+            data: "iVBOR...".into(),
         };
         let json = serde_json::to_string(&block).unwrap();
         let parsed: WireContentBlock = serde_json::from_str(&json).unwrap();
@@ -707,15 +737,14 @@ mod tests {
     fn test_wire_content_block_from_core_strips_source_path() {
         let core_block = ContentBlock::Image {
             media_type: "image/jpeg".to_string(),
-            data: "base64data".to_string(),
-            source_path: Some("/tmp/img.jpg".to_string()),
+            data: "base64data".into(),
         };
         let wire: WireContentBlock = core_block.into();
         assert_eq!(
             wire,
             WireContentBlock::Image {
                 media_type: "image/jpeg".to_string(),
-                data: "base64data".to_string(),
+                data: "base64data".into(),
             }
         );
     }
@@ -737,7 +766,7 @@ mod tests {
             },
             WireContentBlock::Image {
                 media_type: "image/png".to_string(),
-                data: "abc123".to_string(),
+                data: "abc123".into(),
             },
         ]);
         let json = serde_json::to_string(&input).unwrap();
@@ -762,7 +791,7 @@ mod tests {
             },
             WireContentBlock::Image {
                 media_type: "image/png".to_string(),
-                data: "data".to_string(),
+                data: "data".into(),
             },
         ]);
         let json = serde_json::to_string(&content).unwrap();
@@ -806,7 +835,7 @@ mod tests {
                         },
                         WireContentBlock::Image {
                             media_type: "image/png".to_string(),
-                            data: "abc".to_string()
+                            data: "abc".into()
                         },
                     ])
                 );
@@ -829,8 +858,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "base64data".to_string(),
-                    source_path: Some("/tmp/img.png".to_string()),
+                    data: "base64data".into(),
                 },
             ]))],
         };
@@ -845,7 +873,7 @@ mod tests {
                         },
                         WireContentBlock::Image {
                             media_type: "image/png".to_string(),
-                            data: "base64data".to_string()
+                            data: "base64data".into()
                         },
                     ])
                 );
@@ -871,8 +899,7 @@ mod tests {
                         },
                         ContentBlock::Image {
                             media_type: "image/png".to_string(),
-                            data: "imgdata".to_string(),
-                            source_path: Some("/tmp/shot.png".to_string()),
+                            data: "imgdata".into(),
                         },
                     ],
                     false,
@@ -890,7 +917,7 @@ mod tests {
                         },
                         WireContentBlock::Image {
                             media_type: "image/png".to_string(),
-                            data: "imgdata".to_string()
+                            data: "imgdata".into()
                         },
                     ])
                 );

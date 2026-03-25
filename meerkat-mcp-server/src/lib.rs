@@ -17,7 +17,7 @@ use meerkat_core::service::{
     SessionService, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
-    AgentEvent, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
+    AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
     ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
     RuntimeBootstrap, ToolCallView, format_verbose_event,
 };
@@ -478,6 +478,7 @@ impl MeerkatMcpState {
         let runtime_adapter = persistence.runtime_adapter();
         let runtime_store = persistence.runtime_store();
         let session_store = persistence.session_store();
+        let blob_store = persistence.blob_store();
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let conventions_context_root = bootstrap.context.context_root.clone();
         let project_root = conventions_context_root
@@ -525,6 +526,7 @@ impl MeerkatMcpState {
             100,
             session_store,
             runtime_store,
+            blob_store,
         ));
 
         Ok(Self {
@@ -583,8 +585,9 @@ impl MeerkatMcpState {
             realm_paths.root.join("config_state.json"),
         ));
 
+        let runtime_root = realm_paths.root.clone();
         let mut factory = AgentFactory::new(store_path)
-            .runtime_root(realm_paths.root)
+            .runtime_root(runtime_root)
             .project_root(project_root)
             .builtins(true)
             .shell(true);
@@ -593,7 +596,17 @@ impl MeerkatMcpState {
         }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let service = Arc::new(PersistentSessionService::new(builder, 100, store, None));
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::FsBlobStore::new(
+                realm_paths.root.join("blobs"),
+            ));
+        let service = Arc::new(PersistentSessionService::new(
+            builder,
+            100,
+            store,
+            None,
+            blob_store,
+        ));
 
         Self {
             service,
@@ -780,6 +793,11 @@ pub struct MeerkatSessionHistoryInput {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeerkatBlobGetInput {
+    pub blob_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1046,6 +1064,14 @@ fn post_commit_session_created_error(
     )
 }
 
+fn request_cancelled_tool_error() -> ToolCallError {
+    ToolCallError::new(
+        meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code(),
+        "request cancelled before start",
+        None,
+    )
+}
+
 #[cfg(test)]
 const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5;
 #[cfg(not(test))]
@@ -1114,6 +1140,11 @@ fn base_tools_list() -> Vec<Value> {
             "name": "meerkat_history",
             "description": "Read a session's full history.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionHistoryInput>()
+        }),
+        json!({
+            "name": "meerkat_blob_get",
+            "description": "Fetch raw blob bytes and metadata by blob id.",
+            "inputSchema": meerkat_tools::schema_for::<MeerkatBlobGetInput>()
         }),
         json!({
             "name": "meerkat_interrupt",
@@ -1307,6 +1338,13 @@ pub async fn handle_tools_call_with_notifier(
             let input: MeerkatSessionHistoryInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
             handle_meerkat_history(state, input)
+                .await
+                .map_err(ToolCallError::internal)
+        }
+        "meerkat_blob_get" => {
+            let input: MeerkatBlobGetInput = serde_json::from_value(arguments.clone())
+                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+            handle_meerkat_blob_get(state, input)
                 .await
                 .map_err(ToolCallError::internal)
         }
@@ -1725,6 +1763,22 @@ async fn handle_meerkat_history(
         &state.realm_id,
         &session_id,
     ));
+    Ok(wrap_tool_payload(
+        serde_json::to_value(payload).unwrap_or(Value::Null),
+    ))
+}
+
+async fn handle_meerkat_blob_get(
+    state: &MeerkatMcpState,
+    input: MeerkatBlobGetInput,
+) -> Result<Value, String> {
+    let blob_id = BlobId::new(input.blob_id);
+    let payload = state
+        .service
+        .blob_store()
+        .get(&blob_id)
+        .await
+        .map_err(|err| err.to_string())?;
     Ok(wrap_tool_payload(
         serde_json::to_value(payload).unwrap_or(Value::Null),
     ))
@@ -2388,7 +2442,11 @@ async fn handle_meerkat_run(
                 runtime_adapter.unregister_session(&session_id).await;
             }
         }));
-        let _ = context.run_cancel_if_requested().await;
+        if context.run_cancel_if_requested().await {
+            let _ = state.service.archive(&session_id).await;
+            state.runtime_adapter.unregister_session(&session_id).await;
+            return Err(request_cancelled_tool_error());
+        }
     }
 
     // Set up event forwarding
@@ -2446,6 +2504,7 @@ async fn handle_meerkat_run(
             peer_meta: input.peer_meta.is_some(),
             ..Default::default()
         },
+        blob_store_override: None,
     };
 
     let req = CreateSessionRequest {
@@ -2527,7 +2586,9 @@ async fn handle_meerkat_resume(
                 let _ = service.interrupt(&session_id).await;
             }
         }));
-        let _ = context.run_cancel_if_requested().await;
+        if context.run_cancel_if_requested().await {
+            return Err(request_cancelled_tool_error());
+        }
     }
 
     let mut session = state
@@ -2719,6 +2780,7 @@ async fn handle_meerkat_resume(
             comms_name: input.comms_name.is_some(),
             peer_meta: input.peer_meta.is_some(),
         },
+        blob_store_override: None,
     };
 
     let result = if needs_rebuild {
@@ -2940,6 +3002,7 @@ mod tests {
     use super::*;
     use futures::stream;
     use meerkat::Session;
+    use meerkat::surface::{SurfaceRequestExecutor, noop_request_action};
     use std::path::PathBuf;
     use tokio::time::{Duration, timeout};
 
@@ -2960,6 +3023,14 @@ mod tests {
         let session_id = session.id().to_string();
         store.save(&session).await.expect("persisted session");
         (state, session_id)
+    }
+
+    async fn cancelled_request_context(key: &str) -> RequestContext {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let context = executor.begin_request(key.to_string(), noop_request_action());
+        let cancelled = executor.cancel_request(key).await;
+        assert!(cancelled, "pre-cancel should mark request cancelled");
+        context
     }
 
     fn hooks_override_fixture() -> HookRunOverrides {
@@ -3429,6 +3500,19 @@ mod tests {
     }
 
     #[test]
+    fn test_tools_list_has_blob_get_tool() {
+        let blob_tool = tools_list()
+            .into_iter()
+            .find(|tool| tool["name"] == "meerkat_blob_get")
+            .expect("meerkat_blob_get tool must exist");
+        assert_eq!(blob_tool["name"], "meerkat_blob_get");
+        assert_eq!(
+            blob_tool["inputSchema"]["properties"]["blob_id"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
     fn test_tools_list_skills_schema_has_source_selector() {
         let tools = tools_list();
         let skills_tool = tools.iter().find(|t| t["name"] == "meerkat_skills");
@@ -3584,6 +3668,131 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code, -32602);
         assert!(err.message.contains("comms_name"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_meerkat_run_returns_request_cancelled_when_pre_cancelled() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let context = cancelled_request_context("req-run-cancelled").await;
+
+        let result = handle_meerkat_run(
+            &state,
+            MeerkatRunInput {
+                prompt: "test".to_string(),
+                system_prompt: None,
+                model: Some("claude-opus-4-6".to_string()),
+                max_tokens: Some(4096),
+                provider: None,
+                output_schema: None,
+                structured_output_retries: Some(2),
+                stream: false,
+                verbose: false,
+                tools: vec![],
+                enable_builtins: Some(false),
+                builtin_config: None,
+                keep_alive: Some(false),
+                comms_name: None,
+                peer_meta: None,
+                hooks_override: None,
+                enable_memory: None,
+                enable_mob: None,
+                provider_params: None,
+                budget_limits: None,
+                preload_skills: None,
+                skill_refs: None,
+                skill_references: None,
+                labels: None,
+                additional_instructions: None,
+                app_context: None,
+                shell_env: None,
+            },
+            None,
+            Some(context),
+        )
+        .await;
+
+        let err = result.expect_err("pre-cancelled run should be rejected");
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_meerkat_resume_returns_request_cancelled_when_pre_cancelled() {
+        let (state, session_id) = state_with_persisted_session().await;
+        let context = cancelled_request_context("req-resume-cancelled").await;
+
+        let result = handle_meerkat_resume(
+            &state,
+            MeerkatResumeInput {
+                session_id,
+                prompt: "Resume".to_string(),
+                system_prompt: None,
+                model: None,
+                max_tokens: None,
+                provider: None,
+                output_schema: None,
+                structured_output_retries: None,
+                stream: false,
+                verbose: false,
+                tools: vec![],
+                tool_results: vec![],
+                enable_builtins: None,
+                builtin_config: None,
+                keep_alive: None,
+                comms_name: None,
+                peer_meta: None,
+                hooks_override: None,
+                enable_memory: None,
+                enable_mob: None,
+                provider_params: None,
+                budget_limits: None,
+                preload_skills: None,
+                skill_refs: None,
+                skill_references: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            },
+            None,
+            Some(context),
+        )
+        .await;
+
+        let err = result.expect_err("pre-cancelled resume should be rejected");
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_meerkat_blob_get_returns_payload() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let blob_ref = state
+            .service
+            .blob_store()
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+
+        let result = handle_tools_call(
+            &state,
+            "meerkat_blob_get",
+            &json!({ "blob_id": blob_ref.blob_id.as_str() }),
+        )
+        .await
+        .expect("blob get succeeds");
+
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("text payload");
+        let payload: Value = serde_json::from_str(text).expect("valid json payload");
+        assert_eq!(payload["blob_id"], blob_ref.blob_id.as_str());
+        assert_eq!(payload["media_type"], "image/png");
+        assert_eq!(payload["data"], "aGVsbG8=");
     }
 
     #[test]

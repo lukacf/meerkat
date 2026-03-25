@@ -49,7 +49,10 @@ from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .tools import ToolRegistry
 from .types import (
     AttributedEvent,
+    BlobPayload,
     Capability,
+    ContentBlock,
+    ContentInput,
     EventEnvelope,
     McpLiveOpResponse,
     RunResult,
@@ -284,7 +287,7 @@ class MeerkatClient:
 
     async def create_session(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -335,7 +338,7 @@ class MeerkatClient:
 
     def create_session_streaming(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -401,7 +404,7 @@ class MeerkatClient:
 
     async def create_deferred_session(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -493,6 +496,14 @@ class MeerkatClient:
             params["limit"] = limit
         raw = await self._request("session/history", params)
         return self._parse_session_history(raw)
+
+    async def get_blob(self, blob_id: str) -> BlobPayload:
+        raw = await self._request("blob/get", {"blob_id": blob_id})
+        return BlobPayload(
+            blob_id=str(raw.get("blob_id", blob_id)),
+            media_type=str(raw.get("media_type", "")),
+            data_base64=str(raw.get("data", "")),
+        )
 
     # -- Capabilities ------------------------------------------------------
 
@@ -921,7 +932,7 @@ class MeerkatClient:
     async def _start_turn(
         self,
         session_id: str,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -965,7 +976,7 @@ class MeerkatClient:
     def _start_turn_streaming(
         self,
         session_id: str,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -1253,7 +1264,7 @@ class MeerkatClient:
 
     @staticmethod
     def _build_create_params(
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
@@ -1433,7 +1444,7 @@ class MeerkatClient:
         role = data.get("role", "")
         return SessionMessage(
             role=role,
-            content=data.get("content"),
+            content=MeerkatClient._parse_content_input(data["content"]) if "content" in data else None,
             tool_calls=[
                 SessionToolCall(
                     id=tool_call.get("id", ""),
@@ -1450,12 +1461,44 @@ class MeerkatClient:
             results=[
                 SessionToolResult(
                     tool_use_id=result.get("tool_use_id", ""),
-                    content=result.get("content", ""),
+                    content=MeerkatClient._parse_content_input(result.get("content", "")),
                     is_error=bool(result.get("is_error", False)),
                 )
                 for result in data.get("results", [])
             ],
         )
+
+    @staticmethod
+    def _parse_content_input(value: Any) -> ContentInput:
+        if isinstance(value, list):
+            return [
+                MeerkatClient._parse_content_block(block)
+                for block in value
+                if isinstance(block, dict)
+            ]
+        return "" if value is None else str(value)
+
+    @staticmethod
+    def _parse_content_block(data: dict[str, Any]) -> ContentBlock:
+        if data.get("type") == "image":
+            source = data.get("source", "inline")
+            if source == "blob":
+                return {
+                    "type": "image",
+                    "media_type": str(data.get("media_type", "")),
+                    "source": "blob",
+                    "blob_id": str(data.get("blob_id", "")),
+                }
+            return {
+                "type": "image",
+                "media_type": str(data.get("media_type", "")),
+                "source": "inline",
+                "data": str(data.get("data", "")),
+            }
+        return {
+            "type": "text",
+            "text": str(data.get("text", "")),
+        }
 
     @staticmethod
     def _parse_session_assistant_block(data: dict[str, Any]) -> SessionAssistantBlock:

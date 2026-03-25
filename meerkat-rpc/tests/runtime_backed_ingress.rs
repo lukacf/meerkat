@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::AgentFactory;
 use meerkat_client::{LlmClient, LlmError};
-use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
+use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore, StopReason};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
+use meerkat_store::MemoryBlobStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct MockLlmClient;
@@ -53,11 +54,12 @@ fn spawn_test_server() -> (
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
     let mut runtime = SessionRuntime::new(
         factory,
         config,
         10,
-        meerkat::PersistenceBundle::new(store, None),
+        meerkat::PersistenceBundle::new(store, None, blob_store),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =

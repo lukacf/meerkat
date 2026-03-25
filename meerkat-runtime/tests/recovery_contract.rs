@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunEvent, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
@@ -19,6 +20,7 @@ use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SessionDelta};
 use meerkat_runtime::traits::RuntimeDriver;
 use meerkat_runtime::{EphemeralRuntimeDriver, PersistentRuntimeDriver};
+use meerkat_store::MemoryBlobStore;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -67,6 +69,10 @@ fn supported_store_harnesses() -> Vec<StoreHarness> {
     }
 
     harnesses
+}
+
+fn memory_blob_store() -> Arc<dyn BlobStore> {
+    Arc::new(MemoryBlobStore::new())
 }
 
 fn make_runtime_id(label: &str) -> LogicalRuntimeId {
@@ -287,7 +293,11 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             .await
             .unwrap();
 
-        let mut driver = PersistentRuntimeDriver::new(runtime_id.clone(), harness.store.clone());
+        let mut driver = PersistentRuntimeDriver::new(
+            runtime_id.clone(),
+            harness.store.clone(),
+            memory_blob_store(),
+        );
         let report = driver.recover().await.unwrap();
         assert_eq!(
             report.inputs_recovered, 2,
@@ -355,7 +365,11 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
         drop(driver);
 
         let mut retired_driver =
-            PersistentRuntimeDriver::new(runtime_id.clone(), harness.store.clone());
+            PersistentRuntimeDriver::new(
+                runtime_id.clone(),
+                harness.store.clone(),
+                memory_blob_store(),
+            );
         retired_driver.recover().await.unwrap();
         assert_eq!(
             retired_driver.runtime_state(),
@@ -418,7 +432,11 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
             .await
             .unwrap();
 
-        let mut driver = PersistentRuntimeDriver::new(runtime_id.clone(), harness.store.clone());
+        let mut driver = PersistentRuntimeDriver::new(
+            runtime_id.clone(),
+            harness.store.clone(),
+            memory_blob_store(),
+        );
         driver.recover().await.unwrap();
 
         assert!(

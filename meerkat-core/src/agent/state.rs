@@ -6,6 +6,7 @@ use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
 };
+use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
@@ -82,6 +83,24 @@ where
         temperature: Option<f32>,
         provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError> {
+        let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
+            let mut hydrated = messages.to_vec();
+            hydrate_messages_for_execution(
+                blob_store.as_ref(),
+                &mut hydrated,
+                MissingBlobBehavior::HistoricalPlaceholder,
+            )
+            .await
+            .map_err(|err| {
+                AgentError::InternalError(format!(
+                    "failed to hydrate image refs before llm execution: {err}"
+                ))
+            })?;
+            Some(hydrated)
+        } else {
+            None
+        };
+        let messages = hydrated_messages.as_deref().unwrap_or(messages);
         let mut attempt = 0u32;
 
         loop {
@@ -1493,9 +1512,15 @@ fn compute_retry_delay(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::manual_async_fn)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::manual_async_fn
+)]
 mod tests {
     use super::rewrite_assistant_text;
+    use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::budget::{Budget, BudgetLimits};
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
@@ -1507,7 +1532,8 @@ mod tests {
     use crate::state::LoopState;
     use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter};
     use crate::types::{
-        AssistantBlock, Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+        AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCallView, ToolDef,
+        ToolResult, Usage, UserMessage,
     };
     use async_trait::async_trait;
     use serde_json::Value;
@@ -1740,6 +1766,113 @@ mod tests {
 
         fn model(&self) -> &'static str {
             "mock-model"
+        }
+    }
+
+    struct ImageHydrationLlmClient {
+        seen_user_blocks: Mutex<Vec<Vec<ContentBlock>>>,
+    }
+
+    impl ImageHydrationLlmClient {
+        fn new() -> Self {
+            Self {
+                seen_user_blocks: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<Vec<ContentBlock>> {
+            self.seen_user_blocks.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ImageHydrationLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut seen = self.seen_user_blocks.lock().unwrap();
+            for message in messages {
+                if let Message::User(user) = message {
+                    seen.push(user.content.clone());
+                }
+            }
+            drop(seen);
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct RecordingBlobStore {
+        blobs: std::collections::HashMap<BlobId, BlobPayload>,
+        gets: Mutex<Vec<BlobId>>,
+    }
+
+    impl RecordingBlobStore {
+        fn new(payloads: Vec<BlobPayload>) -> Self {
+            Self {
+                blobs: payloads
+                    .into_iter()
+                    .map(|payload| (payload.blob_id.clone(), payload))
+                    .collect(),
+                gets: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn gets(&self) -> Vec<BlobId> {
+            self.gets.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl BlobStore for RecordingBlobStore {
+        async fn put_image(
+            &self,
+            media_type: &str,
+            _data: &str,
+        ) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::new(format!("sha256:test-{}", self.blobs.len()));
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.gets.lock().unwrap().push(blob_id.clone());
+            self.blobs
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, _blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
         }
     }
 
@@ -2508,6 +2641,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn llm_execution_hydrates_blob_refs_before_provider_call() {
+        let blob_id = BlobId::new("sha256:test-image");
+        let blob_store = Arc::new(RecordingBlobStore::new(vec![BlobPayload {
+            blob_id: blob_id.clone(),
+            media_type: "image/png".to_string(),
+            data: "restored-base64".to_string(),
+        }]));
+        let client = Arc::new(ImageHydrationLlmClient::new());
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "historical image".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_id.clone(),
+                },
+            },
+        ])));
+
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_blob_store(blob_store.clone())
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent.run("current turn".to_string().into()).await.unwrap();
+
+        let seen = client.seen();
+        assert!(
+            seen.iter().flatten().any(|block| matches!(
+                block,
+                ContentBlock::Image {
+                    data: ImageData::Inline { data },
+                    ..
+                } if data == "restored-base64"
+            )),
+            "provider should receive hydrated inline image bytes"
+        );
+        assert_eq!(blob_store.gets(), vec![blob_id]);
+    }
+
+    #[tokio::test]
     async fn provider_receives_filtered_tools_and_dispatch_blocks_hidden_tools() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
@@ -3183,7 +3361,10 @@ mod tests {
             Err(AgentError::StructuredOutputValidationFailed {
                 attempts, reason, ..
             }) => {
-                assert_eq!(attempts, 2, "should report validation failure count (== max_retries)");
+                assert_eq!(
+                    attempts, 2,
+                    "should report validation failure count (== max_retries)"
+                );
                 assert!(
                     reason.contains("Invalid JSON"),
                     "reason should mention JSON parse failure, got: {reason}"

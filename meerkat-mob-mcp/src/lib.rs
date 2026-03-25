@@ -2316,8 +2316,7 @@ mod tests {
             },
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".to_string(),
-                data: "abc123".to_string(),
-                source_path: None,
+                data: "abc123".into(),
             },
         ]);
 

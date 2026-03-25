@@ -155,7 +155,6 @@ mod tests {
                 meerkat_core::types::ContentBlock::Image {
                     media_type: "image/png".into(),
                     data: "abc123".into(),
-                    source_path: None,
                 },
             ]),
             "f",

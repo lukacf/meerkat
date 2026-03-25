@@ -192,11 +192,14 @@ async fn setup_mob()
 
     let store_dyn: Arc<dyn meerkat::SessionStore> = store.clone();
     let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::default());
     let session_service = Arc::new(PersistentSessionService::new(
         builder,
         16,
         store_dyn,
         Some(runtime_store),
+        blob_store,
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
 
@@ -626,8 +629,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             },
             ContentBlock::Image {
                 media_type: mime.clone(),
-                data: img_data.clone(),
-                source_path: None,
+                data: img_data.clone().into(),
             },
         ];
 

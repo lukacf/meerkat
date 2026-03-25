@@ -5,6 +5,8 @@ mod mcp;
 mod stdin_events;
 mod stream_renderer;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
@@ -34,7 +36,7 @@ use meerkat_mob_pack::pack::{
 use meerkat_mob_pack::targz::extract_targz_safe;
 use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
 use meerkat_tools::find_project_root;
-use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -806,6 +808,12 @@ enum Commands {
         command: SessionCommands,
     },
 
+    /// Blob management
+    Blob {
+        #[command(subcommand)]
+        command: BlobCommands,
+    },
+
     /// Realm lifecycle management
     Realms {
         #[command(subcommand)]
@@ -947,6 +955,21 @@ enum SessionCommands {
     Interrupt {
         /// Session ID to interrupt
         session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlobCommands {
+    /// Fetch raw blob bytes or blob payload JSON.
+    Get {
+        /// Blob ID to fetch.
+        blob_id: String,
+        /// Write raw bytes to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Print the blob payload as JSON instead of raw bytes.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1435,6 +1458,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 interrupt_session(&session_id, &cli_scope).await
             }
         },
+        Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
@@ -2931,13 +2955,14 @@ async fn build_deploy_mob_session_service(
     if let Some(user_root) = scope.user_config_root.clone() {
         factory = factory.user_config_root(user_root);
     }
-    let (store, runtime_store) = persistence.into_parts();
+    let (store, runtime_store, blob_store) = persistence.into_parts();
     let builder = FactoryAgentBuilder::new(factory, config);
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
         64,
         store,
         runtime_store,
+        blob_store,
     ));
     Ok(Arc::new(MobCliSessionService::new(service)))
 }
@@ -3290,6 +3315,7 @@ async fn run_agent(
         ops_lifecycle_override: ops_lifecycle,
         resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
+        blob_store_override: None,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3691,12 +3717,14 @@ async fn resume_session_with_llm_override(
     // Build persistent session service for resume — durable runtime semantics.
     let resume_adapter = persistence.runtime_adapter();
     let runtime_store = persistence.runtime_store();
+    let blob_store = persistence.blob_store();
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
         64,
         store.clone(),
         runtime_store,
+        blob_store,
     ));
 
     log_stage("compose_external_tool_dispatchers");
@@ -3788,6 +3816,7 @@ async fn resume_session_with_llm_override(
             ..Default::default()
         },
         call_timeout_override: Default::default(),
+        blob_store_override: None,
     };
 
     let turn_result = async {
@@ -3950,11 +3979,42 @@ async fn build_cli_persistent_service(
 
     let runtime_adapter = persistence.runtime_adapter();
     let runtime_store = persistence.runtime_store();
+    let blob_store = persistence.blob_store();
     let builder = FactoryAgentBuilder::new(factory, config);
     Ok((
-        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store),
+        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store, blob_store),
         runtime_adapter,
     ))
+}
+
+async fn handle_blob_command(command: BlobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    match command {
+        BlobCommands::Get {
+            blob_id,
+            output,
+            json,
+        } => {
+            let (_manifest, persistence) = create_persistence_bundle(scope).await?;
+            let payload = persistence
+                .blob_store()
+                .get(&meerkat::BlobId::new(blob_id))
+                .await
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            let bytes = BASE64_STANDARD.decode(payload.data.as_bytes())?;
+            if let Some(path) = output {
+                tokio::fs::write(path, bytes).await?;
+            } else {
+                let mut stdout = tokio::io::stdout();
+                stdout.write_all(&bytes).await?;
+                stdout.flush().await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilder>;

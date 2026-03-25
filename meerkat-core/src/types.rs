@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::fmt;
 use uuid::Uuid;
 
+use crate::blob::BlobId;
 use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning};
 
 // ===========================================================================
@@ -18,6 +19,30 @@ use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, Sche
 /// A block of content in user messages and tool results.
 ///
 /// Supports text and images for multimodal agent interactions.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ImageData {
+    /// Base64-encoded inline bytes used for ingress and live execution.
+    Inline { data: String },
+    /// Durable blob reference used by persisted history/runtime state.
+    Blob { blob_id: BlobId },
+}
+
+impl From<String> for ImageData {
+    fn from(data: String) -> Self {
+        Self::Inline { data }
+    }
+}
+
+impl From<&str> for ImageData {
+    fn from(data: &str) -> Self {
+        Self::Inline {
+            data: data.to_string(),
+        }
+    }
+}
+
 #[non_exhaustive]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,12 +54,9 @@ pub enum ContentBlock {
     Image {
         /// MIME type (e.g. "image/png", "image/jpeg").
         media_type: String,
-        /// Base64-encoded image data.
-        data: String,
-        /// Internal-only source path for re-reading after compaction.
-        /// Never serialized — only used in-memory.
-        #[serde(default, skip_serializing)]
-        source_path: Option<String>,
+        /// Image bytes or a durable blob reference.
+        #[serde(flatten)]
+        data: ImageData,
     },
 }
 
@@ -53,6 +75,26 @@ impl ContentBlock {
     /// Convenience: wrap a string into a single-element Vec of Text blocks.
     pub fn text_vec(s: String) -> Vec<ContentBlock> {
         vec![ContentBlock::Text { text: s }]
+    }
+
+    pub fn image_inline_data(&self) -> Option<(&str, &str)> {
+        match self {
+            ContentBlock::Image {
+                media_type,
+                data: ImageData::Inline { data },
+            } => Some((media_type, data)),
+            _ => None,
+        }
+    }
+
+    pub fn image_blob_ref(&self) -> Option<(&str, &BlobId)> {
+        match self {
+            ContentBlock::Image {
+                media_type,
+                data: ImageData::Blob { blob_id },
+            } => Some((media_type, blob_id)),
+            _ => None,
+        }
     }
 }
 

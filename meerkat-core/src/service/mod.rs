@@ -167,6 +167,9 @@ pub struct SessionBuildOptions {
     pub budget_limits: Option<BudgetLimits>,
     pub provider_params: Option<serde_json::Value>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Blob store used to externalize durable image content and hydrate refs
+    /// back to bytes at execution seams.
+    pub blob_store_override: Option<Arc<dyn crate::BlobStore>>,
     /// Opaque transport for an optional per-request LLM override.
     ///
     /// Factory builders may downcast this to their concrete client trait.
@@ -263,6 +266,7 @@ impl Default for SessionBuildOptions {
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            blob_store_override: None,
             llm_client_override: None,
             ops_lifecycle_override: None,
             override_builtins: None,
@@ -300,6 +304,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("budget_limits", &self.budget_limits)
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
             .field(
                 "ops_lifecycle_override",

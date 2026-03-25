@@ -28,7 +28,11 @@ from .streaming import EventStream, EventSubscription
 
 # Domain types (clean, Wire-free public names)
 from .types import (
+    BlobImageBlock,
+    BlobPayload,
     CONTRACT_VERSION,
+    ContentBlock,
+    ContentInput,
     AttributedEvent,
     Capability,
     EventEnvelope,
@@ -61,6 +65,8 @@ from .types import (
     SourceHealthSnapshot,
     WireInputState,
     Usage,
+    InlineImageBlock,
+    TextBlock,
 )
 
 # Error hierarchy
@@ -120,7 +126,11 @@ __all__ = [
     # Types
     "CONTRACT_VERSION",
     "AttributedEvent",
+    "BlobImageBlock",
+    "BlobPayload",
     "Capability",
+    "ContentBlock",
+    "ContentInput",
     "EventEnvelope",
     "InputListParams",
     "InputListResult",
@@ -151,6 +161,8 @@ __all__ = [
     "SourceHealthSnapshot",
     "WireInputState",
     "Usage",
+    "InlineImageBlock",
+    "TextBlock",
     # Errors
     "MeerkatError",
     "CapabilityUnavailableError",

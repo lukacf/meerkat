@@ -63,7 +63,9 @@ import { EventSubscription } from "./subscription.js";
 import type {
   AgentEventEnvelope,
   AttributedMobEvent,
+  BlobPayload,
   Capability,
+  ContentInput,
   ContentBlock,
   MobCreateOptions,
   MobFlowStatus,
@@ -540,6 +542,15 @@ export class MeerkatClient {
       params.source = options.source;
     }
     return this.request("skills/inspect", params);
+  }
+
+  async getBlob(blobId: string): Promise<BlobPayload> {
+    const result = await this.request("blob/get", { blob_id: blobId });
+    return {
+      blobId: String(result.blob_id ?? blobId),
+      mediaType: String(result.media_type ?? ""),
+      dataBase64: String(result.data ?? ""),
+    };
   }
 
   async listMobPrefabs(): Promise<Array<Record<string, unknown>>> {
@@ -1446,7 +1457,7 @@ export class MeerkatClient {
       : [];
     return {
       role: String(data.role ?? ""),
-      content: data.content != null ? String(data.content) : undefined,
+      content: data.content != null ? MeerkatClient.parseContentInput(data.content) : undefined,
       toolCalls: rawToolCalls.map(
         (toolCall): SessionToolCall => ({
           id: String(toolCall.id ?? ""),
@@ -1459,11 +1470,45 @@ export class MeerkatClient {
       results: rawResults.map(
         (result): SessionToolResult => ({
           toolUseId: String(result.tool_use_id ?? ""),
-          content: String(result.content ?? ""),
+          content: MeerkatClient.parseContentInput(result.content),
           isError: Boolean(result.is_error ?? false),
         }),
       ),
     };
+  }
+
+  static parseContentInput(value: unknown): ContentInput {
+    if (Array.isArray(value)) {
+      return value
+        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+        .map((block) => MeerkatClient.parseContentBlock(block));
+    }
+    return String(value ?? "");
+  }
+
+  static parseContentBlock(data: Record<string, unknown>): ContentBlock {
+    const type = String(data.type ?? "");
+    if (type === "text") {
+      return { type: "text", text: String(data.text ?? "") };
+    }
+    if (type === "image") {
+      const source = String(data.source ?? "inline");
+      if (source === "blob") {
+        return {
+          type: "image",
+          media_type: String(data.media_type ?? ""),
+          source: "blob",
+          blob_id: String(data.blob_id ?? ""),
+        };
+      }
+      return {
+        type: "image",
+        media_type: String(data.media_type ?? ""),
+        source: "inline",
+        data: String(data.data ?? ""),
+      };
+    }
+    return { type: "text", text: "" };
   }
 
   static parseSessionAssistantBlock(data: Record<string, unknown>): SessionAssistantBlock {

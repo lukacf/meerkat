@@ -563,6 +563,8 @@ where
     /// Optional session checkpointer for host-mode persistence.
     #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    /// Optional blob store used to hydrate image refs at execution seams.
+    pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
     /// Run-scoped diagnostic stash for originating hard-failure errors.
     ///
     /// When an exhausted hard LLM-call failure (e.g., CallTimeout, NetworkTimeout)

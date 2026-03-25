@@ -37,6 +37,7 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    BlobStore,
     BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
     SessionTooling,
 };
@@ -208,6 +209,8 @@ pub struct AgentBuildConfig {
     pub provider_params: Option<serde_json::Value>,
     /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Optional blob store override used for image externalization/hydration.
+    pub blob_store_override: Option<Arc<dyn BlobStore>>,
     /// Canonical async-op registry for the owning session.
     ///
     /// Runtime-backed callers should provide the registry from the real
@@ -318,6 +321,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("llm_client_override", &self.llm_client_override.is_some())
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("blob_store_override", &self.blob_store_override.is_some())
             .field(
                 "ops_lifecycle_override",
                 &self.ops_lifecycle_override.is_some(),
@@ -374,6 +378,7 @@ impl AgentBuildConfig {
             llm_client_override: None,
             provider_params: None,
             external_tools: None,
+            blob_store_override: None,
             ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
@@ -427,6 +432,7 @@ impl AgentBuildConfig {
         self.budget_limits = build.budget_limits.clone();
         self.provider_params = build.provider_params.clone();
         self.external_tools = build.external_tools.clone();
+        self.blob_store_override = build.blob_store_override.clone();
         self.llm_client_override = build
             .llm_client_override
             .as_ref()
@@ -465,6 +471,7 @@ impl AgentBuildConfig {
             budget_limits: self.budget_limits.clone(),
             provider_params: self.provider_params.clone(),
             external_tools: self.external_tools.clone(),
+            blob_store_override: self.blob_store_override.clone(),
             llm_client_override: self
                 .llm_client_override
                 .clone()
@@ -1250,7 +1257,7 @@ impl AgentFactory {
                     .cloned()
                     .collect::<std::collections::HashSet<String>>(),
             );
-            let runtime =
+            let mut runtime =
                 crate::build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
                     config,
                     _realm_scope_root.as_path(),
@@ -1264,6 +1271,9 @@ impl AgentFactory {
                 )
                 .await
                 .map_err(BuildAgentError::Comms)?;
+            if let Some(blob_store) = build_config.blob_store_override.clone() {
+                runtime.set_blob_store(blob_store);
+            }
             Some(Arc::new(runtime))
         } else {
             None
@@ -1281,7 +1291,7 @@ impl AgentFactory {
                     .cloned()
                     .collect::<std::collections::HashSet<String>>(),
             );
-            let runtime = meerkat_comms::CommsRuntime::inproc_only_with_silent_intents(
+            let mut runtime = meerkat_comms::CommsRuntime::inproc_only_with_silent_intents(
                 comms_name,
                 build_config.realm_id.clone(),
                 silent_intents,
@@ -1289,6 +1299,9 @@ impl AgentFactory {
             .map_err(|e| BuildAgentError::Comms(e.to_string()))?;
             if let Some(ref meta) = build_config.peer_meta {
                 runtime.set_peer_meta(meta.clone());
+            }
+            if let Some(blob_store) = build_config.blob_store_override.clone() {
+                runtime.set_blob_store(blob_store);
             }
             Some(Arc::new(runtime))
         } else {
@@ -1830,6 +1843,9 @@ impl AgentFactory {
         // 12g. Wire session checkpointer for host-mode persistence
         if let Some(cp) = build_config.checkpointer {
             builder = builder.with_checkpointer(cp);
+        }
+        if let Some(blob_store) = build_config.blob_store_override {
+            builder = builder.with_blob_store(blob_store);
         }
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
 

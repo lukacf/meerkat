@@ -4,11 +4,18 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use meerkat_core::lifecycle::InputId;
+use meerkat_core::types::{ContentBlock, ImageData};
+use meerkat_core::BlobStore;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputLifecycleState, InputOrigin,
     InputState, InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput,
     RuntimeDriver, RuntimeStore,
 };
+use meerkat_store::MemoryBlobStore;
+
+fn memory_blob_store() -> Arc<dyn BlobStore> {
+    Arc::new(MemoryBlobStore::new())
+}
 
 fn make_prompt(text: &str) -> Input {
     Input::Prompt(PromptInput {
@@ -28,11 +35,39 @@ fn make_prompt(text: &str) -> Input {
     })
 }
 
+fn make_multimodal_prompt(text: &str, label: &str) -> Input {
+    Input::Prompt(PromptInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Operator,
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        text: text.into(),
+        blocks: Some(vec![
+            ContentBlock::Text {
+                text: text.to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: format!("base64-{label}"),
+                },
+            },
+        ]),
+        turn_metadata: None,
+    })
+}
+
 #[tokio::test]
 async fn durable_before_ack() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
 
     let input = make_prompt("hello");
     let input_id = input.id().clone();
@@ -49,7 +84,7 @@ async fn durable_before_ack() {
 async fn dedup_not_persisted() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
 
     let key = meerkat_runtime::identifiers::IdempotencyKey::new("req-1");
     let mut input1 = make_prompt("hello");
@@ -84,7 +119,7 @@ async fn recover_from_store() {
     store.persist_input_state(&rid, &state).await.unwrap();
 
     // Create a fresh driver (simulating restart)
-    let mut driver = PersistentRuntimeDriver::new(rid, store);
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
 
     // Recover
     let report = driver.recover().await.unwrap();
@@ -116,7 +151,7 @@ async fn recover_rebuilds_dedup_index() {
     store.persist_input_state(&rid, &state).await.unwrap();
 
     // Create a fresh driver and recover
-    let mut driver = PersistentRuntimeDriver::new(rid, store);
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
     driver.recover().await.unwrap();
 
     // Now try to accept a new input with the same idempotency key
@@ -143,7 +178,7 @@ async fn recover_filters_ephemeral_inputs() {
     store.persist_input_state(&rid, &state).await.unwrap();
 
     // Create fresh driver and recover
-    let mut driver = PersistentRuntimeDriver::new(rid, store);
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
     let report = driver.recover().await.unwrap();
 
     // Ephemeral input should NOT be recovered (it shouldn't survive restart)
@@ -162,7 +197,7 @@ async fn boundary_applied_persists_atomically() {
 
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
 
     // Accept and manually process an input
     let input = make_prompt("hello");
@@ -200,10 +235,57 @@ async fn boundary_applied_persists_atomically() {
 }
 
 #[tokio::test]
+async fn durable_runtime_input_externalizes_inline_images_before_ack() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
+
+    let input = make_multimodal_prompt("hello", "driver");
+    let input_id = input.id().clone();
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+
+    let stored = store
+        .load_input_state(&rid, &input_id)
+        .await
+        .unwrap()
+        .expect("persisted input should exist");
+    let persisted_input = stored
+        .persisted_input
+        .expect("accepted durable input should be persisted");
+    match persisted_input {
+        Input::Prompt(prompt) => {
+            let blocks = prompt.blocks.expect("multimodal blocks should persist");
+            assert!(
+                blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Image {
+                        data: ImageData::Blob { .. },
+                        ..
+                    }
+                )),
+                "persisted runtime input should externalize image bytes"
+            );
+            assert!(
+                !blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Image {
+                        data: ImageData::Inline { .. },
+                        ..
+                    }
+                )),
+                "persisted runtime input must not retain inline image bytes"
+            );
+        }
+        other => panic!("expected prompt input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn retire_preserves_inputs_for_drain() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
 
     let input = make_prompt("hello");
     let input_id = input.id().clone();
@@ -229,7 +311,7 @@ async fn retire_preserves_inputs_for_drain() {
 async fn reset_persists_abandoned_inputs() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
 
     let input = make_prompt("hello");
     let input_id = input.id().clone();
@@ -301,7 +383,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
         .await
         .unwrap();
 
-    let mut driver = PersistentRuntimeDriver::new(rid, store);
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
     driver.recover().await.unwrap();
 
     let recovered = driver.input_state(&input_id);

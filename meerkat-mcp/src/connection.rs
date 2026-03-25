@@ -235,8 +235,7 @@ fn extract_content_blocks(contents: Vec<rmcp::model::Content>) -> Vec<ContentBlo
             RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
             RawContent::Image(image) => Some(ContentBlock::Image {
                 media_type: image.mime_type,
-                data: image.data,
-                source_path: None,
+                data: meerkat_core::ImageData::Inline { data: image.data },
             }),
             _ => None,
         })
@@ -316,8 +315,7 @@ pub mod tests {
             blocks[0],
             ContentBlock::Image {
                 media_type: "image/png".to_string(),
-                data: "aW1hZ2VkYXRh".to_string(),
-                source_path: None,
+                data: "aW1hZ2VkYXRh".into(),
             }
         );
     }
@@ -336,9 +334,12 @@ pub mod tests {
         assert!(
             matches!(&blocks[0], ContentBlock::Text { text } if text == "description of the image")
         );
-        assert!(
-            matches!(&blocks[1], ContentBlock::Image { media_type, data, .. } if media_type == "image/png" && data == "cG5nZGF0YQ==")
-        );
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::Image { media_type, data, .. }
+                if media_type == "image/png"
+                    && matches!(data, meerkat_core::ImageData::Inline { data } if data == "cG5nZGF0YQ==")
+        ));
         assert!(matches!(&blocks[2], ContentBlock::Text { text } if text == "additional context"));
     }
 

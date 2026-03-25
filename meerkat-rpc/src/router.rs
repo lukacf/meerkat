@@ -18,6 +18,7 @@ use meerkat_core::service::SessionHistoryQuery;
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::error;
@@ -37,6 +38,11 @@ enum SessionOwner {
     Runtime,
     #[cfg(feature = "mob")]
     Mob,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlobGetParams {
+    blob_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +432,27 @@ impl MethodRouter {
         Ok(())
     }
 
+    async fn handle_blob_get(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: BlobGetParams = match handlers::parse_params(params) {
+            Ok(params) => params,
+            Err(response) => return response.with_id(id),
+        };
+        let blob_id = meerkat_core::BlobId::new(params.blob_id);
+        match self.runtime.blob_store().get(&blob_id).await {
+            Ok(payload) => RpcResponse::success(id, payload),
+            Err(meerkat_core::BlobStoreError::NotFound(missing)) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("blob not found: {missing}"),
+            ),
+            Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        }
+    }
+
     #[cfg(feature = "mob")]
     pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
@@ -579,6 +606,7 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            "blob/get" => self.handle_blob_get(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
             "session/external_event" => {
                 handlers::event::handle_external_event(id, params, self.runtime.clone()).await
@@ -1862,10 +1890,12 @@ mod tests {
 
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures::stream;
     use meerkat::AgentFactory;
+    use meerkat::surface::{RequestContext, SurfaceRequestExecutor, noop_request_action};
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::skills::{
         SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
@@ -1987,6 +2017,10 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
+    fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
+        Arc::new(meerkat_store::MemoryBlobStore::new())
+    }
+
     async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
@@ -1996,7 +2030,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2017,6 +2051,7 @@ mod tests {
         let (router, notif_rx) = test_router().await;
         let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
         ));
         (router.with_runtime_adapter(runtime_adapter), notif_rx)
     }
@@ -2032,7 +2067,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2061,7 +2096,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2090,7 +2125,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2118,7 +2153,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2134,6 +2169,44 @@ mod tests {
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
         (router, notif_rx)
+    }
+
+    #[tokio::test]
+    async fn blob_get_returns_payload() {
+        let (router, _rx) = test_router().await;
+        let blob_ref = router
+            .runtime
+            .blob_store()
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+
+        let response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(1)),
+                method: "blob/get".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({ "blob_id": blob_ref.blob_id.as_str() }),
+                    )
+                    .expect("raw value"),
+                ),
+            })
+            .await;
+
+        let response = response.expect("response");
+        assert!(response.error.is_none(), "blob/get should succeed");
+        let result: serde_json::Value = serde_json::from_str(
+            response
+                .result
+                .expect("blob payload")
+                .get(),
+        )
+        .expect("valid blob payload");
+        assert_eq!(result["blob_id"], blob_ref.blob_id.as_str());
+        assert_eq!(result["media_type"], "image/png");
+        assert_eq!(result["data"], "aGVsbG8=");
     }
 
     fn source_uuid(raw: &str) -> SourceUuid {
@@ -2236,6 +2309,15 @@ mod tests {
     /// Extract the error code from an error response.
     fn error_code(resp: &RpcResponse) -> i32 {
         resp.error.as_ref().expect("Expected error response").code
+    }
+
+    async fn cancelled_request_context(id: &RpcId) -> RequestContext {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let key = serde_json::to_string(id).expect("request id should serialize");
+        let context = executor.begin_request(key.clone(), noop_request_action());
+        let cancelled = executor.cancel_request(&key).await;
+        assert!(cancelled, "pre-cancel should mark request cancelled");
+        context
     }
 
     fn error_message(resp: &RpcResponse) -> String {
@@ -4616,6 +4698,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn turn_start_returns_request_cancelled_when_pre_cancelled() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Hello",
+                "initial_turn": "deferred"
+            }),
+        );
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let mut turn_req = make_request(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "Follow up"
+            }),
+        );
+        turn_req.id = Some(RpcId::Num(42));
+        let context = cancelled_request_context(turn_req.id.as_ref().unwrap()).await;
+
+        let turn_resp = router
+            .dispatch_with_request_context(turn_req, Some(context))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&turn_resp), error::REQUEST_CANCELLED);
+    }
+
     /// 8. `turn/start` emits notifications via the notification sink.
     #[tokio::test]
     async fn turn_start_emits_notifications() {
@@ -4777,6 +4892,40 @@ mod tests {
         let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
         let interrupt_result = result_value(&interrupt_resp);
         assert_eq!(interrupt_result["interrupted"], true);
+    }
+
+    #[tokio::test]
+    async fn session_create_returns_request_cancelled_and_rolls_back_when_pre_cancelled() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+
+        let mut create_req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Hello"
+            }),
+        );
+        create_req.id = Some(RpcId::Num(77));
+        let context = cancelled_request_context(create_req.id.as_ref().unwrap()).await;
+
+        let create_resp = router
+            .dispatch_with_request_context(create_req, Some(context))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&create_resp), error::REQUEST_CANCELLED);
+
+        let list_resp = router
+            .dispatch(make_request("session/list", serde_json::json!({})))
+            .await
+            .unwrap();
+        let listed = result_value(&list_resp);
+        let sessions = listed["sessions"]
+            .as_array()
+            .expect("session/list should return an array");
+        assert!(
+            sessions.is_empty(),
+            "pre-start cancelled create should not leave a live session behind: {sessions:?}"
+        );
     }
 
     /// 10. `config/get` returns the default config.

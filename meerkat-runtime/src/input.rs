@@ -5,6 +5,10 @@
 //! RunPrimitive for core consumption.
 
 use chrono::{DateTime, Utc};
+use meerkat_core::{
+    BlobStore, BlobStoreError, MissingBlobBehavior, externalize_content_blocks,
+    hydrate_content_blocks,
+};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use meerkat_core::ops::{OpEvent, OperationId};
@@ -161,6 +165,110 @@ impl Input {
             _ => None,
         }
     }
+}
+
+async fn externalize_payload_blocks(
+    blob_store: &dyn BlobStore,
+    payload: &mut serde_json::Value,
+) -> Result<(), BlobStoreError> {
+    let Some(obj) = payload.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(blocks_value) = obj.get_mut("blocks") else {
+        return Ok(());
+    };
+    let mut blocks = serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(
+        blocks_value.clone(),
+    )
+    .map_err(|err| BlobStoreError::Internal(format!("failed to decode payload blocks: {err}")))?;
+    externalize_content_blocks(blob_store, &mut blocks).await?;
+    *blocks_value = serde_json::to_value(blocks)
+        .map_err(|err| BlobStoreError::Internal(format!("failed to encode payload blocks: {err}")))?;
+    Ok(())
+}
+
+async fn hydrate_payload_blocks(
+    blob_store: &dyn BlobStore,
+    payload: &mut serde_json::Value,
+    missing_behavior: MissingBlobBehavior,
+) -> Result<(), BlobStoreError> {
+    let Some(obj) = payload.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(blocks_value) = obj.get_mut("blocks") else {
+        return Ok(());
+    };
+    let mut blocks = serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(
+        blocks_value.clone(),
+    )
+    .map_err(|err| BlobStoreError::Internal(format!("failed to decode payload blocks: {err}")))?;
+    hydrate_content_blocks(blob_store, &mut blocks, missing_behavior).await?;
+    *blocks_value = serde_json::to_value(blocks)
+        .map_err(|err| BlobStoreError::Internal(format!("failed to encode payload blocks: {err}")))?;
+    Ok(())
+}
+
+pub async fn externalize_input_images(
+    blob_store: &dyn BlobStore,
+    input: &mut Input,
+) -> Result<(), BlobStoreError> {
+    match input {
+        Input::Prompt(prompt) => {
+            if let Some(blocks) = prompt.blocks.as_mut() {
+                externalize_content_blocks(blob_store, blocks).await?;
+            }
+        }
+        Input::Peer(peer) => {
+            if let Some(blocks) = peer.blocks.as_mut() {
+                externalize_content_blocks(blob_store, blocks).await?;
+            }
+        }
+        Input::FlowStep(flow_step) => {
+            if let Some(blocks) = flow_step.blocks.as_mut() {
+                externalize_content_blocks(blob_store, blocks).await?;
+            }
+        }
+        Input::ExternalEvent(event) => {
+            if let Some(blocks) = event.blocks.as_mut() {
+                externalize_content_blocks(blob_store, blocks).await?;
+            }
+            externalize_payload_blocks(blob_store, &mut event.payload).await?;
+        }
+        Input::Continuation(_) | Input::Operation(_) => {}
+    }
+    Ok(())
+}
+
+pub async fn hydrate_input_images(
+    blob_store: &dyn BlobStore,
+    input: &mut Input,
+    missing_behavior: MissingBlobBehavior,
+) -> Result<(), BlobStoreError> {
+    match input {
+        Input::Prompt(prompt) => {
+            if let Some(blocks) = prompt.blocks.as_mut() {
+                hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
+            }
+        }
+        Input::Peer(peer) => {
+            if let Some(blocks) = peer.blocks.as_mut() {
+                hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
+            }
+        }
+        Input::FlowStep(flow_step) => {
+            if let Some(blocks) = flow_step.blocks.as_mut() {
+                hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
+            }
+        }
+        Input::ExternalEvent(event) => {
+            if let Some(blocks) = event.blocks.as_mut() {
+                hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
+            }
+            hydrate_payload_blocks(blob_store, &mut event.payload, missing_behavior).await?;
+        }
+        Input::Continuation(_) | Input::Operation(_) => {}
+    }
+    Ok(())
 }
 
 /// User/operator prompt input.
@@ -491,8 +599,9 @@ mod tests {
                 },
                 meerkat_core::types::ContentBlock::Image {
                     media_type: "image/png".into(),
-                    data: "abc123".into(),
-                    source_path: None,
+                    data: meerkat_core::types::ImageData::Inline {
+                        data: "abc123".into(),
+                    },
                 },
             ]),
             turn_metadata: None,
@@ -515,8 +624,9 @@ mod tests {
                 },
                 meerkat_core::types::ContentBlock::Image {
                     media_type: "image/png".into(),
-                    data: "abc123".into(),
-                    source_path: None,
+                    data: meerkat_core::types::ImageData::Inline {
+                        data: "abc123".into(),
+                    },
                 },
             ]),
         });

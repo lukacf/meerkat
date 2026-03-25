@@ -27,7 +27,7 @@ from __future__ import annotations
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from .types import RunResult, SessionHistory, SkillKey, SkillRef
+from .types import ContentBlock, RunResult, SessionHistory, SkillKey, SkillRef
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
@@ -131,7 +131,7 @@ class Session:
 
     async def turn(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -154,7 +154,7 @@ class Session:
 
     def stream(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -212,7 +212,7 @@ class Session:
     async def invoke_skill(
         self,
         skill_ref: SkillRef,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
     ) -> RunResult:
         """Invoke a skill in this session.
 
@@ -285,7 +285,7 @@ class DeferredSession:
 
     async def start_turn(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,

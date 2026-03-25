@@ -74,6 +74,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         RpcMethodDescriptor::basic("session/list", "List active sessions"),
         RpcMethodDescriptor::basic("session/read", "Get session state"),
         RpcMethodDescriptor::basic("session/history", "Get full session history"),
+        RpcMethodDescriptor::typed(
+            "blob/get",
+            "Fetch raw blob payload metadata and bytes by blob id",
+            "BlobGetParams",
+            "BlobPayload",
+        ),
         RpcMethodDescriptor::basic("session/archive", "Remove session"),
         RpcMethodDescriptor::basic(
             "session/external_event",

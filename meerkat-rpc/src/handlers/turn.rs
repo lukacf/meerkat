@@ -15,7 +15,6 @@ use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
-#[cfg(feature = "mob")]
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
@@ -157,7 +156,13 @@ pub async fn handle_start(
                 let _ = runtime.interrupt(&session_id).await;
             }
         }));
-        let _ = context.run_cancel_if_requested().await;
+        if context.run_cancel_if_requested().await {
+            return RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            );
+        }
     }
 
     // Set up event forwarding. The spawned task exits naturally when `event_tx`

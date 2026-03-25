@@ -7,7 +7,7 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
-use meerkat_core::{ContentBlock, Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -200,16 +200,20 @@ impl GeminiClient {
 
                         if r.has_images() {
                             for block in &r.content {
-                                if let ContentBlock::Image {
-                                    media_type, data, ..
-                                } = block
-                                {
-                                    parts.push(serde_json::json!({
-                                        "inlineData": {
-                                            "mimeType": media_type,
-                                            "data": data
-                                        }
-                                    }));
+                                if let ContentBlock::Image { media_type, data } = block {
+                                    match data {
+                                        ImageData::Inline { data } => parts.push(
+                                            serde_json::json!({
+                                                "inlineData": {
+                                                    "mimeType": media_type,
+                                                    "data": data
+                                                }
+                                            }),
+                                        ),
+                                        ImageData::Blob { .. } => parts.push(serde_json::json!({
+                                            "text": block.text_projection()
+                                        })),
+                                    }
                                 }
                             }
                         }
@@ -2294,8 +2298,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "iVBOR...".to_string(),
-                    source_path: Some("/tmp/img.png".to_string()),
+                    data: "iVBOR...".into(),
                 },
             ]))],
         );
@@ -2378,8 +2381,7 @@ mod tests {
                             },
                             ContentBlock::Image {
                                 media_type: "image/png".to_string(),
-                                data: "iVBOR...".to_string(),
-                                source_path: None,
+                                data: "iVBOR...".into(),
                             },
                         ],
                         false,

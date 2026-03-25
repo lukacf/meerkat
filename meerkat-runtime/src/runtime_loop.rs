@@ -603,7 +603,6 @@ mod tests {
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "abc123".into(),
-                source_path: None,
             },
         ];
         let input = Input::Peer(PeerInput {
@@ -650,7 +649,6 @@ mod tests {
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "abc123".into(),
-                source_path: None,
             },
         ];
         let input = Input::FlowStep(FlowStepInput {
@@ -696,7 +694,6 @@ mod tests {
             meerkat_core::types::ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "abc123".into(),
-                source_path: None,
             },
         ];
         let input = Input::ExternalEvent(crate::input::ExternalEventInput {

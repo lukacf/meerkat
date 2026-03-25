@@ -210,7 +210,8 @@ fn apply_resumed_session_metadata(
     config.override_memory = Some(metadata.tooling.memory);
     config.override_mob = Some(metadata.tooling.mob);
     config.preload_skills = metadata.tooling.active_skills.clone();
-    config.keep_alive = metadata.keep_alive;
+    // keep_alive is NOT restored from metadata — mob runtime owns it
+    // (determined by runtime_mode == AutonomousHost). §1: one owner.
     config.comms_name = Some(stored_comms_name);
     config.peer_meta = metadata.peer_meta.clone();
     Ok(())

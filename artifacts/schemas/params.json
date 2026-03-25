@@ -32,8 +32,11 @@
         ]
       },
       "keep_alive": {
-        "default": false,
-        "type": "boolean"
+        "description": "None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.",
+        "type": [
+          "boolean",
+          "null"
+        ]
       },
       "peer_meta": {
         "anyOf": [

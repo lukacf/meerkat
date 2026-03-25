@@ -79,14 +79,26 @@ impl SessionAgent for FactoryAgent {
     async fn run_turn_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-        _handling_mode: HandlingMode,
-        _render_metadata: Option<RenderMetadata>,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         // handling_mode and render_metadata are runtime-owned semantics.
         // The runtime routes Queue/Steer BEFORE calling the executor, so by
         // the time this method runs the routing decision is already made.
-        // This implementation just executes the turn.
+        // Reject if a non-runtime caller attempts to use these — they cannot
+        // be honored on the direct path and silent flattening violates §5.
+        if handling_mode != HandlingMode::Queue {
+            return Err(meerkat_core::error::AgentError::ConfigError(format!(
+                "handling_mode {:?} requires a runtime-backed surface; direct session-service path supports Queue only",
+                handling_mode
+            )));
+        }
+        if render_metadata.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "render_metadata requires a runtime-backed surface; direct session-service path does not support it".to_string(),
+            ));
+        }
         self.agent.run_with_events(prompt, event_tx).await
     }
 
@@ -105,6 +117,15 @@ impl SessionAgent for FactoryAgent {
 
     fn replace_client(&mut self, client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {
         self.agent.replace_client(client);
+    }
+
+    fn update_keep_alive(&mut self, keep_alive: bool) {
+        if let Some(mut metadata) = self.agent.session().session_metadata() {
+            metadata.keep_alive = keep_alive;
+            if let Err(e) = self.agent.session_mut().set_session_metadata(metadata) {
+                tracing::warn!(error = %e, "failed to update keep_alive in session metadata");
+            }
+        }
     }
 
     fn hot_swap_llm_identity(

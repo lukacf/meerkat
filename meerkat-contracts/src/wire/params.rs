@@ -48,8 +48,9 @@ pub struct StructuredOutputParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CommsParams {
-    #[serde(default)]
-    pub keep_alive: bool,
+    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.

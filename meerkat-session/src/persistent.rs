@@ -895,6 +895,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         }
     }
 
+    async fn update_session_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        // Update the live in-memory session metadata first.
+        self.inner.update_session_keep_alive(id, keep_alive).await?;
+        // Persist to store so recovery/resume inherits the updated intent.
+        self.persist_full_session(id).await?;
+        Ok(())
+    }
+
     async fn subscribe_session_events(
         &self,
         id: &SessionId,

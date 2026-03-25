@@ -1787,6 +1787,17 @@ impl SessionRuntime {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
 
+        // Persist explicit keep_alive override so subsequent inheriting calls
+        // (REST/MCP resume with None) observe the updated intent.
+        // This is not fire-and-forget: if the update fails, the turn must not
+        // proceed with divergent runtime vs persisted state.
+        if overrides.as_ref().and_then(|ov| ov.keep_alive).is_some() {
+            self.service
+                .update_session_keep_alive(session_id, keep_alive)
+                .await
+                .map_err(session_error_to_rpc)?;
+        }
+
         match self.service.start_turn(session_id, req).await {
             Ok(result) => Ok(result),
             Err(SessionError::NotFound { .. }) => {

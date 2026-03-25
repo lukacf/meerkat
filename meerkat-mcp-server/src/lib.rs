@@ -109,10 +109,11 @@ pub struct MeerkatRunInput {
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
-    /// Run in host mode: process prompt then stay alive listening for comms messages.
-    /// Requires comms_name to be set.
+    /// Keep session alive after turn completes, listening for comms messages.
+    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
+    /// Requires comms_name when enabled.
     #[serde(default)]
-    pub keep_alive: bool,
+    pub keep_alive: Option<bool>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -266,19 +267,20 @@ async fn load_config_async(
     config
 }
 
-fn resolve_keep_alive(requested: bool) -> Result<bool, String> {
-    #[cfg(feature = "comms")]
-    {
-        meerkat::surface::resolve_keep_alive(requested)
-    }
-    #[cfg(not(feature = "comms"))]
-    {
-        if requested {
-            return Err(
-                "keep_alive requires comms support (build with --features comms)".to_string(),
-            );
+/// Resolve an explicit keep_alive override. Returns None when input is None (inherit).
+fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, String> {
+    match requested {
+        Some(true) => {
+            #[cfg(feature = "comms")]
+            {
+                meerkat::surface::resolve_keep_alive(true).map(Some)
+            }
+            #[cfg(not(feature = "comms"))]
+            {
+                Err("keep_alive requires comms support (build with --features comms)".to_string())
+            }
         }
-        Ok(false)
+        other => Ok(other), // None (inherit) or Some(false) (disable) pass through
     }
 }
 
@@ -666,9 +668,10 @@ pub struct MeerkatResumeInput {
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
-    /// Run in host mode: process prompt then stay alive listening for comms messages.
+    /// Keep session alive after turn completes, listening for comms messages.
+    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
     #[serde(default)]
-    pub keep_alive: bool,
+    pub keep_alive: Option<bool>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -2252,7 +2255,9 @@ async fn handle_meerkat_run(
     request_context: Option<RequestContext>,
 ) -> Result<Value, String> {
     validate_public_peer_meta(input.peer_meta.as_ref())?;
-    let keep_alive = resolve_keep_alive(input.keep_alive)?;
+    let keep_alive_override = resolve_keep_alive(input.keep_alive)?;
+    // Create: no persisted session to inherit from, so None → false.
+    let keep_alive = keep_alive_override.unwrap_or(false);
     if keep_alive
         && input
             .comms_name
@@ -2364,7 +2369,7 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        keep_alive: false,
+        keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
@@ -2499,9 +2504,13 @@ async fn handle_meerkat_resume(
             .map(|meta| meta.tooling.memory)
             .filter(|&v| v)
     });
-    let keep_alive_requested =
-        input.keep_alive || stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
-    let keep_alive = resolve_keep_alive(keep_alive_requested)?;
+    // §10: inherit, disable, and set are different facts.
+    // None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
+    let keep_alive_override = resolve_keep_alive(input.keep_alive)?;
+    let keep_alive = match keep_alive_override {
+        Some(val) => val,
+        None => stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive),
+    };
     let comms_name = input.comms_name.clone().or_else(|| {
         stored_metadata
             .as_ref()
@@ -2630,7 +2639,7 @@ async fn handle_meerkat_resume(
             .and_then(|m| m.backend.clone())
             .or_else(|| Some(state.backend.clone())),
         config_generation: current_generation,
-        keep_alive: false,
+        keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
@@ -3355,15 +3364,16 @@ mod tests {
     #[cfg(not(feature = "comms"))]
     #[test]
     fn test_resolve_keep_alive_rejects_when_comms_disabled() {
-        let err = resolve_keep_alive(true).expect_err("keep_alive should be rejected");
+        let err = resolve_keep_alive(Some(true)).expect_err("keep_alive should be rejected");
         assert!(err.contains("keep_alive requires comms support"));
     }
 
     #[cfg(feature = "comms")]
     #[test]
     fn test_resolve_keep_alive_allows_when_comms_enabled() {
-        assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
-        assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
+        assert_eq!(resolve_keep_alive(Some(true)).unwrap(), Some(true));
+        assert_eq!(resolve_keep_alive(Some(false)).unwrap(), Some(false));
+        assert_eq!(resolve_keep_alive(None).unwrap(), None);
     }
 
     #[cfg(feature = "comms")]
@@ -3377,19 +3387,19 @@ mod tests {
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
-        assert!(input.keep_alive);
+        assert_eq!(input.keep_alive, Some(true));
         assert_eq!(input.comms_name, Some("test-agent".to_string()));
     }
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_meerkat_run_input_keep_alive_defaults_to_false() {
+    fn test_meerkat_run_input_keep_alive_defaults_to_none() {
         let input_json = json!({
             "prompt": "Hello"
         });
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
-        assert!(!input.keep_alive);
+        assert_eq!(input.keep_alive, None);
         assert!(input.comms_name.is_none());
     }
 
@@ -3434,7 +3444,7 @@ mod tests {
                 tools: vec![],
                 enable_builtins: false,
                 builtin_config: None,
-                keep_alive: true,
+                keep_alive: Some(true),
                 comms_name: None, // Missing!
                 peer_meta: None,
                 hooks_override: None,
@@ -3466,12 +3476,8 @@ mod tests {
         let tools = tools_list();
         let run_tool = &tools[0];
 
-        // Verify keep_alive parameter exists in the schema
+        // Verify keep_alive parameter exists in the schema (nullable boolean)
         assert!(run_tool["inputSchema"]["properties"]["keep_alive"].is_object());
-        assert_eq!(
-            run_tool["inputSchema"]["properties"]["keep_alive"]["type"],
-            "boolean"
-        );
 
         // Verify comms_name parameter exists in the schema
         assert!(run_tool["inputSchema"]["properties"]["comms_name"].is_object());

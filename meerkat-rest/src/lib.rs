@@ -551,7 +551,7 @@ async fn apply_runtime_turn(
                     .and_then(|meta| meta.backend.clone())
                     .or_else(|| Some(context.backend.clone())),
                 config_generation: current_generation,
-                keep_alive: false,
+                keep_alive,
                 checkpointer: None,
                 silent_comms_intents: Vec::new(),
                 max_inline_peer_notifications: None,
@@ -689,8 +689,14 @@ fn realm_origin_from_selection(selection: &RealmSelection) -> RealmOrigin {
     }
 }
 
-fn resolve_keep_alive(requested: bool) -> Result<bool, ApiError> {
-    meerkat::surface::resolve_keep_alive(requested).map_err(ApiError::BadRequest)
+/// Resolve an explicit keep_alive override. Returns None when input is None (inherit).
+fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError> {
+    match requested {
+        Some(true) => meerkat::surface::resolve_keep_alive(true)
+            .map(Some)
+            .map_err(ApiError::BadRequest),
+        other => Ok(other), // None (inherit) or Some(false) (disable) pass through
+    }
 }
 
 fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), ApiError> {
@@ -718,10 +724,11 @@ pub struct CreateSessionRequest {
     /// Enable verbose event logging (server-side).
     #[serde(default)]
     pub verbose: bool,
-    /// Run in host mode: process prompt then stay alive listening for comms messages.
-    /// Requires comms_name to be set.
+    /// Keep session alive after turn completes, listening for comms messages.
+    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
+    /// Requires comms_name when enabled.
     #[serde(default)]
-    pub keep_alive: bool,
+    pub keep_alive: Option<bool>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -816,9 +823,10 @@ pub struct ContinueSessionRequest {
     /// Max retries for structured output validation (default: 2).
     #[serde(default = "default_structured_output_retries")]
     pub structured_output_retries: u32,
-    /// Run in host mode: process prompt then stay alive listening for comms messages.
+    /// Keep session alive after turn completes, listening for comms messages.
+    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
     #[serde(default)]
-    pub keep_alive: bool,
+    pub keep_alive: Option<bool>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -2137,7 +2145,9 @@ async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
     validate_public_peer_meta(req.peer_meta.as_ref())?;
-    let keep_alive = resolve_keep_alive(req.keep_alive)?;
+    let keep_alive_override = resolve_keep_alive(req.keep_alive)?;
+    // Create: no persisted session to inherit from, so None → false.
+    let keep_alive = keep_alive_override.unwrap_or(false);
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = canonical_skill_keys_for_state(
@@ -2218,7 +2228,7 @@ async fn create_session(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        keep_alive: false,
+        keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
@@ -2557,8 +2567,19 @@ async fn continue_session(
         req.verbose,
     );
 
-    let keep_alive_requested = req.keep_alive;
-    let keep_alive = resolve_keep_alive(keep_alive_requested)?;
+    let keep_alive_override = resolve_keep_alive(req.keep_alive)?;
+    // Continue: None → inherit from persisted session metadata.
+    let keep_alive = match keep_alive_override {
+        Some(val) => val,
+        None => state
+            .session_service
+            .load_persisted(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|session| session.session_metadata().map(|m| m.keep_alive))
+            .unwrap_or(false),
+    };
     let skill_references = canonical_skill_keys_for_state(
         &state,
         req.skill_refs.clone(),
@@ -3381,18 +3402,18 @@ mod tests {
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert_eq!(req.prompt, ContentInput::Text("Hello".to_string()));
-        assert!(req.keep_alive);
+        assert_eq!(req.keep_alive, Some(true));
         assert_eq!(req.comms_name, Some("test-agent".to_string()));
     }
 
     #[test]
-    fn test_create_session_request_keep_alive_defaults_to_false() {
+    fn test_create_session_request_keep_alive_defaults_to_none() {
         let req_json = serde_json::json!({
             "prompt": "Hello"
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
-        assert!(!req.keep_alive);
+        assert_eq!(req.keep_alive, None);
         assert!(req.comms_name.is_none());
     }
 
@@ -3859,15 +3880,16 @@ mod tests {
     #[cfg(not(feature = "comms"))]
     #[test]
     fn test_resolve_keep_alive_rejects_when_comms_disabled() {
-        let err = resolve_keep_alive(true).expect_err("keep_alive should be rejected");
+        let err = resolve_keep_alive(Some(true)).expect_err("keep_alive should be rejected");
         assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[cfg(feature = "comms")]
     #[test]
     fn test_resolve_keep_alive_allows_when_comms_enabled() {
-        assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
-        assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
+        assert_eq!(resolve_keep_alive(Some(true)).unwrap(), Some(true));
+        assert_eq!(resolve_keep_alive(Some(false)).unwrap(), Some(false));
+        assert_eq!(resolve_keep_alive(None).unwrap(), None);
     }
 
     #[test]

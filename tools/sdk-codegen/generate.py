@@ -300,7 +300,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     if has_comms:
         types_content += "\n@dataclass\nclass CommsParams:\n"
         types_content += '    """Comms parameters (available because comms capability is compiled)."""\n'
-        types_content += "    keep_alive: bool = False\n"
+        types_content += "    keep_alive: Optional[bool] = None\n"
         types_content += "    comms_name: Optional[str] = None\n\n"
         types_content += "    peer_meta: Optional[dict[str, Any]] = None\n\n"
 
@@ -513,7 +513,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     # Conditional params based on available capabilities
     if has_comms:
         types_content += "\nexport interface CommsParams {\n"
-        types_content += "  keep_alive: boolean;\n"
+        types_content += "  keep_alive?: boolean | null;\n"
         types_content += "  comms_name?: string;\n"
         types_content += "  peer_meta?: Record<string, unknown>;\n"
         types_content += "}\n"

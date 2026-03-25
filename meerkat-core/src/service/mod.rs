@@ -529,6 +529,21 @@ pub trait SessionService: Send + Sync {
         ))
     }
 
+    /// Update the `keep_alive` flag on a live session's durable metadata.
+    ///
+    /// Called by the runtime when an explicit override changes the session's
+    /// keep-alive intent so that subsequent inheriting calls observe the
+    /// updated value. Returns `Unsupported` by default.
+    async fn update_session_keep_alive(
+        &self,
+        _id: &SessionId,
+        _keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "update_session_keep_alive".to_string(),
+        ))
+    }
+
     /// Stage an external tool visibility filter on a live session.
     ///
     /// Used to dynamically hide/show tools (e.g., `view_image`) after a

@@ -94,6 +94,11 @@ enum SessionCommand {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
     },
+    /// Update the keep_alive flag in durable session metadata.
+    UpdateKeepAlive {
+        keep_alive: bool,
+        reply_tx: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -189,13 +194,27 @@ pub trait SessionAgent: Send {
     /// These parameters are present on the trait because the session task
     /// forwards them from `StartTurnRequest`, but implementations should
     /// not act on them — the runtime is the canonical owner.
+    ///
+    /// The default rejects non-Queue handling_mode and non-None render_metadata
+    /// to prevent silent flattening on paths that can't honor them (§5).
     async fn run_turn_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-        _handling_mode: meerkat_core::types::HandlingMode,
-        _render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if handling_mode != meerkat_core::types::HandlingMode::Queue {
+            return Err(meerkat_core::error::AgentError::ConfigError(format!(
+                "handling_mode {:?} requires a runtime-backed surface",
+                handling_mode
+            )));
+        }
+        if render_metadata.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "render_metadata requires a runtime-backed surface".to_string(),
+            ));
+        }
         self.run_with_events(prompt, event_tx).await
     }
 
@@ -241,6 +260,13 @@ pub trait SessionAgent: Send {
     /// full message history. Only called by `PersistentSessionService`
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
+
+    /// Update the `keep_alive` flag in the session's durable metadata.
+    ///
+    /// Called by the session task when the runtime overrides keep-alive on a
+    /// live session. This ensures subsequent inheriting calls observe the
+    /// updated value.
+    fn update_keep_alive(&mut self, _keep_alive: bool) {}
 
     /// Apply runtime-owned system-context blocks immediately to the canonical session.
     fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]);
@@ -1005,6 +1031,35 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         Ok(())
     }
 
+    async fn update_session_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply channel".to_string(),
+            ))
+        })
+    }
+
     async fn subscribe_session_events(
         &self,
         id: &SessionId,
@@ -1286,6 +1341,13 @@ async fn session_task<A: SessionAgent>(
                     usage: snap.usage,
                     last_assistant_text: snap.last_assistant_text,
                 });
+                let _ = reply_tx.send(());
+            }
+            SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                reply_tx,
+            } => {
+                agent.update_keep_alive(keep_alive);
                 let _ = reply_tx.send(());
             }
             SessionCommand::Shutdown => {

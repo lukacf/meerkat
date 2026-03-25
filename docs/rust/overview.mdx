@@ -83,7 +83,9 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
 ## Quick start
 
-The recommended entry point is `SessionService` via `build_ephemeral_service`:
+Production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path where `SessionService` is substrate and `RuntimeSessionAdapter` owns keep-alive, Queue/Steer routing, and comms drain. See [`meerkat-rpc`](../rpc/overview.mdx) or [`meerkat-rest`](../rest/overview.mdx) for those entry points.
+
+For **testing or embedded use** where runtime semantics are not needed, `build_ephemeral_service` provides a direct Queue-only path:
 
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
@@ -105,7 +107,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: Some("You are a helpful assistant.".into()),
         max_tokens: Some(1024),
         event_tx: None,
-        keep_alive: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,

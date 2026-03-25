@@ -2,35 +2,18 @@
 //!
 //! A minimal, high-performance agent harness for LLM-powered applications.
 //!
-//! # Quick Start
+//! # Architecture
 //!
-//! ```text
-//! use meerkat::{AgentFactory, Config, build_ephemeral_service};
-//! use meerkat::{CreateSessionRequest, SessionService};
-//! use meerkat_core::service::InitialTurnPolicy;
+//! All production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path:
+//! `SessionService` (substrate) + `RuntimeSessionAdapter` (control plane).
+//! The runtime owns keep-alive, Queue/Steer routing, comms drain, and ingress.
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let config = Config::load().await?;
-//!     let factory = AgentFactory::new(std::env::current_dir()?);
-//!     let service = build_ephemeral_service(factory, config, 64);
+//! `build_ephemeral_service` is available for **testing and embedded use** where
+//! runtime semantics (keep-alive, Steer, comms-driven admission) are not needed.
+//! It supports Queue-only turns and will reject Steer/render_metadata.
 //!
-//!     let result = service.create_session(CreateSessionRequest {
-//!         model: "claude-sonnet-4-5".into(),
-//!         prompt: "What is 2 + 2?".into(),
-//!         render_metadata: None,
-//!         system_prompt: None,
-//!         max_tokens: None,
-//!         event_tx: None,
-//! //!         skill_references: None,
-//!         initial_turn: InitialTurnPolicy::RunImmediately,
-//!         build: None,
-//!         labels: None,
-//!     }).await?;
-//!     println!("{}", result.text);
-//!     Ok(())
-//! }
-//! ```
+//! For the runtime-backed entry point, see [`meerkat_rpc::SessionRuntime`] or
+//! the REST/MCP server crates.
 
 // On wasm32, provide tokio alias backed by tokio_with_wasm.
 #[cfg(target_arch = "wasm32")]
@@ -184,7 +167,8 @@ pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_in;
 
-// Factory-backed SessionService wiring
+// Factory-backed SessionService wiring (substrate — testing/embedded use).
+// Production surfaces use runtime-backed paths (see meerkat-rpc, meerkat-rest).
 mod service_factory;
 #[cfg(feature = "session-store")]
 pub use service_factory::build_persistent_service;

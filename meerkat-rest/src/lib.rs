@@ -2292,7 +2292,7 @@ async fn create_session(
         req.prompt,
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                keep_alive: if keep_alive { Some(true) } else { None },
+                keep_alive: keep_alive_override,
                 skill_references,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -2629,10 +2629,22 @@ async fn continue_session(
     }
     let adapter = state.runtime_adapter.clone();
 
-    // Spawn comms drain for keep_alive sessions (idempotent — skips if already running).
+    // Persist explicit keep_alive override and manage comms drain lifecycle.
     #[cfg(feature = "comms")]
     {
+        if keep_alive_override.is_some() {
+            state
+                .session_service
+                .update_session_keep_alive(&session_id, keep_alive)
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to persist keep_alive: {e}")))?;
+        }
         let comms_rt = state.session_service.comms_runtime(&session_id).await;
+        if keep_alive && comms_rt.is_none() {
+            return Err(ApiError::BadRequest(
+                "keep_alive requires a session created with comms_name".to_string(),
+            ));
+        }
         adapter
             .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
             .await;
@@ -2642,7 +2654,7 @@ async fn continue_session(
         svc_req.prompt.clone(),
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                keep_alive: if keep_alive { Some(true) } else { None },
+                keep_alive: keep_alive_override,
                 skill_references: svc_req.skill_references.clone(),
                 flow_tool_overlay: svc_req.flow_tool_overlay.clone(),
                 additional_instructions: svc_req.additional_instructions.clone(),

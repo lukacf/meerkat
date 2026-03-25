@@ -90,8 +90,7 @@ impl SessionAgent for FactoryAgent {
         // be honored on the direct path and silent flattening violates §5.
         if handling_mode != HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
-                "handling_mode {:?} requires a runtime-backed surface; direct session-service path supports Queue only",
-                handling_mode
+                "handling_mode {handling_mode:?} requires a runtime-backed surface; direct session-service path supports Queue only",
             )));
         }
         if render_metadata.is_some() {

@@ -2407,7 +2407,7 @@ async fn handle_meerkat_run(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Spawn comms drain for keep_alive sessions — lifecycle owned by runtime adapter.
+    // Manage comms drain lifecycle for the new session.
     #[cfg(feature = "comms")]
     if result.is_ok() {
         let comms_rt = state.service.comms_runtime(&session_id).await;
@@ -2731,10 +2731,22 @@ async fn handle_meerkat_resume(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
     }
 
-    // Spawn comms drain for keep_alive sessions — lifecycle owned by runtime adapter.
+    // Persist explicit keep_alive override and manage comms drain lifecycle.
     #[cfg(feature = "comms")]
     if result.is_ok() {
+        if keep_alive_override.is_some()
+            && let Err(e) = state
+                .service
+                .update_session_keep_alive(&session_id, keep_alive)
+                .await
+        {
+            tracing::warn!(error = %e, "failed to persist keep_alive on MCP resume");
+            return Err(format!("failed to persist keep_alive: {e}"));
+        }
         let comms_rt = state.service.comms_runtime(&session_id).await;
+        if keep_alive && comms_rt.is_none() {
+            return Err("keep_alive requires a session created with comms_name".to_string());
+        }
         state
             .runtime_adapter
             .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)

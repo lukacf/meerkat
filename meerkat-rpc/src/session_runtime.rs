@@ -822,14 +822,33 @@ impl SessionRuntime {
 
         self.ensure_runtime_executor(session_id).await?;
 
-        // Spawn comms drain for keep_alive sessions routed through the runtime path.
+        // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
         {
-            let keep_alive = overrides
-                .as_ref()
-                .and_then(|ov| ov.keep_alive)
-                .unwrap_or(false);
+            let keep_alive_override = overrides.as_ref().and_then(|ov| ov.keep_alive);
+            let keep_alive = match keep_alive_override {
+                Some(val) => val,
+                None => self
+                    .load_persisted_session(session_id)
+                    .await?
+                    .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
+                    .unwrap_or(false),
+            };
+            // Persist explicit override so subsequent inheriting calls observe it.
+            if keep_alive_override.is_some() {
+                self.service
+                    .update_session_keep_alive(session_id, keep_alive)
+                    .await
+                    .map_err(session_error_to_rpc)?;
+            }
             let comms_rt = self.service.comms_runtime(session_id).await;
+            if keep_alive && comms_rt.is_none() {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: "keep_alive requires a session created with comms_name".to_string(),
+                    data: None,
+                });
+            }
             self.runtime_adapter
                 .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
                 .await;

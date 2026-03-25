@@ -900,10 +900,16 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
         keep_alive: bool,
     ) -> Result<(), SessionError> {
-        // Update the live in-memory session metadata first.
+        // Update the live in-memory session metadata first (persist_full_session
+        // reads from live state, so the mutation must happen before the write).
         self.inner.update_session_keep_alive(id, keep_alive).await?;
         // Persist to store so recovery/resume inherits the updated intent.
-        self.persist_full_session(id).await?;
+        // If the store write fails, roll back the live mutation to keep both
+        // sides consistent rather than leaving them diverged.
+        if let Err(e) = self.persist_full_session(id).await {
+            let _ = self.inner.update_session_keep_alive(id, !keep_alive).await;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -1393,6 +1399,17 @@ mod tests {
             match self.session.lock() {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn update_keep_alive(&mut self, keep_alive: bool) {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(mut meta) = session.session_metadata() {
+                meta.keep_alive = keep_alive;
+                let _ = session.set_session_metadata(meta);
             }
         }
 
@@ -2371,5 +2388,101 @@ mod tests {
             })
             .expect("persisted session should contain a system prompt");
         assert!(persisted_prompt.contains("recover me"));
+    }
+
+    /// Create a session request that seeds initial SessionMetadata so
+    /// update_keep_alive has something to mutate (mirrors what the real factory does).
+    fn create_request_with_metadata(
+        prompt: &str,
+        initial_turn: InitialTurnPolicy,
+    ) -> CreateSessionRequest {
+        let mut session = Session::new();
+        let metadata = meerkat_core::SessionMetadata {
+            model: "test".to_string(),
+            max_tokens: 1024,
+            provider: meerkat_core::Provider::Anthropic,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        };
+        session.set_session_metadata(metadata).unwrap();
+        let mut req = create_request(prompt, initial_turn);
+        req.build = Some(SessionBuildOptions {
+            resume_session: Some(session),
+            ..Default::default()
+        });
+        req
+    }
+
+    #[tokio::test]
+    async fn test_update_keep_alive_persists_to_store() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(DummyBuilder, 4, Arc::clone(&store), None);
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        // Verify initial keep_alive is false (default).
+        let persisted = store.load(&id).await.unwrap().unwrap();
+        let meta = persisted.session_metadata().expect("metadata present");
+        assert!(!meta.keep_alive, "initial keep_alive should be false");
+
+        // Update keep_alive to true on the live session.
+        service
+            .update_session_keep_alive(&id, true)
+            .await
+            .expect("update_session_keep_alive should succeed");
+
+        // Verify the store reflects the update.
+        let persisted = store.load(&id).await.unwrap().unwrap();
+        let meta = persisted.session_metadata().expect("metadata present");
+        assert!(
+            meta.keep_alive,
+            "persisted keep_alive should be true after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_keep_alive_rolls_back_on_store_failure() {
+        let fail_store = Arc::new(FailSaveStore::new());
+        let store: Arc<dyn SessionStore> = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
+        let service = PersistentSessionService::new(DummyBuilder, 4, store, None);
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::RunImmediately,
+            ))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        // Now make the store fail on save.
+        fail_store.set_fail_save(true);
+
+        // Update keep_alive — should fail because persist_full_session fails.
+        let result = service.update_session_keep_alive(&id, true).await;
+        assert!(result.is_err(), "update should fail when store write fails");
+
+        // Verify the live session was rolled back to the original value.
+        fail_store.set_fail_save(false);
+        let exported = service.export_session_with_labels(&id).await.unwrap();
+        let meta = exported.session_metadata().expect("metadata present");
+        assert!(
+            !meta.keep_alive,
+            "live session keep_alive should be rolled back to false after store failure"
+        );
     }
 }

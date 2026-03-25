@@ -1026,11 +1026,13 @@ impl RuntimeSessionAdapter {
             .map(|e| Arc::clone(&e.ops_lifecycle))
     }
 
-    /// Spawn a comms drain for a host-mode session if one is not already running.
+    /// Manage the comms drain lifecycle for a session based on keep_alive intent.
     ///
-    /// Returns `true` if a new drain was spawned. All state transitions go
-    /// through `CommsDrainLifecycleAuthority` -- no manual `handle.is_finished()`
-    /// checks.
+    /// When `keep_alive` is true, spawns a drain if one is not already running.
+    /// When `keep_alive` is false, aborts any running drain for the session.
+    /// Returns `true` if a new drain was spawned.
+    ///
+    /// All state transitions go through `CommsDrainLifecycleAuthority`.
     pub async fn maybe_spawn_comms_drain(
         self: &Arc<Self>,
         session_id: &SessionId,
@@ -1038,6 +1040,8 @@ impl RuntimeSessionAdapter {
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> bool {
         if !keep_alive {
+            // Explicit disable: stop any running drain for this session.
+            self.abort_comms_drain(session_id).await;
             return false;
         }
 

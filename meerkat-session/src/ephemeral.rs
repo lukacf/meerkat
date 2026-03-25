@@ -206,8 +206,7 @@ pub trait SessionAgent: Send {
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if handling_mode != meerkat_core::types::HandlingMode::Queue {
             return Err(meerkat_core::error::AgentError::ConfigError(format!(
-                "handling_mode {:?} requires a runtime-backed surface",
-                handling_mode
+                "handling_mode {handling_mode:?} requires a runtime-backed surface",
             )));
         }
         if render_metadata.is_some() {

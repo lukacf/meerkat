@@ -16,10 +16,10 @@ use meerkat_mob::{MobDefinition, MobRun, MobRunStatus, SpawnMemberSpec, StepRunS
 use crate::state::ForceState;
 use super::{ProgressNotifier, ToolCallError};
 
-const DEFAULT_FLOW_STEP_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_FLOW_STEP_TIMEOUT_MS: u64 = 300_000; // 5 min: matches Opus call timeout
 const FLOW_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const FLOW_WATCHDOG_BASE_SLACK_MS: u64 = 30_000;
-const FLOW_WATCHDOG_PER_STEP_SLACK_MS: u64 = 5_000;
+const FLOW_WATCHDOG_BASE_SLACK_MS: u64 = 60_000; // 1 min base slack
+const FLOW_WATCHDOG_PER_STEP_SLACK_MS: u64 = 30_000; // 30s per step slack
 
 #[derive(Deserialize)]
 struct DeliberateInput {
@@ -645,7 +645,9 @@ mod tests {
         assert_eq!(
             timeout,
             Duration::from_millis(
-                1_000 * 2 + FLOW_WATCHDOG_BASE_SLACK_MS + FLOW_WATCHDOG_PER_STEP_SLACK_MS
+                1_000 * 2 // step budget * attempts
+                    + FLOW_WATCHDOG_BASE_SLACK_MS
+                    + FLOW_WATCHDOG_PER_STEP_SLACK_MS
             )
         );
     }

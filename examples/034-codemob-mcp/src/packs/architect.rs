@@ -34,10 +34,10 @@ impl Pack for ArchitectPack {
         skills.insert("synthesizer-skill".into(), SkillSource::Inline { content: include_str!("../../skills/synthesizer.md").into() });
 
         let mut steps = IndexMap::new();
-        steps.insert(StepId::from("plan"),       flow_step("planner",     format!("Create an architecture plan for:\n\n{task}{ctx}"), &[], 180_000));
-        steps.insert(StepId::from("critique"),   flow_step("critic",      "Critique this plan. Find weaknesses and risky assumptions.\n\n## Plan\n{{ steps.plan }}".into(), &["plan"], 180_000));
-        steps.insert(StepId::from("revise"),     flow_step("planner",     "Address the critique. Revise your plan.\n\n## Critique\n{{ steps.critique }}".into(), &["critique"], 180_000));
-        steps.insert(StepId::from("synthesize"), flow_step("synthesizer", "Produce a final ADR: context, decision, consequences, alternatives.\n\n## Revised Plan\n{{ steps.revise }}".into(), &["revise"], 180_000));
+        steps.insert(StepId::from("plan"),       flow_step("planner",     format!("Create an architecture plan for:\n\n{task}{ctx}"), &[], 600_000));
+        steps.insert(StepId::from("critique"),   flow_step("critic",      "Critique this plan. Find weaknesses and risky assumptions.\n\n## Plan\n{{ steps.plan }}".into(), &["plan"], 600_000));
+        steps.insert(StepId::from("revise"),     flow_step("planner",     "Address the critique. Revise your plan.\n\n## Critique\n{{ steps.critique }}".into(), &["critique"], 600_000));
+        steps.insert(StepId::from("synthesize"), flow_step("synthesizer", "Produce a final ADR: context, decision, consequences, alternatives.\n\n## Revised Plan\n{{ steps.revise }}".into(), &["revise"], 600_000));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Architecture deliberation".into()), steps });

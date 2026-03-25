@@ -30,7 +30,7 @@ impl Pack for AdvisorPack {
         skills.insert("advisor-skill".into(), SkillSource::Inline { content: include_str!("../../skills/advisor.md").into() });
 
         let mut steps = IndexMap::new();
-        steps.insert(StepId::from("respond"), flow_step("advisor", format!("{task}{ctx}"), &[], 120_000));
+        steps.insert(StepId::from("respond"), flow_step("advisor", format!("{task}{ctx}"), &[], 300_000));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Single-agent advisory opinion".into()), steps });

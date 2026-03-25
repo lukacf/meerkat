@@ -54,6 +54,7 @@ async fn inner_test_rest_resume_metadata() {
         100,
         store.clone(),
         None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -155,6 +156,7 @@ async fn inner_test_rest_resume_metadata() {
         100,
         store.clone(),
         None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
     let config_store_resume: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(config.clone()));

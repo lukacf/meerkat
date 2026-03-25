@@ -35,7 +35,7 @@ fn build_state(
         .project_root(project_root.to_path_buf());
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store, None));
+    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store, None, Arc::new(meerkat_store::MemoryBlobStore::new())));
 
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(config.clone()));

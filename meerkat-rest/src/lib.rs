@@ -29,6 +29,10 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
+use meerkat::surface::{
+    RequestAlreadyExists, RequestContext, SurfaceRequestExecutor, noop_request_action,
+    request_action,
+};
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
     PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
@@ -126,6 +130,8 @@ pub struct AppState {
     /// Per-session MCP adapter state (live MCP mutation).
     #[cfg(feature = "mcp")]
     pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
+    /// Request-level cancellation executor.
+    pub request_executor: Arc<SurfaceRequestExecutor>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,12 +286,13 @@ impl AppState {
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
         let runtime_adapter = persistence.runtime_adapter();
-        let (session_store, runtime_store) = persistence.into_parts();
+        let (session_store, runtime_store, blob_store) = persistence.into_parts();
         let session_service = Arc::new(PersistentSessionService::new(
             builder,
             100,
             session_store,
             runtime_store,
+            blob_store,
         ));
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
@@ -317,6 +324,9 @@ impl AppState {
             mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_service)),
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            request_executor: Arc::new(SurfaceRequestExecutor::new(
+                std::time::Duration::from_secs(5),
+            )),
         })
     }
 
@@ -562,6 +572,7 @@ async fn apply_runtime_turn(
                 shell_env: None,
                 resume_override_mask: Default::default(),
                 call_timeout_override: Default::default(),
+                blob_store_override: None,
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -935,6 +946,57 @@ pub struct ErrorResponse {
     pub details: Option<Value>,
 }
 
+enum RequestOutcome<T> {
+    Published(T),
+    Unpublished(T),
+}
+
+async fn with_request_lifecycle<T>(
+    executor: &SurfaceRequestExecutor,
+    ctx: Option<RequestContext>,
+    outcome: RequestOutcome<T>,
+) -> T {
+    match ctx {
+        Some(ctx) => match outcome {
+            RequestOutcome::Published(val) => {
+                executor.mark_published(ctx.key());
+                executor.remove_published(ctx.key());
+                val
+            }
+            RequestOutcome::Unpublished(val) => {
+                executor.finish_unpublished(ctx.key()).await;
+                val
+            }
+        },
+        None => match outcome {
+            RequestOutcome::Published(val) | RequestOutcome::Unpublished(val) => val,
+        },
+    }
+}
+
+fn extract_request_context(
+    headers: &axum::http::HeaderMap,
+    executor: &SurfaceRequestExecutor,
+) -> Result<Option<RequestContext>, ApiError> {
+    let Some(header_value) = headers.get("x-meerkat-request-id") else {
+        return Ok(None);
+    };
+    let request_id = header_value
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("X-Meerkat-Request-Id must be valid UTF-8".into()))?;
+    if request_id.is_empty() {
+        return Err(ApiError::BadRequest(
+            "X-Meerkat-Request-Id must not be empty".into(),
+        ));
+    }
+    match executor.try_begin_request(request_id, noop_request_action()) {
+        Ok(ctx) => Ok(Some(ctx)),
+        Err(RequestAlreadyExists) => Err(ApiError::DuplicateRequestId {
+            request_id: request_id.to_string(),
+        }),
+    }
+}
+
 /// Build the REST API router
 pub fn router(state: AppState) -> Router {
     let r = Router::new()
@@ -946,6 +1008,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/external-events", post(post_external_event))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/requests/{request_id}/cancel", post(cancel_request))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
         .route(
@@ -2157,34 +2220,67 @@ fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<Session
     Ok(locator.session_id)
 }
 
-/// Create and run a new session
+/// Create and run a new session (outer wrapper with request lifecycle).
 async fn create_session(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    validate_public_peer_meta(req.peer_meta.as_ref())?;
-    let keep_alive_override = resolve_keep_alive(req.keep_alive)?;
+    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let executor = state.request_executor.clone();
+    let outcome = create_session_inner(&state, req, req_ctx.clone()).await;
+    with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+/// Create and run a new session (inner body returning RequestOutcome).
+async fn create_session_inner(
+    state: &AppState,
+    req: CreateSessionRequest,
+    req_ctx: Option<RequestContext>,
+) -> RequestOutcome<Result<Json<SessionResponse>, ApiError>> {
+    // --- Validation (pre-stateful work) ---
+    if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
+        return RequestOutcome::Unpublished(Err(e));
+    }
+    let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
+        Ok(v) => v,
+        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+    };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let skill_references = canonical_skill_keys_for_state(
-        &state,
+    let skill_references = match canonical_skill_keys_for_state(
+        state,
         req.skill_refs.clone(),
         req.skill_references.clone(),
     )
-    .await?;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+    };
+
+    // Early cancel check — before any stateful work.
+    if let Some(ctx) = req_ctx.as_ref() {
+        if ctx.run_cancel_if_requested().await {
+            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        }
+    }
+
+    // --- Preclaim: session, runtime registration, MCP adapter ---
 
     // Pre-create a session to claim the session_id (needed for CallbackPending handling
     // and event forwarding before the service call returns).
     let pre_session = Session::new();
     let session_id = pre_session.id().clone();
-    let ops_lifecycle = ensure_runtime_session_ops_registry(&state, &session_id)
-        .await
-        .map_err(|resp| {
+    let ops_lifecycle = match ensure_runtime_session_ops_registry(state, &session_id).await {
+        Ok(v) => v,
+        Err(resp) => {
             let message = format!("failed to prepare runtime ops registry: {}", resp.status());
-            ApiError::Internal(message)
-        })?;
+            return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
+        }
+    };
 
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -2217,6 +2313,42 @@ async fn create_session(
     };
     #[cfg(not(feature = "mcp"))]
     let mcp_external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>> = None;
+
+    // Install unpublished cleanup: archive + mcp cleanup + comms drain abort + unregister.
+    if let Some(ctx) = req_ctx.as_ref() {
+        let cleanup_state = state.clone();
+        let cleanup_session_id = session_id.clone();
+        ctx.set_unpublished_cleanup(request_action(move || {
+            let state = cleanup_state.clone();
+            let sid = cleanup_session_id.clone();
+            async move {
+                let _ = state.session_service.archive(&sid).await;
+                #[cfg(feature = "mcp")]
+                cleanup_mcp_session(&state, &sid).await;
+                #[cfg(feature = "comms")]
+                state.runtime_adapter.abort_comms_drain(&sid).await;
+                state.runtime_adapter.unregister_session(&sid).await;
+            }
+        }));
+
+        // Install cancel action: interrupt the session.
+        let cancel_svc = state.session_service.clone();
+        let cancel_sid = session_id.clone();
+        ctx.replace_cancel_action(request_action(move || {
+            let svc = cancel_svc.clone();
+            let sid = cancel_sid.clone();
+            async move {
+                let _ = svc.interrupt(&sid).await;
+            }
+        }));
+
+        // Re-check cancel after installing the action.
+        if ctx.run_cancel_if_requested().await {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        }
+    }
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
     let build = SessionBuildOptions {
@@ -2272,6 +2404,7 @@ async fn create_session(
             ..Default::default()
         },
         call_timeout_override: Default::default(),
+        blob_store_override: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -2295,28 +2428,26 @@ async fn create_session(
         Ok(result) => result,
         Err(err) => {
             state.runtime_adapter.unregister_session(&session_id).await;
-            return Err(match err {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            let api_err = match err {
                 SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
                 SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
                 _ => ApiError::Agent(err.to_string()),
-            });
+            };
+            return RequestOutcome::Unpublished(Err(api_err));
         }
     };
 
     // Register executor for the new session
-    if let Err(_resp) = ensure_runtime_session_registered(&state, &create_result.session_id).await {
+    if let Err(_resp) = ensure_runtime_session_registered(state, &create_result.session_id).await {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return Err(ApiError::InternalWithData {
-            message: "failed to register runtime executor".to_string(),
-            code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
-            details: json!({
-                "session_id": session_id.to_string(),
-                "session_ref": format_session_ref(&state.realm_id, &session_id),
-                "session_created": true,
-                "resumable": true,
-            }),
-        });
+        #[cfg(feature = "mcp")]
+        cleanup_mcp_session(state, &session_id).await;
+        return RequestOutcome::Unpublished(Err(ApiError::Internal(
+            "failed to register runtime executor".to_string(),
+        )));
     }
 
     // Spawn comms drain for keep_alive sessions.
@@ -2342,10 +2473,17 @@ async fn create_session(
         ),
     ));
 
-    let (outcome, handle) = adapter
+    let (outcome, handle) = match adapter
         .accept_input_with_completion(&create_result.session_id, input)
         .await
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    {
+        Ok(pair) => pair,
+        Err(err) => {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::Internal(err.to_string())));
+        }
+    };
 
     let result = match handle {
         Some(handle) => match handle.wait().await {
@@ -2373,24 +2511,35 @@ async fn create_session(
 
     // Drop the sender so the forwarder sees channel closure and can drain.
     drop(caller_event_tx);
-
     drain_event_forwarder(&session_id, forward_task).await;
 
     match result {
-        Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
-        Err(err) => Err(ApiError::InternalWithData {
-            message: match err {
+        Ok(run_result) => RequestOutcome::Published(Ok(Json(run_result_to_response(
+            run_result,
+            &state.realm_id,
+        )))),
+        Err(err) => {
+            // SESSION_CREATED_WITH_TURN_FAILURE: session exists and is preserved.
+            // This is a Published error — cleanup must NOT run.
+            #[cfg(feature = "mcp")]
+            cleanup_mcp_session(state, &session_id).await;
+            #[cfg(feature = "comms")]
+            state.runtime_adapter.abort_comms_drain(&session_id).await;
+            let message = match err {
                 ApiError::Internal(msg) => msg,
-                other => return Err(other),
-            },
-            code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
-            details: json!({
-                "session_id": session_id.to_string(),
-                "session_ref": format_session_ref(&state.realm_id, &session_id),
-                "session_created": true,
-                "resumable": true,
-            }),
-        }),
+                other => return RequestOutcome::Published(Err(other)),
+            };
+            RequestOutcome::Published(Err(ApiError::InternalWithData {
+                message,
+                code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
+                details: json!({
+                    "session_id": session_id.to_string(),
+                    "session_ref": format_session_ref(&state.realm_id, &session_id),
+                    "session_created": true,
+                    "resumable": true,
+                }),
+            }))
+        }
     }
 }
 
@@ -2551,6 +2700,23 @@ async fn archive_session(
     }
 }
 
+/// Cancel a tracked in-flight request.
+async fn cancel_request(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if state.request_executor.cancel_request(&request_id).await {
+        Ok(Json(json!({
+            "request_id": request_id,
+            "cancelled": true
+        })))
+    } else {
+        Err(ApiError::NotFound(format!(
+            "request not found: {request_id}"
+        )))
+    }
+}
+
 fn system_context_error_to_api(err: SessionControlError) -> ApiError {
     match err {
         SessionControlError::Session(SessionError::NotFound { .. }) => {
@@ -2587,22 +2753,66 @@ async fn append_system_context(
     })))
 }
 
-/// Continue an existing session
+/// Continue an existing session (outer wrapper with request lifecycle).
 async fn continue_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ContinueSessionRequest>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    validate_public_peer_meta(req.peer_meta.as_ref())?;
-    let path_session_id = resolve_session_id_for_state(&id, &state)?;
-    let body_session_id = resolve_session_id_for_state(&req.session_id, &state)?;
+    let req_ctx = extract_request_context(&headers, &state.request_executor)?;
+    let executor = state.request_executor.clone();
+    let outcome = continue_session_inner(&state, &id, req, req_ctx.clone()).await;
+    with_request_lifecycle(&executor, req_ctx, outcome).await
+}
+
+/// Continue an existing session (inner body returning RequestOutcome).
+async fn continue_session_inner(
+    state: &AppState,
+    id: &str,
+    req: ContinueSessionRequest,
+    req_ctx: Option<RequestContext>,
+) -> RequestOutcome<Result<Json<SessionResponse>, ApiError>> {
+    if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
+        return RequestOutcome::Unpublished(Err(e));
+    }
+    let path_session_id = match resolve_session_id_for_state(id, state) {
+        Ok(v) => v,
+        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+    };
+    let body_session_id = match resolve_session_id_for_state(&req.session_id, state) {
+        Ok(v) => v,
+        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+    };
     if body_session_id != path_session_id {
-        return Err(ApiError::BadRequest(format!(
+        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(format!(
             "Session ID mismatch: path={} body={}",
             id, req.session_id
-        )));
+        ))));
     }
     let session_id = body_session_id;
+
+    let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
+        Ok(v) => v,
+        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+    };
+    let skill_references = match canonical_skill_keys_for_state(
+        state,
+        req.skill_refs.clone(),
+        req.skill_references.clone(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return RequestOutcome::Unpublished(Err(e)),
+    };
+
+    // Early cancel check — before any stateful work.
+    if let Some(ctx) = req_ctx.as_ref() {
+        if ctx.run_cancel_if_requested().await {
+            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        }
+    }
 
     // Set up event forwarding: caller channel -> broadcast
     let (caller_event_tx, caller_event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
@@ -2613,15 +2823,23 @@ async fn continue_session(
         req.verbose,
     );
 
-    let loaded_session = state
+    let loaded_session = match state
         .session_service
         .load_persisted(&session_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to load session: {e}")))?;
+    {
+        Ok(v) => v,
+        Err(e) => {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+                "Failed to load session: {e}"
+            ))));
+        }
+    };
     let stored_metadata = loaded_session
         .as_ref()
         .and_then(meerkat::Session::session_metadata);
-    let keep_alive_override = resolve_keep_alive(req.keep_alive)?;
     // Continue: None → inherit from persisted session metadata.
     let keep_alive = match keep_alive_override {
         Some(val) => val,
@@ -2637,16 +2855,12 @@ async fn continue_session(
             .as_ref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err(ApiError::BadRequest(
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
+        return RequestOutcome::Unpublished(Err(ApiError::BadRequest(
             "keep_alive requires comms_name".to_string(),
-        ));
+        )));
     }
-    let skill_references = canonical_skill_keys_for_state(
-        &state,
-        req.skill_refs.clone(),
-        req.skill_references.clone(),
-    )
-    .await?;
 
     // Apply staged MCP operations at the turn boundary.
     // MCP boundary appends text-only system notices; extract a String for it,
@@ -2656,7 +2870,14 @@ async fn continue_session(
     #[cfg(feature = "mcp")]
     {
         let mut mcp_text = String::new();
-        apply_mcp_boundary(&state, &session_id, &caller_event_tx, &mut mcp_text).await?;
+        match apply_mcp_boundary(state, &session_id, &caller_event_tx, &mut mcp_text).await {
+            Ok(()) => {}
+            Err(e) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(e));
+            }
+        }
         // If the MCP boundary appended notices, prepend as a text block
         // to preserve any multimodal content in the original prompt.
         if !mcp_text.is_empty() {
@@ -2671,14 +2892,26 @@ async fn continue_session(
 
     let adapter = state.runtime_adapter.clone();
     let final_result = if rest_continue_requires_rebuild(&req) {
-        let session = loaded_session
-            .ok_or_else(|| ApiError::NotFound(format!("Session not found: {session_id}")))?;
-        let ops_lifecycle = ensure_runtime_session_ops_registry(&state, &session_id)
-            .await
-            .map_err(|resp| {
-                let message = format!("failed to prepare runtime ops registry: {}", resp.status());
-                ApiError::Internal(message)
-            })?;
+        let session = match loaded_session {
+            Some(s) => s,
+            None => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::NotFound(format!(
+                    "Session not found: {session_id}"
+                ))));
+            }
+        };
+        let ops_lifecycle = match ensure_runtime_session_ops_registry(state, &session_id).await {
+            Ok(v) => v,
+            Err(resp) => {
+                let message =
+                    format!("failed to prepare runtime ops registry: {}", resp.status());
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
+            }
+        };
         let build = SessionBuildOptions {
             provider: req.provider,
             output_schema: req.output_schema,
@@ -2724,6 +2957,7 @@ async fn continue_session(
                 ..Default::default()
             },
             call_timeout_override: Default::default(),
+            blob_store_override: None,
         };
         let create_req = SvcCreateSessionRequest {
             model: req
@@ -2741,11 +2975,39 @@ async fn continue_session(
             build: Some(build),
             labels: None,
         };
-        let create_result = state
-            .session_service
-            .create_session(create_req)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to rebuild session: {e}")))?;
+        let create_result = match state.session_service.create_session(create_req).await {
+            Ok(v) => v,
+            Err(e) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+                    "Failed to rebuild session: {e}"
+                ))));
+            }
+        };
+
+        // Install cancel action: interrupt the session.
+        if let Some(ctx) = req_ctx.as_ref() {
+            let cancel_svc = state.session_service.clone();
+            let cancel_sid = session_id.clone();
+            ctx.replace_cancel_action(request_action(move || {
+                let svc = cancel_svc.clone();
+                let sid = cancel_sid.clone();
+                async move {
+                    let _ = svc.interrupt(&sid).await;
+                }
+            }));
+
+            // Post-install recheck.
+            if ctx.run_cancel_if_requested().await {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
+                    details: None,
+                }));
+            }
+        }
+
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
@@ -2766,10 +3028,17 @@ async fn continue_session(
                     },
                 ),
             ));
-        let (_outcome, handle) = adapter
+        let (_outcome, handle) = match adapter
             .accept_input_with_completion(&create_result.session_id, input)
             .await
-            .map_err(|err| ApiError::Internal(err.to_string()))?;
+        {
+            Ok(pair) => pair,
+            Err(err) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::Internal(err.to_string())));
+            }
+        };
         match handle {
             Some(handle) => match handle.wait().await {
                 meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => {
@@ -2791,34 +3060,63 @@ async fn continue_session(
         }
     } else {
         // Ensure session is registered with executor for runtime-backed execution.
-        if let Err(_resp) = ensure_runtime_session_registered(&state, &session_id).await {
+        if let Err(_resp) = ensure_runtime_session_registered(state, &session_id).await {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return Err(ApiError::NotFound(format!(
+            return RequestOutcome::Unpublished(Err(ApiError::NotFound(format!(
                 "Session not found: {session_id}"
-            )));
+            ))));
         }
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
-                return Err(ApiError::BadRequest(
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::BadRequest(
                     "keep_alive requires a session created with comms_name".to_string(),
-                ));
+                )));
             }
             if keep_alive_override.is_some() {
-                state
+                if let Err(e) = state
                     .session_service
                     .update_session_keep_alive(&session_id, keep_alive)
                     .await
-                    .map_err(|e| {
-                        ApiError::Internal(format!("failed to persist keep_alive: {e}"))
-                    })?;
+                {
+                    drop(caller_event_tx);
+                    drain_event_forwarder(&session_id, forward_task).await;
+                    return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+                        "failed to persist keep_alive: {e}"
+                    ))));
+                }
             }
             adapter
                 .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
                 .await;
         }
+
+        // Install cancel action: interrupt the session.
+        if let Some(ctx) = req_ctx.as_ref() {
+            let cancel_svc = state.session_service.clone();
+            let cancel_sid = session_id.clone();
+            ctx.replace_cancel_action(request_action(move || {
+                let svc = cancel_svc.clone();
+                let sid = cancel_sid.clone();
+                async move {
+                    let _ = svc.interrupt(&sid).await;
+                }
+            }));
+
+            // Post-install recheck.
+            if ctx.run_cancel_if_requested().await {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
+                    details: None,
+                }));
+            }
+        }
+
         let input =
             meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
@@ -2832,10 +3130,17 @@ async fn continue_session(
                     },
                 ),
             ));
-        let (outcome, handle) = adapter
+        let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
             .await
-            .map_err(|err| ApiError::Internal(err.to_string()))?;
+        {
+            Ok(pair) => pair,
+            Err(err) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::Internal(err.to_string())));
+            }
+        };
 
         match handle {
             Some(handle) => match handle.wait().await {
@@ -2866,11 +3171,13 @@ async fn continue_session(
 
     // Drop the sender so the forwarder sees channel closure and can drain.
     drop(caller_event_tx);
-
     drain_event_forwarder(&session_id, forward_task).await;
 
     match final_result {
-        Ok(run_result) => Ok(Json(run_result_to_response(run_result, &state.realm_id))),
+        Ok(run_result) => RequestOutcome::Published(Ok(Json(run_result_to_response(
+            run_result,
+            &state.realm_id,
+        )))),
         Err(err) => {
             if let ApiError::Internal(message) = &err
                 && message.contains("runtime boundary commit failed")
@@ -2881,7 +3188,8 @@ async fn continue_session(
                     .await;
                 state.runtime_adapter.unregister_session(&session_id).await;
             }
-            Err(err)
+            // Session exists for continue — this is a Published error.
+            RequestOutcome::Published(Err(err))
         }
     }
 }
@@ -3273,6 +3581,12 @@ pub enum ApiError {
         code: String,
         details: Value,
     },
+    RequestCancelled {
+        details: Option<Value>,
+    },
+    DuplicateRequestId {
+        request_id: String,
+    },
     ServiceUnavailable(String),
     Gone(String),
 }
@@ -3329,6 +3643,18 @@ impl IntoResponse for ApiError {
                 code,
                 message,
                 Some(details),
+            ),
+            ApiError::RequestCancelled { details } => (
+                StatusCode::from_u16(499).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                "REQUEST_CANCELLED".to_string(),
+                "request cancelled".to_string(),
+                details,
+            ),
+            ApiError::DuplicateRequestId { request_id } => (
+                StatusCode::CONFLICT,
+                "DUPLICATE_REQUEST_ID".to_string(),
+                format!("request ID already in flight: {request_id}"),
+                None,
             ),
             ApiError::ServiceUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -4625,6 +4951,179 @@ mod tests {
             assert_eq!(json["error"], "duplicate_input");
             assert_eq!(json["code"], "DUPLICATE_INPUT");
             assert_eq!(json["existing_id"], "input-abc-123");
+        }
+    }
+
+    mod request_cancel_tests {
+        use super::*;
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        #[tokio::test]
+        async fn test_missing_header_works_normally() {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            let app = router(state);
+
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/sessions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"prompt": "Hello"}).to_string(),
+                        ))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("should not timeout")
+            .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn test_empty_request_id_returns_400() {
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            let app = router(state);
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/sessions")
+                        .header("content-type", "application/json")
+                        .header("x-meerkat-request-id", "")
+                        .body(Body::from(
+                            serde_json::json!({"prompt": "Hello"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                payload["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("must not be empty")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_cancel_unknown_returns_404() {
+            let temp = TempDir::new().unwrap();
+            let state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            let app = router(state);
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/requests/nonexistent-req/cancel")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_with_request_lifecycle_published_skips_cleanup() {
+            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ctx = executor
+                .try_begin_request("pub-test", noop_request_action())
+                .unwrap();
+            ctx.set_unpublished_cleanup(request_action({
+                let count = Arc::clone(&cleanup_count);
+                move || {
+                    let count = Arc::clone(&count);
+                    async move {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
+
+            let result: u32 =
+                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Published(42u32))
+                    .await;
+            assert_eq!(result, 42);
+            assert_eq!(
+                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "Published path must not run cleanup"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_with_request_lifecycle_unpublished_runs_cleanup() {
+            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let ctx = executor
+                .try_begin_request("unpub-test", noop_request_action())
+                .unwrap();
+            ctx.set_unpublished_cleanup(request_action({
+                let count = Arc::clone(&cleanup_count);
+                move || {
+                    let count = Arc::clone(&count);
+                    async move {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
+
+            let result: u32 =
+                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Unpublished(99u32))
+                    .await;
+            assert_eq!(result, 99);
+            assert_eq!(
+                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "Unpublished path must run cleanup"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_post_commit_success_not_rewritten_to_cancelled() {
+            // Simulate: turn completes (Published), then cancel arrives.
+            // The success response must not be rewritten to 499.
+            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let ctx = executor
+                .try_begin_request("commit-test", noop_request_action())
+                .unwrap();
+            let key = ctx.key().to_string();
+
+            // Simulate: turn completed successfully (Published).
+            let val: Result<u32, ApiError> =
+                with_request_lifecycle(&executor, Some(ctx), RequestOutcome::Published(Ok(200u32)))
+                    .await;
+            assert!(val.is_ok());
+            assert_eq!(val.unwrap(), 200);
+
+            // Cancel arrives after completion — should return false (already gone).
+            assert!(
+                !executor.cancel_request(&key).await,
+                "cancel after Published removal should return false"
+            );
         }
     }
 

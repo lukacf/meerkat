@@ -93,6 +93,52 @@ fn input_turn_metadata(
     }
 }
 
+/// Merge turn metadata from all inputs in a batch.
+///
+/// Later inputs override scalar fields (last writer wins); collection
+/// fields (skill_references, additional_instructions) accumulate.
+fn merge_batch_turn_metadata(
+    inputs: &[(InputId, Input)],
+) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+
+    let mut merged: Option<RuntimeTurnMetadata> = None;
+    for (_, input) in inputs {
+        let Some(meta) = input_turn_metadata(input) else {
+            continue;
+        };
+        let m = merged.get_or_insert_with(RuntimeTurnMetadata::default);
+        if meta.handling_mode.is_some() {
+            m.handling_mode = meta.handling_mode;
+        }
+        if meta.keep_alive.is_some() {
+            m.keep_alive = meta.keep_alive;
+        }
+        if meta.model.is_some() {
+            m.model = meta.model;
+        }
+        if meta.provider.is_some() {
+            m.provider = meta.provider;
+        }
+        if meta.provider_params.is_some() {
+            m.provider_params = meta.provider_params;
+        }
+        if meta.flow_tool_overlay.is_some() {
+            m.flow_tool_overlay = meta.flow_tool_overlay;
+        }
+        // Accumulate collection fields.
+        if let Some(refs) = meta.skill_references {
+            m.skill_references.get_or_insert_with(Vec::new).extend(refs);
+        }
+        if let Some(instrs) = meta.additional_instructions {
+            m.additional_instructions
+                .get_or_insert_with(Vec::new)
+                .extend(instrs);
+        }
+    }
+    merged
+}
+
 fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     let content = match input {
         Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
@@ -104,9 +150,15 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
             blocks: f.blocks.clone().unwrap_or_default(),
         },
-        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: e.blocks.clone().unwrap_or_default(),
-        },
+        Input::ExternalEvent(e) if e.blocks.is_some() => {
+            // Prepend the event-type label so the model can distinguish
+            // external events from ordinary user prompts.
+            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                text: format!("[External Event: {}] ", e.event_type),
+            }];
+            blocks.extend(e.blocks.clone().unwrap_or_default());
+            CoreRenderable::Blocks { blocks }
+        }
         Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
             CoreRenderable::Text {
                 text: input_to_prompt(input),
@@ -133,9 +185,9 @@ pub(crate) fn inputs_to_primitive_with_boundary(
         .iter()
         .map(|(input_id, _)| input_id.clone())
         .collect::<Vec<_>>();
-    let turn_metadata = inputs
-        .iter()
-        .find_map(|(_, input)| input_turn_metadata(input));
+    // Merge turn metadata from ALL inputs in the batch, not just the first.
+    // Later inputs override scalar fields; collection fields accumulate.
+    let turn_metadata = merge_batch_turn_metadata(inputs);
 
     RunPrimitive::StagedInput(StagedRunInput {
         boundary,
@@ -652,7 +704,19 @@ mod tests {
         };
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => assert_eq!(got.len(), 2),
+            CoreRenderable::Blocks { blocks: got } => {
+                // 3 blocks: event label prefix + original text + original image
+                assert_eq!(got.len(), 3);
+                match &got[0] {
+                    meerkat_core::types::ContentBlock::Text { text } => {
+                        assert!(
+                            text.contains("[External Event: webhook]"),
+                            "first block should be the event label, got: {text}"
+                        );
+                    }
+                    other => return Err(format!("expected text label block, got {other:?}")),
+                }
+            }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
         Ok(())

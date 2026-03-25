@@ -307,7 +307,7 @@ address = "127.0.0.1:9100"         # Listen address
 auth = true                         # Require Ed25519 signatures
 
 # CLI usage:
-rkat run --comms-name "agent-a" --host-mode "Send hello to agent-b"
+rkat run --comms-name "agent-a" --keep-alive "Send hello to agent-b"
 
 # Python SDK:
 result = await client.create_session(

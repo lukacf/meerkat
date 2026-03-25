@@ -189,7 +189,7 @@ pub struct SessionBuildOptions {
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
-    /// Optional session checkpointer for host-mode persistence.
+    /// Optional session checkpointer for keep-alive persistence.
     pub checkpointer: Option<std::sync::Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.

@@ -99,7 +99,7 @@ branch.
 | 021 | [multi-provider-routing-py](021-multi-provider-routing-py/) | Python | Route to Anthropic, OpenAI, Gemini with provider-specific params |
 | 022 | [rest-api-client-py](022-rest-api-client-py/) | Python | HTTP REST API integration (no SDK required) |
 | 023 | [rpc-ide-integration-ts](023-rpc-ide-integration-ts/) | TypeScript | JSON-RPC for IDE extensions and desktop apps |
-| 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Reactive agents processing incoming events |
+| 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Multi-turn event mesh (reactive agents processing incoming events) |
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Reference architecture with all features combined |
 | 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
 | 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `session.invokeSkill()` with canonical `SkillKey` refs |

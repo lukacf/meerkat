@@ -3,7 +3,7 @@
 //! Host-mode agents run indefinitely, so the normal post-turn persistence path
 //! (`PersistentSessionService::persist_full_session`) never fires after the
 //! initial `create_session`. This trait allows the agent to checkpoint the
-//! session after each host-mode interaction.
+//! session after each keep-alive interaction.
 
 use crate::session::Session;
 use async_trait::async_trait;

@@ -194,22 +194,22 @@ impl CliOutputPipeline {
 
         let mut shutdown_err = after_sender_drop.await.err();
 
-        if let Some(task) = primary_to_scoped_bridge_task {
-            if let Err(err) = task.await {
-                accumulate_anyhow_error(
-                    &mut shutdown_err,
-                    anyhow::anyhow!("primary stream bridge task failed: {err}"),
-                );
-            }
+        if let Some(task) = primary_to_scoped_bridge_task
+            && let Err(err) = task.await
+        {
+            accumulate_anyhow_error(
+                &mut shutdown_err,
+                anyhow::anyhow!("primary stream bridge task failed: {err}"),
+            );
         }
 
-        if let Some(task) = verbose_task {
-            if let Err(err) = task.await {
-                accumulate_anyhow_error(
-                    &mut shutdown_err,
-                    anyhow::anyhow!("verbose event task failed: {err}"),
-                );
-            }
+        if let Some(task) = verbose_task
+            && let Err(err) = task.await
+        {
+            accumulate_anyhow_error(
+                &mut shutdown_err,
+                anyhow::anyhow!("verbose event task failed: {err}"),
+            );
         }
 
         if let Some(task) = stream_task {
@@ -1269,6 +1269,7 @@ impl From<CliMcpScope> for Option<McpScope> {
 }
 
 #[tokio::main]
+#[allow(clippy::large_futures)]
 async fn main() -> anyhow::Result<ExitCode> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
@@ -1471,6 +1472,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::large_futures)]
 async fn handle_run_command(
     mut prompt: String,
     system_prompt: Option<String>,
@@ -3492,7 +3494,7 @@ async fn run_agent(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::large_futures)]
 async fn resume_session(
     session_id: &str,
     mut prompt: String,
@@ -3995,8 +3997,8 @@ async fn get_or_create_mob_persistent_service(
 
 /// Mob-facing session service wrapper for CLI orchestration.
 ///
-/// Mob actor host-mode behavior is defined by runtime/backend decisions.
-/// This wrapper forwards requests without rewriting host-mode flags.
+/// Mob actor keep-alive behavior is defined by runtime/backend decisions.
+/// This wrapper forwards requests without rewriting keep-alive flags.
 struct MobCliSessionService {
     inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
 }

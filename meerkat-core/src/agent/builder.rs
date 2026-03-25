@@ -286,7 +286,7 @@ impl AgentBuilder {
         agent
     }
 
-    /// Set the session checkpointer for host-mode persistence.
+    /// Set the session checkpointer for keep-alive persistence.
     pub fn with_checkpointer(
         mut self,
         cp: Arc<dyn crate::checkpoint::SessionCheckpointer>,

@@ -1,29 +1,25 @@
-//! # 024 — Host Mode & Event Mesh (Rust)
+//! # 024 — Multi-Turn Event Mesh (Rust)
 //!
-//! Host mode keeps an agent alive to receive and process incoming messages
-//! between turns. Combined with event streaming, it enables reactive systems
-//! where agents respond to external events in real time.
+//! Demonstrates multi-turn event-driven processing using `EphemeralSessionService`
+//! as substrate. The session stays alive between turns, accumulating context as
+//! new events arrive.
 //!
 //! ## What this example demonstrates
-//! - `EphemeralSessionService`: the same session infrastructure used by all
-//!   Meerkat surfaces (CLI, REST, RPC, MCP Server)
-//! - Multi-turn event-driven processing: the agent stays alive between turns
+//! - `EphemeralSessionService`: in-memory session lifecycle (substrate for
+//!   testing/embedded use — production surfaces use runtime-backed paths)
+//! - Multi-turn event-driven processing via repeated `start_turn()` calls
 //! - Event streaming via `AgentEvent` across multiple injected turns
 //! - Reading session state to observe accumulating context
 //!
-//! ## How host mode works
-//! Under the hood, `EphemeralSessionService` spawns a dedicated tokio task per
-//! session. That task exclusively owns the `Agent` and processes commands via
-//! channels. `create_session()` runs the first turn; subsequent `start_turn()`
-//! calls inject new prompts as if they were external events. The agent retains
-//! full conversation history across turns -- each new message builds on prior
-//! context.
+//! ## How it works
+//! `EphemeralSessionService` spawns a dedicated tokio task per session. That task
+//! exclusively owns the `Agent` and processes commands via channels.
+//! `create_session()` runs the first turn; subsequent `start_turn()` calls inject
+//! new prompts. The agent retains full conversation history across turns.
 //!
-//! With the `comms` feature, the agent loop (`run_keep_alive_inner`) goes
-//! further: after the initial prompt it enters a poll loop, draining its comms
-//! inbox and processing peer messages/requests as they arrive, until the budget
-//! is exhausted or a DISMISS signal is received. This example demonstrates the
-//! multi-turn pattern without requiring the comms infrastructure.
+//! For production keep-alive with comms (peer messaging, event mesh), use the
+//! runtime-backed path (`rkat --keep-alive --comms-name "processor"`). The runtime
+//! owns the comms drain lifecycle, Queue/Steer routing, and ingress admission.
 //!
 //! ## Run
 //! ```bash
@@ -48,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Architecture overview ──────────────────────────────────────────────
 
     println!(
-        r#"=== Host Mode & Event Mesh ===
+        r#"=== Multi-Turn Event Mesh ===
 
-Standard mode:
+Single-turn mode:
   User prompt --> Agent runs --> Agent stops
 
-Host mode (via SessionService):
+Multi-turn via SessionService (this example):
   create_session() --> Agent runs turn 1 --> Session task STAYS ALIVE
                                                 |
   start_turn("event 1") -----> Agent processes --> Session task stays alive
@@ -61,16 +57,12 @@ Host mode (via SessionService):
   ...                          (full history retained across turns)
   archive()            -----> Session task exits
 
-With comms (--host-mode --comms-name "processor"):
-  Initial prompt --> Agent runs --> Enters host loop
-                                      |
-  Peer message arrives  --> Agent processes --> Stays in loop
-  Webhook POST          --> Agent processes --> Stays in loop
-  Budget exhausted / DISMISS --> Agent exits loop
+Production keep-alive with comms (rkat --keep-alive --comms-name "processor"):
+  Runtime owns comms drain --> inbox poll --> accept_input --> policy table
+  Peer messages and external events route through runtime ingress.
 
-This example uses EphemeralSessionService -- the same infrastructure backing
-CLI, REST, RPC, and MCP Server surfaces. Each session gets a dedicated tokio
-task that owns the Agent exclusively (no mutex needed).
+This example uses EphemeralSessionService (substrate) for simplicity.
+Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
 "#
     );
 

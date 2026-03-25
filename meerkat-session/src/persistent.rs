@@ -72,7 +72,7 @@ struct CheckpointerGate {
 
 /// Checkpointer that saves sessions to a [`SessionStore`].
 ///
-/// Used by host-mode agents to persist the session after each interaction
+/// Used by keep-alive agents to persist the session after each interaction
 /// without going through `SessionService::start_turn()`.
 ///
 /// Tracks the message count from the last successful save so that
@@ -126,7 +126,7 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// immediately reloading durable archived snapshots on hot history reads.
     archived_sessions: Mutex<IndexMap<SessionId, Session>>,
     archived_history_capacity: usize,
-    /// Gates for active host-mode checkpointers, keyed by session ID.
+    /// Gates for active keep-alive checkpointers, keyed by session ID.
     /// Archive acquires the gate's lock, sets cancelled, then saves the
     /// archived snapshot -- mutual exclusion prevents a concurrent checkpoint
     /// from overwriting the archived row with a live one.
@@ -669,7 +669,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         &self,
         mut req: CreateSessionRequest,
     ) -> Result<RunResult, SessionError> {
-        // Inject a checkpointer for all sessions. The host-mode attached loop
+        // Inject a checkpointer for all sessions. The keep-alive attached loop
         // calls it after each interaction; runtime-backed sessions keep it
         // disabled so they do not bypass runtime boundary persistence.
         let gate = Arc::new(CheckpointerGate {
@@ -695,7 +695,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         }
 
         // Persist the full session snapshot (messages + metadata) after first
-        // turn and seed the checkpointer so the next host-mode checkpoint is
+        // turn and seed the checkpointer so the next keep-alive checkpoint is
         // skipped if the session hasn't changed since this save.
         let saved_len = self.persist_full_session(&result.session_id).await?;
         checkpointer

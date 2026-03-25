@@ -270,7 +270,7 @@ let result = service.create_session(CreateSessionRequest {
     system_prompt: None,
     max_tokens: None,
     event_tx: None,
-    host_mode: false,
+    // keep_alive is set via SessionBuildOptions, not on CreateSessionRequest
     skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     build: None,
@@ -403,7 +403,7 @@ In `autonomous_host` mode, agents run a continuous loop: wake on inbox → proce
 
 - **`output_schema` constrains the agent's final text output**, not tool call arguments. It triggers an extraction turn after the agentic loop completes, calling the LLM with no tools and API-enforced structured output.
 - **Comms `send` tool body is free-text** (`Option<String>`). There is no schema enforcement on comms message content — agents communicate naturally.
-- **The extraction turn fires after each host-mode processing cycle.** Each time the active host-mode owner path consumes inbox work, the agent processes it, sends replies, and then produces a structured JSON summary of what it did. This summary is API-enforced via `output_schema` on the profile.
+- **The extraction turn fires after each keep-alive processing cycle.** Each time the runtime comms drain consumes inbox work, the agent processes it, sends replies, and then produces a structured JSON summary of what it did. This summary is API-enforced via `output_schema` on the profile.
 - **Use case**: Set `output_schema` on autonomous agent profiles to get structured turn summaries (e.g. `{headline: string, details: string}`) while letting agents communicate freely via `send`. The summaries power compact UI displays; the raw comms messages are available for detailed views.
 - **Event stream**: The structured output appears in `RunCompleted` events as a JSON string in the `result` field. Parse it to extract the schema-validated fields.
 

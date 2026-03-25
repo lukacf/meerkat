@@ -148,7 +148,7 @@ Create and run a new session.
   },
   "structured_output_retries": 2,
   "verbose": false,
-  "keep_alive": false,
+  "keep_alive": null,
   "comms_name": null,
   "peer_meta": null,
   "hooks_override": null,
@@ -209,8 +209,8 @@ Create and run a new session.
   Enable verbose event logging (server-side).
 </ParamField>
 
-<ParamField body="keep_alive" type="bool" default="false">
-  Run in keep-alive mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -454,8 +454,8 @@ Continue an existing session.
   Enable verbose event logging.
 </ParamField>
 
-<ParamField body="keep_alive" type="bool" default="false">
-  Enable keep-alive mode for this turn.
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep-alive override for this turn. `null` = inherit persisted session intent, `true` = enable, `false` = disable.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="from session">

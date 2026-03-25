@@ -216,7 +216,7 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
-    #[allow(dead_code)] // Used by session-service host mode and persistent session service.
+    #[allow(dead_code)] // Used by persistent session service.
     #[doc(hidden)]
     pub async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
@@ -569,7 +569,7 @@ where
     ///
     /// Uses the existing pending user message in the session (does NOT push a new one).
     /// Emits lifecycle events when `event_tx` is provided. Also used by
-    /// the host-mode continuation path after response injection.
+    /// the keep-alive continuation path after response injection.
     pub(super) async fn run_pending_inner(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,

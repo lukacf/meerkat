@@ -27,19 +27,24 @@ The comms system provides:
 
 ```mermaid
 graph TD
-    subgraph agent["Agent loop (meerkat-core)"]
-        DRAIN["drain_comms_inbox()"]
-        HOST["run_keep_alive()"]
+    subgraph rt["Runtime (meerkat-runtime)"]
+        DRAIN["comms_drain"]
+        BRIDGE["comms_bridge"]
+        INGRESS["RuntimeIngressAuthority"]
+        POLICY["PolicyTable (Queue/Steer)"]
     end
 
-    subgraph runtime["CommsRuntime (meerkat-comms)"]
+    subgraph comms["CommsRuntime (meerkat-comms)"]
         ROUTER["Router"]
         INBOX["Inbox"]
         KP["Keypair"]
         TP["TrustedPeers"]
     end
 
-    agent --> runtime
+    DRAIN -->|"poll inbox"| INBOX
+    DRAIN -->|"classify"| BRIDGE
+    BRIDGE -->|"accept_input"| INGRESS
+    INGRESS --> POLICY
 
     subgraph signed["Signed listeners (agent-to-agent)"]
         UDS["UDS Listener"]
@@ -55,7 +60,7 @@ graph TD
         RPC_EVT["RPC comms/send"]
     end
 
-    runtime --> signed
+    comms --> signed
     plain -->|"EventInjector"| INBOX
 ```
 
@@ -425,7 +430,7 @@ rkat run --comms-name reviewer \
   --agent-description "Reviews pull requests for style issues" \
   --agent-label lang=rust \
   --agent-label team=infra \
-  --host "You review code when asked."
+  --keep-alive "You review code when asked."
 ```
 
 Via the Rust SDK:

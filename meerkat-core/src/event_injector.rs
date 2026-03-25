@@ -52,7 +52,7 @@ pub trait EventInjector: Send + Sync {
 
 /// Internal runtime handle for an interaction-scoped event stream.
 ///
-/// This remains available only to support internal host-mode/runtime wiring.
+/// This remains available only to support internal runtime wiring.
 /// It is not part of the public interaction model.
 #[doc(hidden)]
 pub struct InteractionSubscription {

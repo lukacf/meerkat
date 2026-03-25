@@ -131,7 +131,7 @@ struct SessionHandle {
     event_injector: Option<Arc<dyn meerkat_core::EventInjector>>,
     /// Internal runtime injector for interaction-scoped streaming.
     interaction_event_injector: Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>>,
-    /// Optional comms runtime for host-mode commands and stream attachment.
+    /// Optional comms runtime for keep-alive commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,

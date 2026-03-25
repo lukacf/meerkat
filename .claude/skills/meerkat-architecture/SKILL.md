@@ -113,7 +113,7 @@ Use the dogma above to reject designs that still leave semantic truth in:
 
 `AgentFactory::build_agent()` is the single entry point for ALL surfaces. Key steps:
 
-1. Validate host_mode
+1. Validate keep_alive
 2. Resolve provider (infer from model or explicit)
 3. Create LLM client (override > factory credentials > config)
 4. Create LLM adapter (with event channel and event tap)
@@ -152,7 +152,7 @@ With branches: `ErrorRecovery`, `Cancelling`
 
 **Silent intent override:** If an incoming peer intent matches the session's `silent_comms_intents` list, the policy is overridden to `ApplyMode::Ignore`, `WakeMode::None` — no LLM turn triggered. This is canonical runtime-owned behavior.
 
-**Host-mode drain ownership:** host mode is not "just a loop that drains at turn boundaries." Runtime-backed and direct session-service paths must both follow canonical drain lifecycle truth. Suppression of turn-boundary drain is a projection of drain lifecycle state, not a free shell boolean.
+**Keep-alive drain ownership:** The runtime owns the comms drain lifecycle via `CommsDrainLifecycleAuthority`. `maybe_spawn_comms_drain` spawns on `keep_alive=true` and aborts on `keep_alive=false`. The direct session-service path (substrate) does not support keep-alive — only runtime-backed surfaces can.
 
 **Respawn semantics:** Helper convenience (not a machine-owned primitive). Same member identity (MeerkatId), spec, and peer wiring — **new session ID**. Old session archived. Used for "agent is confused, restart it" recovery.
 

@@ -1,7 +1,7 @@
 //! Runtime comms bridge helpers.
 //!
 //! These helpers translate drained comms interactions into the runtime-owned
-//! input families used by the host-mode cutover bridge.
+//! input families used by the comms classification bridge.
 
 use chrono::Utc;
 use meerkat_core::interaction::{

@@ -65,7 +65,7 @@ pub use mcp::tools::{ToolContext, handle_tools_call, tools_list};
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Comms,
-        description: "Inter-agent communication: send, request, response, list peers + host mode",
+        description: "Inter-agent communication: send, request, response, list peers + keep-alive",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("comms"),
         prerequisites: &[],
@@ -78,7 +78,7 @@ inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "multi-agent-comms",
         name: "Multi-Agent Comms",
-        description: "Setting up host mode, peer trust, send vs request/response patterns",
+        description: "Setting up keep-alive, peer trust, send vs request/response patterns",
         scope: meerkat_core::skills::SkillScope::Builtin,
         requires_capabilities: &["comms"],
         body: include_str!("../skills/multi-agent-comms/SKILL.md"),

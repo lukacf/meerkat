@@ -489,7 +489,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Signal that an interaction has reached a terminal state (complete or failed).
     ///
     /// Implementations should transition the reservation FSM to `Completed` and
-    /// clean up registry entries. Called from the host-mode loop after sending
+    /// clean up registry entries. Called from the keep-alive loop after sending
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
 

@@ -1,7 +1,7 @@
 //! Profile to AgentBuildConfig compilation.
 //!
 //! Maps a mob [`Profile`] to an [`AgentBuildConfig`] with the correct
-//! flags for host-mode operation, comms naming, peer metadata, and
+//! flags for keep-alive operation, comms naming, peer metadata, and
 //! tool overrides. Bridges to [`CreateSessionRequest`] for session creation.
 
 use crate::definition::{MobDefinition, SkillSource};

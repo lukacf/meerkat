@@ -257,6 +257,82 @@ async fn history_contains(
     false
 }
 
+/// Dump the cross-agent conversation for a round.
+async fn print_conversation(handle: &MobHandle, service: &dyn MobSessionService) {
+    println!();
+    println!("  ┌─────────────────────────────────────────────────────────");
+    println!("  │ CONVERSATION");
+    println!("  ├─────────────────────────────────────────────────────────");
+
+    // Collect all messages with timestamps from all members, then sort chronologically.
+    let mut all_messages: Vec<(String, String, String)> = Vec::new(); // (timestamp, speaker, text)
+
+    let members = handle.list_members().await;
+    for member in &members {
+        let name = member.meerkat_id.to_string();
+        let Some(session_id) = member.session_id() else {
+            continue;
+        };
+        let Ok(page) = service
+            .read_history(
+                session_id,
+                meerkat_core::SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+        else {
+            continue;
+        };
+
+        for msg in &page.messages {
+            let text = match msg {
+                meerkat_core::types::Message::Assistant(a) => a.content.clone(),
+                meerkat_core::types::Message::BlockAssistant(ba) => ba
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => continue,
+            };
+            if text.is_empty() || text.len() < 3 {
+                continue;
+            }
+            let idx = all_messages.len();
+            all_messages.push((format!("{idx:04}:{name}"), name.clone(), text));
+        }
+    }
+
+    all_messages.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (_, speaker, text) in &all_messages {
+        // Truncate very long messages (char-boundary safe)
+        let display = if text.chars().count() > 200 {
+            let end: String = text.chars().take(200).collect();
+            format!("{end}...")
+        } else {
+            text.clone()
+        };
+        // Indent continuation lines
+        let lines: Vec<&str> = display.lines().collect();
+        if let Some(first) = lines.first() {
+            println!("  │ {speaker:>10}: {first}");
+            for line in &lines[1..] {
+                println!("  │             {line}");
+            }
+        }
+    }
+    println!("  └─────────────────────────────────────────────────────────");
+    println!();
+}
+
 async fn wait_for(
     handle: &MobHandle,
     service: &dyn MobSessionService,
@@ -402,6 +478,8 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         } else {
             println!("  ✗ Timed out — no verdict from artist");
         }
+
+        print_conversation(&handle, service.as_ref()).await;
 
         // Round 1 (easy) must pass to validate the pipeline works
         if round_idx == 0 && !got_correct {

@@ -1162,13 +1162,17 @@ where
                             };
 
                         if let Some(error) = validation_error {
-                            // Validation failed — ask authority for retry or exhaustion
-                            let attempts = self.turn_authority.extraction_attempts();
-                            let max_retries = self.turn_authority.max_extraction_retries();
-                            if attempts < max_retries {
-                                // Retry: push retry prompt, authority transitions
-                                // Extracting -> CallingLlm
-                                self.extraction_last_error = Some(error.clone());
+                            // Validation failed — authority decides retry vs exhaust
+                            self.extraction_last_error = Some(error.clone());
+                            let t = self.apply_turn_input(
+                                TurnExecutionInput::ExtractionValidationFailed {
+                                    run_id: run_id.clone(),
+                                    error: error.clone(),
+                                },
+                            )?;
+
+                            if !self.turn_authority.phase().is_terminal() {
+                                // Authority decided to retry — push retry prompt
                                 let retry_prompt = format!(
                                     "The previous output was invalid: {error}. \
                                     Please provide valid JSON matching the schema. \
@@ -1176,24 +1180,17 @@ where
                                 );
                                 self.session
                                     .push(Message::User(UserMessage::text(retry_prompt)));
-                                let t =
-                                    self.apply_turn_input(TurnExecutionInput::ExtractionRetry {
-                                        run_id: run_id.clone(),
-                                    })?;
                                 self.execute_turn_effects(&t, turn_count, &event_tx).await;
                                 turn_count += 1;
                                 continue;
                             }
 
-                            // Retries exhausted
-                            self.apply_turn_input(TurnExecutionInput::ExtractionExhausted {
-                                run_id: run_id.clone(),
-                            })?;
+                            // Authority decided retries exhausted
                             if let Err(e) = self.store.save(&self.session).await {
                                 tracing::warn!("Failed to save session: {}", e);
                             }
                             return Err(AgentError::StructuredOutputValidationFailed {
-                                attempts: max_retries + 1,
+                                attempts: self.turn_authority.extraction_attempts(),
                                 reason: error,
                                 last_output: self.session.last_assistant_text().unwrap_or_default(),
                             });
@@ -1263,7 +1260,7 @@ where
                                 run_id: run_id.clone(),
                                 max_retries: self.config.structured_output_retries,
                             })?;
-                            let t = self.apply_turn_input(TurnExecutionInput::ExtractionRetry {
+                            let t = self.apply_turn_input(TurnExecutionInput::ExtractionStart {
                                 run_id: run_id.clone(),
                             })?;
                             self.execute_turn_effects(&t, turn_count, &event_tx).await;
@@ -2958,9 +2955,7 @@ mod tests {
         // The compute_retry_delay unit tests verify the floor independently.
         assert!(
             actual_delay >= hint,
-            "retry delay ({:?}) must be at least the server hint ({:?})",
-            actual_delay,
-            hint,
+            "retry delay ({actual_delay:?}) must be at least the server hint ({hint:?})",
         );
     }
 

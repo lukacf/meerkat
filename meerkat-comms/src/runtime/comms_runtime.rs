@@ -2642,7 +2642,7 @@ mod tests {
             TrustedPeerSpec::new(
                 "session-scoped-trust-peer",
                 peer.public_key().to_peer_id(),
-                &format!("inproc://{}", peer.participant_name()),
+                format!("inproc://{}", peer.participant_name()),
             )
             .expect("trusted peer spec"),
         )

@@ -33,6 +33,7 @@ fn canonical_session_comms_identity_root(
         let home = std::env::var_os("HOME").ok_or_else(|| {
             "HOME is not set; cannot resolve session comms identity root".to_string()
         })?;
+        #[allow(clippy::needless_return)]
         return Ok(std::path::PathBuf::from(home)
             .join("Library")
             .join("Application Support")
@@ -520,7 +521,7 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
 }
 
 #[cfg(feature = "comms")]
-#[allow(clippy::implicit_hasher)]
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
 pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
     config: &Config,
     base_dir: impl AsRef<Path>,

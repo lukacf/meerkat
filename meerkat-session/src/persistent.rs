@@ -1247,7 +1247,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
@@ -1367,6 +1367,7 @@ mod tests {
                     .unwrap_or(meerkat_core::SessionMetadata {
                         model: identity.model.clone(),
                         max_tokens: 0,
+                        structured_output_retries: 2,
                         provider: identity.provider,
                         provider_params: identity.provider_params.clone(),
                         tooling: meerkat_core::SessionTooling::default(),
@@ -2361,6 +2362,7 @@ mod tests {
             .set_session_metadata(meerkat_core::SessionMetadata {
                 model: "test-model".to_string(),
                 max_tokens: 1024,
+                structured_output_retries: 2,
                 provider: meerkat_core::Provider::Anthropic,
                 provider_params: None,
                 tooling: meerkat_core::SessionTooling {
@@ -2442,6 +2444,7 @@ mod tests {
         let metadata = meerkat_core::SessionMetadata {
             model: "test".to_string(),
             max_tokens: 1024,
+            structured_output_retries: 2,
             provider: meerkat_core::Provider::Anthropic,
             provider_params: None,
             tooling: meerkat_core::SessionTooling::default(),

@@ -222,6 +222,32 @@ pub struct SessionBuildOptions {
     /// - `Disabled`: explicitly disable call timeout regardless of profile
     /// - `Value(d)`: explicitly set call timeout to `d`
     pub call_timeout_override: crate::CallTimeoutOverride,
+    /// Typed explicit-override intent for resumed-session merges.
+    ///
+    /// Surfaces set bits only for fields they can prove were explicitly
+    /// supplied by the caller. Resumed metadata then fills only the
+    /// non-explicit fields.
+    pub resume_override_mask: ResumeOverrideMask,
+}
+
+/// Typed explicit-override intent for resumed-session metadata merges.
+///
+/// This avoids trying to recover caller intent from flattened build config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResumeOverrideMask {
+    pub model: bool,
+    pub provider: bool,
+    pub max_tokens: bool,
+    pub structured_output_retries: bool,
+    pub provider_params: bool,
+    pub override_builtins: bool,
+    pub override_shell: bool,
+    pub override_memory: bool,
+    pub override_mob: bool,
+    pub preload_skills: bool,
+    pub keep_alive: bool,
+    pub comms_name: bool,
+    pub peer_meta: bool,
 }
 
 impl Default for SessionBuildOptions {
@@ -256,6 +282,7 @@ impl Default for SessionBuildOptions {
             additional_instructions: None,
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
+            resume_override_mask: ResumeOverrideMask::default(),
         }
     }
 }
@@ -297,6 +324,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
             .field("call_timeout_override", &self.call_timeout_override)
+            .field("resume_override_mask", &self.resume_override_mask)
             .finish()
     }
 }
@@ -674,6 +702,12 @@ impl dyn SessionService {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

@@ -214,11 +214,14 @@ pub fn turn_execution_machine() -> MachineSchema {
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
-                    name: "ExtractionRetry".into(),
-                    fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
+                    name: "ExtractionValidationFailed".into(),
+                    fields: vec![
+                        field("run_id", TypeRef::Named("RunId".into())),
+                        field("error", TypeRef::String),
+                    ],
                 },
                 VariantSchema {
-                    name: "ExtractionExhausted".into(),
+                    name: "ExtractionStart".into(),
                     fields: vec![field("run_id", TypeRef::Named("RunId".into()))],
                 },
                 VariantSchema {
@@ -1442,11 +1445,32 @@ pub fn turn_execution_machine() -> MachineSchema {
                 }],
             },
             TransitionSchema {
-                name: "ExtractionRetry".into(),
+                name: "ExtractionStart".into(),
                 from: vec!["Extracting".into()],
                 on: InputMatch {
-                    variant: "ExtractionRetry".into(),
+                    variant: "ExtractionStart".into(),
                     bindings: vec!["run_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "run_matches_active".into(),
+                    expr: Expr::Eq(
+                        Box::new(Expr::Field("active_run".into())),
+                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
+                    ),
+                }],
+                updates: vec![],
+                to: "CallingLlm".into(),
+                emit: vec![EffectEmit {
+                    variant: "CheckCompaction".into(),
+                    fields: IndexMap::new(),
+                }],
+            },
+            TransitionSchema {
+                name: "ExtractionValidationFailed".into(),
+                from: vec!["Extracting".into()],
+                on: InputMatch {
+                    variant: "ExtractionValidationFailed".into(),
+                    bindings: vec!["run_id".into(), "error".into()],
                 },
                 guards: vec![Guard {
                     name: "run_matches_active".into(),
@@ -1459,34 +1483,12 @@ pub fn turn_execution_machine() -> MachineSchema {
                     field: "extraction_attempts".into(),
                     amount: 1,
                 }],
+                // Conditional: CallingLlm if retries remain, Failed if exhausted.
+                // Schema captures the retry path; the authority handles branching.
                 to: "CallingLlm".into(),
                 emit: vec![EffectEmit {
                     variant: "CheckCompaction".into(),
                     fields: IndexMap::new(),
-                }],
-            },
-            TransitionSchema {
-                name: "ExtractionExhausted".into(),
-                from: vec!["Extracting".into()],
-                on: InputMatch {
-                    variant: "ExtractionExhausted".into(),
-                    bindings: vec!["run_id".into()],
-                },
-                guards: vec![Guard {
-                    name: "run_matches_active".into(),
-                    expr: Expr::Eq(
-                        Box::new(Expr::Field("active_run".into())),
-                        Box::new(Expr::Some(Box::new(Expr::Binding("run_id".into())))),
-                    ),
-                }],
-                updates: vec![Update::Assign {
-                    field: "terminal_outcome".into(),
-                    expr: Expr::String("Completed".into()),
-                }],
-                to: "Completed".into(),
-                emit: vec![EffectEmit {
-                    variant: "RunCompleted".into(),
-                    fields: IndexMap::from([("run_id".into(), Expr::Binding("run_id".into()))]),
                 }],
             },
             TransitionSchema {

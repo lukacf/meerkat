@@ -563,7 +563,7 @@ impl EphemeralRuntimeDriver {
         input_id: &InputId,
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
-        self.stage_batch(&[input_id.clone()], run_id)
+        self.stage_batch(std::slice::from_ref(input_id), run_id)
     }
 
     /// Stage a batch of inputs in a single `StageDrainSnapshot` call.

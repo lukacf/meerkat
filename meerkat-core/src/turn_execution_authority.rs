@@ -15,7 +15,7 @@
 //!   PrimitiveApplied, LlmReturnedToolCalls, LlmReturnedTerminal,
 //!   RegisterPendingOps, ToolCallsResolved, OpsBarrierSatisfied,
 //!   BoundaryContinue, BoundaryComplete, EnterExtraction,
-//!   ExtractionValidationPassed, ExtractionRetry, ExtractionExhausted,
+//!   ExtractionValidationPassed, ExtractionValidationFailed, ExtractionStart,
 //!   RecoverableFailure, FatalFailure, RetryRequested, CancelNow,
 //!   CancelAfterBoundary, CancellationObserved, AcknowledgeTerminal,
 //!   TurnLimitReached, BudgetExhausted, TimeBudgetExceeded, ForceCancelNoRun,
@@ -229,12 +229,21 @@ pub enum TurnExecutionInput {
     ExtractionValidationPassed {
         run_id: RunId,
     },
-    /// Extraction validation failed but retries remain — retry the extraction.
-    ExtractionRetry {
+    /// Extraction validation failed — authority decides retry vs exhaust.
+    ///
+    /// The authority checks `extraction_attempts < max_extraction_retries`
+    /// internally. If retries remain, increments attempts and transitions to
+    /// `CallingLlm`. If exhausted, transitions to `Failed` with
+    /// `StructuredOutputValidationFailed`.
+    ExtractionValidationFailed {
         run_id: RunId,
+        error: String,
     },
-    /// Extraction retries exhausted — complete with failure.
-    ExtractionExhausted {
+    /// Start the extraction LLM call (Extracting → CallingLlm).
+    ///
+    /// Sent after `EnterExtraction` to begin the first extraction attempt,
+    /// and after each retry to re-enter `CallingLlm`.
+    ExtractionStart {
         run_id: RunId,
     },
     /// Force-cancel when no active run exists.
@@ -275,7 +284,7 @@ pub enum TurnExecutionEffect {
     /// Check whether compaction should run before the next LLM call.
     ///
     /// Emitted on transitions that re-enter CallingLlm (BoundaryContinue,
-    /// RetryRequested, ExtractionRetry).
+    /// RetryRequested, ExtractionStart).
     CheckCompaction,
 }
 
@@ -527,12 +536,12 @@ impl TurnExecutionAuthority {
     ) -> Result<(TurnPhase, TurnExecutionFields, Vec<TurnExecutionEffect>), AgentError> {
         use TurnExecutionInput::{
             AcknowledgeTerminal, BoundaryComplete, BoundaryContinue, BudgetExhausted,
-            CancelAfterBoundary, CancelNow, CancellationObserved, EnterExtraction,
-            ExtractionExhausted, ExtractionRetry, ExtractionValidationPassed, FatalFailure,
-            ForceCancelNoRun, LlmReturnedTerminal, LlmReturnedToolCalls, OpsBarrierSatisfied,
-            PrimitiveApplied, RecoverableFailure, RegisterPendingOps, RetryRequested,
-            StartConversationRun, StartImmediateAppend, StartImmediateContext, TimeBudgetExceeded,
-            ToolCallsResolved, TurnLimitReached,
+            CancelAfterBoundary, CancelNow, CancellationObserved, EnterExtraction, ExtractionStart,
+            ExtractionValidationFailed, ExtractionValidationPassed, FatalFailure, ForceCancelNoRun,
+            LlmReturnedTerminal, LlmReturnedToolCalls, OpsBarrierSatisfied, PrimitiveApplied,
+            RecoverableFailure, RegisterPendingOps, RetryRequested, StartConversationRun,
+            StartImmediateAppend, StartImmediateContext, TimeBudgetExceeded, ToolCallsResolved,
+            TurnLimitReached,
         };
         use TurnPhase::{
             ApplyingPrimitive, CallingLlm, Cancelled, Cancelling, Completed, DrainingBoundary,
@@ -845,7 +854,7 @@ impl TurnExecutionAuthority {
             //
             // Called each time the shell reaches DrainingBoundary during an
             // extraction run. On the first call extraction_attempts is 0
-            // (from run start); ExtractionRetry increments it on each retry.
+            // (from run start); ExtractionValidationFailed increments it.
             // ---------------------------------------------------------------
             (
                 DrainingBoundary,
@@ -876,29 +885,41 @@ impl TurnExecutionAuthority {
             }
 
             // ---------------------------------------------------------------
-            // ExtractionRetry: Extracting -> CallingLlm
+            // ExtractionStart: Extracting -> CallingLlm
+            //
+            // Used for the initial extraction call and after each retry.
+            // Does not increment attempts (validation failure does that).
             // ---------------------------------------------------------------
-            (Extracting, ExtractionRetry { run_id }) => {
+            (Extracting, ExtractionStart { run_id }) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
-                fields.extraction_attempts += 1;
                 effects.push(TurnExecutionEffect::CheckCompaction);
                 CallingLlm
             }
 
             // ---------------------------------------------------------------
-            // ExtractionExhausted: Extracting -> Failed
+            // ExtractionValidationFailed: Extracting -> CallingLlm or Failed
+            //
+            // Authority owns the retry-vs-exhaust decision:
+            //   - attempts < max_retries → increment, transition to CallingLlm
+            //   - otherwise → transition to Failed
             // ---------------------------------------------------------------
-            (Extracting, ExtractionExhausted { run_id }) => {
+            (Extracting, ExtractionValidationFailed { run_id, .. }) => {
                 if !self.guard_run_matches(run_id) {
                     return Err(Self::invalid(phase, input));
                 }
-                fields.terminal_outcome = TurnTerminalOutcome::StructuredOutputValidationFailed;
-                effects.push(TurnExecutionEffect::RunFailed {
-                    run_id: run_id.clone(),
-                });
-                Failed
+                fields.extraction_attempts += 1;
+                if fields.extraction_attempts < fields.max_extraction_retries {
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                    CallingLlm
+                } else {
+                    fields.terminal_outcome = TurnTerminalOutcome::StructuredOutputValidationFailed;
+                    effects.push(TurnExecutionEffect::RunFailed {
+                        run_id: run_id.clone(),
+                    });
+                    Failed
+                }
             }
 
             // ---------------------------------------------------------------
@@ -2143,7 +2164,7 @@ mod tests {
     }
 
     #[test]
-    fn extraction_retry_increments_attempts_and_goes_to_calling_llm() {
+    fn extraction_start_goes_to_calling_llm() {
         let mut auth = authority_at_draining_boundary_terminal();
         auth.apply(TurnExecutionInput::EnterExtraction {
             run_id: test_run_id(),
@@ -2152,12 +2173,12 @@ mod tests {
         .expect("enter extraction");
 
         let t = auth
-            .apply(TurnExecutionInput::ExtractionRetry {
+            .apply(TurnExecutionInput::ExtractionStart {
                 run_id: test_run_id(),
             })
-            .expect("extraction retry");
+            .expect("extraction start");
         assert_eq!(t.next_phase, TurnPhase::CallingLlm);
-        assert_eq!(auth.extraction_attempts(), 1);
+        assert_eq!(auth.extraction_attempts(), 0);
     }
 
     #[test]
@@ -2184,7 +2205,26 @@ mod tests {
     }
 
     #[test]
-    fn extraction_exhausted_fails() {
+    fn extraction_validation_failed_retries_when_attempts_remain() {
+        let mut auth = authority_at_draining_boundary_terminal();
+        auth.apply(TurnExecutionInput::EnterExtraction {
+            run_id: test_run_id(),
+            max_retries: 2,
+        })
+        .expect("enter extraction");
+
+        let t = auth
+            .apply(TurnExecutionInput::ExtractionValidationFailed {
+                run_id: test_run_id(),
+                error: "bad json".into(),
+            })
+            .expect("validation failed with retries remaining");
+        assert_eq!(t.next_phase, TurnPhase::CallingLlm);
+        assert_eq!(auth.extraction_attempts(), 1);
+    }
+
+    #[test]
+    fn extraction_validation_failed_exhausts_when_no_retries_remain() {
         let mut auth = authority_at_draining_boundary_terminal();
         auth.apply(TurnExecutionInput::EnterExtraction {
             run_id: test_run_id(),
@@ -2192,9 +2232,11 @@ mod tests {
         })
         .expect("enter extraction");
 
+        // First failure: attempts goes 0→1, which equals max_retries (1) → exhausted
         let t = auth
-            .apply(TurnExecutionInput::ExtractionExhausted {
+            .apply(TurnExecutionInput::ExtractionValidationFailed {
                 run_id: test_run_id(),
+                error: "bad json".into(),
             })
             .expect("exhausted");
         assert_eq!(t.next_phase, TurnPhase::Failed);
@@ -2222,13 +2264,13 @@ mod tests {
         .expect("enter");
         assert_eq!(auth.phase(), TurnPhase::Extracting);
 
-        // First retry -> CallingLlm
-        auth.apply(TurnExecutionInput::ExtractionRetry {
+        // Start extraction -> CallingLlm
+        auth.apply(TurnExecutionInput::ExtractionStart {
             run_id: rid.clone(),
         })
-        .expect("retry 1");
+        .expect("start");
         assert_eq!(auth.phase(), TurnPhase::CallingLlm);
-        assert_eq!(auth.extraction_attempts(), 1);
+        assert_eq!(auth.extraction_attempts(), 0);
 
         // LLM returns terminal -> DrainingBoundary
         auth.apply(TurnExecutionInput::LlmReturnedTerminal {
@@ -2244,16 +2286,17 @@ mod tests {
         })
         .expect("re-enter");
         assert_eq!(auth.phase(), TurnPhase::Extracting);
-        // Attempts preserved (not reset)
-        assert_eq!(auth.extraction_attempts(), 1);
+        // Attempts preserved (not reset by re-enter)
+        assert_eq!(auth.extraction_attempts(), 0);
 
-        // Second retry -> CallingLlm
-        auth.apply(TurnExecutionInput::ExtractionRetry {
+        // Validation failed (first failure) -> retry -> CallingLlm
+        auth.apply(TurnExecutionInput::ExtractionValidationFailed {
             run_id: rid.clone(),
+            error: "bad json".into(),
         })
-        .expect("retry 2");
+        .expect("validation failed");
         assert_eq!(auth.phase(), TurnPhase::CallingLlm);
-        assert_eq!(auth.extraction_attempts(), 2);
+        assert_eq!(auth.extraction_attempts(), 1);
 
         // LLM returns terminal -> DrainingBoundary
         auth.apply(TurnExecutionInput::LlmReturnedTerminal {

@@ -281,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn catalog_keeps_live_mcp_route_descriptions() {
         let catalog = rest_path_catalog();
         let mcp_add = catalog

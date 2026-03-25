@@ -343,7 +343,7 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
         }
         let id = request.id.clone()?;
         let request_key = request_key(&id);
-        let publish_on_success = request.method == "session/create";
+        let publish_on_success = request_commits_state_on_success(request);
         let context = self
             .request_executor
             .begin_request(request_key.clone(), noop_request_action());
@@ -426,7 +426,7 @@ fn request_cancel_target(params: Option<&serde_json::value::RawValue>) -> Option
     let params = params?;
     let value: serde_json::Value = serde_json::from_str(params.get()).ok()?;
     let request_id = value.get("request_id")?;
-    Some(serde_json::to_string(request_id).ok()?)
+    serde_json::to_string(request_id).ok()
 }
 
 fn request_cancelled_response(id: Option<RpcId>) -> RpcResponse {
@@ -438,6 +438,14 @@ fn request_cancelled_response(id: Option<RpcId>) -> RpcResponse {
 }
 
 fn request_requires_long_running_executor(request: &RpcRequest) -> bool {
+    match request.method.as_str() {
+        "turn/start" => true,
+        "session/create" => session_create_runs_immediately(request.params.as_deref()),
+        _ => false,
+    }
+}
+
+fn request_commits_state_on_success(request: &RpcRequest) -> bool {
     match request.method.as_str() {
         "turn/start" => true,
         "session/create" => session_create_runs_immediately(request.params.as_deref()),
@@ -496,19 +504,25 @@ pub async fn serve_stdio_with_skill_runtime(
 mod tests {
     use super::*;
 
+    fn raw_params(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
+        let raw = serde_json::value::to_raw_value(&value);
+        assert!(raw.is_ok(), "raw params should serialize: {raw:?}");
+        match raw {
+            Ok(raw) => raw,
+            Err(_) => unreachable!("assert above"),
+        }
+    }
+
     #[test]
     fn deferred_session_create_uses_simple_path() {
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(RpcId::Num(1)),
             method: "session/create".to_string(),
-            params: Some(
-                serde_json::value::to_raw_value(&serde_json::json!({
-                    "prompt": "hello",
-                    "initial_turn": "deferred"
-                }))
-                .expect("raw params"),
-            ),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "hello",
+                "initial_turn": "deferred"
+            }))),
         };
 
         assert!(!request_requires_long_running_executor(&request));
@@ -520,14 +534,31 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             id: Some(RpcId::Num(1)),
             method: "session/create".to_string(),
-            params: Some(
-                serde_json::value::to_raw_value(&serde_json::json!({
-                    "prompt": "hello"
-                }))
-                .expect("raw params"),
-            ),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "hello"
+            }))),
         };
 
         assert!(request_requires_long_running_executor(&request));
+    }
+
+    #[test]
+    fn turn_start_is_publish_on_success() {
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(1)),
+            method: "turn/start".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "hello"
+            }))),
+        };
+
+        assert!(request_commits_state_on_success(&request));
+        let response = RpcResponse::success(request.id.clone(), serde_json::json!({"ok": true}));
+        assert!(matches!(
+            classify_long_running_response(&response, request_commits_state_on_success(&request)),
+            RequestTerminal::Publish(_)
+        ));
     }
 }

@@ -273,6 +273,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     let original_metadata = SessionMetadata {
         model: "claude-sonnet-4-5".to_string(),
         max_tokens: 4096,
+        structured_output_retries: 2,
         provider: Provider::Anthropic,
         provider_params: Some(json!({
             "reasoning": { "budget_tokens": 2048 }
@@ -341,6 +342,82 @@ async fn build_agent_with_resume_uses_stored_metadata() {
 }
 
 #[tokio::test]
+async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: Some(json!({
+                "reasoning": { "budget_tokens": 2048 }
+            })),
+            tooling: SessionTooling {
+                builtins: false,
+                shell: false,
+                comms: false,
+                mob: false,
+                memory: false,
+                active_skills: None,
+            },
+            keep_alive: true,
+            comms_name: Some("persisted-name".to_string()),
+            peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "persisted")),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session),
+        provider: Some(Provider::OpenAI),
+        max_tokens: Some(1024),
+        provider_params: Some(json!({ "temperature": 0.1 })),
+        keep_alive: false,
+        comms_name: Some("explicit-name".to_string()),
+        peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "explicit")),
+        ..AgentBuildConfig::new("gpt-5.2")
+    };
+    build_config.resume_override_mask.provider = true;
+    build_config.resume_override_mask.max_tokens = true;
+    build_config.resume_override_mask.provider_params = true;
+    build_config.resume_override_mask.keep_alive = true;
+    build_config.resume_override_mask.comms_name = true;
+    build_config.resume_override_mask.peer_meta = true;
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+
+    assert_eq!(metadata.model, "claude-sonnet-4-5");
+    assert_eq!(metadata.provider, Provider::OpenAI);
+    assert_eq!(metadata.max_tokens, 1024);
+    assert_eq!(
+        metadata.provider_params,
+        Some(json!({ "temperature": 0.1 }))
+    );
+    assert!(!metadata.keep_alive);
+    assert_eq!(metadata.comms_name.as_deref(), Some("explicit-name"));
+    assert_eq!(
+        metadata
+            .peer_meta
+            .as_ref()
+            .and_then(|meta| meta.labels.get("role")),
+        Some(&"explicit".to_string())
+    );
+}
+
+#[tokio::test]
 async fn build_agent_with_resume_preserves_persisted_system_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
@@ -353,6 +430,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
@@ -405,6 +483,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
@@ -480,6 +559,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
@@ -800,6 +880,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".into(),
             max_tokens: 2048,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {

@@ -24,7 +24,6 @@
 //! ```
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
-use meerkat_core::service::SessionServiceCommsExt;
 use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
 use meerkat_mob::{
     MeerkatId, MobBuilder, MobDefinition, MobHandle, MobId, MobMemberStatus, MobRuntimeMode,
@@ -268,7 +267,7 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
         let members = handle.list_members().await;
         let active_count = members
             .iter()
-            .filter(|m| matches!(m.status, MobMemberStatus::Active { .. }))
+            .filter(|m| matches!(m.status, MobMemberStatus::Active))
             .count();
         if active_count == 4 {
             return Ok(());
@@ -295,48 +294,45 @@ async fn wait_for_artist_verdict(
         if let Some(artist) = members
             .iter()
             .find(|m| m.meerkat_id == MeerkatId::from("artist"))
+            && let Some(sid) = artist.session_id()
+            && let Ok(page) = service
+                .read_history(
+                    sid,
+                    meerkat_core::SessionHistoryQuery {
+                        offset: 0,
+                        limit: None,
+                    },
+                )
+                .await
         {
-            if let Some(sid) = artist.session_id() {
-                if let Ok(page) = service
-                    .read_history(
-                        sid,
-                        meerkat_core::SessionHistoryQuery {
-                            offset: 0,
-                            limit: None,
-                        },
-                    )
-                    .await
-                {
-                    for msg in page.messages.iter().rev() {
-                        let text = match msg {
-                            meerkat_core::types::Message::Assistant(a) => &a.content,
-                            meerkat_core::types::Message::BlockAssistant(ba) => {
-                                // Check text blocks — must start with verdict
-                                // but NOT "CORRECT or WRONG" (instruction echo).
-                                let has_verdict = ba.blocks.iter().any(|b| match b {
-                                    meerkat_core::types::AssistantBlock::Text { text, .. } => {
-                                        let t = text.trim();
-                                        t.starts_with(verdict)
-                                            && !t.starts_with("CORRECT or")
-                                            && !t.starts_with("WRONG or")
-                                    }
-                                    _ => false,
-                                });
-                                if has_verdict {
-                                    return true;
-                                }
-                                continue;
+            for msg in page.messages.iter().rev() {
+                let text = match msg {
+                    meerkat_core::types::Message::Assistant(a) => &a.content,
+                    meerkat_core::types::Message::BlockAssistant(ba) => {
+                        // Check text blocks — must start with verdict
+                        // but NOT "CORRECT or WRONG" (instruction echo).
+                        let has_verdict = ba.blocks.iter().any(|b| match b {
+                            meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                                let t = text.trim();
+                                t.starts_with(verdict)
+                                    && !t.starts_with("CORRECT or")
+                                    && !t.starts_with("WRONG or")
                             }
-                            _ => continue,
-                        };
-                        let t = text.trim();
-                        if t.starts_with(verdict)
-                            && !t.starts_with("CORRECT or")
-                            && !t.starts_with("WRONG or")
-                        {
+                            _ => false,
+                        });
+                        if has_verdict {
                             return true;
                         }
+                        continue;
                     }
+                    _ => continue,
+                };
+                let t = text.trim();
+                if t.starts_with(verdict)
+                    && !t.starts_with("CORRECT or")
+                    && !t.starts_with("WRONG or")
+                {
+                    return true;
                 }
             }
         }
@@ -345,61 +341,6 @@ async fn wait_for_artist_verdict(
         }
         sleep(Duration::from_secs(2)).await;
     }
-}
-
-/// Check if any member's history contains a needle.
-async fn history_contains(
-    handle: &MobHandle,
-    service: &dyn MobSessionService,
-    needle: &str,
-) -> bool {
-    let members = handle.list_members().await;
-    for member in &members {
-        let Some(session_id) = member.session_id() else {
-            continue;
-        };
-        if let Ok(page) = service
-            .read_history(
-                session_id,
-                meerkat_core::SessionHistoryQuery {
-                    offset: 0,
-                    limit: None,
-                },
-            )
-            .await
-        {
-            // Use text projection instead of full JSON serialization to avoid
-            // serializing multi-MB base64 image data on every poll.
-            let blob: String = page
-                .messages
-                .iter()
-                .map(|m| match m {
-                    meerkat_core::types::Message::Assistant(a) => a.content.clone(),
-                    meerkat_core::types::Message::BlockAssistant(ba) => ba
-                        .blocks
-                        .iter()
-                        .map(|b| match b {
-                            meerkat_core::types::AssistantBlock::Text { text, .. } => text.clone(),
-                            meerkat_core::types::AssistantBlock::ToolUse { args, .. } => {
-                                args.get().to_string()
-                            }
-                            _ => String::new(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    meerkat_core::types::Message::User(u) => {
-                        meerkat_core::types::text_content(&u.content)
-                    }
-                    _ => String::new(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if blob.to_lowercase().contains(&needle.to_lowercase()) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Dump the cross-agent conversation for a round.
@@ -465,23 +406,19 @@ async fn print_conversation(
                                 args,
                                 ..
                             } => {
-                                if tool_name == "send" {
-                                    if let Ok(v) =
+                                if tool_name == "send"
+                                    && let Ok(v) =
                                         serde_json::from_str::<serde_json::Value>(args.get())
-                                    {
-                                        let peer = v
-                                            .get("to")
-                                            .or_else(|| v.get("peer"))
-                                            .and_then(|p| p.as_str())
-                                            .unwrap_or("?");
-                                        let body =
-                                            v.get("body").and_then(|b| b.as_str()).unwrap_or("");
-                                        let kind = v
-                                            .get("kind")
-                                            .and_then(|k| k.as_str())
-                                            .unwrap_or("message");
-                                        parts.push(format!("[send {kind} → {peer}] {body}"));
-                                    }
+                                {
+                                    let peer = v
+                                        .get("to")
+                                        .or_else(|| v.get("peer"))
+                                        .and_then(|p| p.as_str())
+                                        .unwrap_or("?");
+                                    let body = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
+                                    let kind =
+                                        v.get("kind").and_then(|k| k.as_str()).unwrap_or("message");
+                                    parts.push(format!("[send {kind} → {peer}] {body}"));
                                 }
                             }
                             _ => {}
@@ -526,24 +463,6 @@ async fn print_conversation(
     println!();
 }
 
-async fn wait_for(
-    handle: &MobHandle,
-    service: &dyn MobSessionService,
-    needle: &str,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if history_contains(handle, service, needle).await {
-            return true;
-        }
-        if Instant::now() > deadline {
-            return false;
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The test
 // ---------------------------------------------------------------------------
@@ -551,6 +470,12 @@ async fn wait_for(
 #[tokio::test]
 #[ignore = "e2e: live API (Gemini image gen + Claude/Gemini/GPT multimodal + mob comms)"]
 async fn e2e_pictionary_multimodal_comms_stress() {
+    // Init tracing so RUST_LOG output is visible.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+
     // Check all 3 provider keys
     if first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]).is_none() {
         eprintln!("Skipping: ANTHROPIC_API_KEY not set");
@@ -585,8 +510,6 @@ async fn e2e_pictionary_multimodal_comms_stress() {
     ];
 
     let mut passed = 0;
-    let mut msg_offset = 0usize; // track where previous round ended
-
     for (round_idx, (secret_word, label)) in rounds.iter().enumerate() {
         println!("--- {label}: \"{secret_word}\" ---");
 
@@ -599,9 +522,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         let (img_data, mime) = match generate_image(&gemini_key, &gen_prompt).await {
             Ok(r) => r,
             Err(e) => {
-                if round_idx == 0 {
-                    panic!("Round 1 image generation failed — cannot validate pipeline: {e}");
-                }
+                assert!(
+                    round_idx != 0,
+                    "Round 1 image generation failed — cannot validate pipeline: {e}"
+                );
                 eprintln!("  Image gen failed: {e} — skipping round");
                 continue;
             }
@@ -681,84 +605,75 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             if let Some(ga) = members
                 .iter()
                 .find(|m| m.meerkat_id == MeerkatId::from("guesser-a"))
+                && let Some(sid) = ga.session_id()
+                && let Ok(page) = service
+                    .read_history(
+                        sid,
+                        meerkat_core::SessionHistoryQuery {
+                            offset: 0,
+                            limit: None,
+                        },
+                    )
+                    .await
             {
-                if let Some(sid) = ga.session_id() {
-                    if let Ok(page) = service
-                        .read_history(
-                            sid,
-                            meerkat_core::SessionHistoryQuery {
-                                offset: 0,
-                                limit: None,
-                            },
-                        )
-                        .await
-                    {
-                        println!(
-                            "\n  === DEBUG: guesser-a raw history ({} messages) ===",
-                            page.messages.len()
-                        );
-                        for (i, msg) in page.messages.iter().enumerate() {
-                            let (role, summary) = match msg {
-                                meerkat_core::types::Message::System(s) => {
-                                    ("system", format!("[{}B]", s.content.len()))
-                                }
-                                meerkat_core::types::Message::User(u) => {
-                                    let has_img = meerkat_core::has_images(&u.content);
-                                    let text = meerkat_core::types::text_content(&u.content);
-                                    let preview: String = text.chars().take(120).collect();
-                                    (
-                                        "user",
-                                        format!(
-                                            "blocks={} has_img={has_img} text={preview}",
-                                            u.content.len()
-                                        ),
-                                    )
-                                }
-                                meerkat_core::types::Message::Assistant(a) => {
-                                    let preview: String = a.content.chars().take(120).collect();
-                                    (
-                                        "assistant",
-                                        format!("tools={} text={preview}", a.tool_calls.len()),
-                                    )
-                                }
-                                meerkat_core::types::Message::BlockAssistant(ba) => {
-                                    let text_blocks = ba
-                                        .blocks
-                                        .iter()
-                                        .filter(|b| {
-                                            matches!(
-                                                b,
-                                                meerkat_core::types::AssistantBlock::Text { .. }
-                                            )
-                                        })
-                                        .count();
-                                    let tool_blocks = ba
-                                        .blocks
-                                        .iter()
-                                        .filter(|b| {
-                                            matches!(
-                                                b,
-                                                meerkat_core::types::AssistantBlock::ToolUse { .. }
-                                            )
-                                        })
-                                        .count();
-                                    (
-                                        "block_assistant",
-                                        format!(
-                                            "blocks={} text={text_blocks} tool_use={tool_blocks}",
-                                            ba.blocks.len()
-                                        ),
-                                    )
-                                }
-                                meerkat_core::types::Message::ToolResults { results } => {
-                                    ("tool_results", format!("count={}", results.len()))
-                                }
-                            };
-                            println!("    [{i}] {role}: {summary}");
+                println!(
+                    "\n  === DEBUG: guesser-a raw history ({} messages) ===",
+                    page.messages.len()
+                );
+                for (i, msg) in page.messages.iter().enumerate() {
+                    let (role, summary) = match msg {
+                        meerkat_core::types::Message::System(s) => {
+                            ("system", format!("[{}B]", s.content.len()))
                         }
-                        println!("  === END DEBUG ===\n");
-                    }
+                        meerkat_core::types::Message::User(u) => {
+                            let has_img = meerkat_core::has_images(&u.content);
+                            let text = meerkat_core::types::text_content(&u.content);
+                            let preview: String = text.chars().take(120).collect();
+                            (
+                                "user",
+                                format!(
+                                    "blocks={} has_img={has_img} text={preview}",
+                                    u.content.len()
+                                ),
+                            )
+                        }
+                        meerkat_core::types::Message::Assistant(a) => {
+                            let preview: String = a.content.chars().take(120).collect();
+                            (
+                                "assistant",
+                                format!("tools={} text={preview}", a.tool_calls.len()),
+                            )
+                        }
+                        meerkat_core::types::Message::BlockAssistant(ba) => {
+                            let text_blocks = ba
+                                .blocks
+                                .iter()
+                                .filter(|b| {
+                                    matches!(b, meerkat_core::types::AssistantBlock::Text { .. })
+                                })
+                                .count();
+                            let tool_blocks = ba
+                                .blocks
+                                .iter()
+                                .filter(|b| {
+                                    matches!(b, meerkat_core::types::AssistantBlock::ToolUse { .. })
+                                })
+                                .count();
+                            (
+                                "block_assistant",
+                                format!(
+                                    "blocks={} text={text_blocks} tool_use={tool_blocks}",
+                                    ba.blocks.len()
+                                ),
+                            )
+                        }
+                        meerkat_core::types::Message::ToolResults { results } => {
+                            ("tool_results", format!("count={}", results.len()))
+                        }
+                    };
+                    println!("    [{i}] {role}: {summary}");
                 }
+                println!("  === END DEBUG ===\n");
             }
         }
         // Look for the artist's verdict. The artist's response should
@@ -771,11 +686,11 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             Duration::from_secs(120),
         )
         .await;
-        let got_wrong = if !got_correct {
+        let got_wrong = if got_correct {
+            false
+        } else {
             wait_for_artist_verdict(&handle, service.as_ref(), "WRONG", Duration::from_secs(5))
                 .await
-        } else {
-            false
         };
 
         if got_correct {
@@ -791,12 +706,11 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         print_conversation(&handle, service.as_ref(), 0).await;
 
         // Round 1 (easy) must pass to validate the pipeline works
-        if round_idx == 0 && !got_correct {
-            panic!(
-                "Round 1 (\"{secret_word}\") must pass — \
-                 validates multimodal + comms pipeline"
-            );
-        }
+        assert!(
+            round_idx != 0 || got_correct,
+            "Round 1 (\"{secret_word}\") must pass — \
+             validates multimodal + comms pipeline"
+        );
         println!();
     }
 

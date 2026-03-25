@@ -507,6 +507,8 @@ pub struct SessionMeta {
 pub struct SessionMetadata {
     pub model: String,
     pub max_tokens: u32,
+    #[serde(default = "default_structured_output_retries")]
+    pub structured_output_retries: u32,
     pub provider: Provider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
@@ -529,6 +531,10 @@ pub struct SessionMetadata {
     /// Config generation used when this session was created/resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_generation: Option<u64>,
+}
+
+fn default_structured_output_retries() -> u32 {
+    2
 }
 
 /// Canonical durable LLM identity for a session.

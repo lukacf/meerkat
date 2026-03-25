@@ -289,6 +289,8 @@ pub struct AgentBuildConfig {
     /// - `Disabled`: explicitly disable call timeout regardless of profile
     /// - `Value(d)`: explicitly set call timeout to `d`
     pub call_timeout_override: meerkat_core::CallTimeoutOverride,
+    /// Typed explicit-override intent for resumed-session metadata merges.
+    pub resume_override_mask: meerkat_core::service::ResumeOverrideMask,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -307,6 +309,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("output_schema", &self.output_schema.is_some())
             .field("structured_output_retries", &self.structured_output_retries)
             .field("keep_alive", &self.keep_alive)
+            .field("resume_override_mask", &self.resume_override_mask)
             .field("comms_name", &self.comms_name)
             .field("peer_meta", &self.peer_meta)
             .field("resume_session", &self.resume_session.is_some())
@@ -393,6 +396,7 @@ impl AgentBuildConfig {
             shell_env: None,
             checkpointer: None,
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
+            resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
         }
     }
 
@@ -445,6 +449,7 @@ impl AgentBuildConfig {
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
         self.call_timeout_override = build.call_timeout_override.clone();
+        self.resume_override_mask = build.resume_override_mask;
     }
 
     /// Convert build options to the service transport representation.
@@ -482,6 +487,7 @@ impl AgentBuildConfig {
             shell_env: self.shell_env.clone(),
             checkpointer: self.checkpointer.clone(),
             call_timeout_override: self.call_timeout_override.clone(),
+            resume_override_mask: self.resume_override_mask,
         }
     }
 }
@@ -782,18 +788,47 @@ impl AgentFactory {
             .as_ref()
             .and_then(Session::session_metadata)?;
 
-        build_config.model = metadata.model.clone();
-        build_config.max_tokens = Some(metadata.max_tokens);
-        build_config.provider = Some(metadata.provider);
-        build_config.provider_params = metadata.provider_params.clone();
-        build_config.override_builtins = Some(metadata.tooling.builtins);
-        build_config.override_shell = Some(metadata.tooling.shell);
-        build_config.override_memory = Some(metadata.tooling.memory);
-        build_config.override_mob = Some(metadata.tooling.mob);
-        build_config.preload_skills = metadata.tooling.active_skills.clone();
-        build_config.keep_alive = metadata.keep_alive;
-        build_config.comms_name = metadata.comms_name.clone();
-        build_config.peer_meta = metadata.peer_meta.clone();
+        let mask = build_config.resume_override_mask;
+
+        if !mask.model {
+            build_config.model = metadata.model.clone();
+        }
+        if !mask.max_tokens {
+            build_config.max_tokens = Some(metadata.max_tokens);
+        }
+        if !mask.structured_output_retries {
+            build_config.structured_output_retries = metadata.structured_output_retries;
+        }
+        if !mask.provider {
+            build_config.provider = Some(metadata.provider);
+        }
+        if !mask.provider_params {
+            build_config.provider_params = metadata.provider_params.clone();
+        }
+        if !mask.override_builtins {
+            build_config.override_builtins = Some(metadata.tooling.builtins);
+        }
+        if !mask.override_shell {
+            build_config.override_shell = Some(metadata.tooling.shell);
+        }
+        if !mask.override_memory {
+            build_config.override_memory = Some(metadata.tooling.memory);
+        }
+        if !mask.override_mob {
+            build_config.override_mob = Some(metadata.tooling.mob);
+        }
+        if !mask.preload_skills {
+            build_config.preload_skills = metadata.tooling.active_skills.clone();
+        }
+        if !mask.keep_alive {
+            build_config.keep_alive = metadata.keep_alive;
+        }
+        if !mask.comms_name {
+            build_config.comms_name = metadata.comms_name.clone();
+        }
+        if !mask.peer_meta {
+            build_config.peer_meta = metadata.peer_meta.clone();
+        }
 
         Some(metadata)
     }
@@ -1820,6 +1855,7 @@ impl AgentFactory {
         let metadata = if let Some(mut metadata) = resumed_session_metadata {
             metadata.model = model;
             metadata.max_tokens = max_tokens;
+            metadata.structured_output_retries = build_config.structured_output_retries;
             metadata.provider = provider;
             metadata.provider_params = build_config.provider_params;
             metadata.tooling.builtins = effective_builtins;
@@ -1839,6 +1875,7 @@ impl AgentFactory {
             SessionMetadata {
                 model,
                 max_tokens,
+                structured_output_retries: build_config.structured_output_retries,
                 provider,
                 provider_params: build_config.provider_params,
                 tooling: SessionTooling {

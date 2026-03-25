@@ -85,6 +85,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
     let metadata = meerkat_core::SessionMetadata {
         model: "claude-test".to_string(),
         max_tokens: 1234,
+        structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
         provider_params: None,
         tooling: meerkat_core::SessionTooling {
@@ -249,6 +250,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
     let metadata = meerkat_core::SessionMetadata {
         model: "model-x".to_string(),
         max_tokens: 999,
+        structured_output_retries: 2,
         provider: meerkat_core::Provider::OpenAI,
         provider_params: None,
         tooling: meerkat_core::SessionTooling::default(),

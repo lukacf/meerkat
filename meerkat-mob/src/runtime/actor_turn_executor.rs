@@ -442,67 +442,6 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ActorFlowTurnExecutor;
-    use crate::ids::RunId;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex;
-
-    #[test]
-    fn test_release_orphan_slot_caps_at_max_budget() {
-        let budget = AtomicUsize::new(2);
-        ActorFlowTurnExecutor::release_orphan_slot(&budget, 2);
-        assert_eq!(
-            budget.load(Ordering::Acquire),
-            2,
-            "release should be capped at configured max budget"
-        );
-    }
-
-    #[test]
-    fn test_release_orphan_slot_increments_when_below_max() {
-        let budget = AtomicUsize::new(1);
-        ActorFlowTurnExecutor::release_orphan_slot(&budget, 2);
-        assert_eq!(
-            budget.load(Ordering::Acquire),
-            2,
-            "release should increment when a slot is available"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reconcile_detached_turn_releases_budget_when_bridge_panics() {
-        let run_id = RunId::new();
-        let budget = Arc::new(AtomicUsize::new(0));
-        let per_run_orphans = Arc::new(Mutex::new(BTreeMap::from([(run_id.clone(), 1usize)])));
-        let bridge_handle = tokio::spawn(async move {
-            panic!("detached bridge panic");
-        });
-
-        ActorFlowTurnExecutor::reconcile_detached_turn(
-            bridge_handle,
-            budget.clone(),
-            1,
-            per_run_orphans.clone(),
-            run_id.clone(),
-        )
-        .await;
-
-        assert_eq!(
-            budget.load(Ordering::Acquire),
-            1,
-            "detached panic path should release one global orphan budget slot"
-        );
-        assert!(
-            !per_run_orphans.lock().await.contains_key(&run_id),
-            "detached panic path should release per-run orphan accounting"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // CoreExecutor for mob AutonomousHost comms drain
 // ---------------------------------------------------------------------------
@@ -636,5 +575,66 @@ impl CoreExecutor for MobActorCoreExecutor {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActorFlowTurnExecutor;
+    use crate::ids::RunId;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn test_release_orphan_slot_caps_at_max_budget() {
+        let budget = AtomicUsize::new(2);
+        ActorFlowTurnExecutor::release_orphan_slot(&budget, 2);
+        assert_eq!(
+            budget.load(Ordering::Acquire),
+            2,
+            "release should be capped at configured max budget"
+        );
+    }
+
+    #[test]
+    fn test_release_orphan_slot_increments_when_below_max() {
+        let budget = AtomicUsize::new(1);
+        ActorFlowTurnExecutor::release_orphan_slot(&budget, 2);
+        assert_eq!(
+            budget.load(Ordering::Acquire),
+            2,
+            "release should increment when a slot is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_detached_turn_releases_budget_when_bridge_panics() {
+        let run_id = RunId::new();
+        let budget = Arc::new(AtomicUsize::new(0));
+        let per_run_orphans = Arc::new(Mutex::new(BTreeMap::from([(run_id.clone(), 1usize)])));
+        let bridge_handle = tokio::spawn(async move {
+            panic!("detached bridge panic");
+        });
+
+        ActorFlowTurnExecutor::reconcile_detached_turn(
+            bridge_handle,
+            budget.clone(),
+            1,
+            per_run_orphans.clone(),
+            run_id.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            budget.load(Ordering::Acquire),
+            1,
+            "detached panic path should release one global orphan budget slot"
+        );
+        assert!(
+            !per_run_orphans.lock().await.contains_key(&run_id),
+            "detached panic path should release per-run orphan accounting"
+        );
     }
 }

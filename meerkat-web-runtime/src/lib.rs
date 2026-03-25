@@ -1433,7 +1433,7 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     } else {
         serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
     };
-    let (session_service, session_id, run_id, keep_alive) = with_runtime_state_mut(|state| {
+    let (session_service, session_id, run_id, _keep_alive) = with_runtime_state_mut(|state| {
         let session = state
             .sessions
             .get_mut(&handle)

@@ -214,10 +214,7 @@ async fn wait_for_history_contains_all(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {:?} in history of {}.\ncurrent history: {}",
-            needles,
-            session_id,
-            blob
+            "timed out waiting for {needles:?} in history of {session_id}.\ncurrent history: {blob}"
         );
         sleep(Duration::from_millis(500)).await;
     }
@@ -249,10 +246,7 @@ async fn send_and_wait(
 async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
     let model = smoke_model();
     if !has_key_for_smoke_model(&model) {
-        eprintln!(
-            "Skipping mob partial-resume smoke: no matching API key for model {}",
-            model
-        );
+        eprintln!("Skipping mob partial-resume smoke: no matching API key for model {model}");
         return;
     }
 

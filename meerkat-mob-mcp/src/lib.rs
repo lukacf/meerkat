@@ -1980,7 +1980,7 @@ mod tests {
         async fn start_turn(
             &self,
             id: &SessionId,
-            req: StartTurnRequest,
+            _req: StartTurnRequest,
         ) -> Result<RunResult, SessionError> {
             if !self.sessions.read().await.contains_key(id) {
                 return Err(SessionError::NotFound { id: id.clone() });
@@ -2251,6 +2251,7 @@ mod tests {
                 &session_id,
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
+                    system_prompt: None,
                     render_metadata: None,
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
@@ -2433,6 +2434,7 @@ mod tests {
                 &session_id,
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
+                    system_prompt: None,
                     render_metadata: None,
                     handling_mode: HandlingMode::Queue,
                     event_tx: None,
@@ -2518,6 +2520,7 @@ mod tests {
         let _ = spoofed.set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
@@ -2551,6 +2554,7 @@ mod tests {
         let _ = persisted.set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
@@ -2589,6 +2593,7 @@ mod tests {
         let _ = persisted.set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".to_string(),
             max_tokens: 4096,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {

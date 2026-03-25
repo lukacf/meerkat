@@ -61,6 +61,7 @@ tempfile = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
 reqwest = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 
 [features]

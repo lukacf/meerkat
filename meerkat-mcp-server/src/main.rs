@@ -136,10 +136,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
                 if id.is_none() {
-                    if method == "notifications/cancelled" {
-                        if let Some(target) = request_cancel_target(request.get("params")) {
-                            let _ = request_executor.cancel_request(&target).await;
-                        }
+                    if method == "notifications/cancelled"
+                        && let Some(target) = request_cancel_target(request.get("params"))
+                    {
+                        let _ = request_executor.cancel_request(&target).await;
                     }
                     continue;
                 }
@@ -178,7 +178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     "tools/call" => {
-                        let request_id = id.expect("validated request id");
+                        let Some(request_id) = id else {
+                            continue;
+                        };
                         let request_key = request_key(&request_id);
                         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
                         let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
@@ -238,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "id": request_id_for_task,
                                         "result": result
                                     });
-                                    if tool_name == "meerkat_run" {
+                                    if tool_call_commits_state_on_success(&tool_name) {
                                         RequestTerminal::Publish(response)
                                     } else {
                                         RequestTerminal::RespondWithoutPublish(response)
@@ -331,6 +333,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server_result
 }
 
+fn tool_call_commits_state_on_success(tool_name: &str) -> bool {
+    matches!(tool_name, "meerkat_run" | "meerkat_resume")
+}
+
 fn request_key(id: &Value) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| id.to_string())
 }
@@ -358,4 +364,16 @@ fn request_cancelled_response(id: Option<Value>) -> Value {
             "message": "request cancelled before response publish"
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meerkat_run_and_resume_publish_on_success() {
+        assert!(tool_call_commits_state_on_success("meerkat_run"));
+        assert!(tool_call_commits_state_on_success("meerkat_resume"));
+        assert!(!tool_call_commits_state_on_success("meerkat_sessions"));
+    }
 }

@@ -1845,9 +1845,10 @@ mod scenario_22_runtime_host_comms {
             if t >= 2 {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("Timeout: comms_drain → runtime ingress → executor never fired. turns={t}");
-            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "Timeout: comms_drain → runtime ingress → executor never fired. turns={t}"
+            );
         }
 
         let comms_elapsed = comms_inject_time.elapsed();

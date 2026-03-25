@@ -2487,11 +2487,11 @@ impl MobSessionService for PersistedListingSessionService {
     }
 
     async fn cancel_all_checkpointers(&self) {
-        self.inner.cancel_all_checkpointers().await
+        self.inner.cancel_all_checkpointers().await;
     }
 
     async fn rearm_all_checkpointers(&self) {
-        self.inner.rearm_all_checkpointers().await
+        self.inner.rearm_all_checkpointers().await;
     }
 }
 
@@ -2661,11 +2661,11 @@ impl MobSessionService for InactiveReadSessionService {
     }
 
     async fn cancel_all_checkpointers(&self) {
-        self.inner.cancel_all_checkpointers().await
+        self.inner.cancel_all_checkpointers().await;
     }
 
     async fn rearm_all_checkpointers(&self) {
-        self.inner.rearm_all_checkpointers().await
+        self.inner.rearm_all_checkpointers().await;
     }
 }
 
@@ -12657,7 +12657,7 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     let receipt = CoreCommsRuntime::send(
         &*comms_a,
         CommsCommand::PeerMessage {
-            to: PeerName::new(&test_comms_name("worker", "w-1")).expect("valid peer name"),
+            to: PeerName::new(test_comms_name("worker", "w-1")).expect("valid peer name"),
             body: "body: please inspect this image".to_string(),
             blocks: Some(vec![
                 meerkat_core::types::ContentBlock::Text {

@@ -27,6 +27,8 @@ nohup.out
 .release-hook-done
 .rct/
 test-project/
+.cache/
+.codemob-mcp/
 
 # Vendored deps (local symlink, not portable)
 vendor

@@ -18,7 +18,7 @@ use meerkat_core::service::{
     SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
+    AgentEvent, BlobId, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
     StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
@@ -3997,7 +3997,7 @@ async fn handle_blob_command(command: BlobCommands, scope: &RuntimeScope) -> any
             let (_manifest, persistence) = create_persistence_bundle(scope).await?;
             let payload = persistence
                 .blob_store()
-                .get(&meerkat::BlobId::new(blob_id))
+                .get(&BlobId::new(blob_id))
                 .await
                 .map_err(|err| anyhow::anyhow!(err.to_string()))?;
             if json {

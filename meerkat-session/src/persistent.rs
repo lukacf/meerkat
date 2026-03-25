@@ -8,11 +8,11 @@
 
 use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
+use meerkat_core::BlobStore;
 use meerkat_core::PendingSystemContextAppend;
 #[allow(unused_imports)] // Used in read() fallback path
 use meerkat_core::Session;
 use meerkat_core::SessionSystemContextState;
-use meerkat_core::BlobStore;
 use meerkat_core::image_content::externalize_messages_from;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{
@@ -107,7 +107,9 @@ impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
             return;
         }
         let mut persisted = session.clone();
-        if let Err(e) = externalize_messages_from(self.blob_store.as_ref(), persisted.messages_mut(), 0).await {
+        if let Err(e) =
+            externalize_messages_from(self.blob_store.as_ref(), persisted.messages_mut(), 0).await
+        {
             tracing::warn!("Host-mode checkpoint blob externalization failed: {e}");
             return;
         }
@@ -552,7 +554,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let run_result = self.inner.start_turn(id, req).await?;
 
         let session = self.export_session_with_labels(id).await?;
-        let persisted_session = self.normalized_session_for_persistence(session.clone()).await?;
+        let persisted_session = self
+            .normalized_session_for_persistence(session.clone())
+            .await?;
         let session_snapshot = serde_json::to_vec(&persisted_session).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to serialize session snapshot for runtime commit: {err}"
@@ -675,7 +679,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         let session = self.export_session_with_labels(id).await?;
-        let persisted_session = self.normalized_session_for_persistence(session.clone()).await?;
+        let persisted_session = self
+            .normalized_session_for_persistence(session.clone())
+            .await?;
         let session_snapshot = serde_json::to_vec(&persisted_session).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to serialize session snapshot for runtime commit: {err}"
@@ -1287,8 +1293,8 @@ mod tests {
     use meerkat_core::types::{ContentBlock, ContentInput, ImageData, Message, UserMessage};
     use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
     use meerkat_runtime::InMemoryRuntimeStore;
-    use meerkat_store::{MemoryBlobStore, MemoryStore};
     use meerkat_store::StoreError;
+    use meerkat_store::{MemoryBlobStore, MemoryStore};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
@@ -1536,28 +1542,92 @@ mod tests {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            session.push(Message::User(UserMessage::with_blocks(prompt.into_blocks())));
+            session.push(Message::User(UserMessage::with_blocks(
+                prompt.into_blocks(),
+            )));
             session.push(Message::Assistant(meerkat_core::types::AssistantMessage {
                 content: "ok".to_string(),
                 tool_calls: vec![],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
                 usage: meerkat_core::types::Usage::default(),
             }));
-            Ok(RunResult::new("ok".to_string(), 1))
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: session.id().clone(),
+                usage: meerkat_core::types::Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
         }
 
-        async fn session_snapshot(&self) -> SessionSnapshot {
-            let session = match self.session.lock() {
-                Ok(guard) => guard.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
             };
-            let system_context_state = match self.system_context_state.lock() {
-                Ok(guard) => guard.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
+            let mut metadata =
+                session
+                    .session_metadata()
+                    .unwrap_or(meerkat_core::SessionMetadata {
+                        model: identity.model.clone(),
+                        max_tokens: 0,
+                        structured_output_retries: 2,
+                        provider: identity.provider,
+                        provider_params: identity.provider_params.clone(),
+                        tooling: meerkat_core::SessionTooling::default(),
+                        keep_alive: false,
+                        comms_name: None,
+                        peer_meta: None,
+                        realm_id: None,
+                        instance_id: None,
+                        backend: None,
+                        config_generation: None,
+                    });
+            metadata.apply_llm_identity(&identity);
+            session.set_session_metadata(metadata).map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update image-preserving session metadata: {err}"
+                ))
+            })
+        }
+
+        fn cancel(&mut self) {}
+
+        fn snapshot(&self) -> SessionSnapshot {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
             };
             SessionSnapshot {
-                session,
-                system_context_state,
+                created_at: session.created_at(),
+                updated_at: session.updated_at(),
+                message_count: session.messages().len(),
+                total_tokens: session.total_tokens(),
+                usage: session.total_usage(),
+                last_assistant_text: session.last_assistant_text(),
+            }
+        }
+
+        fn session_clone(&self) -> Session {
+            match self.session.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
             }
         }
 
@@ -1569,9 +1639,9 @@ mod tests {
             guard.id().clone()
         }
 
-        fn apply_system_context_blocks(
+        fn apply_runtime_system_context(
             &mut self,
-            appends: Vec<meerkat_core::PendingSystemContextAppend>,
+            appends: &[meerkat_core::PendingSystemContextAppend],
         ) {
             let mut guard = match self.session.lock() {
                 Ok(guard) => guard,
@@ -1929,7 +1999,7 @@ mod tests {
         let result = service
             .create_session(CreateSessionRequest {
                 prompt: image_prompt("create"),
-                ..create_request("ignored", InitialTurnPolicy::Run)
+                ..create_request("ignored", InitialTurnPolicy::RunImmediately)
             })
             .await
             .expect("create_session should succeed");
@@ -2032,7 +2102,10 @@ mod tests {
             .await
             .expect("apply_runtime_turn should succeed");
 
-        let runtime_id = super::PersistentSessionService::<ImagePreservingBuilder>::runtime_id_for_session(&created.session_id);
+        let runtime_id =
+            super::PersistentSessionService::<ImagePreservingBuilder>::runtime_id_for_session(
+                &created.session_id,
+            );
         let snapshot = runtime_store
             .load_session_snapshot(&runtime_id)
             .await

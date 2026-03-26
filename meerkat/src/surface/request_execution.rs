@@ -8,6 +8,8 @@ use futures::future::BoxFuture;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::{Session, SessionId};
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 #[cfg(target_arch = "wasm32")]

@@ -3133,9 +3133,9 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         #[cfg(all(feature = "comms", feature = "mob"))]
-        assert_eq!(tools.len(), 23 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 24 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
-        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 22 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(feature = "comms", not(feature = "mob")))]
         assert_eq!(tools.len(), 19);
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]

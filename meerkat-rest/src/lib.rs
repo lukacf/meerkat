@@ -287,13 +287,8 @@ impl AppState {
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
-        let mut session_service = PersistentSessionService::new(
-            builder,
-            100,
-            session_store,
-            runtime_store,
-            blob_store,
-        );
+        let mut session_service =
+            PersistentSessionService::new(builder, 100, session_store, runtime_store, blob_store);
         {
             let adapter = runtime_adapter.clone();
             session_service.set_ops_lifecycle_provider(Arc::new(move |session_id| {

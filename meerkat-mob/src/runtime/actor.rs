@@ -701,6 +701,7 @@ impl MobActor {
             ))
         })?;
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(adapter) = self.runtime_adapter.clone() {
             adapter.register_session(session_id.clone()).await;
             let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(

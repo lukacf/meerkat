@@ -12955,8 +12955,8 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     .expect("peer message should reach runtime apply path");
     let delivered_text = delivered.text_content();
     assert!(
-        delivered_text.contains("body: please inspect this image"),
-        "peer message body should survive runtime delivery: {delivered_text:?}"
+        delivered_text.contains("[COMMS MESSAGE from test-mob/lead/l-1]"),
+        "peer message should carry comms source label: {delivered_text:?}"
     );
     assert!(
         delivered_text.contains("caption: this block text should survive"),

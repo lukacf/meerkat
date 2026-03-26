@@ -3100,18 +3100,17 @@ async fn continue_session_inner(
                     "keep_alive requires a session created with comms_name".to_string(),
                 )));
             }
-            if keep_alive_override.is_some() {
-                if let Err(e) = state
+            if keep_alive_override.is_some()
+                && let Err(e) = state
                     .session_service
                     .update_session_keep_alive(&session_id, keep_alive)
                     .await
-                {
-                    drop(caller_event_tx);
-                    drain_event_forwarder(&session_id, forward_task).await;
-                    return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
-                        "failed to persist keep_alive: {e}"
-                    ))));
-                }
+            {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::Internal(format!(
+                    "failed to persist keep_alive: {e}"
+                ))));
             }
             adapter
                 .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)

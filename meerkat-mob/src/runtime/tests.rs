@@ -13764,10 +13764,13 @@ async fn test_reset_rejects_from_destroyed() {
     handle.destroy().await.expect("destroy");
     assert_eq!(handle.status(), MobState::Destroyed);
 
-    let result = handle.reset().await;
+    let err = handle
+        .reset()
+        .await
+        .expect_err("reset after destroy must fail");
     assert!(
-        matches!(result, Err(MobError::InvalidTransition { .. })),
-        "reset from Destroyed should fail with InvalidTransition"
+        matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
+        "reset after terminal destroy should fail because the actor is gone: {err:?}"
     );
 }
 

@@ -1800,7 +1800,7 @@ mod tests {
     #[async_trait]
     impl BlobStore for TestBlobStore {
         async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
-            let blob_id = BlobId::from(format!("sha256:test-{}-{}", media_type, data));
+            let blob_id = BlobId::from(format!("sha256:test-{media_type}-{data}"));
             let payload = BlobPayload {
                 blob_id: blob_id.clone(),
                 media_type: media_type.to_string(),

@@ -303,7 +303,8 @@ impl AnthropicClient {
                                         "text": text
                                     }),
                                     ContentBlock::Image {
-                                        media_type, data, ..
+                                        media_type,
+                                        data: ImageData::Inline { data },
                                     } => serde_json::json!({
                                         "type": "image",
                                         "source": {
@@ -311,6 +312,10 @@ impl AnthropicClient {
                                             "media_type": media_type,
                                             "data": data
                                         }
+                                    }),
+                                    ContentBlock::Image { .. } => serde_json::json!({
+                                        "type": "text",
+                                        "text": block.text_projection()
                                     }),
                                     _ => serde_json::json!({
                                         "type": "text",

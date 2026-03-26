@@ -129,6 +129,7 @@ impl PersistenceBundle {
     }
 
     #[cfg(feature = "session-store")]
+    #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
     ) -> (

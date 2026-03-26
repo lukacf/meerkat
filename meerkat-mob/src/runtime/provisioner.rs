@@ -599,7 +599,7 @@ impl MobProvisioner for SessionBackend {
                     .abort_member_provision(&session_id, operation_id, Some(reason.to_string()))
                     .await
             }
-            Some(OperationStatus::Running) | Some(OperationStatus::Retiring) => {
+            Some(OperationStatus::Running | OperationStatus::Retiring) => {
                 self.retire_member(member_ref).await
             }
             Some(

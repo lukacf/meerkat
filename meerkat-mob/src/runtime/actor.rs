@@ -697,34 +697,34 @@ impl MobActor {
     ) -> Result<(), MobError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-        let session_id = member_ref.session_id().ok_or_else(|| {
-            MobError::Internal(format!(
-                "autonomous member '{meerkat_id}' must be session-backed for runtime readiness"
-            ))
-        })?;
+            let session_id = member_ref.session_id().ok_or_else(|| {
+                MobError::Internal(format!(
+                    "autonomous member '{meerkat_id}' must be session-backed for runtime readiness"
+                ))
+            })?;
 
-        if let Some(adapter) = self.runtime_adapter.clone() {
-            adapter.register_session(session_id.clone()).await;
-            let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
-                Arc::clone(&self.session_service),
-                session_id.clone(),
-            ));
-            adapter
-                .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
+            if let Some(adapter) = self.runtime_adapter.clone() {
+                adapter.register_session(session_id.clone()).await;
+                let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
+                    Arc::clone(&self.session_service),
+                    session_id.clone(),
+                ));
+                adapter
+                    .ensure_session_with_executor(session_id.clone(), executor)
+                    .await;
 
-            let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
-            let spawned = adapter
-                .maybe_spawn_comms_drain(session_id, true, comms_runtime)
-                .await;
-            if spawned {
-                tracing::debug!(
-                    meerkat_id = %meerkat_id,
-                    session_id = %session_id,
-                    "spawned comms drain for autonomous member"
-                );
+                let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
+                let spawned = adapter
+                    .maybe_spawn_comms_drain(session_id, true, comms_runtime)
+                    .await;
+                if spawned {
+                    tracing::debug!(
+                        meerkat_id = %meerkat_id,
+                        session_id = %session_id,
+                        "spawned comms drain for autonomous member"
+                    );
+                }
             }
-        }
         } // cfg(not(wasm32))
 
         self.ensure_autonomous_dispatch_capability(meerkat_id, member_ref)

@@ -948,7 +948,10 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
     let store = Arc::new(HarnessRuntimeStore::delayed_recover(Duration::from_millis(
         75,
     )));
-    let adapter = Arc::new(RuntimeSessionAdapter::persistent(store, memory_blob_store()));
+    let adapter = Arc::new(RuntimeSessionAdapter::persistent(
+        store,
+        memory_blob_store(),
+    ));
     let sid = SessionId::new();
     let apply_called = Arc::new(AtomicBool::new(false));
 
@@ -1393,7 +1396,10 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = Arc::new(RuntimeSessionAdapter::persistent(store, memory_blob_store()));
+    let adapter = Arc::new(RuntimeSessionAdapter::persistent(
+        store,
+        memory_blob_store(),
+    ));
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
     adapter

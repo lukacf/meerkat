@@ -2671,7 +2671,8 @@ impl MobSessionService for InactiveReadSessionService {
 
 async fn create_test_mob_with_persistent_service(definition: MobDefinition) -> MobHandle {
     let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
     let service = Arc::new(meerkat_session::PersistentSessionService::new(
         PersistentMockBuilder,
         16,

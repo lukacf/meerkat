@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, ProviderMeta, StopReason,
-    Usage,
+    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, ProviderMeta, StopReason, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;

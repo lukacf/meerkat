@@ -17,15 +17,15 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::hydrate_content_blocks;
 use meerkat_core::comms::{
     CommsCommand, EventStream, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName,
     PeerReachabilityReason, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
     TrustedPeerSpec,
 };
 use meerkat_core::config::PlainEventSource;
-use meerkat_core::{BlobStore, MissingBlobBehavior};
+use meerkat_core::hydrate_content_blocks;
 use meerkat_core::time_compat::Instant;
+use meerkat_core::{BlobStore, MissingBlobBehavior};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
@@ -1779,8 +1779,7 @@ mod tests {
     use futures::StreamExt;
     use meerkat_core::event_injector::SubscribableInjector;
     use meerkat_core::{
-        BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError,
-        SendError,
+        BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
             InputSource, InputStreamMode, PeerDirectorySource, PeerName, PeerReachability,
             PeerReachabilityReason, StreamError, StreamScope, TrustedPeerSpec,

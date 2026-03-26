@@ -68,7 +68,9 @@ pub async fn externalize_messages_from(
 ) -> Result<(), BlobStoreError> {
     for msg in messages.iter_mut().skip(start) {
         match msg {
-            Message::User(user) => externalize_content_blocks(blob_store, &mut user.content).await?,
+            Message::User(user) => {
+                externalize_content_blocks(blob_store, &mut user.content).await?
+            }
             Message::ToolResults { results } => {
                 for result in results.iter_mut() {
                     externalize_content_blocks(blob_store, &mut result.content).await?;

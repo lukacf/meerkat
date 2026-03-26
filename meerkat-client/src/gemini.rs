@@ -202,14 +202,14 @@ impl GeminiClient {
                             for block in &r.content {
                                 if let ContentBlock::Image { media_type, data } = block {
                                     match data {
-                                        ImageData::Inline { data } => parts.push(
-                                            serde_json::json!({
+                                        ImageData::Inline { data } => {
+                                            parts.push(serde_json::json!({
                                                 "inlineData": {
                                                     "mimeType": media_type,
                                                     "data": data
                                                 }
-                                            }),
-                                        ),
+                                            }))
+                                        }
                                         ImageData::Blob { .. } => parts.push(serde_json::json!({
                                             "text": block.text_projection()
                                         })),

@@ -96,11 +96,8 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
         .await
         .expect("persist second applied state");
 
-    let mut driver = PersistentRuntimeDriver::new(
-        runtime_id.clone(),
-        Arc::clone(&store),
-        memory_blob_store(),
-    );
+    let mut driver =
+        PersistentRuntimeDriver::new(runtime_id.clone(), Arc::clone(&store), memory_blob_store());
     let report = driver.recover().await.expect("recover persistent driver");
     assert_eq!(
         report.inputs_recovered, 2,

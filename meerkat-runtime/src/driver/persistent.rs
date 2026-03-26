@@ -260,7 +260,9 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             && let Some(inner_state) = self.inner.input_state(input_id).cloned()
         {
             let mut input_for_recovery = input_for_recovery.clone();
-            if let Err(err) = externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await {
+            if let Err(err) =
+                externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await
+            {
                 self.forget_input(input_id);
                 return Err(RuntimeDriverError::Internal(format!(
                     "failed to externalize runtime input images: {err}"

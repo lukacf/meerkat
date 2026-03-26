@@ -33,6 +33,8 @@ pub use blob::MemoryBlobStore;
 pub use error::StoreError;
 
 #[cfg(not(target_arch = "wasm32"))]
+pub use blob::FsBlobStore;
+#[cfg(not(target_arch = "wasm32"))]
 pub use index::SessionIndex;
 #[cfg(not(target_arch = "wasm32"))]
 pub use realm::{
@@ -45,8 +47,6 @@ pub use realm::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use redb_store::RedbSessionStore;
-#[cfg(not(target_arch = "wasm32"))]
-pub use blob::FsBlobStore;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub use sqlite_store::SqliteSessionStore;
 

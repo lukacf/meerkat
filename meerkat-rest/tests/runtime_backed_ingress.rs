@@ -84,7 +84,13 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     let llm = Arc::new(FirstTurnOnlyClient::new());
     builder.default_llm_client = Some(llm.clone());
-    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store, None, Arc::new(meerkat_store::MemoryBlobStore::new())));
+    let session_service = Arc::new(PersistentSessionService::new(
+        builder,
+        100,
+        store,
+        None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    ));
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
         Arc::clone(&config_store_arc),

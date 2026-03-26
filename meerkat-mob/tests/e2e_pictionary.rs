@@ -554,7 +554,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
     let t = Instant::now();
     let (handle, service, _tmp) = setup_mob().await.expect("mob setup failed");
     spawn_and_wait(&handle).await.expect("member spawn failed");
-    println!("All 4 members active. [setup: {:.1}s]\n", t.elapsed().as_secs_f64());
+    println!(
+        "All 4 members active. [setup: {:.1}s]\n",
+        t.elapsed().as_secs_f64()
+    );
 
     let rounds = [
         ("lighthouse", "Round 1 — easy: concrete object"),
@@ -586,7 +589,11 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 continue;
             }
         };
-        println!("  Image: {} bytes ({mime}) [{:.1}s]", img_data.len(), t.elapsed().as_secs_f64());
+        println!(
+            "  Image: {} bytes ({mime}) [{:.1}s]",
+            img_data.len(),
+            t.elapsed().as_secs_f64()
+        );
 
         // 2. Brief the artist on the secret word
         let t = Instant::now();
@@ -764,7 +771,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         // Show ALL messages (no offset) so we can see the full discussion.
         let t_conv = Instant::now();
         print_conversation(&handle, service.as_ref(), 0).await;
-        println!("  [conversation dump: {:.1}s]", t_conv.elapsed().as_secs_f64());
+        println!(
+            "  [conversation dump: {:.1}s]",
+            t_conv.elapsed().as_secs_f64()
+        );
 
         // Round 1 (easy) must pass to validate the pipeline works
         assert!(

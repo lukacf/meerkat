@@ -51,7 +51,11 @@ impl BlobStore for MemoryBlobStore {
             media_type: media_type.to_string(),
             data: data.to_string(),
         };
-        self.blobs.write().await.entry(blob_id.clone()).or_insert(stored);
+        self.blobs
+            .write()
+            .await
+            .entry(blob_id.clone())
+            .or_insert(stored);
         Ok(BlobRef {
             blob_id,
             media_type: media_type.to_string(),
@@ -152,8 +156,8 @@ impl BlobStore for FsBlobStore {
                 BlobStoreError::ReadFailed(err.to_string())
             }
         })?;
-        let stored: StoredBlob =
-            serde_json::from_slice(&bytes).map_err(|err| BlobStoreError::ReadFailed(err.to_string()))?;
+        let stored: StoredBlob = serde_json::from_slice(&bytes)
+            .map_err(|err| BlobStoreError::ReadFailed(err.to_string()))?;
         Ok(BlobPayload {
             blob_id: blob_id.clone(),
             media_type: stored.media_type,

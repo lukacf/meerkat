@@ -2823,11 +2823,7 @@ async fn continue_session_inner(
         req.verbose,
     );
 
-    let loaded_session = match state
-        .session_service
-        .load_persisted(&session_id)
-        .await
-    {
+    let loaded_session = match state.session_service.load_persisted(&session_id).await {
         Ok(v) => v,
         Err(e) => {
             drop(caller_event_tx);
@@ -2905,8 +2901,7 @@ async fn continue_session_inner(
         let ops_lifecycle = match ensure_runtime_session_ops_registry(state, &session_id).await {
             Ok(v) => v,
             Err(resp) => {
-                let message =
-                    format!("failed to prepare runtime ops registry: {}", resp.status());
+                let message = format!("failed to prepare runtime ops registry: {}", resp.status());
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));

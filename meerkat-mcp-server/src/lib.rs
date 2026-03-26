@@ -17,9 +17,9 @@ use meerkat_core::service::{
     SessionService, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
-    AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntimeError,
-    ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider, RealmSelection,
-    RuntimeBootstrap, ToolCallView, format_verbose_event,
+    AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy,
+    ConfigRuntimeError, ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider,
+    RealmSelection, RuntimeBootstrap, ToolCallView, format_verbose_event,
 };
 use meerkat_mcp::{McpReloadTarget, McpRouter};
 use schemars::JsonSchema;
@@ -596,16 +596,11 @@ impl MeerkatMcpState {
         }
 
         let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
-        let blob_store: Arc<dyn meerkat_core::BlobStore> =
-            Arc::new(meerkat_store::FsBlobStore::new(
-                realm_paths.root.join("blobs"),
-            ));
+        let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(
+            meerkat_store::FsBlobStore::new(realm_paths.root.join("blobs")),
+        );
         let service = Arc::new(PersistentSessionService::new(
-            builder,
-            100,
-            store,
-            None,
-            blob_store,
+            builder, 100, store, None, blob_store,
         ));
 
         Self {
@@ -3786,9 +3781,7 @@ mod tests {
         .await
         .expect("blob get succeeds");
 
-        let text = result["content"][0]["text"]
-            .as_str()
-            .expect("text payload");
+        let text = result["content"][0]["text"].as_str().expect("text payload");
         let payload: Value = serde_json::from_str(text).expect("valid json payload");
         assert_eq!(payload["blob_id"], blob_ref.blob_id.as_str());
         assert_eq!(payload["media_type"], "image/png");

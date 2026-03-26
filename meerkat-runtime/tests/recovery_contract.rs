@@ -364,12 +364,11 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
 
         drop(driver);
 
-        let mut retired_driver =
-            PersistentRuntimeDriver::new(
-                runtime_id.clone(),
-                harness.store.clone(),
-                memory_blob_store(),
-            );
+        let mut retired_driver = PersistentRuntimeDriver::new(
+            runtime_id.clone(),
+            harness.store.clone(),
+            memory_blob_store(),
+        );
         retired_driver.recover().await.unwrap();
         assert_eq!(
             retired_driver.runtime_state(),

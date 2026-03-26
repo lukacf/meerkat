@@ -2197,13 +2197,9 @@ mod tests {
 
         let response = response.expect("response");
         assert!(response.error.is_none(), "blob/get should succeed");
-        let result: serde_json::Value = serde_json::from_str(
-            response
-                .result
-                .expect("blob payload")
-                .get(),
-        )
-        .expect("valid blob payload");
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.expect("blob payload").get())
+                .expect("valid blob payload");
         assert_eq!(result["blob_id"], blob_ref.blob_id.as_str());
         assert_eq!(result["media_type"], "image/png");
         assert_eq!(result["data"], "aGVsbG8=");

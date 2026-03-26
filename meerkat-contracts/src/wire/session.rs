@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta, SessionHistoryPage,
-    SessionId, SessionInfo, SessionSummary, StopReason,
+    AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
+    SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason,
 };
 
 /// Canonical session info for wire protocol.
@@ -143,7 +143,9 @@ impl From<ProviderMeta> for WireProviderMeta {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum WireImageData {
-    Inline { data: String },
+    Inline {
+        data: String,
+    },
     Blob {
         #[cfg_attr(feature = "schema", schemars(with = "String"))]
         blob_id: BlobId,

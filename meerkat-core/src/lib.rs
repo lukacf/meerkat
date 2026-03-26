@@ -66,8 +66,8 @@ pub use agent::{
     CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
     LlmStreamResult,
 };
-pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
+pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,

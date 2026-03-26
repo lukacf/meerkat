@@ -8,16 +8,16 @@ use meerkat_core::BlobStore;
 
 #[cfg(feature = "session-store")]
 use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore, RuntimeStoreError};
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_store::SqliteSessionStore;
+#[cfg(all(feature = "session-store", target_arch = "wasm32"))]
+use meerkat_store::StoreError;
 #[cfg(all(
     feature = "session-store",
     feature = "jsonl-store",
     not(target_arch = "wasm32")
 ))]
 use meerkat_store::{FsBlobStore, JsonlStore};
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-use meerkat_store::SqliteSessionStore;
-#[cfg(all(feature = "session-store", target_arch = "wasm32"))]
-use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{
     RealmBackend, RealmManifest, RealmOrigin, RedbSessionStore, StoreError,
@@ -162,7 +162,8 @@ pub async fn open_realm_persistence_in(
         RealmBackend::Jsonl => {
             let session_store: Arc<dyn SessionStore> =
                 Arc::new(JsonlStore::new(paths.sessions_jsonl_dir));
-            let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(paths.root.join("blobs")));
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path.clone(),
@@ -183,7 +184,8 @@ pub async fn open_realm_persistence_in(
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
                 sqlite_store.path().to_path_buf(),
             )?) as Arc<dyn RuntimeStore>;
-            let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(paths.root.join("blobs")));
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path.clone(),
@@ -206,7 +208,8 @@ pub async fn open_realm_persistence_in(
             let runtime_store = Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(
                 redb_store.database(),
             )?) as Arc<dyn RuntimeStore>;
-            let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(paths.root.join("blobs")));
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(FsBlobStore::new(paths.root.join("blobs")));
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path.clone(),

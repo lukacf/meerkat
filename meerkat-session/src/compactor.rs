@@ -622,7 +622,11 @@ mod tests {
 
         let result = c.rebuild_history(&messages, "summary");
 
-        assert_eq!(result.messages.len(), 3, "summary + retained user + tool results");
+        assert_eq!(
+            result.messages.len(),
+            3,
+            "summary + retained user + tool results"
+        );
         match &result.messages[2] {
             Message::ToolResults { results } => {
                 assert_eq!(results.len(), 1);

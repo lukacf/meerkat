@@ -1155,7 +1155,10 @@ mod content_block_tests {
             data: "abc".into(),
         };
         let json = serde_json::to_string(&block).unwrap();
-        assert!(json.contains("\"source\":\"inline\""), "inline discriminator missing: {json}");
+        assert!(
+            json.contains("\"source\":\"inline\""),
+            "inline discriminator missing: {json}"
+        );
     }
 
     #[test]

@@ -37,9 +37,8 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BlobStore,
-    BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session, SessionMetadata,
-    SessionTooling,
+    BlobStore, BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session,
+    SessionMetadata, SessionTooling,
 };
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::{SessionId, SessionMeta};

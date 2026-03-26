@@ -5,14 +5,14 @@
 //! RunPrimitive for core consumption.
 
 use chrono::{DateTime, Utc};
-use meerkat_core::{
-    BlobStore, BlobStoreError, MissingBlobBehavior, externalize_content_blocks,
-    hydrate_content_blocks,
-};
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::types::HandlingMode;
+use meerkat_core::{
+    BlobStore, BlobStoreError, MissingBlobBehavior, externalize_content_blocks,
+    hydrate_content_blocks,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{
@@ -177,13 +177,15 @@ async fn externalize_payload_blocks(
     let Some(blocks_value) = obj.get_mut("blocks") else {
         return Ok(());
     };
-    let mut blocks = serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(
-        blocks_value.clone(),
-    )
-    .map_err(|err| BlobStoreError::Internal(format!("failed to decode payload blocks: {err}")))?;
+    let mut blocks =
+        serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(blocks_value.clone())
+            .map_err(|err| {
+                BlobStoreError::Internal(format!("failed to decode payload blocks: {err}"))
+            })?;
     externalize_content_blocks(blob_store, &mut blocks).await?;
-    *blocks_value = serde_json::to_value(blocks)
-        .map_err(|err| BlobStoreError::Internal(format!("failed to encode payload blocks: {err}")))?;
+    *blocks_value = serde_json::to_value(blocks).map_err(|err| {
+        BlobStoreError::Internal(format!("failed to encode payload blocks: {err}"))
+    })?;
     Ok(())
 }
 
@@ -198,13 +200,15 @@ async fn hydrate_payload_blocks(
     let Some(blocks_value) = obj.get_mut("blocks") else {
         return Ok(());
     };
-    let mut blocks = serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(
-        blocks_value.clone(),
-    )
-    .map_err(|err| BlobStoreError::Internal(format!("failed to decode payload blocks: {err}")))?;
+    let mut blocks =
+        serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(blocks_value.clone())
+            .map_err(|err| {
+                BlobStoreError::Internal(format!("failed to decode payload blocks: {err}"))
+            })?;
     hydrate_content_blocks(blob_store, &mut blocks, missing_behavior).await?;
-    *blocks_value = serde_json::to_value(blocks)
-        .map_err(|err| BlobStoreError::Internal(format!("failed to encode payload blocks: {err}")))?;
+    *blocks_value = serde_json::to_value(blocks).map_err(|err| {
+        BlobStoreError::Internal(format!("failed to encode payload blocks: {err}"))
+    })?;
     Ok(())
 }
 

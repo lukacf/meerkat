@@ -106,14 +106,6 @@ impl RosterAuthority {
         self.roster.list_retiring().cloned().collect()
     }
 
-    pub(crate) fn wiring_edge_state(
-        &self,
-        a: &MeerkatId,
-        b: &MeerkatId,
-    ) -> crate::roster::WiringEdgeState {
-        self.roster.wiring_edge_state(a, b)
-    }
-
     #[allow(dead_code)]
     pub(crate) fn debug_assert_wiring_projection_consistent(&self) {
         self.roster.debug_assert_wiring_projection_consistent();

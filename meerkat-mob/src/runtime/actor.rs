@@ -4562,35 +4562,6 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         target_id: MeerkatId,
     ) -> Result<MeerkatId, MobError> {
-        let target_entry = {
-            let roster = self.roster.read().await;
-            match roster.wiring_edge_state(meerkat_id, &target_id) {
-                crate::roster::WiringEdgeState::Absent => {}
-                edge_state => {
-                    return Err(MobError::WiringError(format!(
-                        "role_wiring fan-out requires absent projected edge for {meerkat_id} <-> {target_id}, found {edge_state:?}"
-                    )));
-                }
-            }
-            roster
-                .get(&target_id)
-                .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(target_id.clone()))?
-        };
-        let target_comms = self
-            .provisioner_comms(&target_entry.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "role_wiring fan-out requires comms runtime for target '{target_id}'"
-                ))
-            })?;
-        if target_comms.public_key().is_none() {
-            return Err(MobError::WiringError(format!(
-                "role_wiring fan-out requires public key for target '{target_id}'"
-            )));
-        }
-
         self.do_wire(meerkat_id, &target_id).await.map_err(|e| {
             MobError::WiringError(format!(
                 "role_wiring fan-out failed for {meerkat_id} <-> {target_id}: {e}"

@@ -9726,6 +9726,64 @@ async fn test_spawn_many_parallel_finalize_emits_single_worker_pair_wire_event()
         pair_wire_events, 1,
         "parallel spawn finalization must emit exactly one PeersWired event for w-a<->w-b"
     );
+
+    let a = handle
+        .get_member(&MeerkatId::from("w-a"))
+        .await
+        .expect("w-a should exist");
+    let b = handle
+        .get_member(&MeerkatId::from("w-b"))
+        .await
+        .expect("w-b should exist");
+    assert!(a.wired_to.contains(&MeerkatId::from("w-b")));
+    assert!(b.wired_to.contains(&MeerkatId::from("w-a")));
+}
+
+#[tokio::test]
+async fn test_spawn_many_parallel_finalize_tolerates_overlapping_role_wiring_targets() {
+    let (handle, service) =
+        create_test_mob(sample_definition_with_overlapping_orchestrator_and_role_wiring()).await;
+    service.set_create_session_delay_ms(120);
+
+    let specs = vec![
+        SpawnMemberSpec::new("lead", "l-a"),
+        SpawnMemberSpec::new("worker", "w-a"),
+    ];
+
+    let results = handle.spawn_many(specs).await;
+    for result in results {
+        result.expect("spawn_many member ref");
+    }
+
+    let lead = handle
+        .get_member(&MeerkatId::from("l-a"))
+        .await
+        .expect("lead should exist");
+    let worker = handle
+        .get_member(&MeerkatId::from("w-a"))
+        .await
+        .expect("worker should exist");
+    assert_eq!(lead.wired_to.len(), 1);
+    assert_eq!(worker.wired_to.len(), 1);
+    assert!(lead.wired_to.contains(&MeerkatId::from("w-a")));
+    assert!(worker.wired_to.contains(&MeerkatId::from("l-a")));
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let pair_wire_events = events
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::PeersWired { a, b }
+                    if (a == &MeerkatId::from("l-a") && b == &MeerkatId::from("w-a"))
+                        || (a == &MeerkatId::from("w-a") && b == &MeerkatId::from("l-a"))
+            )
+        })
+        .count();
+    assert_eq!(
+        pair_wire_events, 1,
+        "overlapping batch fan-out must treat an already-created edge as satisfied"
+    );
 }
 
 #[tokio::test]

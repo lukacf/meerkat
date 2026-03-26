@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `3`
+- Version: `4`
 - Rust owner: `meerkat-runtime` / `generated::ops_lifecycle`
 
 ## State
@@ -29,6 +29,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RegisterOperation`(operation_id: OperationId, operation_kind: OperationKind)
 - `ProvisioningSucceeded`(operation_id: OperationId)
 - `ProvisioningFailed`(operation_id: OperationId)
+- `AbortProvisioning`(operation_id: OperationId)
 - `PeerReady`(operation_id: OperationId)
 - `RegisterWatcher`(operation_id: OperationId)
 - `ProgressReported`(operation_id: OperationId)
@@ -108,6 +109,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ProvisioningFailed`
 - From: `Active`
 - On: `ProvisioningFailed`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_does_not_complete_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`
+- To: `Active`
+
+### `AbortProvisioningCompletesWait`
+- From: `Active`
+- On: `AbortProvisioning`(operation_id)
+- Guards:
+  - `status_allows_terminalization`
+  - `terminalization_satisfies_wait`
+- Emits: `SubmitOpEvent`, `NotifyOpWatcher`, `RetainTerminalRecord`, `WaitAllSatisfied`
+- To: `Active`
+
+### `AbortProvisioning`
+- From: `Active`
+- On: `AbortProvisioning`(operation_id)
 - Guards:
   - `status_allows_terminalization`
   - `terminalization_does_not_complete_wait`

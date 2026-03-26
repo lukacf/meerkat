@@ -26,7 +26,7 @@ pub enum MessageKind {
     Message {
         body: String,
         /// Optional multimodal content blocks. When present, carries full
-        /// multimodal content; `body` remains as text projection for backwards compat.
+        /// multimodal content; `body` remains the canonical text projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
     },

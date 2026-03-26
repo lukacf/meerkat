@@ -43,7 +43,7 @@ from .generated.types import (
     WireInputState,
     WireInputStateHistoryEntry,
 )
-from .mob import Mob, MobHelperResult, MobKickoffMemberSnapshot, MobMemberSnapshot
+from .mob import Mob, MobHelperResult, MobKickoffMemberSnapshot, MobMemberSnapshot, MobSpawnSpec
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .tools import ToolRegistry
@@ -308,6 +308,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> Session:
         """Create a new session, run the first turn, and return a :class:`Session`.
 
@@ -331,6 +332,7 @@ class MeerkatClient:
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
+            labels=labels,
         )
         raw = await self._request("session/create", params)
         result = self._parse_run_result(raw)
@@ -359,6 +361,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> EventStream:
         """Create a new session and stream typed events from the first turn.
 
@@ -386,6 +389,7 @@ class MeerkatClient:
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
+            labels=labels,
         )
         self._request_id += 1
         request_id = self._request_id
@@ -425,6 +429,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> DeferredSession:
         """Create a new session without running the first turn.
 
@@ -452,6 +457,7 @@ class MeerkatClient:
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
+            labels=labels,
         )
         params["initial_turn"] = "deferred"
         raw = await self._request("session/create", params)
@@ -467,21 +473,34 @@ class MeerkatClient:
         """List active sessions."""
         result = await self._request("session/list", {})
         return [
-            SessionInfo(
-                session_id=s.get("session_id", ""),
-                session_ref=s.get("session_ref"),
-                created_at=s.get("created_at", ""),
-                updated_at=s.get("updated_at", ""),
-                message_count=s.get("message_count", 0),
-                total_tokens=s.get("total_tokens", 0),
-                is_active=s.get("is_active", False),
-            )
+            self._parse_session_info(s)
             for s in result.get("sessions", [])
         ]
 
-    async def read_session(self, session_id: str) -> dict[str, Any]:
+    async def read_session(self, session_id: str) -> SessionInfo:
         """Read detailed session state."""
-        return await self._request("session/read", {"session_id": session_id})
+        result = await self._request("session/read", {"session_id": session_id})
+        return self._parse_session_info(result)
+
+
+    async def inject_context(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject system context into a session."""
+        params = {
+            "session_id": session_id,
+            "text": text,
+        }
+        if source:
+            params["source"] = source
+        if idempotency_key:
+            params["idempotency_key"] = idempotency_key
+        return await self._request("session/inject_context", params)
 
     async def read_session_history(
         self,
@@ -725,6 +744,17 @@ class MeerkatClient:
             "labels": labels,
             "context": context,
             "additional_instructions": additional_instructions,
+        })
+
+
+    async def spawn_mob_members(
+        self,
+        mob_id: str,
+        specs: list[MobSpawnSpec],
+    ) -> list[dict[str, Any]]:
+        return await self._request("mob/spawn_many", {
+            "mob_id": mob_id,
+            "specs": specs,
         })
 
     async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
@@ -1301,6 +1331,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
         if model:
@@ -1342,6 +1373,8 @@ class MeerkatClient:
             params["skill_refs"] = wire_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
+        if labels is not None:
+            params["labels"] = labels
         return params
 
     @staticmethod
@@ -1526,4 +1559,20 @@ class MeerkatClient:
             name=block_data.get("name"),
             args=block_data.get("args"),
             meta=block_data.get("meta"),
+        )
+
+    @staticmethod
+    def _parse_session_info(s: dict[str, Any]) -> SessionInfo:
+        return SessionInfo(
+            session_id=s.get("session_id", ""),
+            session_ref=s.get("session_ref"),
+            created_at=s.get("created_at", ""),
+            updated_at=s.get("updated_at", ""),
+            message_count=s.get("message_count", 0),
+            total_tokens=s.get("total_tokens", 0),
+            labels=s.get("labels", {}),
+            is_active=s.get("is_active", False),
+            model=s.get("model", ""),
+            provider=s.get("provider", ""),
+            last_assistant_text=s.get("last_assistant_text"),
         )

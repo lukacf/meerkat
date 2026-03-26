@@ -169,48 +169,21 @@ impl Input {
     }
 }
 
-async fn externalize_payload_blocks(
-    blob_store: &dyn BlobStore,
-    payload: &mut serde_json::Value,
-) -> Result<(), BlobStoreError> {
-    let Some(obj) = payload.as_object_mut() else {
+fn migrate_legacy_payload_blocks(event: &mut ExternalEventInput) -> Result<(), BlobStoreError> {
+    let Some(obj) = event.payload.as_object_mut() else {
         return Ok(());
     };
-    let Some(blocks_value) = obj.get_mut("blocks") else {
+    let Some(blocks_value) = obj.remove("blocks") else {
         return Ok(());
     };
-    let mut blocks =
-        serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(blocks_value.clone())
-            .map_err(|err| {
-                BlobStoreError::Internal(format!("failed to decode payload blocks: {err}"))
-            })?;
-    externalize_content_blocks(blob_store, &mut blocks).await?;
-    *blocks_value = serde_json::to_value(blocks).map_err(|err| {
-        BlobStoreError::Internal(format!("failed to encode payload blocks: {err}"))
-    })?;
-    Ok(())
-}
-
-async fn hydrate_payload_blocks(
-    blob_store: &dyn BlobStore,
-    payload: &mut serde_json::Value,
-    missing_behavior: MissingBlobBehavior,
-) -> Result<(), BlobStoreError> {
-    let Some(obj) = payload.as_object_mut() else {
+    if event.blocks.is_some() {
         return Ok(());
-    };
-    let Some(blocks_value) = obj.get_mut("blocks") else {
-        return Ok(());
-    };
-    let mut blocks =
-        serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(blocks_value.clone())
-            .map_err(|err| {
-                BlobStoreError::Internal(format!("failed to decode payload blocks: {err}"))
-            })?;
-    hydrate_content_blocks(blob_store, &mut blocks, missing_behavior).await?;
-    *blocks_value = serde_json::to_value(blocks).map_err(|err| {
-        BlobStoreError::Internal(format!("failed to encode payload blocks: {err}"))
-    })?;
+    }
+    let blocks = serde_json::from_value::<Vec<meerkat_core::types::ContentBlock>>(blocks_value)
+        .map_err(|err| {
+            BlobStoreError::Internal(format!("failed to decode payload blocks: {err}"))
+        })?;
+    event.blocks = Some(blocks);
     Ok(())
 }
 
@@ -235,10 +208,10 @@ pub async fn externalize_input_images(
             }
         }
         Input::ExternalEvent(event) => {
+            migrate_legacy_payload_blocks(event)?;
             if let Some(blocks) = event.blocks.as_mut() {
                 externalize_content_blocks(blob_store, blocks).await?;
             }
-            externalize_payload_blocks(blob_store, &mut event.payload).await?;
         }
         Input::Continuation(_) | Input::Operation(_) => {}
     }
@@ -267,10 +240,10 @@ pub async fn hydrate_input_images(
             }
         }
         Input::ExternalEvent(event) => {
+            migrate_legacy_payload_blocks(event)?;
             if let Some(blocks) = event.blocks.as_mut() {
                 hydrate_content_blocks(blob_store, blocks, missing_behavior).await?;
             }
-            hydrate_payload_blocks(blob_store, &mut event.payload, missing_behavior).await?;
         }
         Input::Continuation(_) | Input::Operation(_) => {}
     }
@@ -427,8 +400,10 @@ pub struct ExternalEventInput {
     pub event_type: String,
     /// Event payload. Uses `Value` because the runtime layer may inspect/merge
     /// payloads during coalescing and projection — not a pure pass-through.
+    /// Multimodal content does NOT live here canonically; use `blocks`.
     pub payload: serde_json::Value,
-    /// Optional multimodal blocks carried by the external event.
+    /// Optional multimodal blocks carried by the external event. This is the
+    /// canonical owner for multimodal external-event content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
     /// Runtime-owned handling hint for this external event.
@@ -648,6 +623,34 @@ mod tests {
         assert_eq!(json["input_type"], "external_event");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::ExternalEvent(_)));
+    }
+
+    #[test]
+    fn legacy_external_event_payload_blocks_migrate_to_canonical_blocks_owner() {
+        let mut input = Input::ExternalEvent(ExternalEventInput {
+            header: make_header(),
+            event_type: "webhook.received".into(),
+            payload: serde_json::json!({
+                "body": "see image",
+                "blocks": [
+                    { "type": "text", "text": "caption text" },
+                    { "type": "image", "media_type": "image/png", "source": "inline", "data": "abc123" }
+                ]
+            }),
+            blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
+        });
+
+        match &mut input {
+            Input::ExternalEvent(event) => {
+                migrate_legacy_payload_blocks(event).unwrap();
+                assert!(event.payload.get("blocks").is_none());
+                assert_eq!(event.payload["body"], "see image");
+                assert_eq!(event.blocks.as_ref().map(Vec::len), Some(2));
+            }
+            other => panic!("Expected ExternalEvent, got {other:?}"),
+        }
     }
 
     #[test]

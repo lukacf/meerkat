@@ -158,6 +158,26 @@ pub async fn handle(
         )));
     }
 
+    // Wait for all autonomous kickoff turns to complete before subscribing
+    // to events. Without this barrier, the event subscription misses
+    // RunStarted events from kickoff turns (emitted during spawn) but sees
+    // their RunCompleted, causing the active_turns counter to go negative
+    // and triggering premature quiescence detection.
+    if let Some(token) = progress_token.as_ref() {
+        send_progress(
+            progress_notifier.as_ref(),
+            token, 0, 1,
+            &format!("waiting for {expected} agents to complete kickoff"),
+        );
+    }
+    if let Err(e) = state.mob_state.mob_wait_kickoff(
+        &mob_id,
+        None,
+        Some(120_000), // 2 min timeout — kickoff turns are simple LLM calls
+    ).await {
+        tracing::warn!(mob_id = %mob_id, error = %e, "kickoff barrier failed; proceeding anyway");
+    }
+
     // Route to flow-based or comms-based execution
     let result = if has_flows {
         run_flow(
@@ -484,7 +504,7 @@ async fn run_comms(
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
     // After all agents go idle, wait this long for a new turn to start (covers
     // the gap between one agent finishing and a comms message triggering another).
-    const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+    const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
 
     let deadline = tokio::time::Instant::now() + MAX_WAIT;
     let mut last_orchestrator_text = String::new();
@@ -535,11 +555,20 @@ async fn run_comms(
                     _ => {}
                 }
 
-                // Capture the orchestrator's latest text output
+                // Capture the orchestrator's latest text output.
+                // Always update on RunCompleted (even empty) so we know the
+                // orchestrator ran. Prefer non-empty results; TextComplete
+                // overwrites if it carries content.
                 if attributed.source.as_str() == orchestrator {
                     match &attributed.envelope.payload {
-                        AgentEvent::RunCompleted { result, .. } if !result.is_empty() => {
-                            last_orchestrator_text = result.clone();
+                        AgentEvent::RunCompleted { result, .. } => {
+                            if !result.is_empty() {
+                                last_orchestrator_text = result.clone();
+                            } else if last_orchestrator_text.is_empty() {
+                                last_orchestrator_text =
+                                    "[orchestrator completed a turn with tool-call-only output]"
+                                        .to_string();
+                            }
                         }
                         AgentEvent::TextComplete { content, .. } if !content.is_empty() => {
                             last_orchestrator_text = content.clone();

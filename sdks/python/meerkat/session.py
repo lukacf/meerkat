@@ -190,6 +190,22 @@ class Session:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
 
+
+    async def inject_context(
+        self,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject system context into this session."""
+        return await self._client.inject_context(
+            self._id,
+            text,
+            source=source,
+            idempotency_key=idempotency_key,
+        )
+
     async def history(
         self,
         *,
@@ -327,6 +343,22 @@ class DeferredSession:
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
+
+
+    async def inject_context(
+        self,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject system context into this session."""
+        return await self._client.inject_context(
+            self._id,
+            text,
+            source=source,
+            idempotency_key=idempotency_key,
+        )
 
     async def history(
         self,

@@ -164,7 +164,11 @@ class SessionInfo:
     updated_at: str = ""
     message_count: int = 0
     total_tokens: int = 0
+    labels: dict[str, str] = field(default_factory=dict)
     is_active: bool = False
+    model: str = ""
+    provider: str = ""
+    last_assistant_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

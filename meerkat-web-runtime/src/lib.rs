@@ -1253,6 +1253,10 @@ fn build_direct_session_request(
         &config.model,
     );
 
+    // Reject reserved mob labels in caller-supplied labels map.
+    meerkat::surface::validate_raw_labels(config.labels.as_ref())
+        .map_err(|e| err_js("invalid_config", &e))?;
+
     // Create LLM client.
     let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
         .map_err(|e| err_str("provider_error", e))?;

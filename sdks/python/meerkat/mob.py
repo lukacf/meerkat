@@ -100,6 +100,21 @@ MobHelperResult = TypedDict(
         "session_id": NotRequired[str],
     },
 )
+MobSpawnSpec = TypedDict(
+    "MobSpawnSpec",
+    {
+        "profile": str,
+        "meerkat_id": str,
+        "initial_message": NotRequired[str | list[dict[str, Any]] | None],
+        "runtime_mode": NotRequired[str | None],
+        "backend": NotRequired[str | None],
+        "resume_session_id": NotRequired[str | None],
+        "labels": NotRequired[dict[str, str] | None],
+        "context": NotRequired[dict[str, Any] | None],
+        "additional_instructions": NotRequired[list[str] | None],
+    },
+)
+
 
 
 class Member:
@@ -167,6 +182,12 @@ class Mob:
             context=context,
             additional_instructions=additional_instructions,
         )
+    async def spawn_many(
+        self,
+        specs: list[MobSpawnSpec],
+    ) -> list[dict[str, Any]]:
+        return await self._client.spawn_mob_members(self.id, specs)
+
 
     async def retire(self, meerkat_id: str) -> None:
         await self._client.retire_mob_member(self.id, meerkat_id)

@@ -32,7 +32,8 @@ class WireRunResult:
     tool_calls: int = 0
     usage: Optional[WireUsage] = None
     structured_output: Optional[Any] = None
-    schema_warnings: Optional[list] = None
+    schema_warnings: Optional[list[Any]] = None
+    skill_diagnostics: Optional[dict] = None
 
 
 @dataclass
@@ -68,11 +69,11 @@ class WireToolResult:
 class WireSessionMessage:
     """Canonical transcript message."""
     role: str = ''
-    content: Optional[str] = None
-    tool_calls: Optional[list] = None
+    content: Optional[Any] = None
+    tool_calls: Optional[list[WireToolCall]] = None
     stop_reason: Optional[str] = None
-    blocks: Optional[list] = None
-    results: Optional[list] = None
+    blocks: Optional[list[WireAssistantBlock]] = None
+    results: Optional[list[WireToolResult]] = None
 
 
 @dataclass
@@ -84,7 +85,7 @@ class WireSessionHistory:
     offset: int = 0
     limit: Optional[int] = None
     has_more: bool = False
-    messages: list = field(default_factory=list)
+    messages: list[WireSessionMessage] = field(default_factory=list)
 
 
 @dataclass
@@ -108,7 +109,7 @@ class CapabilityEntry:
 class CapabilitiesResponse:
     """Response from capabilities/get."""
     contract_version: str = ''
-    capabilities: list = field(default_factory=list)
+    capabilities: list[CapabilityEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -124,7 +125,7 @@ class CommsParams:
 class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
     skills_enabled: bool = False
-    skill_references: list = field(default_factory=list)
+    skill_references: list[str] = field(default_factory=list)
 
 
 @dataclass

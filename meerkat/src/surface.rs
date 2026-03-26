@@ -2,12 +2,10 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
-#[cfg(not(target_arch = "wasm32"))]
 mod request_execution;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use request_execution::{
     PreparedSurfaceSession, RequestAlreadyExists, RequestAsyncAction, RequestContext,
     RequestTerminal, SurfaceRequestExecutor, noop_request_action, prepare_surface_session,
@@ -153,8 +151,23 @@ pub fn validate_public_peer_meta(peer_meta: Option<&PeerMeta>) -> Result<(), Str
         return Ok(());
     };
 
-    for label in RESERVED_MOB_PEER_META_LABELS {
-        if peer_meta.labels.contains_key(label) {
+    validate_raw_labels(Some(&peer_meta.labels))
+}
+
+/// Reject raw labels that are reserved for mob-managed sessions.
+///
+/// Similar to \[`validate_public_peer_meta`\], but works on a raw labels map.
+/// Public surfaces should call this for any caller-supplied labels, including
+/// top-level `CreateSessionRequest::labels`.
+pub fn validate_raw_labels(
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<(), String> {
+    let Some(labels) = labels else {
+        return Ok(());
+    };
+
+    for &label in &RESERVED_MOB_PEER_META_LABELS {
+        if labels.contains_key(label) {
             return Err(format!(
                 "peer_meta label '{label}' is reserved for mob-managed sessions"
             ));

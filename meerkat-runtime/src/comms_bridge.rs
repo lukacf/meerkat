@@ -151,13 +151,7 @@ fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types
 
 fn external_event_payload(interaction: &InboxInteraction) -> serde_json::Value {
     match &interaction.content {
-        InteractionContent::Message { body, blocks } => {
-            let mut payload = serde_json::json!({ "body": body });
-            if let Some(blocks) = blocks {
-                payload["blocks"] = serde_json::to_value(blocks).unwrap_or(serde_json::Value::Null);
-            }
-            payload
-        }
+        InteractionContent::Message { body, .. } => serde_json::json!({ "body": body }),
         InteractionContent::Request { intent, params } => {
             serde_json::json!({ "intent": intent, "params": params })
         }
@@ -434,7 +428,7 @@ mod tests {
         match input {
             Input::ExternalEvent(event) => {
                 assert_eq!(event.payload["body"], "see image");
-                assert!(event.payload["blocks"].is_array());
+                assert!(event.payload.get("blocks").is_none());
                 assert_eq!(event.blocks, Some(blocks));
                 assert_eq!(
                     event.handling_mode,

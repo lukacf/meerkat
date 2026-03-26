@@ -3338,6 +3338,10 @@ async fn run_agent(
         Some(std::collections::BTreeMap::from_iter(labels))
     };
 
+    // Reject reserved mob labels.
+    meerkat::surface::validate_raw_labels(parsed_labels.as_ref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     // Route through SessionService::create_session()
     let create_req = CreateSessionRequest {
         model: model.to_string(),

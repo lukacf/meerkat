@@ -7,7 +7,11 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::{Session, SessionId};
+
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
+#[cfg(target_arch = "wasm32")]
+use tokio_with_wasm::alias::task::JoinHandle;
 
 /// Lock a std::sync::Mutex, recovering from poisoning.
 ///

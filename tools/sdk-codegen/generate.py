@@ -234,7 +234,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    tool_calls: int = 0\n"
     types_content += "    usage: Optional[WireUsage] = None\n"
     types_content += "    structured_output: Optional[Any] = None\n"
-    types_content += "    schema_warnings: Optional[list] = None\n\n\n"
+    types_content += "    schema_warnings: Optional[list[Any]] = None\n"
+    types_content += "    skill_diagnostics: Optional[dict] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireProviderMeta:\n"
     types_content += '    """Provider continuity metadata."""\n'
@@ -260,11 +261,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "@dataclass\nclass WireSessionMessage:\n"
     types_content += '    """Canonical transcript message."""\n'
     types_content += "    role: str = ''\n"
-    types_content += "    content: Optional[str] = None\n"
-    types_content += "    tool_calls: Optional[list] = None\n"
+    types_content += "    content: Optional[Any] = None\n"
+    types_content += "    tool_calls: Optional[list[WireToolCall]] = None\n"
     types_content += "    stop_reason: Optional[str] = None\n"
-    types_content += "    blocks: Optional[list] = None\n"
-    types_content += "    results: Optional[list] = None\n\n\n"
+    types_content += "    blocks: Optional[list[WireAssistantBlock]] = None\n"
+    types_content += "    results: Optional[list[WireToolResult]] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireSessionHistory:\n"
     types_content += '    """Paginated transcript page."""\n'
@@ -274,7 +275,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    offset: int = 0\n"
     types_content += "    limit: Optional[int] = None\n"
     types_content += "    has_more: bool = False\n"
-    types_content += "    messages: list = field(default_factory=list)\n\n\n"
+    types_content += "    messages: list[WireSessionMessage] = field(default_factory=list)\n\n\n"
 
     # WireEvent
     types_content += "@dataclass\nclass WireEvent:\n"
@@ -294,7 +295,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "@dataclass\nclass CapabilitiesResponse:\n"
     types_content += '    """Response from capabilities/get."""\n'
     types_content += "    contract_version: str = ''\n"
-    types_content += "    capabilities: list = field(default_factory=list)\n\n"
+    types_content += "    capabilities: list[CapabilityEntry] = field(default_factory=list)\n\n"
 
     # Conditional params based on available capabilities
     if has_comms:
@@ -308,7 +309,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         types_content += "\n@dataclass\nclass SkillsParams:\n"
         types_content += '    """Skills parameters (available because skills capability is compiled)."""\n'
         types_content += "    skills_enabled: bool = False\n"
-        types_content += "    skill_references: list = field(default_factory=list)\n\n"
+        types_content += "    skill_references: list[str] = field(default_factory=list)\n\n"
 
     params_schema = schemas.get("params", {})
     wire_schema = schemas.get("wire-types", {})

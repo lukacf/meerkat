@@ -624,12 +624,8 @@ impl CoreCommsRuntime for CommsRuntime {
 
                         let (content, rendered_text) = match envelope.kind {
                             MessageKind::Message { body, blocks } => {
-                                let text = match &blocks {
-                                    Some(b) if !b.is_empty() => meerkat_core::types::text_content(b),
-                                    _ => body.clone(),
-                                };
                                 let rendered = format!(
-                                    "[COMMS MESSAGE from {from_peer}]\n{text}"
+                                    "[COMMS MESSAGE from {from_peer}]\n{body}"
                                 );
                                 (
                                     meerkat_core::InteractionContent::Message { body, blocks },
@@ -2042,6 +2038,63 @@ mod tests {
                         && result["ok"] == true
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn test_drain_inbox_interactions_multimodal_message_keeps_body_as_projection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("multimodal-body-projection", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let sender = Keypair::generate();
+        runtime.router.add_trusted_peer(crate::TrustedPeer {
+            name: "sender".to_string(),
+            pubkey: sender.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        });
+
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption text".to_string(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc123".into(),
+            },
+        ];
+        let msg = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Message {
+                body: "please inspect this".to_string(),
+                blocks: Some(blocks.clone()),
+            },
+        );
+
+        runtime
+            .router
+            .inbox_sender()
+            .send_classified(InboxItem::External { envelope: msg })
+            .unwrap();
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        let interaction = &interactions[0];
+        assert_eq!(
+            interaction.rendered_text,
+            "[COMMS MESSAGE from sender]\nplease inspect this"
+        );
+        match &interaction.content {
+            meerkat_core::InteractionContent::Message {
+                body,
+                blocks: got_blocks,
+            } => {
+                assert_eq!(body, "please inspect this");
+                assert_eq!(got_blocks.as_ref(), Some(&blocks));
+            }
+            other => panic!("expected message content, got {other:?}"),
+        }
     }
 
     #[tokio::test]

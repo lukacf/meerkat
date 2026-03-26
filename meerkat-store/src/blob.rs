@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
 #[cfg(target_arch = "wasm32")]

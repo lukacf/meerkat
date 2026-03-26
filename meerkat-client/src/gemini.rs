@@ -85,7 +85,8 @@ impl GeminiClient {
                                     "text": text
                                 }),
                                 ContentBlock::Image {
-                                    media_type, data, ..
+                                    media_type,
+                                    data: ImageData::Inline { data },
                                 } => serde_json::json!({
                                     "inlineData": {
                                         "mimeType": media_type,

@@ -332,69 +332,6 @@ async fn wait_for_artist_received(
     }
 }
 
-/// Wait for the artist's assistant response to start with a verdict keyword.
-/// This avoids false-matching on instruction text like "I'll respond with CORRECT".
-async fn wait_for_artist_verdict(
-    handle: &MobHandle,
-    service: &dyn MobSessionService,
-    verdict: &str,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let members = handle.list_members().await;
-        if let Some(artist) = members
-            .iter()
-            .find(|m| m.meerkat_id == MeerkatId::from("artist"))
-            && let Some(sid) = artist.session_id()
-            && let Ok(page) = service
-                .read_history(
-                    sid,
-                    meerkat_core::SessionHistoryQuery {
-                        offset: 0,
-                        limit: None,
-                    },
-                )
-                .await
-        {
-            for msg in page.messages.iter().rev() {
-                let text = match msg {
-                    meerkat_core::types::Message::Assistant(a) => &a.content,
-                    meerkat_core::types::Message::BlockAssistant(ba) => {
-                        // Check text blocks — must start with verdict
-                        // but NOT "CORRECT or WRONG" (instruction echo).
-                        let has_verdict = ba.blocks.iter().any(|b| match b {
-                            meerkat_core::types::AssistantBlock::Text { text, .. } => {
-                                let t = text.trim();
-                                t.starts_with(verdict)
-                                    && !t.starts_with("CORRECT or")
-                                    && !t.starts_with("WRONG or")
-                            }
-                            _ => false,
-                        });
-                        if has_verdict {
-                            return true;
-                        }
-                        continue;
-                    }
-                    _ => continue,
-                };
-                let t = text.trim();
-                if t.starts_with(verdict)
-                    && !t.starts_with("CORRECT or")
-                    && !t.starts_with("WRONG or")
-                {
-                    return true;
-                }
-            }
-        }
-        if Instant::now() > deadline {
-            return false;
-        }
-        sleep(Duration::from_secs(2)).await;
-    }
-}
-
 /// Dump the cross-agent conversation for a round.
 /// `skip_before` skips messages before this index per member (so repeated rounds don't replay old history).
 async fn print_conversation(

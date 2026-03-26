@@ -220,7 +220,7 @@ mod tests {
             rendered_text: "[EVENT via webhook] hello".into(),
             handling_mode: HandlingMode::Steer,
             render_metadata: Some(RenderMetadata {
-                class: crate::types::RenderClass::System,
+                class: crate::types::RenderClass::SystemNotice,
                 salience: crate::types::RenderSalience::Urgent,
             }),
         };

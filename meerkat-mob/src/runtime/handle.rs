@@ -9,6 +9,7 @@ use meerkat_core::comms::{
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::SessionError;
+use meerkat_core::time_compat::Instant;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1605,8 +1606,7 @@ impl MobHandle {
             return Ok(());
         }
 
-        let deadline =
-            tokio::time::Instant::now() + timeout.unwrap_or(DEFAULT_KICKOFF_WAIT_TIMEOUT);
+        let deadline = Instant::now() + timeout.unwrap_or(DEFAULT_KICKOFF_WAIT_TIMEOUT);
         let mut pending = waiters
             .iter()
             .map(|(id, _)| id.clone())
@@ -1632,12 +1632,27 @@ impl MobHandle {
         }
 
         while !futures.is_empty() {
-            match tokio::time::timeout_at(deadline, futures.next()).await {
-                Ok(Some(id)) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let pending_member_ids = target_ids
+                    .iter()
+                    .filter(|id| pending.contains(*id))
+                    .cloned()
+                    .collect();
+                return Err(MobError::KickoffWaitTimedOut { pending_member_ids });
+            }
+
+            let next_fut = futures.next();
+            let sleep_fut = tokio::time::sleep(remaining);
+            futures::pin_mut!(next_fut);
+            futures::pin_mut!(sleep_fut);
+
+            match futures::future::select(next_fut, sleep_fut).await {
+                futures::future::Either::Left((Some(id), _)) => {
                     pending.remove(&id);
                 }
-                Ok(None) => break,
-                Err(_) => {
+                futures::future::Either::Left((None, _)) => break,
+                futures::future::Either::Right((_, _)) => {
                     let pending_member_ids = target_ids
                         .iter()
                         .filter(|id| pending.contains(*id))

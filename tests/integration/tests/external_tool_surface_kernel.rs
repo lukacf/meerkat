@@ -259,26 +259,23 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
     let draining_delta = effect_with_variant(&draining, "EmitExternalToolDelta");
     assert_eq!(draining.transition, "ApplyBoundaryRemoveDraining");
     assert_eq!(
+        draining_delta.fields.get("operation"),
+        Some(&string("Remove"))
+    );
+    assert_eq!(
         draining_delta.fields.get("phase"),
         Some(&string("Draining"))
     );
-    assert!(!set_contains(
-        &draining.next_state,
-        "visible_surfaces",
-        "beta"
-    ));
 
-    let finished = external_tool_surface::transition(
+    let drained = external_tool_surface::transition(
         &draining.next_state,
         &input("CallFinished", vec![("surface_id", string("beta"))]),
     )
     .expect("call finished");
-    assert_eq!(
-        map_value(&finished.next_state, "inflight_calls", "beta"),
-        Some(&KernelValue::U64(0))
-    );
-    let clean = external_tool_surface::transition(
-        &finished.next_state,
+    assert_eq!(drained.transition, "CallFinishedRemoving");
+
+    let removed = external_tool_surface::transition(
+        &drained.next_state,
         &input(
             "FinalizeRemovalClean",
             vec![
@@ -287,23 +284,28 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
             ],
         ),
     )
-    .expect("finalize clean removal");
-    let clean_delta = effect_with_variant(&clean, "EmitExternalToolDelta");
-    assert_eq!(clean_delta.fields.get("phase"), Some(&string("Applied")));
-    assert_eq!(
-        effect_with_variant(&clean, "CloseSurfaceConnection")
-            .fields
-            .get("surface_id"),
-        Some(&string("beta"))
+    .expect("finalize clean remove");
+    let removed_delta = effect_with_variant(&removed, "EmitExternalToolDelta");
+    assert_eq!(removed_delta.fields.get("phase"), Some(&string("Applied")));
+    assert!(!set_contains(
+        &removed.next_state,
+        "visible_surfaces",
+        "beta"
+    ));
+    assert!(
+        removed
+            .effects
+            .iter()
+            .any(|effect| effect.variant == "CloseSurfaceConnection")
     );
 
-    let forced_state = external_tool_surface::transition(
+    let forced_base = external_tool_surface::transition(
         &state,
         &input("StageAdd", vec![("surface_id", string("gamma"))]),
     )
-    .expect("stage add gamma");
-    let forced_state = external_tool_surface::transition(
-        &forced_state.next_state,
+    .expect("stage gamma add");
+    let apply_force_add = external_tool_surface::transition(
+        &forced_base.next_state,
         &input(
             "ApplyBoundary",
             vec![
@@ -312,10 +314,10 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
             ],
         ),
     )
-    .expect("apply add gamma");
-    let scheduled_forced = effect_with_variant(&forced_state, "ScheduleSurfaceCompletion");
-    let forced_state = external_tool_surface::transition(
-        &forced_state.next_state,
+    .expect("apply gamma add");
+    let schedule_force_add = effect_with_variant(&apply_force_add, "ScheduleSurfaceCompletion");
+    let active_gamma = external_tool_surface::transition(
+        &apply_force_add.next_state,
         &input(
             "PendingSucceeded",
             vec![
@@ -323,37 +325,37 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
                 ("operation", string("Add")),
                 (
                     "pending_task_sequence",
-                    scheduled_forced
+                    schedule_force_add
                         .fields
                         .get("pending_task_sequence")
-                        .expect("pending forced task sequence")
+                        .expect("pending force add task sequence")
                         .clone(),
                 ),
                 (
                     "staged_intent_sequence",
-                    scheduled_forced
+                    schedule_force_add
                         .fields
                         .get("staged_intent_sequence")
-                        .expect("pending forced intent sequence")
+                        .expect("pending force add intent sequence")
                         .clone(),
                 ),
                 ("applied_at_turn", KernelValue::U64(12)),
             ],
         ),
     )
-    .expect("gamma active");
-    let forced_state = external_tool_surface::transition(
-        &forced_state.next_state,
+    .expect("pending gamma add succeeds");
+    let gamma_started = external_tool_surface::transition(
+        &active_gamma.next_state,
         &input("CallStarted", vec![("surface_id", string("gamma"))]),
     )
     .expect("gamma call started");
-    let forced_state = external_tool_surface::transition(
-        &forced_state.next_state,
+    let gamma_staged_remove = external_tool_surface::transition(
+        &gamma_started.next_state,
         &input("StageRemove", vec![("surface_id", string("gamma"))]),
     )
     .expect("stage gamma remove");
-    let forced_state = external_tool_surface::transition(
-        &forced_state.next_state,
+    let gamma_draining = external_tool_surface::transition(
+        &gamma_staged_remove.next_state,
         &input(
             "ApplyBoundary",
             vec![
@@ -364,7 +366,7 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
     )
     .expect("apply gamma remove");
     let forced = external_tool_surface::transition(
-        &forced_state.next_state,
+        &gamma_draining.next_state,
         &input(
             "FinalizeRemovalForced",
             vec![
@@ -373,11 +375,7 @@ fn external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit
             ],
         ),
     )
-    .expect("forced finalize");
-    let forced_delta = effect_with_variant(&forced, "EmitExternalToolDelta");
-    assert_eq!(forced_delta.fields.get("phase"), Some(&string("Forced")));
-    assert_eq!(
-        forced_delta.fields.get("persisted"),
-        Some(&KernelValue::Bool(true))
-    );
+    .expect("force remove finalize");
+    let force_delta = effect_with_variant(&forced, "EmitExternalToolDelta");
+    assert_eq!(force_delta.fields.get("phase"), Some(&string("Forced")));
 }

@@ -47,7 +47,6 @@ schema = []
 jsonschema = ["dep:jsonschema"]
 
 [dev-dependencies]
-meerkat-machine-kernels = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 

@@ -20,34 +20,14 @@ trap 'rm -f "$tmp_cfg"; rm -rf "$tmp_dir"' EXIT
 LOG_DIR="$tmp_dir/logs"
 mkdir -p "$LOG_DIR"
 
-PACKAGES=(
-  meerkat-models
-  meerkat-core
-  meerkat-contracts
-  meerkat-client
-  meerkat-store
-  meerkat-tools
-  meerkat-session
-  meerkat-memory
-  meerkat-mcp
-  meerkat-mcp-server
-  meerkat-hooks
-  meerkat-skills
-  meerkat-comms
-  meerkat-rpc
-  meerkat-rest
-  meerkat
-  meerkat-mob
-  meerkat-mob-mcp
-  rkat
-)
+mapfile -t PACKAGES < <("$(dirname "$0")/release-rust-crates.sh")
 
 run_publish() {
   pkg="$1"
   cfg="$2"
   log_file="$LOG_DIR/$pkg.log"
   result_file="$LOG_DIR/$pkg.result"
-  if "$CARGO" publish -p "$pkg" --dry-run --allow-dirty --no-verify --config "$cfg" > "$log_file" 2>&1; then
+  if "$CARGO" publish -p "$pkg" --dry-run --allow-dirty --config "$cfg" > "$log_file" 2>&1; then
     printf "%s:ok\n" "$pkg" > "$result_file"
   else
     printf "%s:fail\n" "$pkg" > "$result_file"

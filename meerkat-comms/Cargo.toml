@@ -56,7 +56,6 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
-meerkat-machine-kernels = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros", "time", "test-util"] }
 tempfile = { workspace = true }
 ciborium = "0.2"

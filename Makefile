@@ -12,7 +12,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory verify-version-parity verify-schema-freshness check-rust-release-packaging bump-sdk-versions xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -151,12 +151,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs everything
-ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+ci: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint lint-feature-matrix test-all test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity lint test-all test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate rmat-read-seam-lint verify-version-parity check-rust-release-packaging lint test-all test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # RMAT read-seam lint: detect shell code that reads authority state to gate
@@ -273,6 +273,11 @@ verify-version-parity:
 verify-schema-freshness:
 	@scripts/verify-schema-freshness.sh
 
+# Verify the publishable Rust workspace surface matches the release list and
+# every released crate packages cleanly before we ever talk to crates.io.
+check-rust-release-packaging:
+	@scripts/check-rust-release-packaging.sh
+
 # Bump Python + TypeScript SDK versions to match Cargo workspace version
 bump-sdk-versions:
 	@scripts/bump-sdk-versions.sh
@@ -286,7 +291,7 @@ regen-schemas:
 	@echo "$(GREEN)Schemas and SDK types regenerated$(NC)"
 
 # Full pre-release checklist
-release-preflight: ci verify-schema-freshness
+release-preflight: ci verify-schema-freshness check-rust-release-packaging
 	@echo ""
 	@echo "$(GREEN)Pre-release checklist:$(NC)"
 	@echo "  1. CHANGELOG.md [Unreleased] section populated?"
@@ -304,7 +309,7 @@ release-preflight: ci verify-schema-freshness
 
 # Smoke pre-release checklist.
 # Useful for local iteration; skips full feature-matrix expansion.
-release-preflight-smoke: ci-smoke verify-schema-freshness
+release-preflight-smoke: ci-smoke verify-schema-freshness check-rust-release-packaging
 	@echo ""
 	@echo "$(GREEN)Pre-release checklist (smoke):$(NC)"
 	@echo "  1. CHANGELOG.md [Unreleased] section populated?"
@@ -414,6 +419,7 @@ help:
 	@echo "Release targets:"
 	@echo "  $(GREEN)verify-version-parity$(NC) - Check Rust/Python/TS version + contract parity"
 	@echo "  $(GREEN)verify-schema-freshness$(NC)- Check committed schemas match Rust source"
+	@echo "  $(GREEN)check-rust-release-packaging$(NC)- Verify release Rust crates package cleanly"
 	@echo "  $(GREEN)bump-sdk-versions$(NC)     - Bump Python + TS versions to match Cargo"
 	@echo "  $(GREEN)regen-schemas$(NC)         - Re-emit schemas + run SDK codegen"
 	@echo "  $(GREEN)release-preflight$(NC)     - Full pre-release checklist (CI + freshness)"

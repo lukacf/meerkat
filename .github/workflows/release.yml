@@ -54,6 +54,9 @@ jobs:
       - name: Verify schema freshness
         run: make verify-schema-freshness
 
+      - name: Verify Rust release packaging
+        run: make check-rust-release-packaging
+
       - name: Verify tag matches version
         if: startsWith(github.ref, 'refs/tags/v')
         run: make verify-version
@@ -261,29 +264,7 @@ jobs:
           else
             echo "Publishing crates to crates.io"
           fi
-          crates=(
-            meerkat-models
-            meerkat-core
-            meerkat-contracts
-            meerkat-client
-            meerkat-store
-            meerkat-tools
-            meerkat-runtime
-            meerkat-session
-            meerkat-memory
-            meerkat-mcp
-            meerkat-mcp-server
-            meerkat-hooks
-            meerkat-skills
-            meerkat-comms
-            meerkat-rpc
-            meerkat-rest
-            meerkat
-            meerkat-mob
-            meerkat-mob-mcp
-            meerkat-mob-pack
-            rkat
-          )
+          mapfile -t crates < <(scripts/release-rust-crates.sh)
           for c in "${crates[@]}"; do
             tmp_cfg="$(mktemp)"
             scripts/generate-patch-config.sh "$GITHUB_WORKSPACE" "$c" > "$tmp_cfg"

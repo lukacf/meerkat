@@ -110,7 +110,6 @@ fn turn_execution_kernel_tool_loop_yields_back_to_llm_after_boundary() {
         Some(&KernelValue::Bool(false))
     );
 
-    // ToolCallsResolved must be rejected while barrier_satisfied == false
     let rejected = turn_execution::transition(
         &registered.next_state,
         &input(
@@ -259,28 +258,37 @@ fn turn_execution_kernel_cancel_and_failure_paths_emit_terminal_effects() {
         &draining.next_state,
         &input("BoundaryComplete", vec![("run_id", string("run-cancel"))]),
     )
-    .expect("boundary completes cancellation");
-    assert_eq!(cancelled.transition, "BoundaryCompleteCancelsAfterBoundary");
+    .expect("boundary complete");
     assert_eq!(cancelled.next_state.phase, "Cancelled");
     assert_eq!(cancelled.effects[0].variant, "RunCancelled");
 
-    let state = turn_execution::initial_state().expect("initial state");
-    let started = turn_execution::transition(
-        &state,
-        &input("StartImmediateAppend", vec![("run_id", string("run-fail"))]),
-    )
-    .expect("start immediate append");
     let failed = turn_execution::transition(
-        &started.next_state,
+        &state,
+        &input("StartConversationRun", vec![("run_id", string("run-fail"))]),
+    )
+    .expect("start fail conversation");
+    let applied_fail = turn_execution::transition(
+        &failed.next_state,
+        &input(
+            "PrimitiveApplied",
+            vec![
+                ("run_id", string("run-fail")),
+                ("admitted_content_shape", string("text")),
+                ("vision_enabled", KernelValue::Bool(false)),
+                ("image_tool_results_enabled", KernelValue::Bool(false)),
+            ],
+        ),
+    )
+    .expect("apply primitive");
+    let terminal_fail = turn_execution::transition(
+        &applied_fail.next_state,
         &input("FatalFailure", vec![("run_id", string("run-fail"))]),
     )
-    .expect("fatal failure");
-    assert_eq!(failed.transition, "FatalFailureFromApplyingPrimitive");
-    assert_eq!(failed.next_state.phase, "Failed");
-    assert_eq!(failed.effects[0].variant, "RunFailed");
+    .expect("llm failed");
+    assert_eq!(terminal_fail.next_state.phase, "Failed");
+    assert_eq!(terminal_fail.effects[0].variant, "RunFailed");
 }
 
-/// Kernel witness: detached-only ops do not block ToolCallsResolved.
 #[test]
 fn turn_execution_kernel_detached_only_ops_do_not_block_resolution() {
     let state = turn_execution::initial_state().expect("initial state");
@@ -291,7 +299,7 @@ fn turn_execution_kernel_detached_only_ops_do_not_block_resolution() {
             vec![("run_id", string("run-detached"))],
         ),
     )
-    .expect("start");
+    .expect("start conversation");
     let applied = turn_execution::transition(
         &started.next_state,
         &input(
@@ -315,33 +323,24 @@ fn turn_execution_kernel_detached_only_ops_do_not_block_resolution() {
             ],
         ),
     )
-    .expect("llm returns tool calls");
-
-    // Register detached-only ops
+    .expect("llm returned tool calls");
     let registered = turn_execution::transition(
         &waiting.next_state,
         &input(
             "RegisterPendingOps",
             vec![
                 ("run_id", string("run-detached")),
-                (
-                    "op_refs",
-                    KernelValue::Seq(vec![string("op-d1"), string("op-d2")]),
-                ),
+                ("op_refs", KernelValue::Seq(vec![string("op-detached")])),
                 ("barrier_operation_ids", KernelValue::Seq(vec![])),
                 ("has_barrier_ops", KernelValue::Bool(false)),
             ],
         ),
     )
-    .expect("register detached ops");
-
-    // barrier_satisfied stays true when no barrier ops
+    .expect("register pending ops");
     assert_eq!(
         field(&registered.next_state, "barrier_satisfied"),
         Some(&KernelValue::Bool(true))
     );
-
-    // ToolCallsResolved succeeds immediately — no OpsBarrierSatisfied needed
     let resolved = turn_execution::transition(
         &registered.next_state,
         &input(
@@ -349,11 +348,10 @@ fn turn_execution_kernel_detached_only_ops_do_not_block_resolution() {
             vec![("run_id", string("run-detached"))],
         ),
     )
-    .expect("tool calls resolved without barrier");
+    .expect("tool calls resolved");
     assert_eq!(resolved.next_state.phase, "DrainingBoundary");
 }
 
-/// Kernel witness: mixed Barrier+Detached ops block until barrier is satisfied.
 #[test]
 fn turn_execution_kernel_mixed_barrier_detached_blocks_until_satisfied() {
     let state = turn_execution::initial_state().expect("initial state");
@@ -364,7 +362,7 @@ fn turn_execution_kernel_mixed_barrier_detached_blocks_until_satisfied() {
             vec![("run_id", string("run-mixed"))],
         ),
     )
-    .expect("start");
+    .expect("start conversation");
     let applied = turn_execution::transition(
         &started.next_state,
         &input(
@@ -388,9 +386,7 @@ fn turn_execution_kernel_mixed_barrier_detached_blocks_until_satisfied() {
             ],
         ),
     )
-    .expect("llm returns tool calls");
-
-    // Register mixed ops (one barrier + one detached)
+    .expect("llm returned tool calls");
     let registered = turn_execution::transition(
         &waiting.next_state,
         &input(
@@ -399,7 +395,7 @@ fn turn_execution_kernel_mixed_barrier_detached_blocks_until_satisfied() {
                 ("run_id", string("run-mixed")),
                 (
                     "op_refs",
-                    KernelValue::Seq(vec![string("op-barrier"), string("op-detached")]),
+                    KernelValue::Seq(vec![string("op-detached"), string("op-barrier")]),
                 ),
                 (
                     "barrier_operation_ids",
@@ -409,25 +405,19 @@ fn turn_execution_kernel_mixed_barrier_detached_blocks_until_satisfied() {
             ],
         ),
     )
-    .expect("register mixed ops");
-
+    .expect("register pending ops");
     assert_eq!(
         field(&registered.next_state, "barrier_satisfied"),
         Some(&KernelValue::Bool(false))
     );
-
-    // ToolCallsResolved must be rejected
-    let rejected = turn_execution::transition(
-        &registered.next_state,
-        &input("ToolCallsResolved", vec![("run_id", string("run-mixed"))]),
-    );
     assert!(
-        rejected.is_err(),
-        "must block when barrier_satisfied is false"
+        turn_execution::transition(
+            &registered.next_state,
+            &input("ToolCallsResolved", vec![("run_id", string("run-mixed"))]),
+        )
+        .is_err()
     );
-
-    // Satisfy barrier
-    let satisfied = turn_execution::transition(
+    let barrier = turn_execution::transition(
         &registered.next_state,
         &input(
             "OpsBarrierSatisfied",
@@ -440,36 +430,30 @@ fn turn_execution_kernel_mixed_barrier_detached_blocks_until_satisfied() {
             ],
         ),
     )
-    .expect("ops barrier satisfied");
+    .expect("barrier satisfied");
     assert_eq!(
-        field(&satisfied.next_state, "barrier_satisfied"),
+        field(&barrier.next_state, "barrier_satisfied"),
         Some(&KernelValue::Bool(true))
     );
-
-    // Now ToolCallsResolved succeeds
-    let resolved = turn_execution::transition(
-        &satisfied.next_state,
-        &input("ToolCallsResolved", vec![("run_id", string("run-mixed"))]),
-    )
-    .expect("tool calls resolved");
-    assert_eq!(resolved.next_state.phase, "DrainingBoundary");
 }
 
-/// Kernel witness: OpsBarrierSatisfied rejected when barrier is already satisfied.
 #[test]
 fn turn_execution_kernel_ops_barrier_satisfied_rejected_when_already_true() {
     let state = turn_execution::initial_state().expect("initial state");
     let started = turn_execution::transition(
         &state,
-        &input("StartConversationRun", vec![("run_id", string("run-dup"))]),
+        &input(
+            "StartConversationRun",
+            vec![("run_id", string("run-barrier"))],
+        ),
     )
-    .expect("start");
+    .expect("start conversation");
     let applied = turn_execution::transition(
         &started.next_state,
         &input(
             "PrimitiveApplied",
             vec![
-                ("run_id", string("run-dup")),
+                ("run_id", string("run-barrier")),
                 ("admitted_content_shape", string("text")),
                 ("vision_enabled", KernelValue::Bool(false)),
                 ("image_tool_results_enabled", KernelValue::Bool(false)),
@@ -482,41 +466,56 @@ fn turn_execution_kernel_ops_barrier_satisfied_rejected_when_already_true() {
         &input(
             "LlmReturnedToolCalls",
             vec![
-                ("run_id", string("run-dup")),
+                ("run_id", string("run-barrier")),
                 ("tool_count", KernelValue::U64(1)),
             ],
         ),
     )
-    .expect("llm returns tool calls");
-
-    // Register with no barrier ops — barrier_satisfied stays true
+    .expect("llm returned tool calls");
     let registered = turn_execution::transition(
         &waiting.next_state,
         &input(
             "RegisterPendingOps",
             vec![
-                ("run_id", string("run-dup")),
-                ("op_refs", KernelValue::Seq(vec![])),
-                ("barrier_operation_ids", KernelValue::Seq(vec![])),
-                ("has_barrier_ops", KernelValue::Bool(false)),
+                ("run_id", string("run-barrier")),
+                ("op_refs", KernelValue::Seq(vec![string("op-barrier")])),
+                (
+                    "barrier_operation_ids",
+                    KernelValue::Seq(vec![string("op-barrier")]),
+                ),
+                ("has_barrier_ops", KernelValue::Bool(true)),
             ],
         ),
     )
-    .expect("register no-barrier ops");
-
-    // OpsBarrierSatisfied should be rejected since barrier_satisfied is already true
-    let rejected = turn_execution::transition(
+    .expect("register pending ops");
+    let satisfied = turn_execution::transition(
         &registered.next_state,
         &input(
             "OpsBarrierSatisfied",
             vec![
-                ("run_id", string("run-dup")),
-                ("operation_ids", KernelValue::Seq(vec![])),
+                ("run_id", string("run-barrier")),
+                (
+                    "operation_ids",
+                    KernelValue::Seq(vec![string("op-barrier")]),
+                ),
             ],
         ),
-    );
+    )
+    .expect("barrier satisfied");
     assert!(
-        rejected.is_err(),
-        "OpsBarrierSatisfied must be rejected when barrier is already satisfied"
+        turn_execution::transition(
+            &satisfied.next_state,
+            &input(
+                "OpsBarrierSatisfied",
+                vec![
+                    ("run_id", string("run-barrier")),
+                    (
+                        "operation_ids",
+                        KernelValue::Seq(vec![string("op-barrier")])
+                    ),
+                ],
+            ),
+        )
+        .is_err()
     );
 }

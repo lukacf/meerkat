@@ -67,7 +67,7 @@ description = "Automated release triage with code review and changelog generatio
 authors = ["team@example.com"]
 
 [requires]
-meerkat = ">=0.4.0"
+meerkat = ">=0.5.0"
 credentials = ["anthropic_api_key"]       # declared, never stored
 capabilities = ["comms", "shell"]         # what the mob needs from the runtime
 
@@ -397,7 +397,7 @@ description = "Browser-deployed release triage mob"
 authors = ["team@example.com"]
 
 [requires]
-meerkat = ">=0.4.0"
+meerkat = ">=0.5.0"
 browser_features = ["web_workers", "indexeddb", "fetch"]
 credentials = ["oauth:jira", "oauth:salesforce"]
 

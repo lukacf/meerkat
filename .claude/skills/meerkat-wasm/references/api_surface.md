@@ -187,7 +187,7 @@ sessionEvents.poll();
 session.destroy();
 ```
 
-### Key type changes (0.4.6)
+### Key type changes (0.5)
 
 - `Mob.subscribe()` and `Mob.subscribeAll()` are now **async** (return `Promise<EventSubscription<T>>`)
 - `EventSubscription<T>` is generic — `subscribe()` yields `EventEnvelope`, `subscribeAll()` yields `AttributedEvent`

@@ -2,6 +2,8 @@
 
 TypeScript client for the [Meerkat](https://github.com/lukacf/meerkat) runtime. The SDK is a thin session-first wrapper over the same runtime-backed contracts used by the CLI, REST, JSON-RPC, and MCP surfaces. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
 
+Current contract version: `0.5.0`.
+
 ## Installation
 
 ```bash

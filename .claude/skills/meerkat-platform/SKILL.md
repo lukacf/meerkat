@@ -175,7 +175,7 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 - MCP protocol client (rmcp blocked by tokio/mio)
 - Network comms (TCP/UDS sockets — inproc only)
 
-**WASM API surface:** See the meerkat-wasm skill (`references/api_surface.md`) for the complete export table. Key additions in 0.4.2: `runtime_version()`, `register_tool_callback()`, `clear_tool_callbacks()`, `create_session_simple()`, per-provider base URLs on all config types.
+**WASM API surface:** See the meerkat-wasm skill (`references/api_surface.md`) for the complete export table. Key additions in 0.5: `runtime_version()`, `register_tool_callback()`, `clear_tool_callbacks()`, `create_session_simple()`, per-provider base URLs on all config types.
 
 **Build:**
 ```bash
@@ -324,13 +324,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.4"
+meerkat = "0.5"
 
 # Single provider, minimal
-meerkat = { version = "0.4", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.5", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms
-meerkat = { version = "0.4", features = [
+meerkat = { version = "0.5", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills"
 ] }
@@ -370,7 +370,7 @@ On materialized sessions, the LLM client is hot-swapped for the remainder of the
 
 ## Core features
 
-### Multimodal content (v0.4.12)
+### Multimodal content (0.5)
 
 Prompts and tool results support multimodal content (text + images). The `ContentInput` type (`Text(String)` or `Blocks(Vec<ContentBlock>)`) is used for all prompt parameters across surfaces.
 

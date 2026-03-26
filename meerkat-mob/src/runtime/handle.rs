@@ -1746,8 +1746,9 @@ impl MobHandle {
 
     /// Spawn a fresh helper, wait for it to complete, retire it, and return its result.
     ///
-    /// This is a convenience wrapper around spawn → wait → collect → retire for
-    /// short-lived sub-tasks.
+    /// Helpers are short-lived TurnDriven tasks by default. Their completion
+    /// truth is the spawn/create boundary plus the canonical post-spawn member
+    /// snapshot, not full member terminality in the mob lifecycle.
     pub async fn spawn_helper(
         &self,
         meerkat_id: MeerkatId,
@@ -1763,22 +1764,26 @@ impl MobHandle {
         let task_text = task.into();
         let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
         spec.initial_message = Some(task_text.into());
-        spec.runtime_mode = options.runtime_mode;
+        spec.runtime_mode = Some(
+            options
+                .runtime_mode
+                .unwrap_or(crate::MobRuntimeMode::TurnDriven),
+        );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
-        let terminal_material = self.wait_one_material(&meerkat_id).await?;
+        let helper_material = self.canonical_member_snapshot_material(&meerkat_id).await;
         let _ = self.retire(meerkat_id.clone()).await;
 
-        Ok(terminal_material.to_helper_result())
+        Ok(helper_material.to_helper_result())
     }
 
     /// Fork from an existing member's context, wait for completion, retire, and return.
     ///
-    /// Like `spawn_helper` but uses `MemberLaunchMode::Fork` to share conversation
-    /// context with the source member.
+    /// Like `spawn_helper` but uses `MemberLaunchMode::Fork` to share
+    /// conversation context with the source member.
     pub async fn fork_helper(
         &self,
         source_member_id: &MeerkatId,
@@ -1796,7 +1801,11 @@ impl MobHandle {
         let task_text = task.into();
         let mut spec = SpawnMemberSpec::new(profile_name, meerkat_id.clone());
         spec.initial_message = Some(task_text.into());
-        spec.runtime_mode = options.runtime_mode;
+        spec.runtime_mode = Some(
+            options
+                .runtime_mode
+                .unwrap_or(crate::MobRuntimeMode::TurnDriven),
+        );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
         spec.auto_wire_parent = true;
@@ -1806,10 +1815,10 @@ impl MobHandle {
         };
 
         self.spawn_spec(spec).await?;
-        let terminal_material = self.wait_one_material(&meerkat_id).await?;
+        let helper_material = self.canonical_member_snapshot_material(&meerkat_id).await;
         let _ = self.retire(meerkat_id.clone()).await;
 
-        Ok(terminal_material.to_helper_result())
+        Ok(helper_material.to_helper_result())
     }
 }
 

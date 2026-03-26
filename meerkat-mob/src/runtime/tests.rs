@@ -3608,8 +3608,9 @@ async fn test_mob_management_tools_dispatch_to_handle() {
 async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let helper_id = MeerkatId::from("helper-spawn");
-    let result = handle
-        .spawn_helper(
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.spawn_helper(
             helper_id.clone(),
             "summarize this",
             HelperOptions {
@@ -3617,9 +3618,11 @@ async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
                 runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
                 ..HelperOptions::default()
             },
-        )
-        .await
-        .expect("spawn_helper succeeds");
+        ),
+    )
+    .await
+    .expect("spawn_helper must not wait on helper terminality")
+    .expect("spawn_helper succeeds");
 
     let session_id = result.session_id.expect("helper session id");
     assert!(
@@ -3648,8 +3651,9 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
         .expect("spawn source member");
 
     let helper_id = MeerkatId::from("fork-helper");
-    let result = handle
-        .fork_helper(
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.fork_helper(
             &source_id,
             helper_id.clone(),
             "continue from source",
@@ -3659,9 +3663,11 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
                 runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
                 ..HelperOptions::default()
             },
-        )
-        .await
-        .expect("fork_helper succeeds");
+        ),
+    )
+    .await
+    .expect("fork_helper must not wait on helper terminality")
+    .expect("fork_helper succeeds");
 
     let helper_session_id = result.session_id.expect("fork helper session id");
     assert!(
@@ -3679,6 +3685,32 @@ async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
             .await
             .and_then(|entry| entry.member_ref.session_id().cloned()),
         "fork_helper must not perturb the source member's canonical session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_spawn_helper_defaults_to_turn_driven_even_when_profile_is_autonomous() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.spawn_helper(
+            MeerkatId::from("helper-default"),
+            "summarize this",
+            HelperOptions {
+                profile_name: Some(ProfileName::from("worker")),
+                ..HelperOptions::default()
+            },
+        ),
+    )
+    .await
+    .expect("spawn_helper default runtime mode must not inherit autonomous host behavior")
+    .expect("spawn_helper succeeds");
+
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        0,
+        "spawn_helper must default to TurnDriven semantics instead of inheriting AutonomousHost"
     );
 }
 
@@ -12505,10 +12537,18 @@ impl RealCommsSessionService {
     }
 }
 
-/// Create a MobHandle with real comms (for behavioral wire tests).
+/// Create a MobHandle with real comms for wiring/trust behavior tests.
+///
+/// This harness intentionally forces all profiles to `TurnDriven` so peer/trust
+/// assertions are not coupled to autonomous keep-alive kickoff behavior. Tests
+/// that need autonomous ingress should use
+/// `create_test_mob_with_runtime_backed_real_comms(...)` instead.
 async fn create_test_mob_with_real_comms(
-    definition: MobDefinition,
+    mut definition: MobDefinition,
 ) -> (MobHandle, Arc<RealCommsSessionService>) {
+    for profile in definition.profiles.values_mut() {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
     let service = Arc::new(RealCommsSessionService::new());
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)

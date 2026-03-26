@@ -1211,7 +1211,7 @@ mod content_block_tests {
     fn tool_result_deserialize_array() {
         let json = json!({
             "tool_use_id": "tc_1",
-            "content": [{"type": "text", "text": "desc"}, {"type": "image", "media_type": "image/png", "data": "abc"}],
+            "content": [{"type": "text", "text": "desc"}, {"type": "image", "media_type": "image/png", "source": "inline", "data": "abc"}],
             "is_error": false
         });
         let result: ToolResult = serde_json::from_value(json).unwrap();

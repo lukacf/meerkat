@@ -2497,12 +2497,12 @@ async fn create_session_inner(
     // Final cancel recheck before submitting input — interrupt() is a no-op
     // when no turn is running, so cancel between the last recheck and here
     // would be lost without this gate.
-    if let Some(ctx) = req_ctx.as_ref() {
-        if ctx.cancel_requested() {
-            drop(caller_event_tx);
-            drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
-        }
+    if let Some(ctx) = req_ctx.as_ref()
+        && ctx.cancel_requested()
+    {
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
+        return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
     }
 
     let (outcome, handle) = match adapter
@@ -3076,14 +3076,12 @@ async fn continue_session_inner(
                 ),
             ));
         // Final cancel recheck before submitting input.
-        if let Some(ctx) = req_ctx.as_ref() {
-            if ctx.cancel_requested() {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
-                    details: None,
-                }));
-            }
+        if let Some(ctx) = req_ctx.as_ref()
+            && ctx.cancel_requested()
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
         }
         let (_outcome, handle) = match adapter
             .accept_input_with_completion(&create_result.session_id, input)
@@ -3187,14 +3185,12 @@ async fn continue_session_inner(
                 ),
             ));
         // Final cancel recheck before submitting input.
-        if let Some(ctx) = req_ctx.as_ref() {
-            if ctx.cancel_requested() {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
-                    details: None,
-                }));
-            }
+        if let Some(ctx) = req_ctx.as_ref()
+            && ctx.cancel_requested()
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
         }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)

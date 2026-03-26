@@ -209,14 +209,30 @@ impl MobMcpState {
     }
 
     pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
-        let mut mobs = self.mobs.write().await;
-        let managed = mobs
-            .get(mob_id)
-            .cloned()
-            .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))?;
-        managed.handle.destroy().await?;
-        mobs.remove(mob_id);
-        Ok(())
+        let managed = {
+            let mut mobs = self.mobs.write().await;
+            mobs.remove(mob_id)
+                .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))?
+        };
+
+        match managed.handle.destroy().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let mut mobs = self.mobs.write().await;
+                match mobs.entry(mob_id.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(managed);
+                    }
+                    Entry::Occupied(_) => {
+                        tracing::warn!(
+                            mob_id = %mob_id,
+                            "mob destroy failed after a replacement mob with the same id was inserted; preserving replacement"
+                        );
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     pub async fn mob_spawn(
@@ -2761,13 +2777,13 @@ timeout_ms = 1000
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": a, "specs":[{"profile":"worker", "meerkat_id":"wa"}]}),
+            json!({"mob_id": a, "specs":[{"profile":"worker", "meerkat_id":"wa", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": b, "specs":[{"profile":"worker", "meerkat_id":"wb"}]}),
+            json!({"mob_id": b, "specs":[{"profile":"worker", "meerkat_id":"wb", "runtime_mode":"turn_driven"}]}),
         )
         .await;
 
@@ -2775,6 +2791,19 @@ timeout_ms = 1000
         let lb = call_tool(&d, "meerkat_list", json!({"mob_id": b})).await;
         assert_eq!(la["members"].as_array().unwrap().len(), 1); // wa
         assert_eq!(lb["members"].as_array().unwrap().len(), 1); // wb
+
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": a, "action":"destroy"}),
+        )
+        .await;
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": b, "action":"destroy"}),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2790,19 +2819,19 @@ timeout_ms = 1000
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "meerkat_id":"lead"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "meerkat_id":"lead", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w2"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w2", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
@@ -2880,19 +2909,19 @@ timeout_ms = 1000
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "meerkat_id":"lead"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"lead", "meerkat_id":"lead", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w1", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
             &d,
             "meerkat_spawn",
-            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w2"}]}),
+            json!({"mob_id": mob_id, "specs":[{"profile":"worker", "meerkat_id":"w2", "runtime_mode":"turn_driven"}]}),
         )
         .await;
         call_tool(
@@ -2923,6 +2952,13 @@ timeout_ms = 1000
         .await;
         let status = call_tool(&d, "mob_list", json!({"mob_id": mob_id})).await;
         assert_eq!(status["status"], "Running");
+
+        call_tool(
+            &d,
+            "mob_lifecycle",
+            json!({"mob_id": mob_id, "action":"destroy"}),
+        )
+        .await;
     }
 
     #[tokio::test]

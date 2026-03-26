@@ -3330,8 +3330,27 @@ async fn test_lifecycle_state_machine_enforcement() {
     let err = handle
         .destroy()
         .await
-        .expect_err("destroy from Destroyed must fail");
-    assert!(matches!(err, MobError::InvalidTransition { .. }));
+        .expect_err("destroy from Destroyed must fail once actor exits");
+    assert!(
+        matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
+        "destroy should be terminal once completed: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_is_terminal_for_commands() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.destroy().await.expect("destroy");
+    assert_eq!(handle.status(), MobState::Destroyed);
+
+    let err = handle
+        .stop()
+        .await
+        .expect_err("stop after destroy must fail");
+    assert!(
+        matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
+        "destroy should terminate the actor loop: {err:?}"
+    );
 }
 
 #[tokio::test]

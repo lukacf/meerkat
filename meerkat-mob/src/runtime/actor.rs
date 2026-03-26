@@ -1420,7 +1420,16 @@ impl MobActor {
                     // No shell guard — lifecycle_authority rejects invalid transitions.
                     self.fail_all_pending_spawns("mob is destroying").await;
                     let result = self.handle_destroy().await;
+                    let destroy_succeeded = result.is_ok();
                     let _ = reply_tx.send(result);
+                    if destroy_succeeded {
+                        // Destroy is terminal for the current ownership model:
+                        // once a mob is destroyed, the actor task exits and no
+                        // further commands are accepted.
+                        self.lifecycle_tasks.abort_all();
+                        while self.lifecycle_tasks.join_next().await.is_some() {}
+                        break;
+                    }
                 }
                 MobCommand::Reset { reply_tx } => {
                     // No shell guard — lifecycle_authority rejects invalid transitions.

@@ -1304,7 +1304,7 @@ impl MobHandle {
             .map_err(|_| MobError::Internal("actor reply dropped".into()))?
     }
 
-    /// Retire active members and clear persisted mob storage.
+    /// Retire active members, clear persisted mob storage, and terminate the actor.
     pub async fn destroy(&self) -> Result<(), MobError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx

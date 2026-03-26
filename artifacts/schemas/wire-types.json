@@ -854,10 +854,41 @@
         "type": "object"
       },
       {
-        "properties": {
-          "data": {
-            "type": "string"
+        "oneOf": [
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "source": {
+                "const": "inline",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "data"
+            ],
+            "type": "object"
           },
+          {
+            "properties": {
+              "blob_id": {
+                "type": "string"
+              },
+              "source": {
+                "const": "blob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "blob_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "properties": {
           "media_type": {
             "type": "string"
           },
@@ -868,8 +899,7 @@
         },
         "required": [
           "type",
-          "media_type",
-          "data"
+          "media_type"
         ],
         "type": "object"
       },
@@ -911,10 +941,41 @@
             "type": "object"
           },
           {
-            "properties": {
-              "data": {
-                "type": "string"
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
               },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
               "media_type": {
                 "type": "string"
               },
@@ -925,8 +986,7 @@
             },
             "required": [
               "type",
-              "media_type",
-              "data"
+              "media_type"
             ],
             "type": "object"
           },
@@ -1493,10 +1553,41 @@
             "type": "object"
           },
           {
-            "properties": {
-              "data": {
-                "type": "string"
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
               },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
               "media_type": {
                 "type": "string"
               },
@@ -1507,8 +1598,7 @@
             },
             "required": [
               "type",
-              "media_type",
-              "data"
+              "media_type"
             ],
             "type": "object"
           },
@@ -2071,10 +2161,41 @@
             "type": "object"
           },
           {
-            "properties": {
-              "data": {
-                "type": "string"
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
               },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
               "media_type": {
                 "type": "string"
               },
@@ -2085,8 +2206,7 @@
             },
             "required": [
               "type",
-              "media_type",
-              "data"
+              "media_type"
             ],
             "type": "object"
           },
@@ -2503,10 +2623,41 @@
             "type": "object"
           },
           {
-            "properties": {
-              "data": {
-                "type": "string"
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
               },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
               "media_type": {
                 "type": "string"
               },
@@ -2517,8 +2668,7 @@
             },
             "required": [
               "type",
-              "media_type",
-              "data"
+              "media_type"
             ],
             "type": "object"
           },
@@ -2595,10 +2745,41 @@
             "type": "object"
           },
           {
-            "properties": {
-              "data": {
-                "type": "string"
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
               },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
               "media_type": {
                 "type": "string"
               },
@@ -2609,8 +2790,7 @@
             },
             "required": [
               "type",
-              "media_type",
-              "data"
+              "media_type"
             ],
             "type": "object"
           },

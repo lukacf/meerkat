@@ -7,9 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-03-26
 
 Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime ownership around generated authorities and runtime-backed session services, removes a wide set of legacy public-surface residue, brings persistent session and mob recovery much closer to truthful replay, and adds a realm blob store for image content.
+
+### Highlights
+
+- Runtime-backed semantics are now the canonical public model across CLI, REST, RPC, MCP, Rust, Python, TypeScript, and Web surfaces.
+- `host_mode` has been fully replaced by `keep_alive`, with stricter validation, clearer tri-state behavior, and consistent cross-surface ownership.
+- Generated machine authorities, formal schemas, and seam-audit enforcement now back the most important runtime, mob, comms, turn, and ops-lifecycle semantics.
+- Durable image handling moved to the new blob-backed model, with aligned history/read semantics and better multimodal behavior across providers and comms paths.
+- Persistent session and mob resume behavior is much closer to truthful replay, including stronger identity continuity, broken-member handling, and runtime-backed recovery.
+- Surface cancellation, commit-boundary, and external-event behavior were tightened so successful committed work is preserved and invalid/runtime-owned requests fail more honestly.
+
+### Upgrade notes
+
+- Treat 0.5 as a real semantic cutover from 0.4.x, not a small additive release.
+- Runtime-backed session services are now the intended integration path; direct low-level construction is an expert/internal escape hatch.
+- Expect `keep_alive`, blob-backed image durability, richer structured content/history models, and stronger typed lifecycle semantics across surfaces and SDKs.
+- If you are upgrading an older integration, use the 0.4x -> 0.5 migration guidance in the docs/skills rather than assuming 0.4 behavior still holds.
 
 ### Added
 
@@ -857,7 +873,8 @@ Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime o
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/lukacf/meerkat/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/lukacf/meerkat/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/lukacf/meerkat/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/lukacf/meerkat/compare/v0.4.6...v0.4.7

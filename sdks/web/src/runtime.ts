@@ -11,7 +11,7 @@ import type {
 } from './types.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
-const EXPECTED_VERSION = '0.4.13';
+const EXPECTED_VERSION = '0.5.0';
 
 /**
  * Convert a camelCase config object to the snake_case expected by WASM.

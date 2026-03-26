@@ -21,6 +21,12 @@
       "name": "session/history"
     },
     {
+      "description": "Fetch raw blob payload metadata and bytes by blob id",
+      "name": "blob/get",
+      "params_type": "BlobGetParams",
+      "result_type": "BlobPayload"
+    },
+    {
       "description": "Remove session",
       "name": "session/archive"
     },

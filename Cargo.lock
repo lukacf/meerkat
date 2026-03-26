@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-test-server"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2496,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-integration-tests"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "meerkat",
@@ -2634,14 +2634,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-codegen"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "meerkat-machine-schema",
 ]
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "meerkat-machine-schema",
  "serde",
@@ -2651,14 +2651,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "indexmap",
 ]
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2680,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp-server"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -2707,7 +2707,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "hnsw_rs",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-pack"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2799,7 +2799,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2808,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rest"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2846,7 +2846,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rpc"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2875,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "gix",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-web-runtime"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "flate2",
@@ -3690,7 +3690,7 @@ dependencies = [
 
 [[package]]
 name = "rkat"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5321,7 +5321,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.4.13"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",

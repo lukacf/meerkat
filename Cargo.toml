@@ -82,7 +82,7 @@ indexmap = { version = "2", features = ["serde"] }
 tokio-util = "0.7"
 
 # JSON Schema validation
-jsonschema = { version = "0.26", default-features = false }
+jsonschema = { version = "0.45", default-features = false }
 schemars = { version = "1", features = ["derive"] }
 
 # YAML

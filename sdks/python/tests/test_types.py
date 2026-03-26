@@ -797,6 +797,17 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             return {"run": {"status": "running"}}
         if method == "mob/send":
             return {"session_id": "session-1", "member_id": "agent-a"}
+        if method == "mob/wait_kickoff":
+            return {
+                "members": [
+                    {
+                        "meerkat_id": "agent-a",
+                        "status": "active",
+                        "tokens_used": 3,
+                        "is_final": False,
+                    }
+                ]
+            }
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -820,6 +831,18 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     send_receipt = await client.send_mob_member_content("mob-1", "agent-a", "hello")
     assert send_receipt["session_id"] == "session-1"
     assert send_receipt["member_id"] == "agent-a"
+    wait_members = await client.wait_mob_kickoff(
+        "mob-1",
+        member_ids=["agent-a"],
+        timeout_ms=1234,
+    )
+    assert wait_members[0]["meerkat_id"] == "agent-a"
+    assert wait_members[0]["status"] == "active"
+
+    mob_handle = client.mob("mob-1")
+    scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)
+    assert scoped_wait_members[0]["meerkat_id"] == "agent-a"
+
     await client.append_mob_system_context("mob-1", "agent-a", "context")
     assert await client.list_mob_flows("mob-1") == ["incident"]
     assert await client.run_mob_flow("mob-1", "incident") == "run-1"
@@ -838,6 +861,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/unwire",
         "mob/lifecycle",
         "mob/send",
+        "mob/wait_kickoff",
+        "mob/wait_kickoff",
         "mob/append_system_context",
         "mob/flows",
         "mob/flow_run",
@@ -856,3 +881,9 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         },
     }
+    assert calls[11][1] == {
+        "mob_id": "mob-1",
+        "member_ids": ["agent-a"],
+        "timeout_ms": 1234,
+    }
+    assert calls[12][1] == {"mob_id": "mob-1", "timeout_ms": 99}

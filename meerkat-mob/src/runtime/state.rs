@@ -106,6 +106,10 @@ pub(super) enum MobCommand {
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
+    KickoffBarrierSnapshot {
+        meerkat_ids: Vec<MeerkatId>,
+        reply_tx: oneshot::Sender<Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>>,
+    },
     RunFlow {
         flow_id: FlowId,
         activation_params: serde_json::Value,

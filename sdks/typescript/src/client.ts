@@ -53,6 +53,8 @@ import {
 import { DeferredSession, Session } from "./session.js";
 import {
   Mob,
+  type MobKickoffMemberSnapshot,
+  type MobKickoffWaitOptions,
   type MobHandlingMode,
   type MobPeerTarget,
   type MobRenderMetadata,
@@ -778,6 +780,63 @@ export class MeerkatClient {
           }
         : undefined,
     };
+  }
+
+  async waitMobKickoff(
+    mobId: string,
+    options?: MobKickoffWaitOptions,
+  ): Promise<MobKickoffMemberSnapshot[]> {
+    const params: Record<string, unknown> = { mob_id: mobId };
+    if (options?.memberIds !== undefined) {
+      params.member_ids = options.memberIds;
+    }
+    if (options?.timeoutMs !== undefined) {
+      params.timeout_ms = options.timeoutMs;
+    }
+    const result = await this.request("mob/wait_kickoff", params);
+    const members = Array.isArray(result.members) ? result.members : [];
+    return members.map((entry) => {
+      const member =
+        entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+      const rawConnectivity =
+        member.peer_connectivity && typeof member.peer_connectivity === "object"
+          ? (member.peer_connectivity as Record<string, unknown>)
+          : undefined;
+      return {
+        meerkatId: String(member.meerkat_id ?? ""),
+        status: String(member.status ?? "unknown"),
+        outputPreview:
+          member.output_preview != null ? String(member.output_preview) : undefined,
+        error: member.error != null ? String(member.error) : undefined,
+        tokensUsed: Number(member.tokens_used ?? 0),
+        isFinal: Boolean(member.is_final),
+        currentSessionId:
+          member.current_session_id != null ? String(member.current_session_id) : undefined,
+        peerConnectivity: rawConnectivity
+          ? {
+              reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
+              unknownPeerCount: Number(rawConnectivity.unknown_peer_count ?? 0),
+              unreachablePeers: Array.isArray(rawConnectivity.unreachable_peers)
+                ? rawConnectivity.unreachable_peers.map((peer) => {
+                    const rawPeer =
+                      peer && typeof peer === "object" ? (peer as Record<string, unknown>) : {};
+                    return {
+                      peer: String(rawPeer.peer ?? ""),
+                      reason: rawPeer.reason != null ? String(rawPeer.reason) : undefined,
+                    };
+                  })
+                : [],
+            }
+          : undefined,
+      };
+    });
+  }
+
+  async wait_mob_kickoff(
+    mobId: string,
+    options?: MobKickoffWaitOptions,
+  ): Promise<MobKickoffMemberSnapshot[]> {
+    return this.waitMobKickoff(mobId, options);
   }
 
   async spawnMobHelper(

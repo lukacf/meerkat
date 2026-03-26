@@ -69,6 +69,15 @@ export interface MobMemberSnapshot {
   };
 }
 
+export interface MobKickoffWaitOptions {
+  memberIds?: string[];
+  timeoutMs?: number;
+}
+
+export interface MobKickoffMemberSnapshot extends MobMemberSnapshot {
+  meerkatId: string;
+}
+
 export interface ExternalPeerTarget {
   readonly external: {
     readonly name: string;
@@ -148,6 +157,12 @@ export class Mob {
 
   async memberStatus(meerkatId: string): Promise<MobMemberSnapshot> {
     return this.client.mobMemberStatus(this.mobId, meerkatId);
+  }
+
+  async waitForKickoffComplete(
+    options?: MobKickoffWaitOptions,
+  ): Promise<MobKickoffMemberSnapshot[]> {
+    return this.client.waitMobKickoff(this.mobId, options);
   }
 
   async spawnHelper(

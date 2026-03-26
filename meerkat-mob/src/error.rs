@@ -40,6 +40,10 @@ pub enum MobError {
         reason: String,
     },
 
+    /// Waiting for kickoff completion timed out.
+    #[error("kickoff wait timed out")]
+    KickoffWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
+
     /// The mob definition failed validation.
     #[error("definition error: {}", format_diagnostics(.0))]
     DefinitionError(Vec<Diagnostic>),
@@ -222,6 +226,9 @@ mod tests {
                 member_id: MeerkatId::from("m"),
                 session_id: meerkat_core::types::SessionId::new(),
                 reason: "restore failed".to_string(),
+            },
+            MobError::KickoffWaitTimedOut {
+                pending_member_ids: vec![MeerkatId::from("m")],
             },
             MobError::DefinitionError(vec![]),
             MobError::FlowNotFound(FlowId::from("f")),

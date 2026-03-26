@@ -17,7 +17,34 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-type AutonomousHostLoopHandle = tokio::task::JoinHandle<Result<(), MobError>>;
+pub(super) struct AutonomousHostLoopEntry {
+    handle: tokio::task::JoinHandle<Result<(), MobError>>,
+    completion_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl AutonomousHostLoopEntry {
+    fn new(
+        handle: tokio::task::JoinHandle<Result<(), MobError>>,
+        completion_tx: tokio::sync::watch::Sender<bool>,
+    ) -> Self {
+        Self {
+            handle,
+            completion_tx,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    fn abort(self) {
+        self.handle.abort();
+    }
+
+    fn completion_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.completion_tx.subscribe()
+    }
+}
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
 const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
@@ -165,7 +192,7 @@ pub(super) struct MobActor {
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
     pub(super) autonomous_host_loops:
-        Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopHandle>>>,
+        Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, AutonomousHostLoopEntry>>>,
     pub(super) next_spawn_ticket: u64,
     pub(super) pending_spawns: PendingSpawnLineage,
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
@@ -627,6 +654,8 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let loop_id = meerkat_id.clone();
         let log_id = meerkat_id.clone();
+        let (completion_tx, _completion_rx) = tokio::sync::watch::channel(false);
+        let completion_tx_for_task = completion_tx.clone();
 
         let handle = tokio::spawn(async move {
             let result = provisioner
@@ -657,6 +686,7 @@ impl MobActor {
                     "autonomous kickoff turn failed"
                 ),
             }
+            let _ = completion_tx_for_task.send(true);
             result
         });
 
@@ -683,10 +713,10 @@ impl MobActor {
             }
         }
 
-        self.autonomous_host_loops
-            .lock()
-            .await
-            .insert(meerkat_id.clone(), handle);
+        self.autonomous_host_loops.lock().await.insert(
+            meerkat_id.clone(),
+            AutonomousHostLoopEntry::new(handle, completion_tx),
+        );
         Ok(())
     }
 
@@ -938,6 +968,22 @@ impl MobActor {
             .map_err(|error| (entry.meerkat_id, error))
     }
 
+    async fn snapshot_kickoff_barrier_state(
+        &self,
+        meerkat_ids: &[MeerkatId],
+    ) -> Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)> {
+        let mut loops = self.autonomous_host_loops.lock().await;
+        loops.retain(|_, entry| !entry.is_finished());
+        meerkat_ids
+            .iter()
+            .filter_map(|id| {
+                loops
+                    .get(id)
+                    .map(|entry| (id.clone(), entry.completion_receiver()))
+            })
+            .collect()
+    }
+
     /// Main actor loop: process commands sequentially until Shutdown.
     pub(super) async fn run(mut self, mut command_rx: mpsc::Receiver<MobCommand>) {
         if matches!(self.state(), MobState::Running) {
@@ -1141,6 +1187,13 @@ impl MobActor {
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
+                }
+                MobCommand::KickoffBarrierSnapshot {
+                    meerkat_ids,
+                    reply_tx,
+                } => {
+                    let snapshot = self.snapshot_kickoff_barrier_state(&meerkat_ids).await;
+                    let _ = reply_tx.send(snapshot);
                 }
                 MobCommand::RunFlow {
                     flow_id,

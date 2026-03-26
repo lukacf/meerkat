@@ -983,6 +983,48 @@ pub async fn handle_member_status(
     }
 }
 
+// ---------------------------------------------------------------------------
+// mob/wait_kickoff
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobWaitKickoffParams {
+    pub mob_id: String,
+    #[serde(default)]
+    pub member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+pub async fn handle_wait_kickoff(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobWaitKickoffParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
+    let member_ids = params.member_ids.map(|ids| {
+        ids.into_iter()
+            .map(|member_id| MeerkatId::from(member_id.as_str()))
+            .collect::<Vec<_>>()
+    });
+
+    match state
+        .mob_wait_kickoff(&mob_id, member_ids, params.timeout_ms)
+        .await
+    {
+        Ok(members) => RpcResponse::success(id, serde_json::json!({ "members": members })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1116,5 +1158,20 @@ mod tests {
         let err = serde_json::from_value::<MobWireParams>(value)
             .expect_err("legacy a/b shape must be rejected");
         assert!(err.to_string().contains("unknown field `a`"));
+    }
+
+    #[test]
+    fn mob_wait_kickoff_params_accept_optional_member_ids_and_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "member_ids": ["a", "b"],
+            "timeout_ms": 2500
+        });
+        let params: MobWaitKickoffParams = serde_json::from_value(value)?;
+        assert_eq!(params.mob_id, "mob-1");
+        assert_eq!(params.member_ids.unwrap_or_default(), vec!["a", "b"]);
+        assert_eq!(params.timeout_ms, Some(2500));
+        Ok(())
     }
 }

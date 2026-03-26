@@ -26,6 +26,10 @@ export type { ConnectOptions } from "./client.js";
 export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
 export { Mob } from "./mob.js";
+export type {
+  MobKickoffMemberSnapshot,
+  MobKickoffWaitOptions,
+} from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
 

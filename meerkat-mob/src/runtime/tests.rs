@@ -3903,6 +3903,193 @@ async fn test_wait_all_preserves_input_order_for_missing_members() {
 }
 
 #[tokio::test]
+async fn test_wait_for_kickoff_complete_returns_current_autonomous_snapshots() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    service.set_start_turn_delay_ms(150);
+
+    let lead = MeerkatId::from("lead-ready");
+    let worker = MeerkatId::from("worker-ready");
+    handle
+        .spawn(ProfileName::from("lead"), lead.clone(), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(ProfileName::from("worker"), worker.clone(), None)
+        .await
+        .expect("spawn worker");
+
+    let snapshots = handle
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+        .await
+        .expect("kickoff barrier succeeds");
+
+    assert_eq!(
+        snapshots.len(),
+        2,
+        "all current autonomous members should be returned"
+    );
+    assert_eq!(snapshots[0].0, lead);
+    assert_eq!(snapshots[1].0, worker);
+    assert!(
+        snapshots
+            .iter()
+            .all(|(_, snapshot)| snapshot.status == crate::runtime::handle::MobMemberStatus::Active),
+        "kickoff completion should return current active snapshots rather than terminalizing members"
+    );
+}
+
+#[tokio::test]
+async fn test_wait_for_members_kickoff_complete_only_waits_requested_members() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    service.set_start_turn_delay_ms(120);
+
+    let autonomous = MeerkatId::from("lead-only");
+    let turn_driven = MeerkatId::from("worker-td");
+    handle
+        .spawn(ProfileName::from("lead"), autonomous.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            turn_driven.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+
+    let snapshots = handle
+        .wait_for_members_kickoff_complete(
+            &[autonomous.clone(), turn_driven.clone()],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("member-scoped barrier succeeds");
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].0, autonomous);
+    assert_eq!(snapshots[1].0, turn_driven);
+    assert_eq!(
+        snapshots[1].1.status,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "non-autonomous members should be treated as immediately satisfied"
+    );
+}
+
+#[tokio::test]
+async fn test_wait_for_kickoff_complete_times_out_with_pending_member_ids() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+
+    let pending = MeerkatId::from("lead-hung");
+    handle
+        .spawn(ProfileName::from("lead"), pending.clone(), None)
+        .await
+        .expect("spawn hung lead");
+
+    let error = handle
+        .wait_for_kickoff_complete(Some(Duration::from_millis(50)))
+        .await
+        .expect_err("kickoff barrier should time out for hanging kickoff");
+
+    match error {
+        MobError::KickoffWaitTimedOut { pending_member_ids } => {
+            assert_eq!(pending_member_ids, vec![pending]);
+        }
+        other => panic!("expected kickoff timeout, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_wait_for_members_kickoff_complete_excludes_later_spawns() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let barrier = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .wait_for_members_kickoff_complete(&[], Some(Duration::from_secs(2)))
+                .await
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("late-lead"),
+            None,
+        )
+        .await
+        .expect("spawn late lead");
+
+    let snapshots = barrier
+        .await
+        .expect("barrier join")
+        .expect("empty target barrier succeeds");
+    assert!(
+        snapshots.is_empty(),
+        "members spawned after the barrier call must not be included"
+    );
+}
+
+#[tokio::test]
+async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging() {
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let broken = MeerkatId::from("lead-broken");
+    handle
+        .spawn(ProfileName::from("lead"), broken.clone(), None)
+        .await
+        .expect("spawn lead");
+    handle.stop().await.expect("stop mob");
+
+    let old_sid = handle
+        .get_member(&broken)
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume should succeed with Broken projection");
+
+    let snapshots = resumed
+        .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
+        .await
+        .expect("barrier should not hang on Broken members");
+
+    let broken_snapshot = snapshots
+        .into_iter()
+        .find(|(id, _)| *id == broken)
+        .expect("broken member snapshot");
+    assert_eq!(
+        broken_snapshot.1.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(broken_snapshot.1.error.is_some());
+}
+
+#[tokio::test]
 async fn test_mob_flow_tools_dispatch_mutate_and_query_real_run_state() {
     let mut definition =
         with_cancel_grace_timeout(sample_definition_with_single_step_flow(60_000, 8), 25);

@@ -33,6 +33,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
 use ::tokio::sync::{RwLock, mpsc};
@@ -45,6 +46,13 @@ struct ManagedMob {
 }
 
 type DefaultLlmClientProvider = Arc<dyn Fn() -> Option<Arc<dyn LlmClient>> + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KickoffMemberSnapshot {
+    pub meerkat_id: MeerkatId,
+    #[serde(flatten)]
+    pub snapshot: meerkat_mob::MobMemberSnapshot,
+}
 
 fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob::MobId> {
     let metadata = session.session_metadata()?;
@@ -493,6 +501,31 @@ impl MobMcpState {
             .await?
             .member_status(meerkat_id)
             .await
+    }
+
+    pub async fn mob_wait_kickoff(
+        &self,
+        mob_id: &MobId,
+        member_ids: Option<Vec<MeerkatId>>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Vec<KickoffMemberSnapshot>, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let snapshots = match member_ids {
+            Some(ids) => {
+                handle
+                    .wait_for_members_kickoff_complete(&ids, timeout)
+                    .await?
+            }
+            None => handle.wait_for_kickoff_complete(timeout).await?,
+        };
+        Ok(snapshots
+            .into_iter()
+            .map(|(meerkat_id, snapshot)| KickoffMemberSnapshot {
+                meerkat_id,
+                snapshot,
+            })
+            .collect())
     }
 
     pub async fn mob_spawn_helper(
@@ -1170,6 +1203,21 @@ impl MobMcpDispatcher {
                      output_preview, tokens_used, and is_final. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"meerkat_id":{"type":"string"}},"required":["mob_id","meerkat_id"]}),
             ),
+            tool(
+                "mob_wait_kickoff",
+                &format!(
+                    "Wait until autonomous kickoff turns complete. Optional: member_ids (subset), timeout_ms. Returns member snapshots. {COMMON}"
+                ),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "mob_id":{"type":"string"},
+                        "member_ids":{"type":"array","items":{"type":"string"}},
+                        "timeout_ms":{"type":"integer","minimum":1}
+                    },
+                    "required":["mob_id"]
+                }),
+            ),
         ]
         .into();
         Self { state, tools }
@@ -1357,6 +1405,14 @@ struct ForceCancelArgs {
 struct MeerkatStatusArgs {
     mob_id: String,
     meerkat_id: String,
+}
+#[derive(Deserialize)]
+struct WaitKickoffArgs {
+    mob_id: String,
+    #[serde(default)]
+    member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 fn default_limit() -> usize {
     100
@@ -1711,6 +1767,22 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!(snapshot))
+            }
+            "mob_wait_kickoff" => {
+                let args: WaitKickoffArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let member_ids = args.member_ids.map(|ids| {
+                    ids.into_iter()
+                        .map(|id| MeerkatId::from(id.as_str()))
+                        .collect::<Vec<_>>()
+                });
+                let members = self
+                    .state
+                    .mob_wait_kickoff(&MobId::from(args.mob_id), member_ids, args.timeout_ms)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"members": members}))
             }
             _ => Err(ToolError::not_found(call.name)),
         };
@@ -2477,11 +2549,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatcher_exposes_15_tools() {
+    async fn test_dispatcher_exposes_16_tools() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
-        assert_eq!(d.tools().len(), 15);
+        assert_eq!(d.tools().len(), 16);
     }
 
     #[tokio::test]
@@ -3100,6 +3172,76 @@ timeout_ms = 1000
             .collect::<std::collections::BTreeSet<_>>();
         assert!(ids.contains("w-many-a"));
         assert!(ids.contains("w-many-b"));
+    }
+
+    #[tokio::test]
+    async fn test_mob_wait_kickoff_returns_member_snapshots() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+        call_tool(
+            &d,
+            "meerkat_spawn",
+            json!({
+                "mob_id": mob_id,
+                "specs": [
+                    {"profile":"lead","meerkat_id":"lead-kickoff","runtime_mode":"turn_driven"},
+                    {"profile":"worker","meerkat_id":"worker-kickoff","runtime_mode":"turn_driven"}
+                ]
+            }),
+        )
+        .await;
+
+        let waited = call_tool(
+            &d,
+            "mob_wait_kickoff",
+            json!({
+                "mob_id": mob_id,
+                "member_ids": ["lead-kickoff", "worker-kickoff"],
+                "timeout_ms": 2000
+            }),
+        )
+        .await;
+        let members = waited["members"].as_array().expect("members array");
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0]["meerkat_id"], "lead-kickoff");
+        assert_eq!(members[1]["meerkat_id"], "worker-kickoff");
+    }
+
+    #[tokio::test]
+    async fn test_mob_wait_kickoff_timeout_maps_error() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let mob_id = created["mob_id"].as_str().unwrap().to_string();
+        call_tool(
+            &d,
+            "meerkat_spawn",
+            json!({
+                "mob_id": mob_id,
+                "specs": [{"profile":"lead","meerkat_id":"hung-kickoff"}]
+            }),
+        )
+        .await;
+
+        let error = call_tool_err(
+            &d,
+            "mob_wait_kickoff",
+            json!({
+                "mob_id": mob_id,
+                "timeout_ms": 50
+            }),
+        )
+        .await;
+        assert!(
+            matches!(error, ToolError::ExecutionFailed { .. }),
+            "kickoff timeout should surface as execution failure on the MCP tool surface"
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ use super::*;
 use crate::MobRuntimeMode;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::{
     PeerDirectoryEntry, PeerReachability, PeerReachabilityReason, TrustedPeerSpec,
 };
@@ -13,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::time::Duration;
+
+const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Point-in-time snapshot of a mob member's execution state.
 #[derive(Debug, Clone, Serialize)]
@@ -1574,6 +1578,79 @@ impl MobHandle {
         }
     }
 
+    async fn snapshot_kickoff_waiters(
+        &self,
+        meerkat_ids: Vec<MeerkatId>,
+    ) -> Result<Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>, MobError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(MobCommand::KickoffBarrierSnapshot {
+                meerkat_ids,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| MobError::Internal("mob actor dropped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| MobError::Internal("actor reply dropped".into()))
+    }
+
+    async fn wait_for_kickoff_receivers(
+        &self,
+        target_ids: &[MeerkatId],
+        waiters: Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>,
+        timeout: Option<Duration>,
+    ) -> Result<(), MobError> {
+        if waiters.is_empty() {
+            return Ok(());
+        }
+
+        let deadline =
+            tokio::time::Instant::now() + timeout.unwrap_or(DEFAULT_KICKOFF_WAIT_TIMEOUT);
+        let mut pending = waiters
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut futures = FuturesUnordered::new();
+
+        for (id, mut rx) in waiters {
+            if *rx.borrow() {
+                pending.remove(&id);
+                continue;
+            }
+            futures.push(async move {
+                loop {
+                    if *rx.borrow() {
+                        break;
+                    }
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                id
+            });
+        }
+
+        while !futures.is_empty() {
+            match tokio::time::timeout_at(deadline, futures.next()).await {
+                Ok(Some(id)) => {
+                    pending.remove(&id);
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    let pending_member_ids = target_ids
+                        .iter()
+                        .filter(|id| pending.contains(*id))
+                        .cloned()
+                        .collect();
+                    return Err(MobError::KickoffWaitTimedOut { pending_member_ids });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn wait_one_material(
         &self,
         meerkat_id: &MeerkatId,
@@ -1594,6 +1671,39 @@ impl MobHandle {
     ) -> Result<MobMemberSnapshot, MobError> {
         let material = self.canonical_member_snapshot_material(meerkat_id).await;
         Ok(material.to_snapshot())
+    }
+
+    /// Wait for all currently-running autonomous kickoff turns in the current roster snapshot.
+    pub async fn wait_for_kickoff_complete(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<(MeerkatId, MobMemberSnapshot)>, MobError> {
+        let target_ids = self
+            .list_all_members()
+            .await
+            .into_iter()
+            .map(|entry| entry.meerkat_id)
+            .collect::<Vec<_>>();
+        self.wait_for_members_kickoff_complete(&target_ids, timeout)
+            .await
+    }
+
+    /// Wait for currently-running autonomous kickoff turns for the given member ids.
+    pub async fn wait_for_members_kickoff_complete(
+        &self,
+        ids: &[MeerkatId],
+        timeout: Option<Duration>,
+    ) -> Result<Vec<(MeerkatId, MobMemberSnapshot)>, MobError> {
+        let target_ids = ids.to_vec();
+        let waiters = self.snapshot_kickoff_waiters(target_ids.clone()).await?;
+        self.wait_for_kickoff_receivers(&target_ids, waiters, timeout)
+            .await?;
+
+        let mut snapshots = Vec::with_capacity(target_ids.len());
+        for id in target_ids {
+            snapshots.push((id.clone(), self.member_status(&id).await?));
+        }
+        Ok(snapshots)
     }
 
     /// Wait for a specific member to reach a terminal state, then return its snapshot.

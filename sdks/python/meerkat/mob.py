@@ -78,6 +78,20 @@ MobMemberSnapshot = TypedDict(
     },
 )
 
+MobKickoffMemberSnapshot = TypedDict(
+    "MobKickoffMemberSnapshot",
+    {
+        "meerkat_id": str,
+        "status": str,
+        "output_preview": NotRequired[str],
+        "error": NotRequired[str],
+        "tokens_used": int,
+        "is_final": bool,
+        "current_session_id": NotRequired[str],
+        "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+    },
+)
+
 MobHelperResult = TypedDict(
     "MobHelperResult",
     {
@@ -169,6 +183,18 @@ class Mob:
 
     async def member_status(self, meerkat_id: str) -> MobMemberSnapshot:
         return await self._client.mob_member_status(self.id, meerkat_id)
+
+    async def wait_for_kickoff_complete(
+        self,
+        *,
+        member_ids: list[str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[MobKickoffMemberSnapshot]:
+        return await self._client.wait_mob_kickoff(
+            self.id,
+            member_ids=member_ids,
+            timeout_ms=timeout_ms,
+        )
 
     async def spawn_helper(
         self,

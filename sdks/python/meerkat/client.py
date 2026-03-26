@@ -43,7 +43,7 @@ from .generated.types import (
     WireInputState,
     WireInputStateHistoryEntry,
 )
-from .mob import Mob, MobHelperResult, MobMemberSnapshot
+from .mob import Mob, MobHelperResult, MobKickoffMemberSnapshot, MobMemberSnapshot
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .tools import ToolRegistry
@@ -746,6 +746,22 @@ class MeerkatClient:
 
     async def mob_member_status(self, mob_id: str, meerkat_id: str) -> MobMemberSnapshot:
         return await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+
+    async def wait_mob_kickoff(
+        self,
+        mob_id: str,
+        *,
+        member_ids: list[str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[MobKickoffMemberSnapshot]:
+        params: dict[str, Any] = {"mob_id": mob_id}
+        if member_ids is not None:
+            params["member_ids"] = member_ids
+        if timeout_ms is not None:
+            params["timeout_ms"] = timeout_ms
+        result = await self._request("mob/wait_kickoff", params)
+        members = result.get("members", [])
+        return members if isinstance(members, list) else []
 
     async def spawn_mob_helper(
         self,

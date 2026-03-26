@@ -707,6 +707,10 @@ impl MethodRouter {
                 handlers::mob::handle_member_status(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/wait_kickoff" => {
+                handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
             "mob/stream_close" => self.handle_mob_stream_close(id, params).await,
@@ -4020,6 +4024,27 @@ mod tests {
         assert!(
             error_message(&resp).contains("unknown field `message`"),
             "legacy mob/send payloads should be rejected after the 0.5 clean cut"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_wait_kickoff_rejects_empty_mob_id() {
+        let (router, _notif_rx) = test_router().await;
+        let resp = router
+            .dispatch(make_request(
+                "mob/wait_kickoff",
+                serde_json::json!({
+                    "mob_id": "",
+                    "timeout_ms": 1000
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("mob_id must not be empty"),
+            "empty mob_id should be rejected before dispatching to mob state"
         );
     }
 

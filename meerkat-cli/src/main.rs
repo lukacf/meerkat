@@ -1233,6 +1233,20 @@ enum MobCommands {
         #[arg(long)]
         initial_message: Option<String>,
     },
+    /// Wait for autonomous kickoff turns to complete.
+    WaitKickoff {
+        /// Mob ID
+        mob_id: String,
+        /// Restrict wait to specific members (repeatable)
+        #[arg(long = "member")]
+        member_ids: Vec<String>,
+        /// Timeout in milliseconds (defaults to 10 minutes)
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Web deployment commands.
     Web {
         #[command(subcommand)]
@@ -5527,6 +5541,44 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             );
             Ok(())
         }
+        MobCommands::WaitKickoff {
+            mob_id,
+            member_ids,
+            timeout_ms,
+            json,
+        } => {
+            let member_ids = (!member_ids.is_empty()).then(|| {
+                member_ids
+                    .into_iter()
+                    .map(|id| meerkat_mob::MeerkatId::from(id.as_str()))
+                    .collect::<Vec<_>>()
+            });
+            let members = state
+                .mob_wait_kickoff(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    member_ids,
+                    timeout_ms,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "members": members }))?
+                );
+            } else {
+                for member in members {
+                    println!(
+                        "{}\tstatus={:?}\tis_final={}",
+                        member.meerkat_id, member.snapshot.status, member.snapshot.is_final
+                    );
+                }
+            }
+            Ok(())
+        }
         MobCommands::Pack { .. }
         | MobCommands::Inspect { .. }
         | MobCommands::Validate { .. }
@@ -7708,6 +7760,43 @@ mod tests {
         assert!(mob.contains("member-status"));
         assert!(mob.contains("force-cancel"));
         assert!(mob.contains("respawn"));
+        assert!(mob.contains("wait-kickoff"));
+    }
+
+    #[test]
+    fn test_cli_mob_wait_kickoff_command_parses() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "wait-kickoff",
+            "mob-a",
+            "--member",
+            "a-1",
+            "--member",
+            "a-2",
+            "--timeout-ms",
+            "2500",
+            "--json",
+        ])
+        .expect("mob wait-kickoff command should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::WaitKickoff {
+                        mob_id,
+                        member_ids,
+                        timeout_ms,
+                        json,
+                    },
+            } => {
+                assert_eq!(mob_id, "mob-a");
+                assert_eq!(member_ids, vec!["a-1".to_string(), "a-2".to_string()]);
+                assert_eq!(timeout_ms, Some(2500));
+                assert!(json);
+            }
+            _ => unreachable!("expected mob wait-kickoff command"),
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ import {
   isRunCompleted,
   isTurnCompleted,
   MeerkatClient,
+  Mob,
   Session,
   DeferredSession,
 } from "../dist/index.js";
@@ -730,5 +731,60 @@ describe("Mob prefab methods", () => {
 
     await assert.rejects(() => client.listMobPrefabs(), /boom/);
     await assert.rejects(() => client.list_mob_prefabs(), /boom/);
+  });
+});
+
+describe("Mob kickoff wait wrappers", () => {
+  it("waitMobKickoff/wait_mob_kickoff/mob.waitForKickoffComplete preserve canonical call shape", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        members: [
+          {
+            meerkat_id: "lead",
+            status: "active",
+            tokens_used: 42,
+            is_final: false,
+          },
+        ],
+      };
+    };
+
+    const direct = await client.waitMobKickoff("mob-1", {
+      memberIds: ["lead", "writer"],
+      timeoutMs: 1234,
+    });
+    const legacy = await client.wait_mob_kickoff("mob-1", {
+      memberIds: ["lead"],
+    });
+    const mob = new Mob(client, "mob-1");
+    const fromHandle = await mob.waitForKickoffComplete({ timeoutMs: 99 });
+
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls.map((call) => call.method), [
+      "mob/wait_kickoff",
+      "mob/wait_kickoff",
+      "mob/wait_kickoff",
+    ]);
+    assert.deepEqual(calls[0].params, {
+      mob_id: "mob-1",
+      member_ids: ["lead", "writer"],
+      timeout_ms: 1234,
+    });
+    assert.deepEqual(calls[1].params, {
+      mob_id: "mob-1",
+      member_ids: ["lead"],
+    });
+    assert.deepEqual(calls[2].params, {
+      mob_id: "mob-1",
+      timeout_ms: 99,
+    });
+    assert.equal(direct[0].meerkatId, "lead");
+    assert.equal(direct[0].tokensUsed, 42);
+    assert.equal(direct[0].status, "active");
+    assert.equal(legacy[0].meerkatId, "lead");
+    assert.equal(fromHandle[0].meerkatId, "lead");
   });
 });

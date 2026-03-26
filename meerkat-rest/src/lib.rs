@@ -1046,6 +1046,7 @@ pub fn router(state: AppState) -> Router {
         .route("/mob/{id}/events", get(mob_event_stream))
         .route("/mob/{id}/spawn-helper", post(mob_spawn_helper))
         .route("/mob/{id}/fork-helper", post(mob_fork_helper))
+        .route("/mob/{id}/wait-kickoff", post(mob_wait_kickoff))
         .route(
             "/mob/{id}/members/{meerkat_id}/status",
             get(mob_member_status),
@@ -1498,6 +1499,39 @@ struct ForkHelperRequest {
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
     backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[cfg(feature = "mob")]
+struct WaitKickoffRequest {
+    #[serde(default)]
+    member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+/// POST /mob/{id}/wait-kickoff — wait for autonomous kickoff completion barrier.
+#[cfg(feature = "mob")]
+async fn mob_wait_kickoff(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<WaitKickoffRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let request = body.map(|Json(value)| value).unwrap_or_default();
+    let member_ids = request.member_ids.map(|member_ids| {
+        member_ids
+            .into_iter()
+            .map(|member_id| meerkat_mob::MeerkatId::from(member_id.as_str()))
+            .collect::<Vec<_>>()
+    });
+    let members = state
+        .mob_state
+        .mob_wait_kickoff(&mob_id, member_ids, request.timeout_ms)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    Ok(Json(json!({ "members": members })))
 }
 
 /// POST /mob/{id}/fork-helper — fork from a member's context, wait, return result.
@@ -4855,6 +4889,83 @@ mod tests {
         let call_bytes = call_resp.into_body().collect().await.unwrap().to_bytes();
         let call_payload: serde_json::Value = serde_json::from_slice(&call_bytes).unwrap();
         assert!(call_payload["mob_id"].as_str().is_some());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_wait_kickoff_route_returns_member_snapshots() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mob_id = state
+            .mob_state
+            .mob_create_prefab(meerkat_mob::Prefab::CodingSwarm)
+            .await
+            .expect("create mob");
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/wait-kickoff"))
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let members = payload["members"]
+            .as_array()
+            .expect("members should be an array");
+        assert!(
+            members.is_empty(),
+            "empty mob should yield no member snapshots"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_mob_wait_kickoff_route_respects_member_filter() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mob_id = state
+            .mob_state
+            .mob_create_prefab(meerkat_mob::Prefab::CodingSwarm)
+            .await
+            .expect("create mob");
+
+        let app = router(state);
+        let body = serde_json::json!({
+            "member_ids": ["lead-filter"],
+            "timeout_ms": 10_000
+        });
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/wait-kickoff"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let members = payload["members"]
+            .as_array()
+            .expect("members should be an array");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0]["meerkat_id"], "lead-filter");
+        assert_eq!(members[0]["status"], "unknown");
     }
 
     // -----------------------------------------------------------------------

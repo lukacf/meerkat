@@ -695,14 +695,14 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
-        let _session_id = member_ref.session_id().ok_or_else(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+        let session_id = member_ref.session_id().ok_or_else(|| {
             MobError::Internal(format!(
                 "autonomous member '{meerkat_id}' must be session-backed for runtime readiness"
             ))
         })?;
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let session_id = _session_id;
         if let Some(adapter) = self.runtime_adapter.clone() {
             adapter.register_session(session_id.clone()).await;
             let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
@@ -725,6 +725,7 @@ impl MobActor {
                 );
             }
         }
+        } // cfg(not(wasm32))
 
         self.ensure_autonomous_dispatch_capability(meerkat_id, member_ref)
             .await

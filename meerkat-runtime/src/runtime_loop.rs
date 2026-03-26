@@ -148,20 +148,25 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
             blocks: p.blocks.clone().unwrap_or_default(),
         },
         Input::Peer(p) if p.blocks.is_some() => {
-            // Prepend the text body when it carries content not already in blocks,
-            // so multimodal messages keep the text explaining the attached media.
             let raw_blocks = p.blocks.clone().unwrap_or_default();
-            let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
-                matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
-            });
-            if p.body.is_empty() || body_already_in_blocks {
-                CoreRenderable::Blocks { blocks: raw_blocks }
-            } else {
-                let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                    text: p.body.clone(),
-                }];
+            if let Some(prefix) = peer_block_prefix_text(p) {
+                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
                 blocks.extend(raw_blocks);
                 CoreRenderable::Blocks { blocks }
+            } else {
+                // Legacy fallback for non-message or non-peer-identified inputs.
+                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
+                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
+                });
+                if p.body.is_empty() || body_already_in_blocks {
+                    CoreRenderable::Blocks { blocks: raw_blocks }
+                } else {
+                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                        text: p.body.clone(),
+                    }];
+                    blocks.extend(raw_blocks);
+                    CoreRenderable::Blocks { blocks }
+                }
             }
         }
         Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
@@ -186,6 +191,16 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         role: ConversationAppendRole::User,
         content,
     })
+}
+
+fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
+    match (&peer.convention, &peer.header.source) {
+        (
+            Some(crate::input::PeerConvention::Message),
+            crate::input::InputOrigin::Peer { peer_id, .. },
+        ) => Some(format!("[COMMS MESSAGE from {peer_id}]")),
+        _ => None,
+    }
 }
 
 fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
@@ -631,7 +646,7 @@ mod tests {
             },
             convention: Some(crate::input::PeerConvention::Message),
             body: "see this image".into(),
-            blocks: Some(blocks),
+            blocks: Some(blocks.clone()),
         });
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id);
@@ -643,7 +658,112 @@ mod tests {
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
             CoreRenderable::Blocks { blocks: got } => {
+                assert_eq!(got.len(), 3);
+                assert_eq!(
+                    got[0],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "[COMMS MESSAGE from p]".into(),
+                    }
+                );
+                assert_eq!(got[1], blocks[0]);
+                assert_eq!(got[2], blocks[1]);
+            }
+            other => return Err(format!("expected blocks content, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn peer_multimodal_append_keeps_source_without_duplicating_block_text() -> Result<(), String> {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption text".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc123".into(),
+            },
+        ];
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Message),
+            body: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+            blocks: Some(blocks.clone()),
+        });
+        let staged = match input_to_primitive(&input, input.id().clone()) {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => {
+                assert_eq!(got.len(), 3);
+                assert_eq!(
+                    got[0],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "[COMMS MESSAGE from peer-1]".into(),
+                    }
+                );
+                assert_eq!(got[1], blocks[0]);
+                assert_eq!(got[2], blocks[1]);
+            }
+            other => return Err(format!("expected blocks content, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn peer_image_only_blocks_keep_source_identity_without_text_duplication() -> Result<(), String>
+    {
+        let blocks = vec![meerkat_core::types::ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "abc123".into(),
+        }];
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Message),
+            body: "[COMMS MESSAGE from peer-1]\n[image: image/png]".into(),
+            blocks: Some(blocks.clone()),
+        });
+        let staged = match input_to_primitive(&input, input.id().clone()) {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => {
                 assert_eq!(got.len(), 2);
+                assert_eq!(
+                    got[0],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "[COMMS MESSAGE from peer-1]".into(),
+                    }
+                );
+                assert_eq!(got[1], blocks[0]);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }

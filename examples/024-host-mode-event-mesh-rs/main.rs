@@ -260,14 +260,14 @@ Configuration:
   }});
 
   # Inject events via REST
-  curl -X POST http://localhost:8000/sessions/{{id}}/turn \
+  curl -X POST http://localhost:8080/sessions/{{id}}/external-events \
     -H "Content-Type: application/json" \
-    -d '{{"prompt": "New order received"}}'
+    -d '{{"event_type": "order.received", "body": "New order received"}}'
 
   # Or via JSON-RPC
   {{"method": "turn/start", "params": {{"session_id": "...", "prompt": "..."}}}}
 
-Host mode is essential for:
+Keep-alive sessions are essential for:
   - Mob orchestrators (need to receive worker reports)
   - Chat interfaces (bidirectional communication)
   - Event processors (react to webhooks/triggers)

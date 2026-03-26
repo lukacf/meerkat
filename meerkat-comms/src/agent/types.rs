@@ -32,7 +32,10 @@ pub struct PlainMessage {
 impl PlainMessage {
     /// Format this message for injection into an LLM session.
     pub fn to_user_message_text(&self) -> String {
-        format!("[EVENT via {}] {}", self.source, self.body)
+        meerkat_core::interaction::format_external_event_projection(
+            &self.source.to_string(),
+            Some(&self.body),
+        )
     }
 }
 

@@ -21,18 +21,7 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
         Input::Prompt(p) => p.text.clone(),
         Input::Peer(p) => p.body.clone(),
         Input::FlowStep(f) => f.instructions.clone(),
-        Input::ExternalEvent(e) => {
-            if let Some(blocks) = &e.blocks {
-                let text = meerkat_core::types::text_content(blocks);
-                if text.is_empty() {
-                    format!("[External Event: {}]", e.event_type)
-                } else {
-                    format!("[External Event: {}] {}", e.event_type, text)
-                }
-            } else {
-                format!("[External Event: {}] {}", e.event_type, e.payload)
-            }
-        }
+        Input::ExternalEvent(e) => external_event_projection_text(e),
         Input::Continuation(c) => format!("[Continuation] {}", c.reason),
         Input::Operation(operation) => {
             format!(
@@ -200,18 +189,19 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 }
 
 fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
-    let label = format!("[External Event: {}]", event.event_type);
+    let source_name = match &event.header.source {
+        crate::input::InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
+            source_name.as_str()
+        }
+        _ => event.event_type.as_str(),
+    };
     let body = event
         .payload
         .get("body")
         .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|body| !body.is_empty());
+        .map(str::trim);
 
-    match body {
-        Some(body) => format!("{label} {body}"),
-        None => label,
-    }
+    meerkat_core::interaction::format_external_event_projection(source_name, body)
 }
 
 pub(crate) fn inputs_to_primitive_with_boundary(
@@ -749,7 +739,7 @@ mod tests {
                 assert_eq!(
                     got[0],
                     meerkat_core::types::ContentBlock::Text {
-                        text: "[External Event: webhook] see this event".into(),
+                        text: "[EVENT via webhook] see this event".into(),
                     }
                 );
                 assert_eq!(got[1], blocks[0]);
@@ -797,13 +787,91 @@ mod tests {
                 assert_eq!(
                     got[0],
                     meerkat_core::types::ContentBlock::Text {
-                        text: "[External Event: webhook] see attached screenshot".into(),
+                        text: "[EVENT via webhook] see attached screenshot".into(),
                     }
                 );
                 assert_eq!(got[1], blocks[0]);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn external_event_prefers_source_name_over_event_type_without_body() -> Result<(), String> {
+        let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "webhook".into(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "invoice.created".into(),
+            payload: serde_json::json!({"invoice_id": "inv_123"}),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        });
+
+        assert_eq!(input_to_prompt(&input), "[EVENT via webhook]");
+        Ok(())
+    }
+
+    #[test]
+    fn plain_event_and_direct_runtime_external_event_share_projection() -> Result<(), String> {
+        use crate::comms_bridge::classified_interaction_to_runtime_input;
+        use crate::identifiers::LogicalRuntimeId;
+        use meerkat_core::interaction::{
+            ClassifiedInboxInteraction, InboxInteraction, InteractionContent, PeerInputClass,
+        };
+
+        let from_comms = classified_interaction_to_runtime_input(
+            &ClassifiedInboxInteraction {
+                class: PeerInputClass::PlainEvent,
+                lifecycle_peer: None,
+                interaction: InboxInteraction {
+                    id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),
+                    from: "event:webhook".into(),
+                    content: InteractionContent::Message {
+                        body: "build failed".into(),
+                        blocks: None,
+                    },
+                    rendered_text: "[EVENT via webhook] build failed".into(),
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    render_metadata: None,
+                },
+            },
+            &LogicalRuntimeId::new("test"),
+        );
+
+        let direct = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "webhook".into(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "webhook".into(),
+            payload: serde_json::json!({"body": "build failed"}),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        });
+
+        assert_eq!(input_to_prompt(&from_comms), input_to_prompt(&direct));
+        assert_eq!(input_to_prompt(&direct), "[EVENT via webhook] build failed");
         Ok(())
     }
 

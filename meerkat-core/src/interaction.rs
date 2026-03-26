@@ -73,6 +73,21 @@ pub struct InboxInteraction {
     pub render_metadata: Option<RenderMetadata>,
 }
 
+/// Canonical model-facing text projection for an external event.
+///
+/// The visible identity of an external event is its source label
+/// (`webhook`, `rpc`, `stdin`, etc.). Optional body text may follow, but
+/// structured payload remains typed metadata rather than prompt text.
+pub fn format_external_event_projection(source_name: &str, body: Option<&str>) -> String {
+    let label = format!("[EVENT via {source_name}]");
+    let body = body.map(str::trim).filter(|body| !body.is_empty());
+
+    match body {
+        Some(body) => format!("{label} {body}"),
+        None => label,
+    }
+}
+
 /// Classification result for incoming peer/event traffic.
 ///
 /// Stored with each inbox entry at ingress time. Downstream consumers

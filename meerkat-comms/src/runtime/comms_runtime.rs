@@ -736,7 +736,10 @@ impl CoreCommsRuntime for CommsRuntime {
                         render_metadata,
                         ..
                     } => {
-                        let rendered = format!("[EVENT via {source}] {body}");
+                        let rendered = meerkat_core::interaction::format_external_event_projection(
+                            &source.to_string(),
+                            Some(&body),
+                        );
                         Some(meerkat_core::ClassifiedInboxInteraction {
                             interaction: meerkat_core::InboxInteraction {
                                 id: meerkat_core::InteractionId(

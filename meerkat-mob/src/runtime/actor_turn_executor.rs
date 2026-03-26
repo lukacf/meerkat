@@ -446,12 +446,18 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
 // CoreExecutor for mob AutonomousHost comms drain
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::lifecycle::{RunControlCommand, RunId as CoreRunId};
 
+#[cfg(not(target_arch = "wasm32"))]
 /// CoreExecutor for mob sessions — routes runtime primitives back to
 /// the session service's `start_turn` / `apply_runtime_turn`.
+///
+/// Not available on wasm32 (mob actors use tokio tasks that require Send).
 ///
 /// Created by the mob actor when spawning a comms drain for an AutonomousHost
 /// member. Ensures that peer messages accepted by the drain have an executor
@@ -461,6 +467,7 @@ pub struct MobActorCoreExecutor {
     session_id: meerkat_core::SessionId,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MobActorCoreExecutor {
     pub fn new(
         session_service: Arc<dyn crate::MobSessionService>,
@@ -473,8 +480,8 @@ impl MobActorCoreExecutor {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
 impl CoreExecutor for MobActorCoreExecutor {
     async fn apply(
         &mut self,

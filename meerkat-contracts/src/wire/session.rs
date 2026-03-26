@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_wire_user_message_blocks() {
-        let json = r#"{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media_type":"image/png","data":"abc"}]}"#;
+        let json = r#"{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media_type":"image/png","source":"inline","data":"abc"}]}"#;
         let parsed: WireSessionMessage = serde_json::from_str(json).unwrap();
         match parsed {
             WireSessionMessage::User { content } => {

@@ -1361,7 +1361,7 @@ mod content_block_tests {
     fn content_input_deserialize_array() {
         let input: ContentInput = serde_json::from_value(json!([
             {"type": "text", "text": "look"},
-            {"type": "image", "media_type": "image/png", "data": "abc"}
+            {"type": "image", "media_type": "image/png", "source": "inline", "data": "abc"}
         ]))
         .unwrap();
         assert!(input.has_images());

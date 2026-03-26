@@ -2,14 +2,18 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
+#[cfg(not(target_arch = "wasm32"))]
 mod request_execution;
+#[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use request_execution::{
     PreparedSurfaceSession, RequestAlreadyExists, RequestAsyncAction, RequestContext,
     RequestTerminal, SurfaceRequestExecutor, noop_request_action, prepare_surface_session,
     request_action,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};
 
 use meerkat_contracts::{

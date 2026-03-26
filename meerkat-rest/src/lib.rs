@@ -2263,10 +2263,10 @@ async fn create_session_inner(
     };
 
     // Early cancel check — before any stateful work.
-    if let Some(ctx) = req_ctx.as_ref() {
-        if ctx.run_cancel_if_requested().await {
-            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
-        }
+    if let Some(ctx) = req_ctx.as_ref()
+        && ctx.run_cancel_if_requested().await
+    {
+        return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
     }
 
     // --- Preclaim: session, runtime registration, MCP adapter ---
@@ -2822,10 +2822,10 @@ async fn continue_session_inner(
     };
 
     // Early cancel check — before any stateful work.
-    if let Some(ctx) = req_ctx.as_ref() {
-        if ctx.run_cancel_if_requested().await {
-            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
-        }
+    if let Some(ctx) = req_ctx.as_ref()
+        && ctx.run_cancel_if_requested().await
+    {
+        return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
     }
 
     // Set up event forwarding: caller channel -> broadcast

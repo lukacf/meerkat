@@ -121,13 +121,7 @@ fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
     match &interaction.content {
-        InteractionContent::Message { body, .. } => {
-            if interaction.from.starts_with("event:") && !interaction.rendered_text.is_empty() {
-                interaction.rendered_text.clone()
-            } else {
-                body.clone()
-            }
-        }
+        InteractionContent::Message { body, .. } => body.clone(),
         InteractionContent::Request { params, .. } => {
             if !interaction.rendered_text.is_empty() {
                 return interaction.rendered_text.clone();
@@ -305,7 +299,7 @@ mod tests {
             classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
         match input {
             Input::Peer(peer) => {
-                assert_eq!(peer.body, "[COMMS MESSAGE from event:webhook]\nhello");
+                assert_eq!(peer.body, "hello");
                 match peer.header.source {
                     InputOrigin::Peer { peer_id, .. } => assert_eq!(peer_id, "event:webhook"),
                     other => panic!("Expected peer source, got {other:?}"),

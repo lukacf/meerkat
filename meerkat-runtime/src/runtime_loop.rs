@@ -178,22 +178,9 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
             blocks: f.blocks.clone().unwrap_or_default(),
         },
-        Input::ExternalEvent(e) if e.blocks.is_some() => {
-            // Prepend the event-type label + payload body so the model can
-            // distinguish external events and doesn't lose the text explanation.
-            let payload_text = if e.payload.is_null() {
-                String::new()
-            } else if let Some(s) = e.payload.as_str() {
-                format!(" {s}")
-            } else {
-                format!(" {}", e.payload)
-            };
-            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                text: format!("[External Event: {}]{payload_text}", e.event_type),
-            }];
-            blocks.extend(e.blocks.clone().unwrap_or_default());
-            CoreRenderable::Blocks { blocks }
-        }
+        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
+            blocks: e.blocks.clone().unwrap_or_default(),
+        },
         Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
             CoreRenderable::Text {
                 text: input_to_prompt(input),
@@ -725,7 +712,7 @@ mod tests {
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see this event"}),
-            blocks: Some(blocks),
+            blocks: Some(blocks.clone()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         });
@@ -739,17 +726,9 @@ mod tests {
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
             CoreRenderable::Blocks { blocks: got } => {
-                // 3 blocks: event label prefix + original text + original image
-                assert_eq!(got.len(), 3);
-                match &got[0] {
-                    meerkat_core::types::ContentBlock::Text { text } => {
-                        assert!(
-                            text.contains("[External Event: webhook]"),
-                            "first block should be the event label, got: {text}"
-                        );
-                    }
-                    other => return Err(format!("expected text label block, got {other:?}")),
-                }
+                assert_eq!(got.len(), 2);
+                assert_eq!(got[0], blocks[0]);
+                assert_eq!(got[1], blocks[1]);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }

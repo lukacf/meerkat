@@ -3605,7 +3605,6 @@ async fn test_mob_management_tools_dispatch_to_handle() {
 }
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let helper_id = MeerkatId::from("helper-spawn");
@@ -3634,7 +3633,6 @@ async fn test_spawn_helper_contract_aligns_with_retired_terminal_state() {
 }
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_fork_helper_contract_aligns_with_retired_terminal_state() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let source_id = MeerkatId::from("fork-source");
@@ -7957,7 +7955,6 @@ async fn test_auto_wire_orchestrator() {
 }
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_auto_wire_orchestrator_updates_real_comms_peers() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) =
@@ -12869,7 +12866,6 @@ fn has_request_intent_for_peer(
 static REAL_COMMS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_wire_enables_peer_request_delivery() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
@@ -12978,7 +12974,6 @@ async fn test_wire_enables_peer_request_delivery() {
 }
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_unwire_updates_peers_and_sends_retired_notifications() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
@@ -13029,7 +13024,6 @@ async fn test_unwire_updates_peers_and_sends_retired_notifications() {
 }
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_unwire_prunes_stale_local_trust_when_projection_is_already_absent() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;
@@ -13141,7 +13135,6 @@ async fn test_unwire_external_prunes_stale_trust_when_projection_is_already_abse
 }
 
 #[tokio::test]
-#[ignore = "hangs in CI: requires real comms transport"]
 async fn test_retire_updates_peers_and_sends_retired_notifications() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) = create_test_mob_with_real_comms(sample_definition()).await;

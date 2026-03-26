@@ -25,6 +25,7 @@ for member in workspace["workspace"]["members"]:
         paths.append(root / member)
 
 publishable = set()
+metadata_errors = []
 for path in paths:
     manifest = path / "Cargo.toml"
     if not manifest.exists():
@@ -38,9 +39,16 @@ for path in paths:
         continue
     publishable.add(name)
 
+    for field in ("description", "license", "repository", "homepage", "documentation"):
+        value = package.get(field)
+        if value is None:
+            metadata_errors.append(f"{name}: missing required package metadata field `{field}`")
+        elif isinstance(value, str) and not value.strip():
+            metadata_errors.append(f"{name}: empty required package metadata field `{field}`")
+
 missing = sorted(publishable - expected)
 unexpected = sorted(expected - publishable)
-if missing or unexpected:
+if missing or unexpected or metadata_errors:
     if missing:
         print("Publishable workspace crates missing from release list:", file=sys.stderr)
         for name in missing:
@@ -49,6 +57,10 @@ if missing or unexpected:
         print("Release list contains crates that are not publishable workspace members:", file=sys.stderr)
         for name in unexpected:
             print(f"  - {name}", file=sys.stderr)
+    if metadata_errors:
+        print("Publishable workspace crates with invalid release metadata:", file=sys.stderr)
+        for err in metadata_errors:
+            print(f"  - {err}", file=sys.stderr)
     sys.exit(1)
 PY
 

@@ -10,7 +10,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 
 | Subsystem | State Cells | Semantic Operations | Coupling Invariants | Open State Cells | Open Operations | Open Invariants |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| runtime | 7 | 22 | 5 | 0 | 0 | 0 |
+| runtime | 7 | 21 | 5 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
 | mob | 6 | 49 | 3 | 0 | 0 | 0 |
 

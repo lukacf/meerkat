@@ -10984,8 +10984,12 @@ async fn test_complete_cancels_inflight_flow_run() {
 
 #[tokio::test]
 async fn test_destroy_cancels_inflight_flow_run() {
-    let (handle, service) =
-        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    let run_store = Arc::new(RecordingRunStore::new());
+    let (handle, service) = create_test_mob_with_run_store(
+        sample_definition_with_single_step_flow(60_000, 8),
+        run_store.clone(),
+    )
+    .await;
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await
@@ -10999,7 +11003,11 @@ async fn test_destroy_cancels_inflight_flow_run() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     handle.destroy().await.expect("destroy mob");
 
-    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
+    let terminal = run_store
+        .get_run(&run_id)
+        .await
+        .expect("read run after destroy")
+        .expect("run should remain queryable in run store after destroy");
     assert_eq!(terminal.status, MobRunStatus::Canceled);
 }
 

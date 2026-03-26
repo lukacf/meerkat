@@ -383,16 +383,19 @@ impl RuntimeSessionAdapter {
     /// Create a driver entry for a session.
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-        match &self.store {
-            Some(store) => DriverEntry::Persistent(PersistentRuntimeDriver::new(
-                runtime_id,
-                store.clone(),
-                self.blob_store
-                    .as_ref()
-                    .expect("persistent runtime adapter requires blob store")
-                    .clone(),
-            )),
-            None => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id)),
+        match (&self.store, &self.blob_store) {
+            (Some(store), Some(blob_store)) => DriverEntry::Persistent(
+                PersistentRuntimeDriver::new(runtime_id, store.clone(), blob_store.clone()),
+            ),
+            (Some(_store), None) => {
+                tracing::warn!(
+                    %session_id,
+                    "persistent runtime store present but blob store missing; \
+                     falling back to ephemeral driver"
+                );
+                DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id))
+            }
+            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id)),
         }
     }
 

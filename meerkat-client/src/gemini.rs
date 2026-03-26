@@ -208,7 +208,7 @@ impl GeminiClient {
                                                     "mimeType": media_type,
                                                     "data": data
                                                 }
-                                            }))
+                                            }));
                                         }
                                         ImageData::Blob { .. } => parts.push(serde_json::json!({
                                             "text": block.text_projection()

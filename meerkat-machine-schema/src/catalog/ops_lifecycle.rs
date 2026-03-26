@@ -9,7 +9,7 @@ use crate::{
 pub fn ops_lifecycle_machine() -> MachineSchema {
     MachineSchema {
         machine: "OpsLifecycleMachine".into(),
-        version: 3,
+        version: 4,
         rust: RustBinding {
             crate_name: "meerkat-runtime".into(),
             module: "generated::ops_lifecycle".into(),
@@ -146,6 +146,10 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 },
                 VariantSchema {
                     name: "ProvisioningFailed".into(),
+                    fields: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
+                },
+                VariantSchema {
+                    name: "AbortProvisioning".into(),
                     fields: vec![field("operation_id", TypeRef::Named("OperationId".into()))],
                 },
                 VariantSchema {
@@ -495,6 +499,10 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                     ),
                     Expr::Eq(
                         Box::new(Expr::Binding("status".into())),
+                        Box::new(Expr::String("Aborted".into())),
+                    ),
+                    Expr::Eq(
+                        Box::new(Expr::Binding("status".into())),
                         Box::new(Expr::String("Cancelled".into())),
                     ),
                     Expr::Eq(
@@ -555,6 +563,16 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                         Expr::Eq(
                             Box::new(Expr::Binding("terminal_outcome".into())),
                             Box::new(Expr::String("Failed".into())),
+                        ),
+                    ]),
+                    Expr::And(vec![
+                        Expr::Eq(
+                            Box::new(Expr::Binding("status".into())),
+                            Box::new(Expr::String("Aborted".into())),
+                        ),
+                        Expr::Eq(
+                            Box::new(Expr::Binding("terminal_outcome".into())),
+                            Box::new(Expr::String("Aborted".into())),
                         ),
                     ]),
                     Expr::And(vec![
@@ -869,6 +887,20 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 &["Provisioning"],
                 "Failed",
                 "Failed",
+            ),
+            terminal_transition_satisfies_wait(
+                "AbortProvisioningCompletesWait",
+                "AbortProvisioning",
+                &["Provisioning"],
+                "Aborted",
+                "Aborted",
+            ),
+            terminal_transition(
+                "AbortProvisioning",
+                "AbortProvisioning",
+                &["Provisioning"],
+                "Aborted",
+                "Aborted",
             ),
             TransitionSchema {
                 name: "PeerReady".into(),

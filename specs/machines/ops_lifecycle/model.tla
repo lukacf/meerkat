@@ -23,9 +23,9 @@ VARIABLES phase, model_step_count, known_operations, operation_status, operation
 
 vars == << phase, model_step_count, known_operations, operation_status, operation_kind, peer_ready, progress_count, watcher_count, terminal_outcome, terminal_buffered, completed_order, max_completed, max_concurrent, active_count, created_at_ms, completed_at_ms, wait_active, wait_request_id, wait_operation_ids >>
 
-terminal_outcome_matches_status(status, arg_terminal_outcome) == (((status = "Completed") /\ (arg_terminal_outcome = "Completed")) \/ ((status = "Failed") /\ (arg_terminal_outcome = "Failed")) \/ ((status = "Cancelled") /\ (arg_terminal_outcome = "Cancelled")) \/ ((status = "Retired") /\ (arg_terminal_outcome = "Retired")) \/ ((status = "Terminated") /\ (arg_terminal_outcome = "Terminated")))
+terminal_outcome_matches_status(status, arg_terminal_outcome) == (((status = "Completed") /\ (arg_terminal_outcome = "Completed")) \/ ((status = "Failed") /\ (arg_terminal_outcome = "Failed")) \/ ((status = "Aborted") /\ (arg_terminal_outcome = "Aborted")) \/ ((status = "Cancelled") /\ (arg_terminal_outcome = "Cancelled")) \/ ((status = "Retired") /\ (arg_terminal_outcome = "Retired")) \/ ((status = "Terminated") /\ (arg_terminal_outcome = "Terminated")))
 is_owner_terminatable_status(status) == ((status = "Provisioning") \/ (status = "Running") \/ (status = "Retiring"))
-is_terminal_status(status) == ((status = "Completed") \/ (status = "Failed") \/ (status = "Cancelled") \/ (status = "Retired") \/ (status = "Terminated"))
+is_terminal_status(status) == ((status = "Completed") \/ (status = "Failed") \/ (status = "Aborted") \/ (status = "Cancelled") \/ (status = "Retired") \/ (status = "Terminated"))
 terminal_buffered_of(operation_id) == (IF (operation_id \in known_operations) THEN (IF operation_id \in DOMAIN terminal_buffered THEN terminal_buffered[operation_id] ELSE FALSE) ELSE FALSE)
 terminal_outcome_of(operation_id) == (IF (operation_id \in known_operations) THEN (IF operation_id \in DOMAIN terminal_outcome THEN terminal_outcome[operation_id] ELSE "None") ELSE "None")
 progress_count_of(operation_id) == (IF (operation_id \in known_operations) THEN (IF operation_id \in DOMAIN progress_count THEN progress_count[operation_id] ELSE 0) ELSE 0)
@@ -131,6 +131,35 @@ ProvisioningFailed(operation_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ operation_status' = MapSet(operation_status, operation_id, "Failed")
     /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Failed")
+    /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms, wait_active, wait_request_id, wait_operation_ids >>
+
+
+AbortProvisioningCompletesWait(operation_id) ==
+    /\ phase = "Active"
+    /\ (status_of(operation_id) = "Provisioning")
+    /\ wait_completes_on_terminal(operation_id)
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ operation_status' = MapSet(operation_status, operation_id, "Aborted")
+    /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Aborted")
+    /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
+    /\ completed_order' = Append(completed_order, operation_id)
+    /\ active_count' = (active_count) - 1
+    /\ wait_active' = FALSE
+    /\ UNCHANGED << known_operations, operation_kind, peer_ready, progress_count, watcher_count, max_completed, max_concurrent, created_at_ms, completed_at_ms, wait_request_id, wait_operation_ids >>
+
+
+AbortProvisioning(operation_id) ==
+    /\ phase = "Active"
+    /\ (status_of(operation_id) = "Provisioning")
+    /\ ~(wait_completes_on_terminal(operation_id))
+    /\ phase' = "Active"
+    /\ model_step_count' = model_step_count + 1
+    /\ operation_status' = MapSet(operation_status, operation_id, "Aborted")
+    /\ terminal_outcome' = MapSet(terminal_outcome, operation_id, "Aborted")
     /\ terminal_buffered' = MapSet(terminal_buffered, operation_id, TRUE)
     /\ completed_order' = Append(completed_order, operation_id)
     /\ active_count' = (active_count) - 1
@@ -373,6 +402,8 @@ Next ==
     \/ \E operation_id \in OperationIdValues : ProvisioningSucceeded(operation_id)
     \/ \E operation_id \in OperationIdValues : ProvisioningFailedCompletesWait(operation_id)
     \/ \E operation_id \in OperationIdValues : ProvisioningFailed(operation_id)
+    \/ \E operation_id \in OperationIdValues : AbortProvisioningCompletesWait(operation_id)
+    \/ \E operation_id \in OperationIdValues : AbortProvisioning(operation_id)
     \/ \E operation_id \in OperationIdValues : PeerReady(operation_id)
     \/ \E operation_id \in OperationIdValues : RegisterWatcher(operation_id)
     \/ \E operation_id \in OperationIdValues : ProgressReported(operation_id)

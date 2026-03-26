@@ -101,6 +101,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ProvisioningFailed`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `AbortProvisioningCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `AbortProvisioning`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
 - `PeerReady`
   - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
   - scenarios: `register-progress-terminal`, `peer-ready-handoff`

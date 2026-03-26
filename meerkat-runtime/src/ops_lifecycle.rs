@@ -552,6 +552,27 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         Ok(())
     }
 
+    fn abort_provisioning(
+        &self,
+        id: &OperationId,
+        reason: Option<String>,
+    ) -> Result<(), OpsLifecycleError> {
+        let mut state = self.write_state()?;
+
+        let transition = state
+            .authority
+            .apply(OpsLifecycleInput::AbortProvisioning {
+                operation_id: id.clone(),
+            })?;
+
+        state
+            .authority
+            .patch_terminal_outcome(id, OperationTerminalOutcome::Aborted { reason });
+
+        state.execute_effects(&transition.effects);
+        Ok(())
+    }
+
     fn cancel_operation(
         &self,
         id: &OperationId,

@@ -280,7 +280,10 @@ impl JobManager {
             Some(OperationStatus::Completed) => "completed",
             Some(OperationStatus::Failed | OperationStatus::Terminated) => "failed",
             Some(
-                OperationStatus::Cancelled | OperationStatus::Retiring | OperationStatus::Retired,
+                OperationStatus::Aborted
+                | OperationStatus::Cancelled
+                | OperationStatus::Retiring
+                | OperationStatus::Retired,
             ) => "cancelled",
             Some(OperationStatus::Absent) | None => match job.view.status {
                 JobStatus::Running { .. } => "running",
@@ -310,7 +313,10 @@ impl JobManager {
                 },
             },
             Some(
-                OperationStatus::Cancelled | OperationStatus::Retiring | OperationStatus::Retired,
+                OperationStatus::Aborted
+                | OperationStatus::Cancelled
+                | OperationStatus::Retiring
+                | OperationStatus::Retired,
             ) => JobStatus::Cancelled {
                 duration_secs: Self::lifecycle_duration_secs(job.view.started_at_unix),
             },

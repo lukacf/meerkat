@@ -200,6 +200,17 @@ impl MobOpsAdapter {
         }
     }
 
+    pub(crate) fn operation_status(
+        &self,
+        session_id: &SessionId,
+        operation_id: &OperationId,
+    ) -> Option<OperationStatus> {
+        let (registry, _) = self.registry_for_session(session_id);
+        registry
+            .snapshot(operation_id)
+            .map(|snapshot| snapshot.status)
+    }
+
     async fn resolve_or_register_active_operation_id(
         &self,
         session_id: &SessionId,
@@ -332,12 +343,11 @@ impl MobOpsAdapter {
             1 => active_ids[0].clone(),
             0 => {
                 if let Some(latest) = Self::newest_operation_snapshot(&snapshots)
-                    && latest.status == OperationStatus::Retired
+                    && latest.status.is_terminal()
                 {
                     return Ok(());
                 }
-                let display_name = format!("mob_member/{session_id}");
-                self.ensure_operation(&session_id, &display_name).await?
+                return Ok(());
             }
             _ => {
                 return Err(MobError::Internal(format!(
@@ -365,6 +375,27 @@ impl MobOpsAdapter {
         };
         if result.is_ok() {
             self.clear_session_binding(&session_id);
+        }
+        result
+    }
+
+    pub(crate) async fn abort_member_provision(
+        &self,
+        session_id: &SessionId,
+        operation_id: &OperationId,
+        reason: Option<String>,
+    ) -> Result<(), MobError> {
+        let (registry, _) = self.registry_for_session(session_id);
+        let result = match registry.abort_provisioning(operation_id, reason) {
+            Ok(()) => Ok(()),
+            Err(OpsLifecycleError::NotFound(_)) => Ok(()),
+            Err(OpsLifecycleError::InvalidTransition { status, .. }) if status.is_terminal() => {
+                Ok(())
+            }
+            Err(error) => Err(MobError::Internal(error.to_string())),
+        };
+        if result.is_ok() {
+            self.clear_session_binding(session_id);
         }
         result
     }
@@ -453,5 +484,49 @@ mod tests {
             adapter.registry().snapshot(&operation_id).is_none(),
             "fallback registry must not own bound child operation ids"
         );
+    }
+
+    #[tokio::test]
+    async fn mark_member_retired_without_existing_operation_is_noop() {
+        let adapter = MobOpsAdapter::new();
+        let session_id = SessionId::new();
+        let member_ref = MemberRef::from_session_id(session_id);
+
+        adapter
+            .mark_member_retired(&member_ref)
+            .await
+            .expect("missing lifecycle entry should retire as no-op");
+
+        assert!(
+            adapter.registry().list_operations().is_empty(),
+            "retire must not fabricate a provisioning operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_member_provision_marks_provisioning_operation_aborted() {
+        let adapter = MobOpsAdapter::new();
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let registry = adapter.registry();
+        registry
+            .register_operation(OperationSpec {
+                id: operation_id.clone(),
+                kind: OperationKind::MobMemberChild,
+                owner_session_id: session_id.clone(),
+                display_name: "mob/member-abort".into(),
+                source_label: "mob_member".into(),
+                child_session_id: Some(session_id.clone()),
+                expect_peer_channel: true,
+            })
+            .expect("register provisioning operation");
+
+        adapter
+            .abort_member_provision(&session_id, &operation_id, Some("mob is stopping".into()))
+            .await
+            .expect("abort provisioning should succeed");
+
+        let snapshot = registry.snapshot(&operation_id).expect("snapshot");
+        assert_eq!(snapshot.status, OperationStatus::Aborted);
     }
 }

@@ -149,6 +149,16 @@ mod tests {
             })
         }
 
+        async fn abort_member_provision(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &OperationId,
+            _reason: &str,
+        ) -> Result<(), MobError> {
+            self.retired.store(true, Ordering::Release);
+            Ok(())
+        }
+
         async fn retire_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
             self.retired.store(true, Ordering::Release);
             Ok(())

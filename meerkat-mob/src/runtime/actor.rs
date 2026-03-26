@@ -141,7 +141,14 @@ pub(super) struct PendingSpawn {
     pub(super) auto_wire_parent: bool,
     /// Peer wiring to restore after respawn completes.
     pub(super) restore_wiring: Option<RestoreWiringPlan>,
+    pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct PendingSpawnProgress {
+    pub(super) session_id: Option<meerkat_core::types::SessionId>,
+    pub(super) operation_id: Option<meerkat_core::ops::OperationId>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1527,6 +1534,7 @@ impl MobActor {
                 Some(spawn_ticket),
                 "lifecycle transition cleared pending spawn",
             );
+            self.abort_pending_spawn_slot(&slot, reason).await;
             slot.fail(&format!("spawn canceled for '{meerkat_id}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
@@ -1542,6 +1550,42 @@ impl MobActor {
             tracing::error!(
                 message = %message,
                 "pending spawn alignment still violated after lifecycle drain"
+            );
+        }
+    }
+
+    async fn abort_pending_spawn_slot(
+        &self,
+        slot: &super::pending_spawn_lineage::PendingSpawnSlot,
+        reason: &str,
+    ) {
+        let snapshot = {
+            let progress = slot
+                .spawn
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            progress
+                .session_id
+                .clone()
+                .zip(progress.operation_id.clone())
+        };
+        if let Some((session_id, operation_id)) = snapshot
+            && let Err(error) = self
+                .provisioner
+                .abort_member_provision(
+                    &MemberRef::from_session_id(session_id),
+                    &operation_id,
+                    reason,
+                )
+                .await
+        {
+            tracing::warn!(
+                spawn_ticket = slot.ticket,
+                meerkat_id = %slot.spawn.meerkat_id,
+                operation_id = %operation_id,
+                error = %error,
+                "failed to abort pending member provision during lifecycle drain"
             );
         }
     }
@@ -1567,6 +1611,49 @@ impl MobActor {
                 "member lifecycle command canceled pending spawn",
             );
         }
+
+        let pending_abortions = slots
+            .iter()
+            .map(|slot| {
+                (
+                    slot.ticket,
+                    slot.spawn.meerkat_id.clone(),
+                    slot.spawn.progress.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let provisioner = self.provisioner.clone();
+        let reason_owned = reason.to_string();
+        tokio::spawn(async move {
+            for (spawn_ticket, meerkat_id, progress) in pending_abortions {
+                let snapshot = {
+                    let progress = progress
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    progress
+                        .session_id
+                        .clone()
+                        .zip(progress.operation_id.clone())
+                };
+                if let Some((session_id, operation_id)) = snapshot
+                    && let Err(error) = provisioner
+                        .abort_member_provision(
+                            &MemberRef::from_session_id(session_id),
+                            &operation_id,
+                            &reason_owned,
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        spawn_ticket,
+                        meerkat_id = %meerkat_id,
+                        operation_id = %operation_id,
+                        error = %error,
+                        "failed to abort pending member provision during member-specific cancellation"
+                    );
+                }
+            }
+        });
 
         for slot in slots {
             let spawn_ticket = slot.ticket;
@@ -1995,6 +2082,7 @@ impl MobActor {
         let spawn_meerkat_id = meerkat_id.clone();
         let spawn_meerkat_id_for_log = spawn_meerkat_id.clone();
         let spawn_runtime_mode = selected_runtime_mode;
+        let pending_progress = Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default()));
 
         if let Err(error) = self.stage_orchestrator_spawn() {
             let _ = reply_tx.send(Err(error));
@@ -2009,6 +2097,7 @@ impl MobActor {
             labels: resolved_labels,
             auto_wire_parent,
             restore_wiring: None,
+            progress: pending_progress.clone(),
             reply_tx,
         };
         // Treat pending spawn lifecycle as a single keyed table: pending intent
@@ -2019,6 +2108,13 @@ impl MobActor {
             let panic_meerkat_id = spawn_meerkat_id.clone();
             let provision_result = std::panic::AssertUnwindSafe(async {
                 let spawn_receipt = provisioner.provision_member(provision_request).await?;
+                if let Some(session_id) = spawn_receipt.member_ref.session_id().cloned() {
+                    let mut progress = pending_progress
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    progress.session_id = Some(session_id);
+                    progress.operation_id = Some(spawn_receipt.operation_id.clone());
+                }
                 if spawn_runtime_mode == crate::MobRuntimeMode::AutonomousHost
                     && let Err(capability_error) =
                         Self::ensure_autonomous_dispatch_capability_for_provisioner(
@@ -2147,6 +2243,7 @@ impl MobActor {
                 labels,
                 auto_wire_parent,
                 restore_wiring,
+                progress: _,
                 reply_tx,
             } = pending;
             in_flight.push(async move {
@@ -2288,6 +2385,7 @@ impl MobActor {
             labels: labels.clone(),
             auto_wire_parent: false,
             restore_wiring: None,
+            progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: pending_reply_tx,
         };
         let pending_task = tokio::spawn(async {
@@ -2857,6 +2955,7 @@ impl MobActor {
             restore_wiring: (!snapshot.restore_wiring.local_peers.is_empty()
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
+            progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: respawn_inline_reply_tx,
         };
         let respawn_inline_task = tokio::spawn(async {

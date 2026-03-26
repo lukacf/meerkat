@@ -62,6 +62,7 @@ pub struct OperationProgressUpdate {
 pub enum OperationTerminalOutcome {
     Completed(OperationResult),
     Failed { error: String },
+    Aborted { reason: Option<String> },
     Cancelled { reason: Option<String> },
     Retired,
     Terminated { reason: String },
@@ -77,6 +78,7 @@ pub enum OperationStatus {
     Retiring,
     Completed,
     Failed,
+    Aborted,
     Cancelled,
     Retired,
     Terminated,
@@ -86,7 +88,12 @@ impl OperationStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Retired | Self::Terminated
+            Self::Completed
+                | Self::Failed
+                | Self::Aborted
+                | Self::Cancelled
+                | Self::Retired
+                | Self::Terminated
         )
     }
 
@@ -242,6 +249,11 @@ pub trait OpsLifecycleRegistry: Send + Sync {
         result: OperationResult,
     ) -> Result<(), OpsLifecycleError>;
     fn fail_operation(&self, id: &OperationId, error: String) -> Result<(), OpsLifecycleError>;
+    fn abort_provisioning(
+        &self,
+        id: &OperationId,
+        reason: Option<String>,
+    ) -> Result<(), OpsLifecycleError>;
     fn cancel_operation(
         &self,
         id: &OperationId,
@@ -300,6 +312,7 @@ mod tests {
     fn terminal_statuses_match_contract() {
         assert!(OperationStatus::Completed.is_terminal());
         assert!(OperationStatus::Failed.is_terminal());
+        assert!(OperationStatus::Aborted.is_terminal());
         assert!(OperationStatus::Cancelled.is_terminal());
         assert!(OperationStatus::Retired.is_terminal());
         assert!(OperationStatus::Terminated.is_terminal());

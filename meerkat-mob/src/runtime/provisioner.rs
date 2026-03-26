@@ -13,7 +13,7 @@ use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{InputId, RunId as CoreRunId};
 use meerkat_core::ops::OperationId;
-use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+use meerkat_core::ops_lifecycle::{OperationStatus, OpsLifecycleRegistry};
 use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
 use meerkat_core::types::SessionId;
 #[allow(unused_imports)]
@@ -42,6 +42,12 @@ pub trait MobProvisioner: Send + Sync {
         &self,
         req: ProvisionMemberRequest,
     ) -> Result<MemberSpawnReceipt, MobError>;
+    async fn abort_member_provision(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        reason: &str,
+    ) -> Result<(), MobError>;
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError>;
     async fn start_turn(
@@ -570,6 +576,68 @@ impl MobProvisioner for SessionBackend {
         })
     }
 
+    async fn abort_member_provision(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        reason: &str,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "abort provision for")?;
+        match self.ops_adapter.operation_status(&session_id, operation_id) {
+            Some(OperationStatus::Provisioning) => {
+                if let Some(adapter) = &self.runtime_adapter {
+                    if adapter.contains_session(&session_id).await {
+                        adapter.unregister_session(&session_id).await;
+                    }
+                    self.remove_runtime_session_state(&session_id).await;
+                }
+                match self.session_service.archive(&session_id).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                self.ops_adapter
+                    .abort_member_provision(&session_id, operation_id, Some(reason.to_string()))
+                    .await
+            }
+            Some(OperationStatus::Running) | Some(OperationStatus::Retiring) => {
+                self.retire_member(member_ref).await
+            }
+            Some(
+                OperationStatus::Completed
+                | OperationStatus::Failed
+                | OperationStatus::Aborted
+                | OperationStatus::Cancelled
+                | OperationStatus::Retired
+                | OperationStatus::Terminated,
+            ) => {
+                if let Some(adapter) = &self.runtime_adapter {
+                    if adapter.contains_session(&session_id).await {
+                        adapter.unregister_session(&session_id).await;
+                    }
+                    self.remove_runtime_session_state(&session_id).await;
+                }
+                match self.session_service.archive(&session_id).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(())
+            }
+            Some(OperationStatus::Absent) | None => {
+                if let Some(adapter) = &self.runtime_adapter {
+                    if adapter.contains_session(&session_id).await {
+                        adapter.unregister_session(&session_id).await;
+                    }
+                    self.remove_runtime_session_state(&session_id).await;
+                }
+                match self.session_service.archive(&session_id).await {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(())
+            }
+        }
+    }
+
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "retire")?;
         if let Some(adapter) = &self.runtime_adapter {
@@ -934,6 +1002,17 @@ impl MobProvisioner for MultiBackendProvisioner {
                 .await
             }
         }
+    }
+
+    async fn abort_member_provision(
+        &self,
+        member_ref: &MemberRef,
+        operation_id: &OperationId,
+        reason: &str,
+    ) -> Result<(), MobError> {
+        self.session
+            .abort_member_provision(member_ref, operation_id, reason)
+            .await
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {

@@ -11,11 +11,12 @@
 //! - 1 phase (Active) — the registry is always active; per-operation status is
 //!   the real state dimension
 //! - Per-operation statuses: Absent, Provisioning, Running, Retiring,
-//!   Completed, Failed, Cancelled, Retired, Terminated
-//! - 15 inputs: RegisterOperation, ProvisioningSucceeded, ProvisioningFailed,
-//!   PeerReady, RegisterWatcher, ProgressReported, CompleteOperation,
-//!   FailOperation, CancelOperation, RetireRequested, RetireCompleted,
-//!   CollectTerminal, OwnerTerminated, BeginWaitAll, CancelWaitAll
+//!   Completed, Failed, Aborted, Cancelled, Retired, Terminated
+//! - 16 inputs: RegisterOperation, ProvisioningSucceeded, ProvisioningFailed,
+//!   AbortProvisioning, PeerReady, RegisterWatcher, ProgressReported,
+//!   CompleteOperation, FailOperation, CancelOperation, RetireRequested,
+//!   RetireCompleted, CollectTerminal, OwnerTerminated, BeginWaitAll,
+//!   CancelWaitAll
 //! - 8 effects: SubmitOpEvent, NotifyOpWatcher, ExposeOperationPeer,
 //!   RetainTerminalRecord, EvictCompletedRecord, WaitAllSatisfied,
 //!   CollectCompletedResult, ConcurrencyLimitExceeded
@@ -44,6 +45,8 @@ pub(crate) enum OpsLifecycleInput {
     ProvisioningSucceeded { operation_id: OperationId },
     /// Provisioning failed (Provisioning -> Failed).
     ProvisioningFailed { operation_id: OperationId },
+    /// Provisioning was intentionally aborted (Provisioning -> Aborted).
+    AbortProvisioning { operation_id: OperationId },
     /// Peer is ready for a mob-member-child operation (Running|Retiring, must be MobMemberChild).
     PeerReady { operation_id: OperationId },
     /// Register a completion watcher (operation must exist).
@@ -132,6 +135,7 @@ pub(crate) enum OpEventKind {
     Progress,
     Completed,
     Failed,
+    Aborted,
     Cancelled,
     Retired,
     #[cfg_attr(
@@ -686,6 +690,14 @@ impl OpsLifecycleMutator for OpsLifecycleAuthority {
                 OpEventKind::Failed,
             ),
 
+            OpsLifecycleInput::AbortProvisioning { operation_id } => self.apply_terminal(
+                &operation_id,
+                &[OperationStatus::Provisioning],
+                OperationStatus::Aborted,
+                OperationTerminalOutcome::Aborted { reason: None },
+                OpEventKind::Aborted,
+            ),
+
             OpsLifecycleInput::PeerReady { operation_id } => {
                 let op = self
                     .state
@@ -977,6 +989,7 @@ fn terminal_status_action(status: OperationStatus) -> &'static str {
     match status {
         OperationStatus::Completed => "complete_operation",
         OperationStatus::Failed => "fail_operation",
+        OperationStatus::Aborted => "abort_provisioning",
         OperationStatus::Cancelled => "cancel_operation",
         OperationStatus::Retired => "mark_retired",
         OperationStatus::Terminated => "terminate_owner",
@@ -1373,6 +1386,39 @@ mod tests {
             auth.operation(&id).unwrap().status(),
             OperationStatus::Cancelled
         );
+    }
+
+    // ---- AbortProvisioning ----
+
+    #[test]
+    fn abort_provisioning_transitions_to_aborted() {
+        let mut auth = make_authority();
+        let id = OperationId::new();
+        register(&mut auth, &id, OperationKind::BackgroundToolOp);
+
+        auth.apply(OpsLifecycleInput::AbortProvisioning {
+            operation_id: id.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            auth.operation(&id).unwrap().status(),
+            OperationStatus::Aborted
+        );
+    }
+
+    #[test]
+    fn abort_provisioning_rejects_non_provisioning() {
+        let mut auth = make_authority();
+        let id = OperationId::new();
+        register(&mut auth, &id, OperationKind::BackgroundToolOp);
+        provision_succeed(&mut auth, &id);
+
+        let result = auth.apply(OpsLifecycleInput::AbortProvisioning { operation_id: id });
+        assert!(matches!(
+            result,
+            Err(OpsLifecycleError::InvalidTransition { .. })
+        ));
     }
 
     // ---- RetireRequested ----

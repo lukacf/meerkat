@@ -201,6 +201,24 @@ async fn ops_lifecycle_contract_fail_cancel_and_retire_surface_terminal_outcomes
         registry.snapshot(&retired_id).unwrap().status,
         OperationStatus::Retired
     );
+
+    let aborted = background_spec("background-abort");
+    let aborted_id = aborted.id.clone();
+    registry.register_operation(aborted).unwrap();
+    let aborted_watch = registry.register_watcher(&aborted_id).unwrap();
+    registry
+        .abort_provisioning(&aborted_id, Some("mob is stopping".into()))
+        .unwrap();
+    assert_eq!(
+        aborted_watch.wait().await,
+        OperationTerminalOutcome::Aborted {
+            reason: Some("mob is stopping".into()),
+        }
+    );
+    assert_eq!(
+        registry.snapshot(&aborted_id).unwrap().status,
+        OperationStatus::Aborted
+    );
 }
 
 #[tokio::test]

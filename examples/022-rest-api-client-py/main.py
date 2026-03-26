@@ -94,7 +94,7 @@ Endpoints:
   POST /sessions/:id/messages Continue session (new turn)
   GET  /sessions/:id          Read session state
   GET  /sessions/:id/events   SSE stream (Server-Sent Events)
-  POST /sessions/:id/event    Push external event (webhook)
+  POST /sessions/:id/external-events  Queue external event (webhook)
 
   POST /comms/send            Send comms message
   GET  /comms/peers           List comms peers

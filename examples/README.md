@@ -99,7 +99,7 @@ branch.
 | 021 | [multi-provider-routing-py](021-multi-provider-routing-py/) | Python | Route to Anthropic, OpenAI, Gemini with provider-specific params |
 | 022 | [rest-api-client-py](022-rest-api-client-py/) | Python | HTTP REST API integration (no SDK required) |
 | 023 | [rpc-ide-integration-ts](023-rpc-ide-integration-ts/) | TypeScript | JSON-RPC for IDE extensions and desktop apps |
-| 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Multi-turn event mesh (reactive agents processing incoming events) |
+| 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Multi-turn keep-alive event mesh (reactive agents processing incoming events) |
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Reference architecture with all features combined |
 | 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
 | 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `session.invokeSkill()` with canonical `SkillKey` refs |
@@ -129,7 +129,7 @@ branch.
 | **Mobpack** | 028, 029, 030, 031, 034 |
 | **WASM Web Build** | 029, 030, 031, 032 |
 | **Comms** | 020, 024, 032, 034 |
-| **Host Mode** | 024, 032, 034 |
+| **Keep-alive / long-lived sessions** | 024, 032, 034 |
 | **Multi-Provider** | 021, 032, 034 |
 | **MCP Server** | 034 |
 | **Flow Engine** | 034 |

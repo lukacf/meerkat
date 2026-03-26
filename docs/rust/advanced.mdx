@@ -12,12 +12,12 @@ Advanced Rust SDK usage for the cases where the runtime-backed `SessionService` 
 
 `AgentFactory` (in the `meerkat` facade) is the opinionated composition layer. It knows about tool categories, runtime resources, comms, memory, mobs, and skills, and wires them into the dispatcher before passing them to `AgentBuilder`. All public surfaces go through the runtime-backed session path built on top of `AgentFactory`.
 
-**Use `AgentFactory` via `build_ephemeral_service()` or another `SessionService` constructor unless you explicitly need to bypass session lifecycle orchestration.** Direct `AgentBuilder` usage means you own composition, persistence, event handling, and any drift from the standard runtime-backed path.
+**Use `AgentFactory` via `build_persistent_service()` (main path) or `build_ephemeral_service()` (substrate/testing path) unless you explicitly need to bypass session lifecycle orchestration.** Direct `AgentBuilder` usage means you own composition, persistence, event handling, and any drift from the standard runtime-backed path.
 
 ## AgentBuilder
 
 <Note>
-For most use cases, prefer `SessionService` via `build_ephemeral_service()` (see
+For most use cases, prefer `SessionService` via the runtime-backed persistent path (see
 [overview](/rust/overview)). `AgentBuilder` is used internally by `AgentFactory::build_agent()`.
 Direct usage is only needed when bypassing the session service entirely.
 </Note>
@@ -211,7 +211,7 @@ let hook_engine = create_default_hook_engine(layered_hooks);
 
 ## Comms delivery and observation
 
-Public comms injection is a delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues an external event for the session's active host-mode owner path to consume.
+Public comms injection is a delivery API. `event_injector()` gives you an `EventInjector`, and `inject()` queues a runtime-backed external event for later admission.
 
 ```rust
 use meerkat::{EventInjector, PlainEventSource};
@@ -228,7 +228,7 @@ injector.inject(
 <Accordion title="How it works">
 
 1. `inject()` queues a plain event into the session inbox.
-2. The active host-mode owner path consumes that inbox item and turns it into a new session turn.
+2. The runtime-backed surface admits that queued event as future turn work.
 3. Observation is selected independently:
    - use the session's primary `event_tx` for full session activity,
    - use mob member subscriptions for agent-scoped activity,
@@ -288,7 +288,7 @@ use meerkat_core::service::InitialTurnPolicy;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().await?;
     let factory = AgentFactory::new(std::env::current_dir()?);
-    let service = build_ephemeral_service(factory, config, 64);
+    let service = build_ephemeral_service(factory, config, 64); // embedded/testing substrate only
 
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-5".into(),

@@ -1,19 +1,31 @@
 ---
 title: "Session contracts"
-description: "SessionService lifecycle, concurrency, durability, and realm-scoped guarantees."
+description: "Canonical 0.5 session, runtime, keep-alive, and commit-boundary contracts."
 icon: "file-lines"
 ---
 
-## SessionService lifecycle
+This page is the canonical settled-state 0.5 contract for session and runtime behavior.
 
-All surfaces (CLI, REST, JSON-RPC, MCP server) route through `SessionService`.
+## Ownership model
+
+Meerkat has one canonical semantic path:
+
+- **runtime-backed surfaces** own `keep_alive`, Queue/Steer routing, comms drain lifecycle, external-event admission, and request/turn commit semantics
+- **`SessionService`** is the substrate lifecycle seam used by those surfaces
+- **`EphemeralSessionService` / `build_ephemeral_service`** remain valid for testing, embedded use, and WASM internals, but they are not the primary product path and do not own runtime semantics
+
+The runtime-backed path is:
 
 ```text
-CLI ----------+
-REST ---------+
-MCP Server ---+---> SessionService ---> AgentFactory::build_agent()
-JSON-RPC -----+
+Surface -> RuntimeSessionAdapter -> SessionService -> AgentFactory::build_agent()
 ```
+
+Direct substrate usage is intentionally narrower:
+
+- Queue-only turns
+- no runtime-owned `keep_alive`
+- no Steer/render-metadata semantics
+- no runtime ingress/admission ownership
 
 ## Agent construction contract
 
@@ -22,9 +34,16 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 - Surfaces pass per-request build data in-band via `CreateSessionRequest.build` (`SessionBuildOptions`).
 - No out-of-band staging lock is used.
 - `FactoryAgentBuilder` maps `SessionBuildOptions` to `AgentBuildConfig`.
-- Session metadata persists realm context: `realm_id`, `instance_id`, `backend`, `config_generation`.
+- Session metadata persists realm context and durable session identity:
+  - `realm_id`
+  - `instance_id`
+  - `backend`
+  - `config_generation`
+  - durable LLM identity
+  - `keep_alive`
+  - visible comms identity metadata such as `comms_name` and `peer_meta`
 
-## Session operations
+## Session lifecycle and turn semantics
 
 ### create_session
 
@@ -33,10 +52,13 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 - Returns `RunResult` with `session_id`.
 - `InitialTurnPolicy::RunImmediately` executes the first turn inline (default).
 - `InitialTurnPolicy::Defer` registers the session without running a turn.
-- Supports keep-alive mode where enabled.
-- Keep-alive mode is a lifecycle contract, not just a surface convenience: whichever
-  owner path is active must keep inbox draining and turn-boundary suppression
-  aligned with the canonical drain lifecycle truth.
+
+Create has a commit boundary:
+
+- **pre-commit failure**: side-effect free; no committed session identity
+- **post-commit first-turn failure**: return session identity and keep the session resumable
+
+Committed create failure must not be silently rewritten to “cancelled” or cleaned up as unpublished work.
 
 ### start_turn
 
@@ -44,13 +66,21 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 
 - At most one in-flight turn per session.
 - Concurrent attempts return `SESSION_BUSY`.
-- If `keep_alive = true`, the turn must preserve the session's keep-alive drain
-  ownership semantics after the turn completes. Direct and runtime-backed
-  service paths are not allowed to diverge on that contract.
+- Committed success must not be rewritten to cancellation.
+- Runtime-backed surfaces may hot-swap supported live settings on an existing session where the surface contract says that is allowed.
+
+### Deferred first-turn system prompt override
+
+Rust supports `system_prompt` on `StartTurnRequest` only for a deferred session's first turn.
+
+- deferred + first turn: allowed
+- existing history/messages: rejected
+
+This keeps Rust aligned with the 0.5 runtime contract instead of implying arbitrary mid-session prompt replacement.
 
 ### interrupt
 
-`interrupt(id)` cancels in-flight turn.
+`interrupt(id)` cancels an in-flight turn.
 
 - If no turn is running: `SESSION_NOT_RUNNING`.
 
@@ -58,6 +88,7 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 
 - `read(id)` and `list(query)` are non-blocking with respect to in-flight turns.
 - Persistent services can include durable sessions from the realm backend.
+- Presence in `list()` is not the same as “live session exists”; runtime-owned seams must answer liveness.
 
 ### read_history
 
@@ -72,6 +103,38 @@ Agent construction is centralized in `AgentFactory::build_agent()`.
 
 - Removes session from live runtime.
 - Persistent behavior depends on service/store implementation.
+
+## Keep-alive contract
+
+`keep_alive` is a runtime/session concept, not an old “host mode” execution path.
+
+Rules:
+
+- **create / run** omitted => default `false`
+- **continue / resume** omitted => inherit persisted session intent
+- explicit `keep_alive` override is a session/runtime mutation once validated
+- invalid `keep_alive` + comms configuration is rejected before any stateful work
+- once validated, an explicit `keep_alive` mutation may commit independently of turn success
+
+`keep_alive=true` requires usable comms identity/config on the surfaces that expose it.
+
+## External events
+
+External events are queue-only runtime-backed inputs.
+
+- they are admitted into runtime ingress
+- they do not invent a second direct execution path
+- “turn-boundary inbox draining” is not the primary mental model for 0.5
+
+## Explicit override semantics
+
+Where the surface supports omission vs explicit override, these are distinct facts:
+
+- omit / inherit
+- disable / false
+- set / concrete value
+
+When all three meanings matter, the wire/API must preserve that distinction. Typed optional fields and override masks are preferred over default-value folklore.
 
 ## Realm contract
 
@@ -103,6 +166,8 @@ Durability follows the active realm backend (`sqlite`, `redb`, or `jsonl`).
 - Crash during in-flight turn may lose only that turn.
 - SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows.
 
+Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
+
 ## Config concurrency contract
 
 Config runtime uses generation CAS.
@@ -120,6 +185,8 @@ Encrypt storage at rest externally if required by your environment.
 
 ## See also
 
+- [Architecture](/reference/architecture)
+- [Design philosophy](/reference/design-philosophy)
 - [Realms](/concepts/realms)
 - [Sessions](/concepts/sessions)
 - [Capability matrix](/reference/capability-matrix)

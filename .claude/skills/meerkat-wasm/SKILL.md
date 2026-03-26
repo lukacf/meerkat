@@ -100,7 +100,7 @@ Clippy: `cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- 
 2. **cargo clean scope**: `cargo clean -p <crate>` only cleans native. Use `rm -rf target/wasm32-unknown-unknown`.
 3. **cfg inside async_trait**: May not propagate. Move cfg-gated logic to standalone functions outside the impl.
 4. **Feature unioning**: Workspace `tokio = { features = ["full"] }` pulls mio which fails on wasm32. Each crate needs target-specific deps.
-5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for EphemeralSessionService.
+5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for the embedded ephemeral substrate used in WASM.
 6. **Flow JSON**: Flow engine parses step output as JSON. Prompts must match or use `expected_schema_ref`.
 
 ## Subsystem Availability on wasm32

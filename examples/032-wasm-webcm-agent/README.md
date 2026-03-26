@@ -70,7 +70,7 @@ User message
 ```
 
 Each step is a separate turn — agents end their turn after sending a message.
-The autonomous host loop wakes them when replies arrive. No polling.
+Runtime-backed keep-alive sessions are re-admitted when replies arrive. No polling.
 
 ## What's in the VM
 

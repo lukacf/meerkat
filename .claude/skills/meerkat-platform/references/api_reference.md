@@ -1,5 +1,9 @@
 # Meerkat Platform API Reference
 
+For upgrade and terminology changes, also load:
+
+- `references/migration_0_5.md`
+
 ## Realm scope (all surfaces)
 
 Use explicit realm to control sharing/isolation.
@@ -67,6 +71,11 @@ rkat capabilities
 rkat-rpc
 ```
 
+CLI keep-alive terminology:
+
+- use `--keep-alive`
+- do not use `--host`
+
 Flow command details:
 
 ```bash
@@ -128,6 +137,7 @@ Core endpoints:
 - `POST /sessions/{id}/messages` — continue an existing session
 - `GET /sessions/{id}/events` — SSE stream for agent events
 - `POST /sessions/{id}/event` — (legacy) push external event
+- `POST /requests/{request_id}/cancel` — cancel uncommitted in-flight work when `X-Meerkat-Request-Id` is supplied
 - `GET /skills` — list skills with provenance
 - `GET /skills/{id}` — inspect a skill's full body
 - `GET /health`

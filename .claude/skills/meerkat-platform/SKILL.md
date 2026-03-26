@@ -5,7 +5,20 @@ description: "Comprehensive guide for building applications with the Meerkat age
 
 # Meerkat Platform Guide
 
-Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. The execution pipeline is shared, and state is realm-scoped.
+Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. The execution pipeline is shared, state is realm-scoped, and 0.5 semantics are runtime-backed by default.
+
+If the request is about upgrading older integrations or mental models, load:
+
+- `references/migration_0_5.md`
+
+Use that migration guide for:
+
+- `host_mode` -> `keep_alive`
+- `--host` -> `--keep-alive`
+- runtime-backed ownership vs substrate
+- request cancellation / commit semantics
+- external-event behavior
+- SDK and wire-shape changes
 
 ## Realm-first model
 
@@ -220,8 +233,8 @@ cat document.txt | rkat run "Summarize this document"
 git diff | rkat run "Review these changes" --enable-builtins
 # Chained pipes: each rkat reads stdin, writes response to stdout
 cat data.csv | rkat run "Extract entities" | rkat run "Write a story about them"
-# Live streaming: --host --stdin reads stdin line-by-line as events
-tail -f app.log | rkat run --host --stdin "Monitor and alert on anomalies"
+# Live streaming: --keep-alive --stdin reads stdin line-by-line as events
+tail -f app.log | rkat run --keep-alive --stdin "Monitor and alert on anomalies"
 rkat mob prefabs
 rkat mob create --prefab coding_swarm
 rkat mob list
@@ -253,30 +266,44 @@ await client.close();
 ### Rust SDK
 
 ```rust
-use meerkat::{AgentFactory, Config, CreateSessionRequest, SessionService, build_ephemeral_service};
+use meerkat::{
+    AgentFactory, Config, CreateSessionRequest, SessionService,
+    build_persistent_service, open_realm_persistence_in,
+};
 use meerkat_core::service::InitialTurnPolicy;
-use meerkat_store;
+use meerkat_store::RealmBackend;
 
 let config = Config::load().await?;
-let realm = meerkat_store::realm_paths("team-alpha");
-let factory = AgentFactory::new(realm.root.clone())
-    .runtime_root(realm.root)
+let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
+let (_manifest, persistence) = open_realm_persistence_in(
+    &realms_root,
+    "team-alpha",
+    Some(RealmBackend::Sqlite),
+    None,
+).await?;
+let factory = AgentFactory::new(realms_root.clone())
+    .runtime_root(realms_root)
     .builtins(true)
     .shell(true);
-let service = build_ephemeral_service(factory, config, 64);
+let service = build_persistent_service(factory, config, 64, persistence);
 let result = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-5".into(),
     prompt: "What is Rust?".into(),
     system_prompt: None,
     max_tokens: None,
     event_tx: None,
-    // keep_alive is set via SessionBuildOptions, not on CreateSessionRequest
     skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     build: None,
     labels: None,
 }).await?;
 ```
+
+For detailed surface schemas and examples, also load:
+
+- `references/api_reference.md`
+- `references/mobs.md`
+- `references/migration_0_5.md`
 
 ## Configuration
 

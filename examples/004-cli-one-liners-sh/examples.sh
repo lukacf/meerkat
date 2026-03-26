@@ -31,12 +31,12 @@ SESSION_ID=$(echo "$SESSION_OUTPUT" | sed -n 's/.*Session: \([a-f0-9-]*\).*/\1/p
 if [ -n "$SESSION_ID" ]; then
     echo ""
     echo "=== 3. Resume the session ==="
-    $RKAT session "$SESSION_ID" "What is my favorite color?"
+    $RKAT resume "$SESSION_ID" "What is my favorite color?"
 fi
 
 echo ""
 echo "=== 4. List sessions ==="
-$RKAT list
+$RKAT sessions list
 
 echo ""
 echo "=== 5. Isolated realm (ephemeral workspace) ==="

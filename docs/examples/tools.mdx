@@ -134,7 +134,7 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
         .memory(true)
         .mob(true);
 
-    let service = build_ephemeral_service(factory, config, 64);
+    let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
         prompt: "List files in /tmp".into(),
         ..Default::default()

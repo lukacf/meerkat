@@ -78,12 +78,27 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/config` | Read config |
 | `PUT` | `/config` | Replace config |
 | `PATCH` | `/config` | Merge-patch config (RFC 7396) |
+| `POST` | `/requests/{request_id}/cancel` | Cancel an uncommitted in-flight request |
 
 <Note>
 Mob capability on REST is exposed through the same session endpoints by composing
 `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into
 `SessionBuildOptions.external_tools` in the host runtime.
 </Note>
+
+## Request cancellation
+
+REST request cancellation is opt-in and request-ID based.
+
+- send `X-Meerkat-Request-Id: <id>` on `POST /sessions` or `POST /sessions/{id}/messages`
+- call `POST /requests/{request_id}/cancel` to cancel uncommitted in-flight work
+- duplicate in-flight request IDs are rejected
+
+Cancellation only affects uncommitted work:
+
+- pre-start / pre-commit work may return cancelled
+- committed success is not rewritten to cancellation
+- post-commit create failures still return session identity and remain resumable
 
 ## Configuration
 
@@ -478,6 +493,14 @@ Interrupt an in-flight turn. No-op if the session is idle.
 {"interrupted": true}
 ```
 
+### POST /requests/\{request_id\}/cancel
+
+Cancel an uncommitted in-flight request that previously supplied `X-Meerkat-Request-Id`.
+
+```json Response
+{"cancelled": true}
+```
+
 Returns `404` if the session is not found, `409` if the session is not running.
 
 ### DELETE /sessions/\{id\}
@@ -863,6 +886,10 @@ All errors are returned as JSON with an HTTP status code:
 Keep-alive mode requires `keep_alive: true` and a `comms_name`. If `keep_alive` is
 requested but the binary was not compiled with comms support, the server
 returns a `BAD_REQUEST` error.
+</Note>
+
+<Note>
+`POST /sessions/{id}/external-events` queues a runtime-backed external event. It is a queue-only admission path, not a second direct execution loop.
 </Note>
 
 <Note>

@@ -44,7 +44,7 @@ Surface binaries:
 | `AgentLlmClient` | LLM provider abstraction | `LlmClientAdapter` (meerkat-client) |
 | `AgentToolDispatcher` | Tool routing and dispatch | `CompositeDispatcher` (meerkat-tools), `ToolGateway` (meerkat-core), `EmptyToolDispatcher` (meerkat-tools) |
 | `AgentSessionStore` | Session persistence | `StoreAdapter<S>` (meerkat-store) |
-| `SessionService` | Full session lifecycle | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
+| `SessionService` | Full substrate lifecycle; runtime-backed surfaces layer canonical runtime semantics on top | `EphemeralSessionService<B>` (meerkat-session), `PersistentSessionService<B>` (meerkat-session) |
 | `CommsRuntime` | Inter-agent communication | `meerkat_comms::CommsRuntime` |
 | `HookEngine` | Hook execution | `DefaultHookEngine` (meerkat-hooks) |
 | `SkillEngine` | Skill resolution + rendering | `DefaultSkillEngine` (meerkat-skills) |
@@ -116,9 +116,8 @@ start_turn(id, prompt, handling_mode) → RunResult
 interrupt(id) → set interrupt flag, notify session task
 archive(id) → remove handle, drop session task
 
-Host mode is part of the session lifecycle contract. Runtime-backed and direct
-session-service paths may realize it differently internally, but they are
-expected to preserve the same drain lifecycle truth.
+`keep_alive` is runtime-owned session behavior. Direct substrate usage does not
+own runtime drain semantics; runtime-backed surfaces do.
 ```
 
 ## Mob Lifecycle

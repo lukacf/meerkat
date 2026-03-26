@@ -597,14 +597,13 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
     let factory = AgentFactory::new(root)
         .builtins(true)
         .mob(true);
-    let service = build_ephemeral_service(factory, config, 64);
+    let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-5".into(),
         prompt: "Create a research team and run the synthesis flow".into(),
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        keep_alive: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -618,7 +617,7 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
 
 | Mode | Behavior | Use case |
 |------|----------|----------|
-| `autonomous_host` (default) | Member runs a continuous loop: wake on inbox → process → respond → sleep | Long-lived agents that react to messages |
+| `autonomous_host` (default) | Member runs a long-lived runtime-backed loop: admit inbox work → process → respond → sleep | Long-lived agents that react to messages |
 | `turn_driven` | Member only executes when explicitly given a turn via `meerkat_message` content dispatch or flow dispatch | Controlled execution, deterministic ordering |
 
 Set per-profile in the definition:

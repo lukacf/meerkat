@@ -1,4 +1,4 @@
-//! # 024 — Multi-Turn Event Mesh (Rust)
+//! # 024 — Keep-Alive Event Mesh (Rust)
 //!
 //! Demonstrates multi-turn event-driven processing using `EphemeralSessionService`
 //! as substrate. The session stays alive between turns, accumulating context as
@@ -23,7 +23,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 024-host-mode-event-mesh --features jsonl-store
+//! ANTHROPIC_API_KEY=... cargo run --example 024-host-mode-event-mesh
 //! ```
 
 use std::sync::Arc;
@@ -135,9 +135,9 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
     let event_collector = spawn_event_collector(event_rx);
 
     // start_turn injects a new prompt into the live session. The agent has
-    // full access to the prior conversation history. This is exactly how
-    // host-mode agents receive events in production: webhooks, peer messages,
-    // and CLI input all flow through start_turn on the SessionService.
+    // full access to the prior conversation history. In production,
+    // runtime-backed keep-alive sessions admit webhooks, peer messages, and
+    // CLI input as future turn work through the runtime layer.
     let result = service
         .start_turn(
             &session_id,
@@ -233,7 +233,7 @@ The event mesh connects agents, external systems, and users:
 |  +----------+    +----------+    +----------+                |
 +--------------------------------------------------------------+
 
-Event sources that feed into a host-mode agent:
+Event sources that feed into a keep-alive agent:
   1. Peer messages (agent-to-agent via comms, Ed25519-signed)
   2. External webhooks (REST POST -> agent inbox)
   3. Timer events (scheduled processing)
@@ -242,8 +242,8 @@ Event sources that feed into a host-mode agent:
 
 Configuration:
 
-  # CLI: Start agent in host mode
-  rkat run --host-mode --comms-name "processor" "Process incoming events"
+  # CLI: Start agent in keep-alive mode
+  rkat run --keep-alive --comms-name "processor" "Process incoming events"
 
   # Python SDK
   result = await client.create_session(
@@ -255,8 +255,8 @@ Configuration:
   # TypeScript SDK
   const result = await client.createSession({{
       prompt: "Process incoming events",
-      keep_alive: true,
-      comms_name: "processor",
+      keepAlive: true,
+      commsName: "processor",
   }});
 
   # Inject events via REST

@@ -30,8 +30,13 @@
 ## Prerequisites
 
 ```bash
+rustc --version # stable Rust toolchain
+wasm-pack --version
 node --version  # 20+
 ```
+
+`examples.sh` rebuilds the repo-local `@rkat/web` WASM runtime before the Vite
+build, so both the Rust toolchain and `wasm-pack` must be available on `PATH`.
 
 ## Build & Run
 

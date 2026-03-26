@@ -449,6 +449,10 @@ tool calls. The call waits for the resumed turn to complete and returns the same
   Keep-alive override for this resume. `null` = inherit persisted session intent, `true` = enable, `false` = disable.
 </ParamField>
 
+<Note>
+`meerkat_run` and `meerkat_resume` follow the same commit/cancel rule as the other interactive surfaces: committed success is not rewritten to cancellation, and post-commit create failure returns session identity so the session can be resumed.
+</Note>
+
 <ParamField body="comms_name" type="string | null" default="from session">
   Agent name for comms.
 </ParamField>

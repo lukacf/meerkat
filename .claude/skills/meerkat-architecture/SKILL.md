@@ -11,7 +11,7 @@ Meerkat is a library-first agent runtime. The execution pipeline is shared acros
 
 1. **Infrastructure, not application** — the agent loop is a composable primitive with no opinions about prompts, tools, or output.
 2. **Trait contracts own the architecture** — `meerkat-core` defines contracts; implementations live in satellite crates.
-3. **Surfaces are interchangeable skins** — CLI, REST, RPC, MCP, WASM all route through `SessionService` → `AgentFactory::build_agent()`.
+3. **Surfaces are skins, not authorities** — CLI, REST, RPC, MCP, WASM route through shared substrate and factory seams, but runtime-backed surfaces own runtime semantics.
 4. **Composition over configuration** — optional components are `Option<Arc<dyn Trait>>`, not feature-flagged defaults.
 5. **Runtime conforms to machines** — the runtime must follow the verified machine model, not the other way around.
 6. **Mob is the only multi-agent path** — there is no sub-agent system. All delegated/forked/helper work routes through mob orchestration.
@@ -70,7 +70,7 @@ When reviewing a proposal, ask first:
 | `meerkat-machine-schema` | Rust-native machine/composition catalog plus seam/handoff protocol metadata — the formal authority | — |
 | `meerkat-machine-kernels` | Generated kernel interpreter for all machines | `GeneratedMachineKernel` |
 | `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
-| `meerkat` (facade) | AgentFactory, FactoryAgentBuilder, build_ephemeral_service, re-exports | Wires everything together |
+| `meerkat` (facade) | AgentFactory, FactoryAgentBuilder, build_persistent_service, build_ephemeral_service, persistence helpers, re-exports | Wires everything together |
 
 **Rule: meerkat-core has zero I/O dependencies.** All I/O happens in satellite crates.
 
@@ -170,7 +170,7 @@ Important current boundary:
 
 ## Session Service
 
-All surfaces route through `SessionService` for the full lifecycle:
+All surfaces route through `SessionService` for the full lifecycle, but runtime-backed surfaces are the canonical product path:
 
 ```
 CreateSessionRequest → SessionService::create_session() → RunResult
@@ -179,8 +179,8 @@ CreateSessionRequest → SessionService::create_session() → RunResult
 ```
 
 Two implementations:
-- `EphemeralSessionService<B>` — in-memory, no persistence (WASM, testing)
-- `PersistentSessionService<B>` — event-sourced persistent orchestration (CLI, RPC, REST, MCP; typically backed by sqlite or redb through `PersistenceBundle`)
+- `EphemeralSessionService<B>` — in-memory substrate (WASM, testing, embedded Queue-only use)
+- `PersistentSessionService<B>` — durable substrate for runtime-backed product surfaces (CLI, RPC, REST, MCP; typically backed by sqlite or redb through `PersistenceBundle`)
 
 `FactoryAgentBuilder` bridges `AgentFactory` into `SessionAgentBuilder`.
 

@@ -12,7 +12,9 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 |------|---------------|---------|
 | **Setup** | `Config::load()` | Load configuration from disk |
 | | `AgentFactory::new(store_root)` | Create a factory for building agents |
-| | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service |
+| | `open_realm_persistence_in(...)` | Open a realm-backed persistence bundle |
+| | `build_persistent_service(factory, config, cap, persistence)` | Build the runtime-backed persistent session substrate |
+| | `build_ephemeral_service(factory, config, cap)` | Build an in-memory Queue-only substrate |
 | **Sessions** | `service.create_session(req)` | Create a session and run the first turn |
 | | `service.start_turn(id, req)` | Continue an existing session |
 | | `service.read(id)` | Read session state |
@@ -85,20 +87,28 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
 Production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path where `SessionService` is substrate and `RuntimeSessionAdapter` owns keep-alive, Queue/Steer routing, and comms drain. See [`meerkat-rpc`](../rpc/overview.mdx) or [`meerkat-rest`](../rest/overview.mdx) for those entry points.
 
-For **testing or embedded use** where runtime semantics are not needed, `build_ephemeral_service` provides a direct Queue-only path:
+For the main production embedding path, use the runtime-backed persistent flow:
 
 ```rust
-use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::{CreateSessionRequest, SessionService};
+use meerkat::{
+    AgentFactory, Config, CreateSessionRequest, SessionService,
+    build_persistent_service, open_realm_persistence_in,
+};
 use meerkat_core::service::InitialTurnPolicy;
-use meerkat_store;
+use meerkat_store::RealmBackend;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().await?;
-    let realm = meerkat_store::realm_paths("team-alpha");
-    let factory = AgentFactory::new(realm.root.clone()).runtime_root(realm.root);
-    let service = build_ephemeral_service(factory, config, 64);
+    let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
+    let (_manifest, persistence) = open_realm_persistence_in(
+        &realms_root,
+        "team-alpha",
+        Some(RealmBackend::Sqlite),
+        None,
+    ).await?;
+    let factory = AgentFactory::new(realms_root.clone()).runtime_root(realms_root);
+    let service = build_persistent_service(factory, config, 64, persistence);
 
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-5".into(),
@@ -118,6 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+For **testing or embedded use** where runtime semantics are intentionally not needed, `build_ephemeral_service` remains available as a direct Queue-only substrate.
 
 ---
 

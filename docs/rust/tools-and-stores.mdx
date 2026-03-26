@@ -164,9 +164,12 @@ Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{AgentFactory, Config, SessionStore, SessionFilter, StoreError, Session, SessionId, build_ephemeral_service};
+use meerkat::{
+    AgentFactory, Config, SessionStore, SessionFilter, StoreError, Session, SessionId,
+    build_persistent_service, open_realm_persistence_in,
+};
 use meerkat_core::SessionMeta;
-use meerkat_store;
+use meerkat_store::RealmBackend;
 use std::sync::Arc;
 
 struct BigQueryStore { /* your storage backend */ }
@@ -194,15 +197,21 @@ impl SessionStore for BigQueryStore {
 
 // Wire into AgentFactory — all factory features (comms, hooks, skills, etc.) work unchanged
 let store: Arc<dyn SessionStore> = Arc::new(BigQueryStore { /* ... */ });
-let realm = meerkat_store::realm_paths("team-alpha");
-let factory = AgentFactory::new(realm.root.clone())
-    .runtime_root(realm.root)
+let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
+let (_manifest, persistence) = open_realm_persistence_in(
+    &realms_root,
+    "team-alpha",
+    Some(RealmBackend::Sqlite),
+    None,
+).await?;
+let factory = AgentFactory::new(realms_root.clone())
+    .runtime_root(realms_root)
     .session_store(store)
     .builtins(true)
     .shell(true);
 
 let config = Config::load().await?;
-let service = build_ephemeral_service(factory, config, 64);
+let service = build_persistent_service(factory, config, 64, persistence);
 // Sessions created through `service` now persist through BigQuery
 ```
 

@@ -88,8 +88,9 @@ graph TD
 
 <Note>
 **SessionService routing:** All surfaces (CLI, REST, MCP Server, JSON-RPC, SDKs) route through
-`SessionService` for the full session lifecycle. `AgentFactory::build_agent()` centralizes all
-agent construction. Zero `AgentBuilder::new()` calls in surface crates.
+`SessionService` for substrate lifecycle and through `AgentFactory::build_agent()` for agent
+construction. Runtime-backed surfaces remain the canonical owner of `keep_alive`, Queue/Steer,
+comms drain, and commit/cancel semantics.
 </Note>
 
 <Note>
@@ -204,7 +205,8 @@ Runtime control plane for session-backed agent lifecycle:
 - **Input taxonomy**: typed `Input` enum (Prompt, Peer, FlowStep, ExternalEvent, Continuation, Operation) with durability, origin, and visibility metadata
 - **InputLifecycleState**: full state machine for input processing (Accepted → Consumed | Superseded | Coalesced | Abandoned)
 
-This crate sits between surfaces and `SessionService`, providing the stateful runtime that keeps agents alive between turns for RPC/REST integration.
+This crate sits between surfaces and `SessionService`, providing the stateful runtime that owns
+keep-alive, ingress admission, and live routing semantics for the product surfaces.
 </Accordion>
 
 <Accordion title="meerkat-machine-schema">
@@ -301,9 +303,9 @@ Session service orchestration:
 - **PersistentSessionService**: durable session lifecycle over `SessionStore` backends
 - **DefaultCompactor**: context compaction implementation (feature: `session-compaction`)
 
-Host mode is part of the session contract. Runtime-backed and direct session-service paths are
-expected to follow the same lifecycle truth for inbox consumption and drain ownership, even though
-their mechanics differ internally.
+Runtime-backed surfaces own keep-alive, Queue/Steer routing, comms drain lifecycle, and
+external-event admission. `SessionService` remains the substrate lifecycle layer underneath those
+semantics.
 
 Feature gates: `session-store`, `session-compaction`.
 </Accordion>
@@ -353,9 +355,9 @@ Inter-agent communication system:
 - **Ed25519 identity**: cryptographic signing and verification of messages
 - **Trust model**: `TrustedPeers` with explicit peer verification
 - **Transports**: inproc (in-process), TCP, and UDS
-- **Inbox**: bounded message queue consumed by the active host-mode/drain owner path
+- **Inbox**: bounded message queue feeding runtime-backed ingress admission
 - **Message types**: `Message`, `Request`, `Response`, `Ack`
-- **Host mode**: keeps agent alive listening for messages
+- **Keep-alive**: runtime-backed session behavior that keeps a session alive for future admitted work
 
 Feature-gated behind `comms`.
 </Accordion>
@@ -436,7 +438,8 @@ The main entry point. Re-exports types and provides:
 - **AgentFactory**: centralized agent construction pipeline shared across all surfaces
 - **FactoryAgentBuilder**: bridges `AgentFactory` into `SessionAgentBuilder`
 - **FactoryAgent**: wraps `DynAgent` implementing `SessionAgent`
-- **build_ephemeral_service()**: convenience constructor for `EphemeralSessionService<FactoryAgentBuilder>`
+- **build_persistent_service()**: runtime-backed persistent service constructor for the main Rust embedding path
+- **build_ephemeral_service()**: in-memory substrate constructor for testing and embedded Queue-only use
 - **AgentBuildConfig**: per-request configuration (model, system prompt, tool overrides, realm metadata)
 - **SessionBuildOptions**: in-band request build options used by all surfaces
 
@@ -604,7 +607,7 @@ The `meerkat-comms` crate provides inter-agent communication with a layered arch
 
 **Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
 
-**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. Inbox delivery and inbox consumption are separate concerns: the inbox queues transport work, while the active host-mode/drain lifecycle path decides when those messages become session input.
+**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. Inbox delivery and runtime admission are separate concerns: transport queues work first, then runtime-backed ingress decides when those messages become session input.
 
 ### Data flow through the agent loop
 
@@ -767,7 +770,7 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 | `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, redb, in-memory) |
 | `meerkat-session` | Session orchestration, `EventStore`, compactor |
 | `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |
-| `meerkat` (facade) | Feature wiring, re-exports, `AgentFactory`, `build_ephemeral_service` |
+| `meerkat` (facade) | Feature wiring, re-exports, `AgentFactory`, persistence helpers, `build_persistent_service`, `build_ephemeral_service` |
 
 ### Dependency rules
 

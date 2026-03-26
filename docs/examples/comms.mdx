@@ -1,6 +1,6 @@
 ---
 title: "Comms & mobs"
-description: "Inter-agent messaging, keep-alive mode, external event injection, and mob orchestration."
+description: "Inter-agent messaging, keep-alive sessions, external event injection, and mob orchestration."
 icon: "tower-broadcast"
 ---
 
@@ -8,12 +8,12 @@ For the full guide, see [Comms](/guides/comms) and the `0.5` mob orchestration a
 
 ## Keep-alive mode
 
-Enable the comms listener so the agent stays alive after its initial prompt, waiting for incoming messages and external events.
+Enable the comms listener so the agent stays alive after its initial prompt, waiting for incoming messages and external events as future runtime-backed turn work.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run --comms-name agent-a --host "You are a coordinator."
+    rkat run --comms-name agent-a --keep-alive "You are a coordinator."
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -74,11 +74,12 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
         prompt: "You are a coordinator.".into(),
         system_prompt: None,
         max_tokens: None,
+        render_metadata: None,
         event_tx: None,
-        keep_alive: true,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
+            keep_alive: true,
             comms_name: Some("agent-a".into()),
             ..Default::default()
         }),
@@ -195,13 +196,13 @@ Discover trusted peers visible to a running session.
 
 ## External event injection
 
-Push external events from outside systems into a running agent. Events are queued into the session inbox, then consumed by the active host-mode owner path and injected as user messages.
+Push external events from outside systems into a running agent. Events are queued as runtime-backed external inputs and admitted as future turn work.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    # Host mode with stdin events (pipe or type interactively)
-    rkat run --comms-name monitor --host --stdin \
+    # Keep-alive with stdin events (pipe or type interactively)
+    rkat run --comms-name monitor --keep-alive --stdin \
       "You are a monitoring agent."
     ```
   </Tab>

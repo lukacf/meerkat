@@ -1,4 +1,4 @@
-# 024 — Host Mode & Event Mesh (Rust)
+# 024 — Keep-Alive Event Mesh (Rust)
 
 Build reactive agents that stay alive to process incoming events from
 peers, webhooks, timers, and users.
@@ -6,7 +6,7 @@ peers, webhooks, timers, and users.
 ## What This Example Does
 
 Creates an incident-response coordinator agent using `EphemeralSessionService`
-(the same infrastructure that backs CLI, REST, RPC, and MCP Server). The agent
+(the in-memory substrate underneath Meerkat session orchestration). The agent
 processes three turns that simulate real-time event injection:
 
 1. **Turn 1**: Initial alert (CPU spike on prod-web-03)
@@ -15,7 +15,7 @@ processes three turns that simulate real-time event injection:
 
 Each turn streams `AgentEvent`s and the agent maintains full conversation
 context across all turns — demonstrating the reactive processing pattern
-that keep-alive mode enables.
+that long-lived sessions enable.
 
 ## Concepts
 - `EphemeralSessionService` — in-memory session lifecycle with dedicated tokio tasks
@@ -25,9 +25,9 @@ that keep-alive mode enables.
 - Session state reads — observe accumulating context between turns
 - `archive()` — clean shutdown of the session task
 
-## When to Use Host Mode
-| Scenario | Standard Mode | Host Mode |
-|----------|--------------|-----------|
+## When to Use Keep-Alive
+| Scenario | Standard Mode | Keep-Alive |
+|----------|--------------|------------|
 | Single query | Yes | No |
 | Multi-turn chat | Yes | Better |
 | Mob orchestrator | No | Yes |
@@ -36,5 +36,5 @@ that keep-alive mode enables.
 
 ## Run
 ```bash
-ANTHROPIC_API_KEY=... cargo run --example 024-host-mode-event-mesh --features jsonl-store
+ANTHROPIC_API_KEY=... cargo run -p meerkat --example 024-host-mode-event-mesh
 ```

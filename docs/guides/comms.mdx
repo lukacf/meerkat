@@ -20,8 +20,8 @@ The comms system provides:
 - **Trust-based peer model**: Agents only accept messages from explicitly trusted peers
 - **External event ingestion**: Push plain-text events from stdin, webhooks, RPC, or TCP/UDS listeners
 - **Auth-optional mode**: Signed listeners for agent-to-agent comms; separate plain listeners for external events when `auth = "none"`
-- **Host mode**: An agent processes its initial prompt then stays alive waiting for incoming comms messages and external events
-- **Inbox with lifecycle-managed draining**: Incoming messages and events are queued once, then consumed by the active host-mode owner path through the canonical drain lifecycle
+- **Keep-alive**: A runtime-backed session processes its initial prompt, then remains alive waiting for future admitted work
+- **Runtime-backed queueing**: Incoming messages and external events are queued once and admitted through runtime ingress
 
 ## Architecture
 
@@ -68,7 +68,7 @@ graph TD
 |-------|------|
 | `meerkat-comms` | Core comms: identity, trust, transport, router, inbox, runtime, MCP tools, agent integration |
 | `meerkat-tools` (`builtin::comms`) | `CommsToolSurface`, `CommsToolSet`, individual `BuiltinTool` implementations |
-| `meerkat-core` | `CommsRuntime` trait, `CommsRuntimeConfig`, `CommsRuntimeMode` enum, agent host-mode impl |
+| `meerkat-core` | `CommsRuntime` trait, `CommsRuntimeConfig`, `CommsRuntimeMode` enum, substrate integration points |
 | `meerkat` (facade) | `build_comms_runtime_from_config()`, `compose_tools_with_comms()`, factory wiring |
 
 ## Setup
@@ -361,7 +361,7 @@ When converting to `CommsMessage` for the agent loop, ACKs and messages from unk
 Queueing an inbox item and consuming it are separate truths:
 
 - queueing is transport/inbox work
-- consumption is owned by the active host-mode/drain lifecycle path
+- consumption is runtime-backed admission work
 
 This avoids the old assumption that turn-boundary drain is always the only real consumer.
 
@@ -413,8 +413,8 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--no-comms` | Disable inter-agent communication entirely |
-| `--host` | Run in keep-alive mode (stay alive for comms messages and events after initial prompt) |
-| `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--host`) |
+| `--keep-alive` | Run in keep-alive mode (stay alive for comms messages and events after initial prompt) |
+| `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--keep-alive`) |
 
 <Note>
 All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
@@ -462,27 +462,27 @@ When another agent calls `peers()`, the output includes the metadata:
 }
 ```
 
-### Host mode
+### Keep-alive mode
 
-Host mode keeps the agent alive after processing the initial prompt, listening for incoming comms messages and external events:
+Keep-alive keeps the agent alive after processing the initial prompt, waiting for runtime-backed comms messages and external events to be admitted as future turns:
 
 ```bash
-# Host mode with comms only
-rkat run --comms-name orchestrator --host "You are a project coordinator."
+# Keep-alive with comms only
+rkat run --comms-name orchestrator --keep-alive "You are a project coordinator."
 
-# Host mode with stdin events
-rkat run --comms-name monitor --host --stdin "You are a monitoring agent."
+# Keep-alive with stdin events
+rkat run --comms-name monitor --keep-alive --stdin "You are a monitoring agent."
 ```
 
 <Steps>
   <Step title="Process initial prompt">
     The agent processes the initial prompt normally.
   </Step>
-  <Step title="Enter wait loop">
-    After the first run completes, the session enters keep-alive mode and the active owner path keeps the inbox consumer alive.
+  <Step title="Enter idle runtime-backed session">
+    After the first run completes, the session remains alive in keep-alive mode and waits for future admitted work.
   </Step>
   <Step title="Handle incoming messages and events">
-    When comms messages or external events arrive, they flow into the same inbox. The currently active keep-alive owner path drains that inbox and turns those items into new session turns. Runtime-backed and direct session-service paths use different owner mechanics, but they are expected to follow the same drain-lifecycle truth.
+    When comms messages or external events arrive, runtime ingress queues them and admits them as later turns. External events are queue-only runtime-backed inputs; they do not create a second direct execution loop.
   </Step>
   <Step title="Exit conditions">
     The agent exits when it receives a `DISMISS` message, its budget is exhausted, or it encounters a graceful error.
@@ -596,7 +596,7 @@ The important architectural split is:
 2. the active keep-alive/drain lifecycle path owns **consumption**
 3. formatted message injection into the session is a projection of that lifecycle truth
 
-Historically this was described as "turn-boundary inbox draining." That is no longer the right mental model for the architecture as a whole. Turn-boundary consumption is still one local projection path, but runtime-backed and direct session-service keep-alive mode both have to follow the same canonical drain lifecycle contract.
+Historically this was sometimes described as "turn-boundary inbox draining." That is not the primary 0.5 mental model. The canonical model is runtime-backed queueing and admission.
 
 ### Message injection format
 
@@ -648,7 +648,7 @@ External systems can push events into a running agent without Ed25519 authentica
 
 | Source | Surface | How to use | Auth |
 |--------|---------|-----------|------|
-| Stdin | CLI | `--stdin` flag (with `--host`) | None |
+| Stdin | CLI | `--stdin` flag (with `--keep-alive`) | None |
 | Webhook | REST | `POST /sessions/{id}/external-events` | `RKAT_WEBHOOK_SECRET` env var |
 | RPC | JSON-RPC | `session/external_event` method | None (implicit) |
 | TCP listener | Comms | Configure `event_address` in config | `auth = "none"` required |
@@ -659,10 +659,10 @@ External systems can push events into a running agent without Ed25519 authentica
 Read newline-delimited events from stdin. Each line is parsed as JSON (extracting `body` field if present) or treated as plain text.
 
 ```bash
-# Host mode with stdin events
+# Keep-alive with stdin events
 rkat run "You are a monitoring agent." \
   --comms-name monitor \
-  --host --stdin \
+  --keep-alive --stdin \
   --enable-builtins
 
 # Then type or pipe events:

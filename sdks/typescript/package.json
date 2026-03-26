@@ -23,6 +23,7 @@
   },
   "license": "MIT OR Apache-2.0",
   "devDependencies": {
-    "@types/node": "^22"
+    "@types/node": "^22",
+    "typescript": "^5.8.3"
   }
 }

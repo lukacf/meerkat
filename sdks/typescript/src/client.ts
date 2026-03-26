@@ -26,6 +26,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -36,6 +37,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
@@ -1755,11 +1757,12 @@ export class MeerkatClient {
 
   private static async runCommand(command: string, args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(command, args, { stdio: ["ignore", "inherit", "pipe"] });
+      const options: SpawnOptions = { stdio: ["ignore", "inherit", "pipe"] };
+      const proc = spawn(command, args, options);
       let stderr = "";
-      proc.stderr?.on("data", (chunk) => { stderr += String(chunk); });
-      proc.on("error", (error) => { reject(error); });
-      proc.on("close", (code) => {
+      proc.stderr?.on("data", (chunk: string | Buffer) => { stderr += String(chunk); });
+      proc.on("error", (error: Error) => { reject(error); });
+      proc.on("close", (code: number | null) => {
         if (code === 0) { resolve(); return; }
         reject(new MeerkatError("ARCHIVE_EXTRACT_FAILED", `${command} failed with code ${code}: ${stderr.trim()}`));
       });

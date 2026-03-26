@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::identifiers::InputId;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
-use crate::types::HandlingMode;
+use crate::types::{HandlingMode, RenderMetadata};
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -99,6 +99,9 @@ pub struct RuntimeTurnMetadata {
     /// Override provider-specific parameters for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Optional normalized rendering metadata for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 /// An input staged for application at a run boundary.

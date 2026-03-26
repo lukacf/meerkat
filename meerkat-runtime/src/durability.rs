@@ -80,6 +80,7 @@ mod tests {
     use crate::input::*;
     use chrono::Utc;
     use meerkat_core::lifecycle::InputId;
+    use meerkat_core::types::HandlingMode;
 
     fn make_header(durability: InputDurability, source: InputOrigin) -> InputHeader {
         InputHeader {
@@ -199,6 +200,8 @@ mod tests {
             event_type: "test".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
     }
@@ -215,6 +218,8 @@ mod tests {
             event_type: "test".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
     }

@@ -37,6 +37,8 @@ fn make_message(from: &str, body: &str) -> InboxInteraction {
             blocks: None,
         },
         rendered_text: format!("[{from}]: {body}"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 
@@ -55,6 +57,8 @@ fn make_message_with_blocks(from: &str, body: &str) -> InboxInteraction {
             ]),
         },
         rendered_text: format!("[{from}]: {body}"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 
@@ -69,6 +73,8 @@ fn make_response(from: &str, status: ResponseStatus) -> InboxInteraction {
             result: serde_json::json!({"ok": true}),
         },
         rendered_text: format!("[{from}]: response ({status:?})"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 
@@ -81,6 +87,8 @@ fn make_request(from: &str, intent: &str) -> InboxInteraction {
             params: serde_json::json!({}),
         },
         rendered_text: format!("[{from}]: request ({intent})"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 

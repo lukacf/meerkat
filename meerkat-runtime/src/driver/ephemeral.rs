@@ -511,13 +511,6 @@ impl EphemeralRuntimeDriver {
     pub fn input_states_snapshot(&self) -> Vec<InputState> {
         self.ledger.iter().map(|(_, state)| state.clone()).collect()
     }
-    pub(crate) fn forget_input(&mut self, input_id: &InputId) {
-        let _ = self.queue.remove(input_id);
-        let _ = self.steer_queue.remove(input_id);
-        let _ = self.ledger.remove(input_id);
-        self.wake_requested = false;
-        self.process_requested = false;
-    }
     /// Get a reference to the runtime control authority.
     pub fn control(&self) -> &RuntimeControlAuthority {
         &self.control

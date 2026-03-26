@@ -1,20 +1,154 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use async_trait::async_trait;
 use chrono::Utc;
 use meerkat_core::BlobStore;
-use meerkat_core::lifecycle::InputId;
+use meerkat_core::lifecycle::{
+    InputId, RunId, run_primitive::RunApplyBoundary, run_receipt::RunBoundaryReceipt,
+};
 use meerkat_core::types::{ContentBlock, ImageData};
+use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputLifecycleState, InputOrigin,
     InputState, InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput,
-    RuntimeDriver, RuntimeStore,
+    RuntimeDriver, RuntimeState, RuntimeStore, SessionDelta,
 };
 use meerkat_store::MemoryBlobStore;
 
 fn memory_blob_store() -> Arc<dyn BlobStore> {
     Arc::new(MemoryBlobStore::new())
+}
+
+struct FailPersistInputStore {
+    inner: Arc<InMemoryRuntimeStore>,
+    fail_persist_input_state: AtomicBool,
+}
+
+impl FailPersistInputStore {
+    fn new(inner: Arc<InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_persist_input_state: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeStore for FailPersistInputStore {
+    async fn commit_session_boundary(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+        run_id: RunId,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        input_updates: Vec<InputState>,
+    ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
+        self.inner
+            .commit_session_boundary(
+                runtime_id,
+                session_delta,
+                run_id,
+                boundary,
+                contributing_input_ids,
+                input_updates,
+            )
+            .await
+    }
+
+    async fn atomic_apply(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: Option<SessionDelta>,
+        receipt: RunBoundaryReceipt,
+        input_updates: Vec<InputState>,
+        session_store_key: Option<meerkat_core::types::SessionId>,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .atomic_apply(
+                runtime_id,
+                session_delta,
+                receipt,
+                input_updates,
+                session_store_key,
+            )
+            .await
+    }
+
+    async fn load_input_states(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Vec<InputState>, RuntimeStoreError> {
+        self.inner.load_input_states(runtime_id).await
+    }
+
+    async fn load_boundary_receipt(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
+        self.inner
+            .load_boundary_receipt(runtime_id, run_id, sequence)
+            .await
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn persist_input_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        state: &InputState,
+    ) -> Result<(), RuntimeStoreError> {
+        if self.fail_persist_input_state.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic persist_input_state failure".into(),
+            ));
+        }
+        self.inner.persist_input_state(runtime_id, state).await
+    }
+
+    async fn load_input_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input_id: &InputId,
+    ) -> Result<Option<InputState>, RuntimeStoreError> {
+        self.inner.load_input_state(runtime_id, input_id).await
+    }
+
+    async fn persist_runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        state: RuntimeState,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner.persist_runtime_state(runtime_id, state).await
+    }
+
+    async fn load_runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
+        self.inner.load_runtime_state(runtime_id).await
+    }
+
+    async fn atomic_lifecycle_commit(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        runtime_state: RuntimeState,
+        input_states: &[InputState],
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+            .await
+    }
 }
 
 fn make_prompt(text: &str) -> Input {
@@ -279,6 +413,50 @@ async fn durable_runtime_input_externalizes_inline_images_before_ack() {
         }
         other => panic!("expected prompt input, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn durable_accept_failure_restores_canonical_ingress_state() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(FailPersistInputStore::new(inner.clone()));
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
+
+    let input = make_prompt("hello");
+    let input_id = input.id().clone();
+    let retry_input = input.clone();
+
+    let err = driver
+        .accept_input(input)
+        .await
+        .expect_err("persist should fail");
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("synthetic persist_input_state failure"),
+        "unexpected error: {err_text}"
+    );
+    assert!(
+        driver.input_state(&input_id).is_none(),
+        "failed durable admission must not leave canonical input state behind"
+    );
+    assert!(
+        driver.dequeue_next().is_none(),
+        "failed durable admission must not leave a queued phantom input"
+    );
+    assert!(
+        inner
+            .load_input_state(&rid, &input_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "failed durable admission must not persist input state"
+    );
+
+    let outcome = driver.accept_input(retry_input).await.unwrap();
+    assert!(
+        outcome.is_accepted(),
+        "retry after failed durable admission should succeed cleanly"
+    );
 }
 
 #[tokio::test]

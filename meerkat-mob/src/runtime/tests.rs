@@ -12346,6 +12346,8 @@ struct RuntimeBackedRealCommsSessionService {
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
+    applied_runtime_render_metadata:
+        RwLock<HashMap<SessionId, Vec<Option<meerkat_core::types::RenderMetadata>>>>,
 }
 
 impl RuntimeBackedRealCommsSessionService {
@@ -12358,6 +12360,7 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             applied_runtime_prompts: RwLock::new(HashMap::new()),
+            applied_runtime_render_metadata: RwLock::new(HashMap::new()),
         }
     }
 
@@ -12372,6 +12375,18 @@ impl RuntimeBackedRealCommsSessionService {
 
     async fn applied_runtime_prompts(&self, session_id: &SessionId) -> Vec<ContentInput> {
         self.applied_runtime_prompts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn applied_runtime_render_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<Option<meerkat_core::types::RenderMetadata>> {
+        self.applied_runtime_render_metadata
             .read()
             .await
             .get(session_id)
@@ -12585,6 +12600,12 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .entry(session_id.clone())
             .or_default()
             .push(req.prompt);
+        self.applied_runtime_render_metadata
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push(req.render_metadata.clone());
 
         Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
             receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
@@ -12605,6 +12626,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         self.keep_alive_notifiers.write().await.remove(session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.applied_runtime_prompts
+            .write()
+            .await
+            .remove(session_id);
+        self.applied_runtime_render_metadata
             .write()
             .await
             .remove(session_id);
@@ -12713,6 +12738,47 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     assert!(
         delivered.has_images(),
         "peer message image block should survive runtime delivery: {delivered:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_runtime_backed_turn_driven_send_preserves_render_metadata() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    let member = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-rt"), None)
+        .await
+        .expect("spawn lead")
+        .session_id()
+        .expect("session-backed")
+        .clone();
+
+    let render_metadata = meerkat_core::types::RenderMetadata {
+        class: meerkat_core::types::RenderClass::ExternalEvent,
+        salience: meerkat_core::types::RenderSalience::Urgent,
+    };
+
+    handle
+        .member(&MeerkatId::from("lead-rt"))
+        .await
+        .expect("member handle")
+        .send_with_render_metadata(
+            ContentInput::Text("hello".into()),
+            meerkat_core::types::HandlingMode::Queue,
+            Some(render_metadata.clone()),
+        )
+        .await
+        .expect("runtime-backed turn-driven send should succeed");
+
+    assert_eq!(
+        service.applied_runtime_render_metadata(&member).await,
+        vec![Some(render_metadata)]
     );
 }
 

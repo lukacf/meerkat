@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::types::ContentBlock;
+use crate::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Unique identifier for an interaction.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -67,6 +67,10 @@ pub struct InboxInteraction {
     pub content: InteractionContent,
     /// Pre-rendered text suitable for injection into an LLM session.
     pub rendered_text: String,
+    /// Runtime-owned handling hint for ordinary work admitted from plain events.
+    pub handling_mode: HandlingMode,
+    /// Optional normalized rendering metadata carried alongside the interaction.
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 /// Classification result for incoming peer/event traffic.
@@ -202,6 +206,27 @@ mod tests {
         assert!(json["blocks"].is_array());
         let parsed: InteractionContent = serde_json::from_value(json).unwrap();
         assert_eq!(content, parsed);
+    }
+
+    #[test]
+    fn inbox_interaction_preserves_runtime_hints() {
+        let interaction = InboxInteraction {
+            id: InteractionId(Uuid::new_v4()),
+            from: "event:webhook".into(),
+            content: InteractionContent::Message {
+                body: "hello".into(),
+                blocks: None,
+            },
+            rendered_text: "[EVENT via webhook] hello".into(),
+            handling_mode: HandlingMode::Steer,
+            render_metadata: Some(RenderMetadata {
+                class: crate::types::RenderClass::System,
+                salience: crate::types::RenderSalience::Urgent,
+            }),
+        };
+
+        assert_eq!(interaction.handling_mode, HandlingMode::Steer);
+        assert!(interaction.render_metadata.is_some());
     }
 
     #[test]

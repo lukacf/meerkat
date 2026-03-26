@@ -720,6 +720,8 @@ impl CoreCommsRuntime for CommsRuntime {
                                 from: from_peer,
                                 content,
                                 rendered_text,
+                                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                                render_metadata: None,
                             },
                             class: entry.class,
                             lifecycle_peer: entry.lifecycle_peer,
@@ -728,9 +730,10 @@ impl CoreCommsRuntime for CommsRuntime {
                     crate::types::InboxItem::PlainEvent {
                         body,
                         source,
-                        handling_mode: _,
+                        handling_mode,
                         interaction_id,
                         blocks,
+                        render_metadata,
                         ..
                     } => {
                         let rendered = format!("[EVENT via {source}] {body}");
@@ -742,6 +745,8 @@ impl CoreCommsRuntime for CommsRuntime {
                                 from: format!("event:{source}"),
                                 content: meerkat_core::InteractionContent::Message { body, blocks },
                                 rendered_text: rendered,
+                                handling_mode,
+                                render_metadata,
                             },
                             class: entry.class,
                             lifecycle_peer: entry.lifecycle_peer,
@@ -2217,6 +2222,39 @@ mod tests {
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         assert_eq!(interactions[0].id.0, interaction_id);
+    }
+
+    #[tokio::test]
+    async fn test_plain_event_preserves_handling_mode_and_render_metadata_in_classified_drain() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("plain-hints", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+        let render_metadata = meerkat_core::types::RenderMetadata {
+            class: meerkat_core::types::RenderClass::ExternalEvent,
+            salience: meerkat_core::types::RenderSalience::Urgent,
+        };
+
+        runtime
+            .router
+            .inbox_sender()
+            .send_classified(InboxItem::PlainEvent {
+                blocks: None,
+                body: "evt".to_string(),
+                source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                interaction_id: None,
+                render_metadata: Some(render_metadata.clone()),
+            })
+            .unwrap();
+
+        let interactions = runtime.drain_classified_inbox_interactions().await.unwrap();
+        assert_eq!(interactions.len(), 1);
+        let interaction = &interactions[0].interaction;
+        assert_eq!(
+            interaction.handling_mode,
+            meerkat_core::types::HandlingMode::Steer
+        );
+        assert_eq!(interaction.render_metadata, Some(render_metadata));
     }
 
     #[test]

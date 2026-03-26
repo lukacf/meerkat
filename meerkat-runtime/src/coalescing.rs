@@ -131,6 +131,7 @@ mod tests {
     use super::*;
     use crate::input::*;
     use chrono::Utc;
+    use meerkat_core::types::HandlingMode;
 
     fn make_header_with_supersession(key: Option<&str>) -> InputHeader {
         InputHeader {
@@ -154,6 +155,8 @@ mod tests {
             event_type: "webhook".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         assert!(is_coalescing_eligible(&input));
     }
@@ -202,12 +205,16 @@ mod tests {
             event_type: "status_update".into(),
             payload: serde_json::json!({"v": 1}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
             header: make_header_with_supersession(Some("status")),
             event_type: "status_update".into(),
             payload: serde_json::json!({"v": 2}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         assert!(matches!(result, CoalescingResult::Supersedes { .. }));
@@ -221,12 +228,16 @@ mod tests {
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
             header: make_header_with_supersession(Some("status-b")),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         assert!(matches!(result, CoalescingResult::Standalone));
@@ -240,12 +251,16 @@ mod tests {
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let input2 = Input::ExternalEvent(ExternalEventInput {
             header: make_header_with_supersession(None),
             event_type: "status_update".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let result = check_supersession(&input2, &input1, &runtime);
         assert!(matches!(result, CoalescingResult::Standalone));
@@ -259,6 +274,8 @@ mod tests {
             event_type: "type-a".into(),
             payload: serde_json::json!({}),
             blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         // Different kind (Prompt vs ExternalEvent) but same supersession key
         let input2 = Input::Prompt(PromptInput {
@@ -317,6 +334,8 @@ mod tests {
                     event_type: "test".into(),
                     payload: serde_json::json!({}),
                     blocks: None,
+                    handling_mode: HandlingMode::Queue,
+                    render_metadata: None,
                 })
             })
             .collect();

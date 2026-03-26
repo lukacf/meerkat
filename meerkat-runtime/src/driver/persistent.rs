@@ -193,11 +193,6 @@ impl PersistentRuntimeDriver {
         self.inner.consume_inputs(input_ids, run_id)
     }
 
-    /// Remove a previously accepted input from the ledger/queue.
-    pub(crate) fn forget_input(&mut self, input_id: &InputId) {
-        self.inner.forget_input(input_id);
-    }
-
     async fn persist_state(&self, state: &InputState) -> Result<(), RuntimeDriverError> {
         self.store
             .persist_input_state(&self.runtime_id, state)
@@ -246,6 +241,7 @@ impl PersistentRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeDriver for PersistentRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let checkpoint = self.inner.clone();
         let input_for_recovery = input.clone();
 
         // Delegate to ephemeral for state machine logic
@@ -263,7 +259,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             if let Err(err) =
                 externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await
             {
-                self.forget_input(input_id);
+                self.inner = checkpoint;
                 return Err(RuntimeDriverError::Internal(format!(
                     "failed to externalize runtime input images: {err}"
                 )));
@@ -272,7 +268,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             persisted.persisted_input = Some(input_for_recovery);
             self.inner.ledger_mut().accept(persisted.clone());
             if let Err(err) = self.persist_state(&persisted).await {
-                self.forget_input(input_id);
+                self.inner = checkpoint;
                 return Err(err);
             }
             *state = persisted;

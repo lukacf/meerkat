@@ -49,6 +49,8 @@ pub fn classified_interaction_to_runtime_input(
             event_type: source_name.to_string(),
             payload: external_event_payload(interaction),
             blocks,
+            handling_mode: interaction.handling_mode,
+            render_metadata: interaction.render_metadata.clone(),
         });
     }
 
@@ -207,6 +209,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -228,6 +232,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -257,6 +263,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
         };
         let input =
@@ -266,6 +274,11 @@ mod tests {
                 assert_eq!(event.event_type, "webhook");
                 assert_eq!(event.payload["body"], "{\"ok\":true}");
                 assert_eq!(event.blocks, None);
+                assert_eq!(
+                    event.handling_mode,
+                    meerkat_core::types::HandlingMode::Queue
+                );
+                assert_eq!(event.render_metadata, None);
             }
             other => panic!("Expected ExternalEvent input, got {other:?}"),
         }
@@ -284,6 +297,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: "[COMMS MESSAGE from event:webhook]\nhello".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
         };
         let input =
@@ -311,6 +326,8 @@ mod tests {
             id: make_interaction_id(),
             rendered_text: "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
                 .into(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
@@ -342,6 +359,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: "[COMMS MESSAGE from peer-1]\nsee image".into(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
@@ -371,6 +390,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
@@ -402,6 +423,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: "[EVENT via webhook] see image".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
         };
         let input =
@@ -411,6 +434,45 @@ mod tests {
                 assert_eq!(event.payload["body"], "see image");
                 assert!(event.payload["blocks"].is_array());
                 assert_eq!(event.blocks, Some(blocks));
+                assert_eq!(
+                    event.handling_mode,
+                    meerkat_core::types::HandlingMode::Queue
+                );
+                assert_eq!(event.render_metadata, None);
+            }
+            other => panic!("Expected ExternalEvent input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_event_preserves_handling_mode_and_render_metadata() {
+        let render_metadata = meerkat_core::types::RenderMetadata {
+            class: meerkat_core::types::RenderClass::ExternalEvent,
+            salience: meerkat_core::types::RenderSalience::Urgent,
+        };
+        let classified = ClassifiedInboxInteraction {
+            class: PeerInputClass::PlainEvent,
+            lifecycle_peer: None,
+            interaction: InboxInteraction {
+                from: "event:webhook".into(),
+                content: InteractionContent::Message {
+                    body: "urgent".into(),
+                    blocks: None,
+                },
+                id: make_interaction_id(),
+                rendered_text: "[EVENT via webhook] urgent".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                render_metadata: Some(render_metadata.clone()),
+            },
+        };
+
+        match classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test")) {
+            Input::ExternalEvent(event) => {
+                assert_eq!(
+                    event.handling_mode,
+                    meerkat_core::types::HandlingMode::Steer
+                );
+                assert_eq!(event.render_metadata, Some(render_metadata));
             }
             other => panic!("Expected ExternalEvent input, got {other:?}"),
         }
@@ -428,6 +490,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -456,6 +520,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -483,6 +549,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -509,6 +577,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input =
             interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("agent-runtime-1"));
@@ -540,6 +610,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
             InboxInteraction {
                 from: "p".into(),
@@ -549,6 +621,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
             InboxInteraction {
                 from: "p".into(),
@@ -559,6 +633,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
         ];
 

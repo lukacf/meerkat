@@ -449,7 +449,9 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         let req = StartTurnRequest {
             prompt: extract_prompt_input(&primitive),
             system_prompt: None,
-            render_metadata: None,
+            render_metadata: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.render_metadata.clone()),
             handling_mode: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.handling_mode)
@@ -631,6 +633,7 @@ impl MobProvisioner for SessionBackend {
                 skill_references: req.skill_references.clone(),
                 flow_tool_overlay: req.flow_tool_overlay.clone(),
                 additional_instructions: req.additional_instructions.clone(),
+                render_metadata: req.render_metadata.clone(),
                 ..Default::default()
             };
             let prompt = req.prompt.clone();
@@ -686,6 +689,7 @@ impl MobProvisioner for SessionBackend {
                         skill_references: req.skill_references.clone(),
                         flow_tool_overlay: req.flow_tool_overlay.clone(),
                         additional_instructions: req.additional_instructions.clone(),
+                        render_metadata: req.render_metadata.clone(),
                         ..Default::default()
                     },
                 ),

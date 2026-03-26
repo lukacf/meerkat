@@ -1898,6 +1898,8 @@ fn make_runtime_external_event_input(
         },
         event_type: event_type.to_string(),
         payload,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
         blocks: None,
     })
 }

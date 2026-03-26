@@ -292,6 +292,8 @@ mod tests {
             from: "peer-a".to_string(),
             content,
             rendered_text: "rendered".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         }
     }
 

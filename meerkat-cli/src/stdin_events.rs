@@ -54,6 +54,8 @@ fn make_stdin_external_event_input(
             },
         },
         blocks: None,
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     })
 }
 

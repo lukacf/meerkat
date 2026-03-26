@@ -73,6 +73,10 @@ fn input_boundary(input: &Input) -> RunApplyBoundary {
                 _ => RunApplyBoundary::RunStart,
             }
         }
+        Input::ExternalEvent(event) => match event.handling_mode {
+            meerkat_core::types::HandlingMode::Steer => RunApplyBoundary::RunCheckpoint,
+            meerkat_core::types::HandlingMode::Queue => RunApplyBoundary::RunStart,
+        },
         _ => RunApplyBoundary::RunStart,
     }
 }
@@ -83,6 +87,13 @@ fn input_turn_metadata(
     match input {
         Input::Prompt(prompt) => prompt.turn_metadata.clone(),
         Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
+        Input::ExternalEvent(event) => Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(event.handling_mode),
+                render_metadata: event.render_metadata.clone(),
+                ..Default::default()
+            },
+        ),
         Input::Continuation(continuation) => Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 handling_mode: Some(continuation.handling_mode),
@@ -122,6 +133,9 @@ fn merge_batch_turn_metadata(
         }
         if meta.provider_params.is_some() {
             m.provider_params = meta.provider_params;
+        }
+        if meta.render_metadata.is_some() {
+            m.render_metadata = meta.render_metadata;
         }
         if meta.flow_tool_overlay.is_some() {
             m.flow_tool_overlay = meta.flow_tool_overlay;
@@ -712,6 +726,8 @@ mod tests {
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see this event"}),
             blocks: Some(blocks),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         });
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id);
@@ -737,6 +753,55 @@ mod tests {
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn external_event_with_steer_preserves_runtime_hints() -> Result<(), String> {
+        let render_metadata = meerkat_core::types::RenderMetadata {
+            class: meerkat_core::types::RenderClass::ExternalEvent,
+            salience: meerkat_core::types::RenderSalience::Urgent,
+        };
+        let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "webhook".into(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "webhook".into(),
+            payload: serde_json::json!({"body": "urgent"}),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+            render_metadata: Some(render_metadata.clone()),
+        });
+
+        let staged = match input_to_primitive(&input, input.id().clone()) {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+
+        assert_eq!(staged.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(
+            staged
+                .turn_metadata
+                .as_ref()
+                .and_then(|meta| meta.handling_mode),
+            Some(meerkat_core::types::HandlingMode::Steer)
+        );
+        assert_eq!(
+            staged
+                .turn_metadata
+                .as_ref()
+                .and_then(|meta| meta.render_metadata.clone()),
+            Some(render_metadata)
+        );
         Ok(())
     }
 }

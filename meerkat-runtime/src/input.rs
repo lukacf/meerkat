@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::identifiers::{
     CorrelationId, IdempotencyKey, KindId, LogicalRuntimeId, SupersessionKey,
 };
+use meerkat_core::types::RenderMetadata;
 
 /// Common header for all input variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +162,7 @@ impl Input {
         match self {
             Input::Prompt(prompt) => prompt.turn_metadata.as_ref()?.handling_mode,
             Input::FlowStep(flow_step) => flow_step.turn_metadata.as_ref()?.handling_mode,
+            Input::ExternalEvent(event) => Some(event.handling_mode),
             Input::Continuation(continuation) => Some(continuation.handling_mode),
             _ => None,
         }
@@ -429,6 +431,12 @@ pub struct ExternalEventInput {
     /// Optional multimodal blocks carried by the external event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// Runtime-owned handling hint for this external event.
+    #[serde(default)]
+    pub handling_mode: HandlingMode,
+    /// Optional normalized render metadata carried with the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 /// Explicit continuation request that asks the runtime to keep draining
@@ -633,6 +641,8 @@ mod tests {
                     },
                 },
             ]),
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "external_event");

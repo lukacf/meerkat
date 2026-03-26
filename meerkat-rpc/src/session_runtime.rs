@@ -822,6 +822,7 @@ impl SessionRuntime {
                 model: overrides.as_ref().and_then(|ov| ov.model.clone()),
                 provider: overrides.as_ref().and_then(|ov| ov.provider.clone()),
                 provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
+                render_metadata: None,
             },
         );
 
@@ -941,6 +942,8 @@ impl SessionRuntime {
             event_type: source_name,
             payload,
             blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         });
 
         self.runtime_adapter

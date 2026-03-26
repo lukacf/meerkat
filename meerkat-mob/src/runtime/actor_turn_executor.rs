@@ -534,7 +534,9 @@ impl CoreExecutor for MobActorCoreExecutor {
         let req = StartTurnRequest {
             prompt,
             system_prompt: None,
-            render_metadata: None,
+            render_metadata: primitive
+                .turn_metadata()
+                .and_then(|m| m.render_metadata.clone()),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
             skill_references: primitive

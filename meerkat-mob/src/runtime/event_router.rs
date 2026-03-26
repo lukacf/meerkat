@@ -11,11 +11,11 @@
 
 use crate::event::AttributedEvent;
 use crate::ids::{MeerkatId, ProfileName};
-use crate::roster::Roster;
 use crate::store::MobEventStore;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
+use super::RosterAuthority;
 use super::session_service::MobSessionService;
 use futures::stream::{SelectAll, StreamExt};
 use meerkat_core::comms::EventStream;
@@ -68,7 +68,7 @@ impl Drop for MobEventRouterHandle {
 pub(super) fn spawn_event_router(
     session_service: Arc<dyn MobSessionService>,
     events: Arc<dyn MobEventStore>,
-    roster: Arc<RwLock<Roster>>,
+    roster: Arc<RwLock<RosterAuthority>>,
     config: MobEventRouterConfig,
 ) -> MobEventRouterHandle {
     let (event_tx, event_rx) = mpsc::channel(config.channel_capacity);
@@ -94,7 +94,7 @@ pub(super) fn spawn_event_router(
 async fn run_event_router(
     session_service: Arc<dyn MobSessionService>,
     events: Arc<dyn MobEventStore>,
-    roster: Arc<RwLock<Roster>>,
+    roster: Arc<RwLock<RosterAuthority>>,
     config: MobEventRouterConfig,
     event_tx: mpsc::Sender<AttributedEvent>,
     cancel: CancellationToken,

@@ -4,6 +4,7 @@ use crate::hooks::{HookPoint, HookReasonCode};
 use crate::types::SessionId;
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LlmFailureReason {
     RateLimited {
         retry_after: Option<std::time::Duration>,
@@ -15,6 +16,14 @@ pub enum LlmFailureReason {
     AuthError,
     InvalidModel(String),
     ProviderError(serde_json::Value),
+    /// Provider/client-native network timeout (owned by client layer)
+    NetworkTimeout {
+        duration_ms: u64,
+    },
+    /// Agent-loop hard call timeout (owned by agent loop policy)
+    CallTimeout {
+        duration_ms: u64,
+    },
 }
 
 /// Errors that can occur during tool validation
@@ -212,18 +221,14 @@ pub enum AgentError {
     ConcurrencyLimitExceeded,
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    #[error("Sub-agent limit exceeded: max {limit} concurrent sub-agents")]
-    SubAgentLimitExceeded { limit: usize },
-    #[error("Sub-agent not found: {id}")]
-    SubAgentNotFound { id: String },
-    #[error("Sub-agent {id} not running (state: {state})")]
-    SubAgentNotRunning { id: String, state: String },
     #[error("Invalid tool in access policy: {tool}")]
     InvalidToolAccess { tool: String },
-    #[error("Sub-agent spawn failed: {reason}")]
-    SubAgentSpawnFailed { reason: String },
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    /// Agent construction failed (e.g. missing API key, unknown provider).
+    #[error("Build error: {0}")]
+    BuildError(String),
 
     /// A tool call must be routed externally (callback pending)
     #[error("Callback pending for tool '{tool_name}'")]
@@ -260,6 +265,12 @@ pub enum AgentError {
 
     #[error("Hook configuration invalid: {reason}")]
     HookConfigInvalid { reason: String },
+
+    /// Turn execution reached a terminal outcome classified as HardFailure.
+    #[error("Terminal failure: {outcome:?}")]
+    TerminalFailure {
+        outcome: crate::turn_execution_authority::TurnTerminalOutcome,
+    },
 }
 
 impl AgentError {
@@ -283,10 +294,32 @@ impl AgentError {
                 | Self::MaxTurnsReached { .. }
         )
     }
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Self::Llm {
+                reason: LlmFailureReason::RateLimited { .. },
+                ..
+            }
+        )
+    }
+
+    pub fn retry_after_hint(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Llm {
+                reason: LlmFailureReason::RateLimited { retry_after },
+                ..
+            } => *retry_after,
+            _ => None,
+        }
+    }
+
     pub fn is_recoverable(&self) -> bool {
         match self {
             Self::Llm { reason, .. } => match reason {
                 LlmFailureReason::RateLimited { .. } => true,
+                LlmFailureReason::NetworkTimeout { .. } => true,
+                LlmFailureReason::CallTimeout { .. } => true,
                 LlmFailureReason::ProviderError(value) => {
                     value.get("retryable").and_then(serde_json::Value::as_bool) == Some(true)
                 }
@@ -308,4 +341,224 @@ pub fn store_error_message(err: impl std::fmt::Display) -> String {
 }
 pub fn invalid_session_id_message(err: impl std::fmt::Display) -> String {
     format!("Invalid session ID: {err}")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_timeout_is_recoverable() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 30000 },
+            "network timeout after 30s",
+        );
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_call_timeout_is_recoverable() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::CallTimeout { duration_ms: 45000 },
+            "call timeout after 45s",
+        );
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn test_network_timeout_typed_mapping() {
+        let reason = LlmFailureReason::NetworkTimeout { duration_ms: 5000 };
+        match reason {
+            LlmFailureReason::NetworkTimeout { duration_ms } => {
+                assert_eq!(duration_ms, 5000);
+            }
+            _ => panic!("expected NetworkTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_call_timeout_typed_mapping() {
+        let reason = LlmFailureReason::CallTimeout { duration_ms: 60000 };
+        match reason {
+            LlmFailureReason::CallTimeout { duration_ms } => {
+                assert_eq!(duration_ms, 60000);
+            }
+            _ => panic!("expected CallTimeout"),
+        }
+    }
+
+    #[test]
+    fn test_timeout_variants_are_distinct() {
+        let net = LlmFailureReason::NetworkTimeout { duration_ms: 1000 };
+        let call = LlmFailureReason::CallTimeout { duration_ms: 1000 };
+        assert_ne!(net, call);
+    }
+
+    #[test]
+    fn test_auth_error_not_recoverable() {
+        let err = AgentError::llm("anthropic", LlmFailureReason::AuthError, "bad key");
+        assert!(!err.is_recoverable());
+    }
+
+    // -- Rate-limit helper tests (PR #156 port) --
+
+    #[test]
+    fn test_is_rate_limited_true_for_rate_limit_error() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::RateLimited {
+                retry_after: Some(std::time::Duration::from_secs(30)),
+            },
+            "rate limited",
+        );
+        assert!(err.is_rate_limited());
+    }
+
+    #[test]
+    fn test_is_rate_limited_false_for_other_errors() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 5000 },
+            "timeout",
+        );
+        assert!(!err.is_rate_limited());
+
+        let err = AgentError::llm("anthropic", LlmFailureReason::AuthError, "bad key");
+        assert!(!err.is_rate_limited());
+    }
+
+    #[test]
+    fn test_retry_after_hint_returns_duration_for_rate_limit() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::RateLimited {
+                retry_after: Some(std::time::Duration::from_secs(60)),
+            },
+            "rate limited",
+        );
+        assert_eq!(
+            err.retry_after_hint(),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn test_retry_after_hint_returns_none_for_non_rate_limit() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 5000 },
+            "timeout",
+        );
+        assert_eq!(err.retry_after_hint(), None);
+    }
+
+    #[test]
+    fn test_timeout_variants_not_graceful() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::NetworkTimeout { duration_ms: 1000 },
+            "timeout",
+        );
+        assert!(!err.is_graceful());
+
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::CallTimeout { duration_ms: 1000 },
+            "timeout",
+        );
+        assert!(!err.is_graceful());
+    }
+
+    // -- P2-6: Typed BuildError variant --
+
+    #[test]
+    fn test_build_error_variant_exists_and_carries_message() {
+        let err = AgentError::BuildError("Missing API key for provider 'anthropic'".to_string());
+        match &err {
+            AgentError::BuildError(msg) => {
+                assert!(
+                    msg.contains("API key"),
+                    "message should contain source text"
+                );
+            }
+            other => panic!("expected BuildError, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_build_error_is_not_recoverable() {
+        let err = AgentError::BuildError("Unknown provider for model 'llama-3'".to_string());
+        assert!(!err.is_recoverable(), "build errors are not recoverable");
+    }
+
+    #[test]
+    fn test_build_error_is_not_graceful() {
+        let err = AgentError::BuildError("Missing API key".to_string());
+        assert!(!err.is_graceful(), "build errors are not graceful");
+    }
+
+    #[test]
+    fn test_build_error_display() {
+        let err = AgentError::BuildError("Missing API key for provider 'anthropic'".to_string());
+        let display = err.to_string();
+        assert!(
+            display.contains("Build error")
+                || display.contains("build error")
+                || display.contains("Missing API key"),
+            "display should mention the build error: {display}"
+        );
+    }
+
+    // -- P2-7: Typed TerminalFailure outcome --
+
+    #[test]
+    fn test_terminal_failure_carries_typed_outcome() {
+        use crate::turn_execution_authority::TurnTerminalOutcome;
+
+        // TerminalFailure must carry the typed enum, not a Debug-formatted string.
+        let err = AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::Failed,
+        };
+        match &err {
+            AgentError::TerminalFailure { outcome } => {
+                // If this compiles, outcome is TurnTerminalOutcome, not String.
+                assert_eq!(*outcome, TurnTerminalOutcome::Failed);
+            }
+            other => panic!("expected TerminalFailure, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_terminal_failure_display_includes_outcome() {
+        use crate::turn_execution_authority::TurnTerminalOutcome;
+
+        let err = AgentError::TerminalFailure {
+            outcome: TurnTerminalOutcome::TimeBudgetExceeded,
+        };
+        let display = err.to_string();
+        assert!(
+            display.contains("TimeBudgetExceeded"),
+            "display should include the outcome variant name: {display}"
+        );
+    }
+
+    #[test]
+    fn test_terminal_failure_all_hard_failure_outcomes() {
+        use crate::turn_execution_authority::TurnTerminalOutcome;
+
+        // Both hard-failure outcomes should be representable.
+        for outcome in [
+            TurnTerminalOutcome::Failed,
+            TurnTerminalOutcome::TimeBudgetExceeded,
+        ] {
+            let err = AgentError::TerminalFailure { outcome };
+            assert!(
+                !err.is_graceful(),
+                "TerminalFailure({outcome:?}) should not be graceful"
+            );
+        }
+    }
 }

@@ -15,7 +15,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(name = "rkat-rest")]
+#[command(name = "rkat-rest", version = env!("CARGO_PKG_VERSION"))]
 struct Args {
     /// Explicit realm ID. Reuse to share state across processes/surfaces.
     #[arg(long)]
@@ -132,7 +132,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid host:port combination: {e}"))?;
 
     // Build router with middleware. Keep a clone for shutdown cleanup.
-    #[cfg(feature = "mcp")]
     let shutdown_state = state.clone();
     let app = router(state)
         .layer(TraceLayer::new_for_http())
@@ -145,6 +144,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Cancel in-flight requests and abort stragglers.
+    shutdown_state
+        .request_executor
+        .shutdown_and_abort_stragglers()
+        .await;
 
     // Shut down all live MCP adapters to close connections cleanly.
     #[cfg(feature = "mcp")]

@@ -29,7 +29,7 @@ description = "Embeddable release command center copilot for production dashboar
 authors = ["Meerkat examples"]
 
 [requires]
-meerkat = ">=0.4.7"
+meerkat = ">=0.4.13"
 credentials = ["anthropic_api_key"]
 capabilities = ["comms"]
 

@@ -1,6 +1,6 @@
 //! Thread-safe inbox for Meerkat comms.
 //!
-//! The inbox collects incoming messages from IO tasks and subagent results,
+//! The inbox collects incoming peer and external-event traffic,
 //! allowing the agent loop to drain them at turn boundaries.
 //!
 //! Includes a `Notify` mechanism to wake waiting tasks when new messages arrive.
@@ -532,8 +532,10 @@ mod tests {
             .send_classified(InboxItem::PlainEvent {
                 body: "event".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             })
             .unwrap();
 
@@ -542,28 +544,6 @@ mod tests {
         assert!(
             result.is_err(),
             "Actionable notify should NOT fire for plain events"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_classified_inbox_no_actionable_notify_for_subagent_result() {
-        let ctx = make_classification_context(TrustedPeers::new(), false);
-        let (inbox, sender) = Inbox::new_classified(ctx);
-        let actionable = inbox.classified_actionable_notify().unwrap();
-
-        sender
-            .send_classified(InboxItem::SubagentResult {
-                subagent_id: Uuid::new_v4(),
-                result: serde_json::json!({}),
-                summary: "done".to_string(),
-            })
-            .unwrap();
-
-        let notified = actionable.notified();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(50), notified).await;
-        assert!(
-            result.is_err(),
-            "Actionable notify should NOT fire for subagent results"
         );
     }
 

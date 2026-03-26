@@ -2,6 +2,7 @@
 
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
+use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::types::{ToolCallView, ToolResult};
 use meerkat_tools::builtin::{
     BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
@@ -21,7 +22,10 @@ async fn dispatch_tool(
         name,
         args: &args_raw,
     };
-    dispatcher.dispatch(call).await
+    dispatcher
+        .dispatch(call)
+        .await
+        .map(|outcome| outcome.result)
 }
 
 #[tokio::test]
@@ -37,15 +41,15 @@ async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn test_rct_contracts_agent_list_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rct_contracts_tool_policy_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
     let config = BuiltinToolConfig {
-        policy: ToolPolicyLayer::new().enable_tool("agent_list"),
+        policy: ToolPolicyLayer::new().enable_tool("shell_jobs"),
         ..Default::default()
     };
 
     let encoded = serde_json::to_value(&config)?;
     let decoded: BuiltinToolConfig = serde_json::from_value(encoded)?;
-    assert!(decoded.policy.enable.contains("agent_list"));
+    assert!(decoded.policy.enable.contains("shell_jobs"));
     Ok(())
 }
 
@@ -339,6 +343,7 @@ async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std:
             shell_config: None,
             external: None,
             session_id: None,
+            ops_lifecycle: None,
             image_tool_results: true,
         })),
         comms: None,
@@ -398,7 +403,7 @@ async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std
             })])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let _ = call;
             // Hang forever
             std::future::pending().await
@@ -488,13 +493,9 @@ async fn test_regression_composite_deduplicates_external_tools()
             ])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let value = json!({"from": "external", "tool": call.name});
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                value.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
         }
     }
 
@@ -533,8 +534,8 @@ async fn test_regression_composite_deduplicates_external_tools()
 }
 
 /// Regression test: FilteredDispatcher must enforce tool access policies.
-/// Previously, tool_access was parsed but never applied in agent_spawn/agent_fork,
-/// so sub-agents could access all tools regardless of allow/deny configuration.
+/// Previously, delegated branches could access all tools regardless of
+/// allow/deny configuration.
 #[test]
 fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
     use async_trait::async_trait;
@@ -555,8 +556,8 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
                     input_schema: json!({"type": "object"}),
                 }),
                 Arc::new(ToolDef {
-                    name: "agent_spawn".to_string(),
-                    description: "Spawn sub-agents (nesting sensitive)".to_string(),
+                    name: "shell_job_cancel".to_string(),
+                    description: "Cancel background shell jobs (privileged)".to_string(),
                     input_schema: json!({"type": "object"}),
                 }),
                 Arc::new(ToolDef {
@@ -572,13 +573,9 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             ])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let value = json!({"called": call.name});
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                value.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
         }
     }
 
@@ -587,18 +584,18 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
     // Test 1: DenyList should block specified tools
     {
         let policy =
-            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "agent_spawn".to_string()]);
+            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "shell_job_cancel".to_string()]);
         let filtered = FilteredDispatcher::new(inner.clone(), &policy);
 
         let tool_names: Vec<_> = filtered.tools().iter().map(|t| t.name.clone()).collect();
 
-        // Shell and agent_spawn should be blocked
+        // Shell and shell_job_cancel should be blocked
         assert!(
             !tool_names.contains(&"shell".to_string()),
             "shell should be blocked by deny list but tools are: {tool_names:?}"
         );
         assert!(
-            !tool_names.contains(&"agent_spawn".to_string()),
+            !tool_names.contains(&"shell_job_cancel".to_string()),
             "agent_spawn should be blocked by deny list"
         );
 
@@ -637,7 +634,7 @@ fn test_regression_filtered_dispatcher_enforces_tool_access_policy() {
             "shell should be blocked (not in allow list)"
         );
         assert!(
-            !tool_names.contains(&"agent_spawn".to_string()),
+            !tool_names.contains(&"shell_job_cancel".to_string()),
             "agent_spawn should be blocked (not in allow list)"
         );
         assert!(
@@ -684,7 +681,10 @@ async fn test_regression_filtered_dispatcher_dispatch_blocked_returns_not_found(
             })])
         }
 
-        async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
             // This should NOT be called for blocked tools
             panic!("Dispatch should not be called for blocked tools!");
         }

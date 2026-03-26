@@ -6,6 +6,12 @@ icon: "terminal"
 
 Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps, and automation tools. Unlike REST and MCP, the RPC server keeps agents alive between turns for fast multi-turn conversations.
 
+The RPC surface is fully runtime-backed:
+
+- `keep_alive` is runtime/session behavior
+- `session/external_event` queues runtime-backed external work
+- committed success is not rewritten to cancellation
+
 ## Getting started
 
 <Steps>
@@ -54,8 +60,16 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `session/read` | Session | Get session state |
 | `session/history` | Session | Get committed session transcript messages |
 | `session/archive` | Session | Remove session from runtime |
+| `session/external_event` | Session | Queue a runtime-backed external event |
+| `session/inject_context` | Session | Append runtime-backed system context to the next turn |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
+| `runtime/state` | Runtime | Read runtime-backed ingress state |
+| `runtime/accept` | Runtime | Admit external work directly into runtime ingress |
+| `runtime/retire` | Runtime | Retire runtime-backed ingress |
+| `runtime/reset` | Runtime | Reset runtime-backed ingress |
+| `input/state` | Runtime | Read runtime input lifecycle state |
+| `input/list` | Runtime | List runtime input lifecycle records |
 | `mob/prefabs` | Mob | List mob prefab templates (mob feature) |
 | `session/stream_open` | Session | Open a standalone session event stream |
 | `session/stream_close` | Session | Close a standalone session event stream |
@@ -64,6 +78,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/status` | Mob | Get mob status (mob feature) |
 | `mob/members` | Mob | List mob members (mob feature) |
 | `mob/spawn` | Mob | Spawn a member into a mob (mob feature) |
+| `mob/spawn_many` | Mob | Spawn multiple members into a mob (mob feature) |
 | `mob/retire` | Mob | Retire a mob member (mob feature) |
 | `mob/respawn` | Mob | Respawn a mob member (mob feature) |
 | `mob/wire` | Mob | Wire two mob members for comms (mob feature) |
@@ -78,12 +93,17 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
 | `mob/flow_status` | Mob | Get flow run status (mob feature) |
 | `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |
+| `mob/spawn_helper` | Mob | Spawn a helper member and wait for its result (mob feature) |
+| `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
+| `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
+| `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
 | `mob/tools` | Mob | Compatibility/escape-hatch mob tool inventory (mob feature) |
 | `mob/call` | Mob | Compatibility/escape-hatch mob tool call (mob feature) |
-| `comms/send` | Comms | Push an external event into a session |
+| `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
 | `skills/inspect` | Skills | Inspect a skill's full content |
+| `tools/register` | Tools | Register additional callable tools with the runtime |
 | `mcp/add` | MCP | Stage live MCP server addition (mcp feature) |
 | `mcp/remove` | MCP | Stage live MCP server removal (mcp feature) |
 | `mcp/reload` | MCP | Reload one or all MCP servers (mcp feature) |
@@ -92,6 +112,10 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `config/get` | Config | Read current config |
 | `config/set` | Config | Replace config |
 | `config/patch` | Config | Merge-patch config (RFC 7396) |
+
+<Note>
+`runtime/*` and `input/*` methods are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
+</Note>
 
 <Note>
 RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycle, send, and observation methods from apps. `mob/tools` and `mob/call` remain available only as compatibility and escape-hatch surfaces. Inside running sessions, mob capability is still exposed by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which provides `mob_*` tools to the agent.
@@ -154,18 +178,23 @@ Handshake. Returns server capabilities.
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read", "session/history",
-      "session/archive", "turn/start", "turn/interrupt",
+      "session/archive", "session/external_event", "session/inject_context",
+      "turn/start", "turn/interrupt",
       "config/get", "config/set", "config/patch",
-      "models/catalog",
-      "capabilities/get",
-      "skills/list", "skills/inspect",
+      "capabilities/get", "models/catalog",
+      "skills/list", "skills/inspect", "tools/register",
+      "runtime/state", "runtime/accept", "runtime/retire", "runtime/reset",
+      "input/state", "input/list",
       "session/stream_open", "session/stream_close",
       "mob/prefabs", "mob/create", "mob/list", "mob/status",
-      "mob/members", "mob/spawn", "mob/retire", "mob/respawn",
+      "mob/members", "mob/spawn", "mob/spawn_many",
+      "mob/retire", "mob/respawn",
       "mob/wire", "mob/unwire", "mob/lifecycle", "mob/send",
       "mob/events", "mob/stream_open", "mob/stream_close",
       "mob/append_system_context", "mob/flows", "mob/flow_run",
-      "mob/flow_status", "mob/flow_cancel", "mob/tools", "mob/call",
+      "mob/flow_status", "mob/flow_cancel",
+      "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
+      "mob/tools", "mob/call",
       "mcp/add", "mcp/remove", "mcp/reload",
       "comms/send", "comms/peers",
     ]
@@ -225,9 +254,8 @@ Create a new session and run the first turn.
     "hooks_override": null,
     "enable_builtins": false,
     "enable_shell": false,
-    "enable_subagents": false,
     "enable_memory": false,
-    "host_mode": false,
+    "keep_alive": null,
     "comms_name": null,
     "provider_params": null,
     "preload_skills": ["extraction/email"],
@@ -320,16 +348,12 @@ Only `prompt` is required. All other fields are optional and fall back to config
   Enable shell tool (requires `enable_builtins`).
 </ParamField>
 
-<ParamField body="enable_subagents" type="bool" default="false">
-  Enable sub-agent tools (fork, spawn).
-</ParamField>
-
 <ParamField body="enable_memory" type="bool" default="false">
   Enable semantic memory (`memory_search` tool + compaction indexing).
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Run in host mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -529,16 +553,16 @@ Cancel an in-flight turn. No-op if the session is idle.
 
 ## Event methods
 
-### comms/send
+### session/external_event
 
-Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary.
+Queue a runtime-backed external event for an existing session.
 
 <CodeGroup>
 ```json Request
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "method": "comms/send",
+  "method": "session/external_event",
   "params": {
     "session_id": "01936f8a-...",
     "payload": {"alert": "build failed", "repo": "main"},
@@ -551,24 +575,28 @@ Push an external event into a running session's inbox. The event is queued and p
 {
   "jsonrpc": "2.0",
   "id": 8,
-  "result": {"queued": true}
+  "result": {
+    "outcome_type": "accepted"
+  }
 }
 ```
 </CodeGroup>
 
 <ParamField body="session_id" type="string" required>
-  Session ID to push the event to.
+  Session ID to admit the external event to.
 </ParamField>
 
 <ParamField body="payload" type="any JSON" required>
-  Any JSON value. Serialized and injected as event body.
+  Any JSON value. Stored as the runtime external-event payload.
 </ParamField>
 
 <ParamField body="source" type="string">
-  Optional source label. Prepended as `[source: ci-pipeline]` metadata in the event body.
+  Optional source label. Defaults to `"rpc"` and becomes the runtime external-event source.
 </ParamField>
 
-Error `-32603` if inbox full, `-32602` if session not found or invalid session ID.
+Error `-32603` if runtime admission fails, `-32602` if the session locator is invalid.
+
+This is a queue-only runtime admission path; it does not create a second direct execution loop.
 
 ### comms/peers
 
@@ -946,11 +974,6 @@ Return runtime capabilities with status resolved against config. This lists ever
         "id": "comms",
         "description": "Inter-agent communication",
         "status": {"NotCompiled": {"feature": "comms"}}
-      },
-      {
-        "id": "sub_agents",
-        "description": "Sub-agent forking and spawning",
-        "status": "Available"
       },
       {
         "id": "memory_store",

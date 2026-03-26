@@ -13,8 +13,8 @@ const runtimeFiles = [
 ];
 
 const sourceDirs = [
-  path.join(webDir, "node_modules", "@rkat", "web", "wasm"),
   path.resolve(webDir, "../../../sdks/web/wasm"),
+  path.join(webDir, "node_modules", "@rkat", "web", "wasm"),
 ];
 
 const sourceDir = sourceDirs.find((dir) =>
@@ -31,13 +31,31 @@ if (!sourceDir) {
   process.exit(1);
 }
 
-const destDir = path.join(webDir, "public", "meerkat-pkg");
-fs.mkdirSync(destDir, { recursive: true });
+const destDirs = [
+  path.join(webDir, "public", "meerkat-pkg"),
+  path.join(webDir, "dist", "meerkat-pkg"),
+];
 
-for (const file of runtimeFiles) {
-  const src = path.join(sourceDir, file);
-  const dest = path.join(destDir, file);
-  fs.copyFileSync(src, dest);
+function syncDirectory(source, dest) {
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (entry.name === ".gitignore") continue;
+    const src = path.join(source, entry.name);
+    const dst = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      syncDirectory(src, dst);
+    } else {
+      fs.copyFileSync(src, dst);
+    }
+  }
 }
 
-console.log(`Synced runtime from ${sourceDir} -> ${destDir}`);
+for (const destDir of destDirs) {
+  syncDirectory(sourceDir, destDir);
+}
+
+console.log(
+  `Synced runtime from ${sourceDir} -> ${destDirs.join(", ")}`,
+);

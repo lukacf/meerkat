@@ -21,6 +21,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::{RequestContext, request_action};
 
 // ---------------------------------------------------------------------------
 // Param types
@@ -80,18 +81,15 @@ pub struct CreateSessionParams {
     /// Enable shell tool. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_shell: Option<bool>,
-    /// Run in host mode for inter-agent comms.
+    /// Keep the agent alive after the initial turn (enables comms drain loop).
     #[serde(default)]
-    pub host_mode: bool,
-    /// Agent name for comms (required when host_mode is true).
+    pub keep_alive: bool,
+    /// Agent name for comms (required when keep_alive is true).
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery (description, labels).
     #[serde(default)]
     pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Enable sub-agent tools. Omit to use runtime defaults.
-    #[serde(default)]
-    pub enable_subagents: Option<bool>,
     /// Enable semantic memory. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_memory: Option<bool>,
@@ -232,6 +230,7 @@ pub async fn handle_create(
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
+    request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let params: CreateSessionParams = match parse_params(params) {
         Ok(p) => p,
@@ -285,10 +284,9 @@ pub async fn handle_create(
     build_config.hooks_override = params.hooks_override.unwrap_or_default();
     build_config.override_builtins = params.enable_builtins;
     build_config.override_shell = params.enable_shell;
-    build_config.host_mode = params.host_mode;
+    build_config.keep_alive = params.keep_alive;
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
-    build_config.override_subagents = params.enable_subagents;
     build_config.override_memory = params.enable_memory;
     build_config.override_mob = params.enable_mob;
     build_config.budget_limits = params.budget_limits;
@@ -373,6 +371,37 @@ pub async fn handle_create(
             .await;
     }
 
+    if let Some(context) = request_context.as_ref() {
+        let runtime_for_cancel = Arc::clone(&runtime);
+        let session_id_for_cancel = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cancel);
+            let session_id = session_id_for_cancel.clone();
+            async move {
+                let _ = runtime.interrupt(&session_id).await;
+            }
+        }));
+
+        let runtime_for_cleanup = Arc::clone(&runtime);
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cleanup);
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = runtime.archive_session(&session_id).await;
+            }
+        }));
+        if context.run_cancel_if_requested().await {
+            let _ = runtime.archive_session(&session_id).await;
+            runtime_adapter.unregister_session(&session_id).await;
+            return RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            );
+        }
+    }
+
     // Deferred mode: return session ID without running a turn.
     if params.initial_turn == Some(InitialTurn::Deferred) {
         let result = DeferredCreateResult {
@@ -397,7 +426,7 @@ pub async fn handle_create(
     });
 
     // Start the initial turn — route through runtime for V9 consistency
-    let result = if params.host_mode {
+    let result = if params.keep_alive {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = event_tx.clone();

@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,6 +151,10 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     fn provider(&self) -> &'static str {
         self.client.provider()
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 #[derive(Debug, Default)]
@@ -216,7 +220,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }
@@ -572,74 +576,6 @@ mod scenario_03_structured_output {
         eprintln!(
             "[scenario 3] Structured output validated: {} files",
             files.len()
-        );
-    }
-}
-
-// ============================================================================
-// SCENARIO 4: Sub-agent spawn
-// ============================================================================
-
-mod scenario_04_sub_agent {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore = "integration-real: live API"]
-    async fn e2e_smoke_sub_agent_spawn() {
-        let Some(_api_key) = anthropic_api_key() else {
-            eprintln!("Skipping scenario 4: missing ANTHROPIC_API_KEY");
-            return;
-        };
-
-        // Use AgentFactory with subagents enabled — the agent gets the
-        // agent_spawn/agent_fork/agent_status/agent_list tools and must
-        // actually use them to complete the prompt.
-        let temp_dir = TempDir::new().unwrap();
-        let factory = AgentFactory::new(temp_dir.path().join("sessions"))
-            .builtins(true)
-            .subagents(true)
-            .project_root(temp_dir.path());
-
-        let config = Config::default();
-        let mut build_config = AgentBuildConfig::new(smoke_model());
-        build_config.system_prompt = Some(
-            "You are an orchestrator. When asked to analyze something, \
-             use agent_spawn to delegate sub-tasks. After spawning, \
-             use agent_status to check results. Be brief."
-                .to_string(),
-        );
-
-        let mut agent = factory
-            .build_agent(build_config, &config)
-            .await
-            .expect("Sub-agent factory should build");
-
-        let result = agent
-            .run(
-                "Spawn a sub-agent to answer: what is 2+2? \
-                 Then check its status with agent_status and tell me the result."
-                    .into(),
-            )
-            .await
-            .expect("Sub-agent orchestration should succeed");
-
-        eprintln!(
-            "[scenario 4] tool_calls={}, turns={}, text={}",
-            result.tool_calls,
-            result.turns,
-            &result.text[..result.text.len().min(120)]
-        );
-
-        assert!(
-            result.tool_calls >= 2,
-            "Should have called agent_spawn + agent_status (at least 2 tool calls), got {}",
-            result.tool_calls
-        );
-        let text_lower = result.text.to_lowercase();
-        assert!(
-            text_lower.contains('4') || text_lower.contains("four"),
-            "Should relay the sub-agent's answer (4), got: {}",
-            result.text
         );
     }
 }
@@ -1223,10 +1159,11 @@ mod scenario_09_session_service {
             prompt: "Hello, I am testing the session service."
                 .to_string()
                 .into(),
+            render_metadata: None,
             system_prompt: Some("You are a helpful assistant. Be brief.".to_string()),
             max_tokens: Some(256),
             event_tx: None,
-            host_mode: false,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: None,
@@ -1271,8 +1208,11 @@ mod scenario_09_session_service {
         // 3. Start follow-up turn
         let turn_req = StartTurnRequest {
             prompt: "What did I just say to you?".to_string().into(),
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-            host_mode: false,
+
             skill_references: None,
             flow_tool_overlay: None,
             additional_instructions: None,
@@ -1663,5 +1603,271 @@ exclude = ["mcp"]
 
         // Clean up dist output
         let _ = std::fs::remove_dir_all(workspace_root.join("dist/smoke-test"));
+    }
+}
+
+// ============================================================================
+// SCENARIO 22: Runtime-backed host-mode comms stress
+// ============================================================================
+//
+// This is the critical post-cutover test: proves that comms admission works
+// exclusively through the runtime ingress path (comms_drain → comms_bridge →
+// RuntimeSessionAdapter → ingress authority → policy table). No direct
+// drain_comms_inbox or session-service host loop exists anymore.
+
+#[cfg(feature = "comms")]
+mod scenario_22_runtime_host_comms {
+    use super::*;
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::service::{
+        CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
+    };
+    use meerkat_runtime::RuntimeSessionAdapter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Minimal runtime executor that routes turns through the session service.
+    struct TestRuntimeExecutor {
+        service: Arc<meerkat_session::EphemeralSessionService<meerkat::FactoryAgentBuilder>>,
+        session_id: meerkat_core::types::SessionId,
+        turn_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for TestRuntimeExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let turn_num = self.turn_count.load(Ordering::Relaxed) + 1;
+            let start = std::time::Instant::now();
+
+            let prompt = match &primitive {
+                RunPrimitive::StagedInput(staged) => staged
+                    .appends
+                    .iter()
+                    .filter_map(|a| match &a.content {
+                        meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                RunPrimitive::ImmediateAppend(append) => match &append.content {
+                    meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                        text.clone()
+                    }
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            eprintln!(
+                "[scenario 22] executor apply turn={turn_num} prompt={:?}",
+                &prompt[..prompt.len().min(80)]
+            );
+
+            let turn_req = StartTurnRequest {
+                prompt: prompt.into(),
+                system_prompt: None,
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                event_tx: None,
+                skill_references: None,
+                flow_tool_overlay: None,
+                additional_instructions: None,
+            };
+
+            let result = self
+                .service
+                .start_turn(&self.session_id, turn_req)
+                .await
+                .map_err(|e| CoreExecutorError::ApplyFailed {
+                    reason: e.to_string(),
+                })?;
+
+            // Increment AFTER LLM call completes — proves the full round-trip
+            self.turn_count.fetch_add(1, Ordering::Relaxed);
+            let elapsed = start.elapsed();
+            eprintln!(
+                "[scenario 22] executor turn={turn_num} done in {:.1}s, text={:?}",
+                elapsed.as_secs_f64(),
+                &result.text[..result.text.len().min(100)]
+            );
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id: _run_id,
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: Some(result),
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "e2e: live API"]
+    async fn e2e_runtime_keep_alive_comms_stress() {
+        let Some(_api_key) = anthropic_api_key() else {
+            eprintln!("Skipping scenario 22: missing ANTHROPIC_API_KEY");
+            return;
+        };
+
+        // Proves the sole surviving host-mode comms admission path:
+        //   comms_drain.rs → comms_bridge.rs → accept_input() → runtime ingress → executor
+        //
+        // Agent A: factory-built via session service with comms_name in build options.
+        //   Factory creates an Inproc CommsRuntime. RuntimeSessionAdapter + comms_drain
+        //   own inbox admission.
+        // Agent B: factory-built the same way (separate session, same service).
+        //   Uses the comms `send` tool to message Agent A via Inproc transport.
+
+        let temp = TempDir::new().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions"));
+        factory = factory.comms(true);
+
+        let config = Config::default();
+        let service = Arc::new(build_ephemeral_service(factory, config, 10));
+        let runtime_adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+
+        // --- Create Agent A session with comms ---
+        let build_a = SessionBuildOptions {
+            comms_name: Some("agent-a".to_string()),
+            ..Default::default()
+        };
+        let req_a = CreateSessionRequest {
+            model: smoke_model(),
+            prompt: "You are Agent A. Acknowledge peer messages briefly."
+                .to_string()
+                .into(),
+            render_metadata: None,
+            system_prompt: Some(
+                "You are Agent A. When you receive a message, acknowledge it.".to_string(),
+            ),
+            max_tokens: Some(256),
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: Some(build_a),
+            labels: None,
+        };
+        let cr_a = service.create_session(req_a).await.expect("create A");
+        let sid_a = cr_a.session_id.clone();
+        eprintln!("[scenario 22] Session A: {sid_a}");
+
+        // Get A's factory-built CommsRuntime (Inproc)
+        let comms_a = service.comms_runtime(&sid_a).await;
+        eprintln!("[scenario 22] A has comms: {}", comms_a.is_some());
+        let comms_a = comms_a.expect("factory should wire CommsRuntime when comms_name is set");
+
+        // Wire runtime executor for A
+        let turn_count = Arc::new(AtomicUsize::new(0));
+        let executor = Box::new(TestRuntimeExecutor {
+            service: service.clone(),
+            session_id: sid_a.clone(),
+            turn_count: turn_count.clone(),
+        });
+        runtime_adapter.register_session(sid_a.clone()).await;
+        runtime_adapter
+            .register_session_with_executor(sid_a.clone(), executor)
+            .await;
+
+        // Run A's initial turn through runtime
+        let input_a = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "You are Agent A. Wait for messages.".to_string(),
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: Some(true),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_, h) = runtime_adapter
+            .accept_input_with_completion(&sid_a, input_a)
+            .await
+            .expect("accept A initial");
+        if let Some(h) = h {
+            let _ = h.wait().await;
+        }
+        eprintln!(
+            "[scenario 22] A initial turn done (turns={})",
+            turn_count.load(Ordering::Relaxed)
+        );
+
+        // Spawn comms drain for A — THE path under test
+        runtime_adapter
+            .maybe_spawn_comms_drain(&sid_a, true, Some(comms_a))
+            .await;
+        eprintln!("[scenario 22] Comms drain spawned for A");
+
+        // --- Inject message into A's inbox programmatically ---
+        // Use CommsCommand::Input to inject directly into Agent A's comms inbox.
+        // This tests the exact pipeline: inbox → comms_drain → comms_bridge →
+        // runtime ingress → executor. More reliable than LLM tool calls.
+        let comms_a_ref = service
+            .comms_runtime(&sid_a)
+            .await
+            .expect("A comms runtime");
+
+        let send_result = comms_a_ref
+            .send(meerkat_core::comms::CommsCommand::Input {
+                session_id: sid_a.clone(),
+                body: "Runtime host mode stress test ping from agent-b".to_string(),
+                blocks: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                source: meerkat_core::comms::InputSource::Rpc,
+                stream: meerkat_core::comms::InputStreamMode::None,
+                allow_self_session: true,
+            })
+            .await;
+        eprintln!("[scenario 22] Injected into A's inbox: {send_result:?}");
+
+        // --- Wait for runtime-backed comms admission ---
+        let comms_inject_time = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let t = turn_count.load(Ordering::Relaxed);
+            eprintln!("[scenario 22] A runtime turns: {t}");
+            if t >= 2 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "Timeout: comms_drain → runtime ingress → executor never fired. turns={t}"
+            );
+        }
+
+        let comms_elapsed = comms_inject_time.elapsed();
+        let final_turns = turn_count.load(Ordering::Relaxed);
+        eprintln!(
+            "[scenario 22] PASS: {final_turns} turns, comms round-trip {:.1}s",
+            comms_elapsed.as_secs_f64()
+        );
+        assert!(
+            final_turns >= 2,
+            "Expected at least 2 executor turns (initial + comms-driven)"
+        );
+        // A real LLM round-trip takes >=0.5s even for the fastest model.
+        // If the comms-driven turn completed in <0.3s, the LLM was never called.
+        assert!(
+            comms_elapsed.as_secs_f64() > 0.3,
+            "Comms-driven turn completed in {:.2}s — suspiciously fast, \
+             LLM may not have been called",
+            comms_elapsed.as_secs_f64()
+        );
     }
 }

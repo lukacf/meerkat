@@ -34,7 +34,13 @@ async fn integration_real_live_continue_hangs() {
         .project_root(project_root.clone());
     let mut builder = FactoryAgentBuilder::new(factory, config.clone());
     builder.default_llm_client = Some(Arc::new(TestClient::default()));
-    let session_service = Arc::new(PersistentSessionService::new(builder, 100, store, None));
+    let session_service = Arc::new(PersistentSessionService::new(
+        builder,
+        100,
+        store,
+        None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    ));
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(config.clone()));
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -72,6 +78,9 @@ async fn integration_real_live_continue_hangs() {
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

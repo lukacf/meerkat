@@ -113,14 +113,19 @@ Wire ambassadors across mobs for inter-faction communication. The `wire_cross_mo
 // Wire ambassadors between two mobs
 await wire_cross_mob(mobIdNorth, "ambassador-north", "ambassador-south");
 
-// Send a message to a member (triggers a turn with the message)
-await mob_send_message(mobIdNorth, "ambassador-north",
-  "Send a message to the south faction proposing an alliance on the eastern front."
+// Send work to a member through the canonical member path
+await mob_member_send(
+  mobIdNorth,
+  "ambassador-north",
+  JSON.stringify({
+    content: "Send a message to the south faction proposing an alliance on the eastern front.",
+    handling_mode: "queue"
+  })
 );
 ```
 
 <Note>
-Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bindings. Inter-agent messaging happens through the comms tools available to agents during their turns (the `send` and `peers` tools).
+Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bindings. Inter-agent messaging happens through member-directed turn submission and the comms tools available to agents during their turns (the `send` and `peers` tools).
 </Note>
 
 ## What is available on wasm32
@@ -136,4 +141,4 @@ Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bin
 | **Skills** | Embedded skills, HTTP skills | Filesystem skill sources |
 | **Hooks** | In-process hooks | Command hooks, filesystem hooks |
 | **Compaction** | Context compaction | -- |
-| **Other** | -- | MCP client, sub-agent spawning |
+| **Other** | -- | MCP client, delegated work orchestration |

@@ -1,15 +1,15 @@
 ---
 name: Multi-Agent Comms
-description: Setting up host mode, peer trust, send vs request/response patterns
+description: Setting up keep-alive, peer trust, send vs request/response patterns
 requires_capabilities: [comms]
 ---
 
 # Multi-Agent Communication
 
-## Host Mode
+## Keep-Alive Mode
 
-Enable host mode to allow other agents to connect:
-- Requires `--host` flag or `host_mode: true` in config
+Enable keep-alive to keep the session alive for peer messaging:
+- Requires `--keep-alive` flag or `keep_alive: true` in session build options
 - Must specify a `comms_name` for peer identification
 
 ## Message Patterns
@@ -30,4 +30,4 @@ Use `comms_response` to reply to incoming requests.
 
 - **UDS** (Unix Domain Socket): Same machine, lowest latency
 - **TCP**: Cross-machine communication
-- **inproc**: In-process, for sub-agents in the same runtime
+- **inproc**: In-process, for peers in the same runtime

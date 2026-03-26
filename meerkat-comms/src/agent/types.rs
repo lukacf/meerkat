@@ -6,7 +6,7 @@
 use crate::inproc::InprocRegistry;
 use crate::{InboxItem, MessageKind, PubKey, TrustedPeers};
 use meerkat_core::PlainEventSource;
-use meerkat_core::types::ContentBlock;
+use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
@@ -21,14 +21,21 @@ pub struct PlainMessage {
     pub source: PlainEventSource,
     /// Optional interaction ID for subscription correlation.
     pub interaction_id: Option<uuid::Uuid>,
+    /// Handling mode for ordinary external/member submissions.
+    pub handling_mode: HandlingMode,
     /// Optional multimodal content blocks.
     pub blocks: Option<Vec<ContentBlock>>,
+    /// Optional normalized rendering metadata.
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 impl PlainMessage {
     /// Format this message for injection into an LLM session.
     pub fn to_user_message_text(&self) -> String {
-        format!("[EVENT via {}] {}", self.source, self.body)
+        meerkat_core::interaction::format_external_event_projection(
+            &self.source.to_string(),
+            Some(&self.body),
+        )
     }
 }
 
@@ -47,10 +54,7 @@ pub enum DrainedMessage {
 
 /// Convert an inbox item into a `DrainedMessage`.
 ///
-/// Returns `None` for:
-/// - `SubagentResult` items (handled separately)
-/// - Ack messages (not injected into session)
-/// - Unknown peers (for authenticated messages)
+/// Returns `None` for Ack messages and unknown peers when peer auth is required.
 pub fn drain_inbox_item(
     item: &InboxItem,
     trusted_peers: &TrustedPeers,
@@ -64,15 +68,18 @@ pub fn drain_inbox_item(
         InboxItem::PlainEvent {
             body,
             source,
+            handling_mode,
             interaction_id,
             blocks,
+            render_metadata,
         } => Some(DrainedMessage::Plain(PlainMessage {
             body: body.clone(),
             source: *source,
+            handling_mode: *handling_mode,
             interaction_id: *interaction_id,
             blocks: blocks.clone(),
+            render_metadata: render_metadata.clone(),
         })),
-        InboxItem::SubagentResult { .. } => None,
     }
 }
 
@@ -252,7 +259,7 @@ impl CommsMessage {
     ) -> Option<Self> {
         let envelope = match item {
             InboxItem::External { envelope } => envelope,
-            InboxItem::SubagentResult { .. } | InboxItem::PlainEvent { .. } => return None,
+            InboxItem::PlainEvent { .. } => return None,
         };
 
         // Resolve peer name from pubkey
@@ -305,13 +312,13 @@ impl CommsMessage {
     /// accepted at ingress cannot disappear or change identity if the peer
     /// is removed/renamed before drain.
     ///
-    /// Returns `None` for non-External items, SubagentResult, PlainEvent, and Ack messages.
+    /// Returns `None` for non-External items, PlainEvent, and Ack messages.
     pub(crate) fn from_classified_entry(
         entry: &crate::inbox::ClassifiedInboxEntry,
     ) -> Option<Self> {
         let envelope = match &entry.item {
             InboxItem::External { envelope } => envelope,
-            InboxItem::SubagentResult { .. } | InboxItem::PlainEvent { .. } => return None,
+            InboxItem::PlainEvent { .. } => return None,
         };
 
         let from_peer = entry.from_peer.clone().unwrap_or_else(|| {
@@ -714,20 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn test_comms_message_from_inbox_item_ignores_subagent_result() {
-        let trusted = TrustedPeers::new();
-
-        let item = InboxItem::SubagentResult {
-            subagent_id: Uuid::new_v4(),
-            result: serde_json::json!({"done": true}),
-            summary: "Task completed".to_string(),
-        };
-
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true);
-        assert!(msg.is_none(), "SubagentResult should return None");
-    }
-
-    #[test]
     fn test_comms_message_formatting() {
         let msg = CommsMessage {
             envelope_id: Uuid::new_v4(),
@@ -905,8 +898,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email arrived".to_string(),
             source: PlainEventSource::Tcp,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
         let drained = drain_inbox_item(&item, &trusted, true);
 
@@ -928,8 +923,10 @@ mod tests {
         let msg = PlainMessage {
             body: "CPU > 95% on prod-3".to_string(),
             source: PlainEventSource::Webhook,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
         let text = msg.to_user_message_text();
         assert_eq!(text, "[EVENT via webhook] CPU > 95% on prod-3");
@@ -949,8 +946,10 @@ mod tests {
             let msg = PlainMessage {
                 body: "test".to_string(),
                 source,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             };
             assert!(
                 msg.to_user_message_text().contains(label),

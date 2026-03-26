@@ -2,6 +2,18 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
+mod request_execution;
+#[cfg(not(target_arch = "wasm32"))]
+mod stdio_json;
+
+pub use request_execution::{
+    PreparedSurfaceSession, RequestAlreadyExists, RequestAsyncAction, RequestContext,
+    RequestTerminal, SurfaceRequestExecutor, noop_request_action, prepare_surface_session,
+    request_action,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use stdio_json::{StdioJsonWriter, spawn_stdio_json_writer};
+
 use meerkat_contracts::{
     CapabilitiesResponse, CapabilityEntry, CapabilityStatus, ContractVersion, build_capabilities,
 };
@@ -105,22 +117,22 @@ pub fn build_models_catalog_response() -> meerkat_contracts::ModelsCatalogRespon
     }
 }
 
-/// Validate whether host mode can be enabled in the current build.
+/// Validate whether keep-alive mode can be enabled in the current build.
 ///
-/// Delegates to `meerkat_comms::validate_host_mode()` when the comms feature
+/// Delegates to `meerkat_comms::validate_keep_alive()` when the comms feature
 /// is compiled in; returns an error if requested but comms is not available.
 ///
 /// This is the canonical entry point — all surfaces should call this.
-pub fn resolve_host_mode(requested: bool) -> Result<bool, String> {
+pub fn resolve_keep_alive(requested: bool) -> Result<bool, String> {
     #[cfg(feature = "comms")]
     {
-        meerkat_comms::validate_host_mode(requested)
+        meerkat_comms::validate_keep_alive(requested)
     }
     #[cfg(not(feature = "comms"))]
     {
         if requested {
             return Err(
-                "host_mode requires comms support (build with --features comms)".to_string(),
+                "keep_alive requires comms support (build with --features comms)".to_string(),
             );
         }
         Ok(false)
@@ -139,8 +151,23 @@ pub fn validate_public_peer_meta(peer_meta: Option<&PeerMeta>) -> Result<(), Str
         return Ok(());
     };
 
-    for label in RESERVED_MOB_PEER_META_LABELS {
-        if peer_meta.labels.contains_key(label) {
+    validate_raw_labels(Some(&peer_meta.labels))
+}
+
+/// Reject raw labels that are reserved for mob-managed sessions.
+///
+/// Similar to \[`validate_public_peer_meta`\], but works on a raw labels map.
+/// Public surfaces should call this for any caller-supplied labels, including
+/// top-level `CreateSessionRequest::labels`.
+pub fn validate_raw_labels(
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<(), String> {
+    let Some(labels) = labels else {
+        return Ok(());
+    };
+
+    for &label in &RESERVED_MOB_PEER_META_LABELS {
+        if labels.contains_key(label) {
             return Err(format!(
                 "peer_meta label '{label}' is reserved for mob-managed sessions"
             ));
@@ -273,9 +300,7 @@ pub async fn emit_mcp_lifecycle_events(
     turn_number: u32,
     actions: Vec<meerkat_mcp::McpLifecycleAction>,
 ) {
-    use meerkat_core::event::ToolConfigChangeOperation;
-    use meerkat_core::event::ToolConfigChangedPayload;
-    use meerkat_mcp::McpLifecycleAction;
+    use meerkat_mcp::McpLifecyclePhase;
 
     const MCP_SEQ_SOURCE_CAP: usize = 8192;
 
@@ -288,40 +313,9 @@ pub async fn emit_mcp_lifecycle_events(
     static MCP_EVENT_SEQ_BY_SOURCE: OnceLock<Mutex<McpSeqState>> = OnceLock::new();
 
     for action in actions {
-        let (operation, target, status) = match action {
-            McpLifecycleAction::PendingConnect { server } => (
-                ToolConfigChangeOperation::Add,
-                server,
-                "pending".to_string(),
-            ),
-            McpLifecycleAction::Activated { server } => (
-                ToolConfigChangeOperation::Add,
-                server,
-                "applied".to_string(),
-            ),
-            McpLifecycleAction::Reloaded { server } => (
-                ToolConfigChangeOperation::Reload,
-                server,
-                "applied".to_string(),
-            ),
-            McpLifecycleAction::RemovingStarted { server } => (
-                ToolConfigChangeOperation::Remove,
-                server,
-                "draining".to_string(),
-            ),
-            McpLifecycleAction::Removed { server, degraded } => (
-                ToolConfigChangeOperation::Remove,
-                server,
-                if degraded { "forced" } else { "applied" }.to_string(),
-            ),
-        };
-        let payload = ToolConfigChangedPayload {
-            operation,
-            target: target.clone(),
-            status: status.clone(),
-            persisted: false,
-            applied_at_turn: Some(turn_number),
-        };
+        let mut payload = action.to_tool_config_changed_payload();
+        payload.applied_at_turn = Some(turn_number);
+        let target = payload.target.clone();
         let seq = {
             let map = MCP_EVENT_SEQ_BY_SOURCE.get_or_init(|| Mutex::new(McpSeqState::default()));
             let mut guard = match map.lock() {
@@ -359,7 +353,7 @@ pub async fn emit_mcp_lifecycle_events(
                 },
             ))
             .await;
-        if status == "forced" {
+        if action.phase == McpLifecyclePhase::Forced {
             if !prompt.is_empty() {
                 prompt.push('\n');
             }

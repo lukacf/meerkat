@@ -14,8 +14,10 @@ use meerkat_core::service::{
     SessionQuery, SessionService, SessionServiceCommsExt, SessionSummary, SessionUsage,
     SessionView, StartTurnRequest,
 };
-use meerkat_core::types::{RunResult, SessionId, Usage};
-use meerkat_core::{InteractionId, PlainEventSource};
+use meerkat_core::types::{
+    ContentInput, HandlingMode, RenderMetadata, RunResult, SessionId, Usage,
+};
+use meerkat_core::{InteractionId, PlainEventSource, Provider};
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobBuilder, MobId, MobRuntimeMode, MobSessionService, MobStorage,
     Prefab, ProfileName,
@@ -24,9 +26,9 @@ use tokio::sync::{Notify, RwLock};
 
 #[derive(Default)]
 struct MockSessionService {
-    sessions: RwLock<HashMap<SessionId, Arc<Notify>>>,
+    sessions: RwLock<HashMap<SessionId, ()>>,
+    keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
     start_turn_calls: AtomicU64,
-    host_mode_start_turn_calls: AtomicU64,
     inject_calls: Arc<AtomicU64>,
 }
 
@@ -35,7 +37,13 @@ struct MockInjector {
 }
 
 impl EventInjector for MockInjector {
-    fn inject(&self, _body: String, _source: PlainEventSource) -> Result<(), EventInjectorError> {
+    fn inject(
+        &self,
+        _body: ContentInput,
+        _source: PlainEventSource,
+        _handling_mode: HandlingMode,
+        _render_metadata: Option<RenderMetadata>,
+    ) -> Result<(), EventInjectorError> {
         self.inject_calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -44,10 +52,12 @@ impl EventInjector for MockInjector {
 impl SubscribableInjector for MockInjector {
     fn inject_with_subscription(
         &self,
-        body: String,
+        body: ContentInput,
         source: PlainEventSource,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
     ) -> Result<InteractionSubscription, EventInjectorError> {
-        self.inject(body, source)?;
+        self.inject(body, source, handling_mode, render_metadata)?;
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let interaction_id = InteractionId(uuid::Uuid::new_v4());
         let interaction_id_for_task = interaction_id;
@@ -68,12 +78,16 @@ impl SubscribableInjector for MockInjector {
 
 #[async_trait]
 impl SessionService for MockSessionService {
-    async fn create_session(&self, _req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         let sid = SessionId::new();
-        self.sessions
-            .write()
-            .await
-            .insert(sid.clone(), Arc::new(Notify::new()));
+        self.sessions.write().await.insert(sid.clone(), ());
+        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
+        if is_keep_alive {
+            self.keep_alive_notifiers
+                .write()
+                .await
+                .insert(sid.clone(), Arc::new(Notify::new()));
+        }
         Ok(RunResult {
             text: "ok".to_string(),
             session_id: sid,
@@ -89,20 +103,25 @@ impl SessionService for MockSessionService {
     async fn start_turn(
         &self,
         id: &SessionId,
-        req: StartTurnRequest,
+        _req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
-        if req.host_mode {
-            self.host_mode_start_turn_calls
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        let sessions = self.sessions.read().await;
-        let Some(notify) = sessions.get(id).cloned() else {
+        if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() });
-        };
-        drop(sessions);
-        if req.host_mode {
-            notify.notified().await;
+        }
+        // Block indefinitely for keep-alive sessions (autonomous host loop expects this)
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notified().await;
+            return Ok(RunResult {
+                text: "Host loop interrupted".to_string(),
+                session_id: id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            });
         }
         Ok(RunResult {
             text: "ok".to_string(),
@@ -117,8 +136,8 @@ impl SessionService for MockSessionService {
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        if let Some(notify) = self.sessions.read().await.get(id).cloned() {
-            notify.notify_waiters();
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
         }
         Ok(())
     }
@@ -134,6 +153,8 @@ impl SessionService for MockSessionService {
                 updated_at: SystemTime::now(),
                 message_count: 0,
                 is_active: false,
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Provider::Anthropic,
                 last_assistant_text: None,
                 labels: Default::default(),
             },
@@ -149,8 +170,9 @@ impl SessionService for MockSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        if let Some(notify) = self.sessions.write().await.remove(id) {
-            notify.notify_waiters();
+        self.sessions.write().await.remove(id);
+        if let Some(notifier) = self.keep_alive_notifiers.write().await.remove(id) {
+            notifier.notify_waiters();
         }
         Ok(())
     }
@@ -233,7 +255,7 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
     let service = Arc::new(MockSessionService::default());
     let mut definition = Prefab::CodingSwarm.definition();
     definition.id = MobId::from("phase2-routing");
-    definition.backend.default = MobBackendKind::Subagent;
+    definition.backend.default = MobBackendKind::Session;
     definition.wiring.auto_wire_orchestrator = false;
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(definition, storage)
@@ -261,28 +283,28 @@ async fn test_phase2_external_turn_routing_by_runtime_mode() {
         .await
         .expect("spawn turn-driven");
     let start_before = service.start_turn_calls.load(Ordering::Relaxed);
-    let host_before = service.host_mode_start_turn_calls.load(Ordering::Relaxed);
     let inject_before = service.inject_calls.load(Ordering::Relaxed);
 
     handle
-        .send_message(MeerkatId::from("lead-auto"), "auto".to_string())
+        .member(&MeerkatId::from("lead-auto"))
+        .await
+        .expect("member auto")
+        .send("auto".to_string(), meerkat_core::types::HandlingMode::Queue)
         .await
         .expect("external autonomous");
     handle
-        .send_message(MeerkatId::from("lead-turn"), "turn".to_string())
+        .member(&MeerkatId::from("lead-turn"))
+        .await
+        .expect("member turn")
+        .send("turn".to_string(), meerkat_core::types::HandlingMode::Queue)
         .await
         .expect("external turn-driven");
 
     let start_after = service.start_turn_calls.load(Ordering::Relaxed);
-    let host_after = service.host_mode_start_turn_calls.load(Ordering::Relaxed);
     let inject_after = service.inject_calls.load(Ordering::Relaxed);
     assert!(
         start_after > start_before,
         "turn-driven path should invoke start_turn"
-    );
-    assert_eq!(
-        host_after, host_before,
-        "external turns should not route through host-mode start_turn"
     );
     assert!(
         inject_after > inject_before,

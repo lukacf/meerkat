@@ -64,8 +64,9 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
                     kind: "flow_step".into(),
                 });
             }
-            // ExternalEvent, SystemGenerated, Projected CAN be Derived
-            Input::ExternalEvent(_) | Input::SystemGenerated(_) | Input::Projected(_) => {}
+            // External events, explicit continuations, and explicit operation
+            // lifecycle inputs may be reconstructed or derived.
+            Input::ExternalEvent(_) | Input::Continuation(_) | Input::Operation(_) => {}
         }
     }
 
@@ -79,6 +80,7 @@ mod tests {
     use crate::input::*;
     use chrono::Utc;
     use meerkat_core::lifecycle::InputId;
+    use meerkat_core::types::HandlingMode;
 
     fn make_header(durability: InputDurability, source: InputOrigin) -> InputHeader {
         InputHeader {
@@ -185,6 +187,7 @@ mod tests {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             step_id: "s1".into(),
             instructions: "do it".into(),
+            blocks: None,
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
@@ -196,6 +199,9 @@ mod tests {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             event_type: "test".into(),
             payload: serde_json::json!({}),
+            blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
     }
@@ -211,27 +217,32 @@ mod tests {
             ),
             event_type: "test".into(),
             payload: serde_json::json!({}),
+            blocks: None,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
     }
 
     #[test]
     fn operator_derived_rejected() {
-        let input = Input::SystemGenerated(SystemGeneratedInput {
+        let input = Input::Continuation(ContinuationInput {
             header: make_header(InputDurability::Derived, InputOrigin::Operator),
-            generator: "test".into(),
-            content: "content".into(),
+            reason: "test".into(),
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+            request_id: None,
         });
         assert!(validate_durability(&input).is_err());
     }
 
     #[test]
-    fn projected_derived_from_system_accepted() {
-        let input = Input::Projected(ProjectedInput {
+    fn operation_derived_from_system_accepted() {
+        let input = Input::Operation(OperationInput {
             header: make_header(InputDurability::Derived, InputOrigin::System),
-            rule_id: "rule-1".into(),
-            source_event_id: "evt-1".into(),
-            content: "projected".into(),
+            operation_id: meerkat_core::ops::OperationId::new(),
+            event: meerkat_core::ops::OpEvent::Cancelled {
+                id: meerkat_core::ops::OperationId::new(),
+            },
         });
         assert!(validate_durability(&input).is_ok());
     }

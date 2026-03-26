@@ -11,6 +11,9 @@
 //! - Prefab templates — ready-made mob configurations
 //! - The coding swarm pattern (lead + workers)
 //!
+//! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
+//! Production mob deployments use the runtime-backed path.
+//!
 //! ## Run
 //! ```bash
 //! ANTHROPIC_API_KEY=... cargo run --example 017-mob-coding-swarm --features comms
@@ -220,12 +223,14 @@ content = "Implement Rust services, APIs, and data models."
     // Send a task to the orchestrator (external turn -- lead is external_addressable).
     println!("\nSending task to orchestrator (live LLM call)...");
     handle
-        .send_message(
-            MeerkatId::from("lead-1"),
+        .member(&MeerkatId::from("lead-1"))
+        .await?
+        .send(
             "Plan a small task: write a function that reverses a string in Rust. \
              Describe the plan in 2-3 sentences. Do NOT spawn workers or use any tools -- \
              just describe the plan in plain text."
                 .to_string(),
+            meerkat_core::types::HandlingMode::Queue,
         )
         .await?;
 

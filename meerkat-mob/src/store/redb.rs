@@ -8,6 +8,7 @@ use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meerkat_machine_kernels::KernelState;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
@@ -398,6 +399,94 @@ impl MobRunStore for RedbMobRunStore {
 
                 let terminal = next.is_terminal();
                 run.status = next;
+                if terminal && run.completed_at.is_none() {
+                    run.completed_at = Some(Utc::now());
+                }
+
+                let encoded = encode_json(&run)?;
+                table
+                    .insert(key.as_slice(), encoded.as_slice())
+                    .map_err(storage_error)?;
+                true
+            };
+            write_txn.commit().map_err(storage_error)?;
+            Ok(cas_result)
+        })
+        .await
+    }
+
+    async fn cas_flow_state(
+        &self,
+        run_id: &RunId,
+        expected: &KernelState,
+        next: &KernelState,
+    ) -> Result<bool, MobError> {
+        let db = self.db.clone();
+        let key = run_key(run_id);
+        let expected = expected.clone();
+        let next = next.clone();
+        run_redb_task(move || {
+            let write_txn = db.begin_write().map_err(storage_error)?;
+            let cas_result = {
+                let mut table = write_txn.open_table(RUNS_TABLE).map_err(storage_error)?;
+                let stored = table
+                    .get(key.as_slice())
+                    .map_err(storage_error)?
+                    .map(|value| value.value().to_vec());
+                let Some(stored) = stored else {
+                    return Ok(false);
+                };
+                let mut run: MobRun = decode_json(&stored)?;
+                if run.flow_state != expected {
+                    return Ok(false);
+                }
+                run.flow_state = next;
+                let encoded = encode_json(&run)?;
+                table
+                    .insert(key.as_slice(), encoded.as_slice())
+                    .map_err(storage_error)?;
+                true
+            };
+            write_txn.commit().map_err(storage_error)?;
+            Ok(cas_result)
+        })
+        .await
+    }
+
+    async fn cas_run_snapshot(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &KernelState,
+        next_status: MobRunStatus,
+        next_flow_state: &KernelState,
+    ) -> Result<bool, MobError> {
+        let db = self.db.clone();
+        let key = run_key(run_id);
+        let expected_flow_state = expected_flow_state.clone();
+        let next_flow_state = next_flow_state.clone();
+        run_redb_task(move || {
+            let write_txn = db.begin_write().map_err(storage_error)?;
+            let cas_result = {
+                let mut table = write_txn.open_table(RUNS_TABLE).map_err(storage_error)?;
+                let stored = table
+                    .get(key.as_slice())
+                    .map_err(storage_error)?
+                    .map(|value| value.value().to_vec());
+                let Some(stored) = stored else {
+                    return Ok(false);
+                };
+                let mut run: MobRun = decode_json(&stored)?;
+                if run.status != expected_status
+                    || run.status.is_terminal()
+                    || run.flow_state != expected_flow_state
+                {
+                    return Ok(false);
+                }
+
+                let terminal = next_status.is_terminal();
+                run.status = next_status;
+                run.flow_state = next_flow_state;
                 if terminal && run.completed_at.is_none() {
                     run.completed_at = Some(Utc::now());
                 }
@@ -817,6 +906,7 @@ mod tests {
             mob_id: MobId::from("mob"),
             flow_id: FlowId::from("flow-a"),
             status,
+            flow_state: MobRun::flow_state_for_steps([StepId::from("step-1")]).unwrap(),
             activation_params: serde_json::json!({"a":1}),
             created_at: Utc::now(),
             completed_at: None,

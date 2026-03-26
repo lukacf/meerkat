@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
 #[cfg(target_arch = "wasm32")]
@@ -59,12 +61,14 @@ impl std::fmt::Display for MobState {
 /// Commands sent from [`MobHandle`] to the [`MobActor`] for serialized processing.
 pub(super) enum MobCommand {
     Spawn {
-        spec: super::handle::SpawnMemberSpec,
-        reply_tx: oneshot::Sender<Result<MemberRef, MobError>>,
+        spec: Box<super::handle::SpawnMemberSpec>,
+        owner_session_id: Option<SessionId>,
+        ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
+        reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     },
     SpawnProvisioned {
         spawn_ticket: u64,
-        result: Result<MemberRef, MobError>,
+        result: Result<super::handle::MemberSpawnReceipt, MobError>,
     },
     Retire {
         meerkat_id: MeerkatId,
@@ -73,30 +77,38 @@ pub(super) enum MobCommand {
     Respawn {
         meerkat_id: MeerkatId,
         initial_message: Option<ContentInput>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<
+            Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
+        >,
     },
     RetireAll {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Wire {
-        a: MeerkatId,
-        b: MeerkatId,
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Unwire {
-        a: MeerkatId,
-        b: MeerkatId,
+        local: MeerkatId,
+        target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ExternalTurn {
         meerkat_id: MeerkatId,
         content: ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
         reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
         content: ContentInput,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
+    },
+    KickoffBarrierSnapshot {
+        meerkat_ids: Vec<MeerkatId>,
+        reply_tx: oneshot::Sender<Vec<(MeerkatId, tokio::sync::watch::Receiver<bool>)>>,
     },
     RunFlow {
         flow_id: FlowId,
@@ -115,9 +127,16 @@ pub(super) enum MobCommand {
     FlowFinished {
         run_id: RunId,
     },
+    FlowCanceledCleanup {
+        run_id: RunId,
+    },
     #[cfg(test)]
     FlowTrackerCounts {
         reply_tx: oneshot::Sender<(usize, usize)>,
+    },
+    #[cfg(test)]
+    OrchestratorSnapshot {
+        reply_tx: oneshot::Sender<MobOrchestratorSnapshot>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -144,6 +163,10 @@ pub(super) enum MobCommand {
         task_id: TaskId,
         status: TaskStatus,
         owner: Option<MeerkatId>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    ForceCancel {
+        meerkat_id: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     SetSpawnPolicy {

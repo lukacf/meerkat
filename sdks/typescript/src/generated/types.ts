@@ -82,8 +82,9 @@ export interface CapabilitiesResponse {
 }
 
 export interface CommsParams {
-  host_mode: boolean;
+  keep_alive?: boolean | null;
   comms_name?: string;
+  peer_meta?: Record<string, unknown>;
 }
 
 export interface SkillsParams {
@@ -110,11 +111,157 @@ export interface McpReloadParams {
   session_id: string;
 }
 
+export interface MobSendParams {
+  content: WireContentInput;
+  handling_mode?: WireHandlingMode;
+  meerkat_id: string;
+  mob_id: string;
+  render_metadata?: WireRenderMetadata;
+}
+
+export interface MobWireParams {
+  member: string;
+  mob_id: string;
+  peer: MobPeerTarget;
+}
+
+export interface MobUnwireParams {
+  member: string;
+  mob_id: string;
+  peer: MobPeerTarget;
+}
+
+export interface RuntimeStateParams {
+  session_id: string;
+}
+
+export interface RuntimeAcceptParams {
+  input: unknown;
+  session_id: string;
+}
+
+export interface RuntimeRetireParams {
+  session_id: string;
+}
+
+export interface RuntimeResetParams {
+  session_id: string;
+}
+
+export interface InputStateParams {
+  input_id: string;
+  session_id: string;
+}
+
+export interface InputListParams {
+  session_id: string;
+}
+
 export interface McpLiveOpResponse {
   applied_at_turn?: number;
-  operation: "add" | "remove" | "reload";
+  operation: McpLiveOperation;
   persisted: boolean;
   server_name?: string;
   session_id: string;
-  status: "staged" | "applied" | "rejected";
+  status: McpLiveOpStatus;
+}
+
+export type InputStateResult = WireInputState | null;
+
+export type WireContentBlock = Record<string, unknown>;
+
+export type WireContentInput = string | WireContentBlock[];
+
+export type McpLiveOperation = "add" | "remove" | "reload";
+
+export type McpLiveOpStatus = "staged" | "applied" | "rejected";
+
+export type MobPeerTarget = { local: string } | { external: WireTrustedPeerSpec };
+
+export type WireHandlingMode = "queue" | "steer";
+
+export type WireRenderClass = "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
+
+export type WireRenderSalience = "background" | "normal" | "important" | "urgent";
+
+export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "recovering" | "retired" | "stopped" | "destroyed";
+
+export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
+
+export type WireInputLifecycleState = "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
+
+export interface WireRenderMetadata {
+  class: WireRenderClass;
+  salience?: WireRenderSalience;
+}
+
+export interface MobSendResult {
+  handling_mode: WireHandlingMode;
+  member_id: string;
+  session_id: string;
+}
+
+export interface WireTrustedPeerSpec {
+  address: string;
+  name: string;
+  peer_id: string;
+}
+
+export interface MobWireResult {
+  wired: boolean;
+}
+
+export interface MobUnwireResult {
+  unwired: boolean;
+}
+
+export interface RuntimeStateResult {
+  state: WireRuntimeState;
+}
+
+export interface RuntimeAcceptResult {
+  existing_id?: string;
+  input_id?: string;
+  outcome_type: RuntimeAcceptOutcomeType;
+  policy?: unknown;
+  reason?: string;
+  state?: WireInputState;
+}
+
+export interface RuntimeRetireResult {
+  inputs_abandoned: number;
+  inputs_pending_drain?: number;
+}
+
+export interface RuntimeResetResult {
+  inputs_abandoned: number;
+}
+
+export interface WireInputStateHistoryEntry {
+  from: WireInputLifecycleState;
+  reason?: string;
+  timestamp: string;
+  to: WireInputLifecycleState;
+}
+
+export interface WireInputState {
+  attempt_count?: number;
+  created_at: string;
+  current_state: WireInputLifecycleState;
+  durability?: unknown;
+  history?: WireInputStateHistoryEntry[];
+  idempotency_key?: string;
+  input_id: string;
+  last_boundary_sequence?: number;
+  last_run_id?: string;
+  persisted_input?: unknown;
+  policy?: unknown;
+  reconstruction_source?: unknown;
+  recovery_count?: number;
+  terminal_outcome?: unknown;
+  updated_at: string;
+}
+
+export interface InputListResult {
+  input_ids: string[];
 }

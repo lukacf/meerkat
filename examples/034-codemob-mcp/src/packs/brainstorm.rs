@@ -45,13 +45,13 @@ impl Pack for BrainstormPack {
         let ideate_msg = format!("Generate ideas for:\n\n{task}{ctx}");
 
         let mut steps = IndexMap::new();
-        steps.insert(StepId::from("ideate_a"), flow_step("ideator_a", ideate_msg.clone(), &[], 120_000));
-        steps.insert(StepId::from("ideate_b"), flow_step("ideator_b", ideate_msg.clone(), &[], 120_000));
-        steps.insert(StepId::from("ideate_c"), flow_step("ideator_c", ideate_msg, &[], 120_000));
+        steps.insert(StepId::from("ideate_a"), flow_step("ideator_a", ideate_msg.clone(), &[], 300_000));
+        steps.insert(StepId::from("ideate_b"), flow_step("ideator_b", ideate_msg.clone(), &[], 300_000));
+        steps.insert(StepId::from("ideate_c"), flow_step("ideator_c", ideate_msg, &[], 300_000));
         steps.insert(StepId::from("synthesize"), flow_step("synthesizer",
             "Synthesize all ideas below into a ranked list. For each: describe, assess feasibility, note trade-offs. Recommend top 2-3.\n\n\
              ## Practical\n{{ steps.ideate_a }}\n\n## Creative\n{{ steps.ideate_b }}\n\n## Contrarian\n{{ steps.ideate_c }}".into(),
-            &["ideate_a", "ideate_b", "ideate_c"], 120_000));
+            &["ideate_a", "ideate_b", "ideate_c"], 300_000));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Multi-perspective brainstorm".into()), steps });

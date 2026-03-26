@@ -11,6 +11,48 @@ use crate::session_runtime::SessionRuntime;
 
 use super::{parse_params, parse_session_id_for_runtime};
 
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
+fn normalize_send_error(
+    peer_name: Option<&str>,
+    error: &meerkat_core::comms::SendError,
+) -> serde_json::Value {
+    match error {
+        meerkat_core::comms::SendError::PeerNotFound(peer) => serde_json::json!({
+            "code": "peer_not_found_or_not_trusted",
+            "peer": peer,
+            "message": format!("peer '{peer}' is not found or not trusted"),
+        }),
+        meerkat_core::comms::SendError::PeerOffline => {
+            let peer = peer_name.unwrap_or("<unknown>");
+            serde_json::json!({
+                "code": "peer_unreachable",
+                "peer": peer,
+                "reason": "offline_or_no_ack",
+                "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
+            })
+        }
+        meerkat_core::comms::SendError::Internal(message)
+            if peer_name.is_some() && is_transport_internal(message) =>
+        {
+            let peer = peer_name.unwrap_or("<unknown>");
+            serde_json::json!({
+                "code": "peer_unreachable",
+                "peer": peer,
+                "reason": "transport_error",
+                "message": format!("peer '{peer}' is unreachable: transport_error"),
+                "details": message,
+            })
+        }
+        other => serde_json::json!({
+            "code": "send_failed",
+            "message": other.to_string(),
+        }),
+    }
+}
+
 /// Parameters for `comms/send`.
 #[derive(Deserialize)]
 pub struct CommsSendParams {
@@ -36,6 +78,8 @@ pub struct CommsSendParams {
     pub stream: Option<String>,
     #[serde(default)]
     pub allow_self_session: Option<bool>,
+    #[serde(default)]
+    pub handling_mode: Option<String>,
 }
 
 /// Parameters for `comms/peers`.
@@ -74,17 +118,18 @@ pub async fn handle_send(
     let cmd = match build_comms_command(&params, &session_id) {
         Ok(cmd) => cmd,
         Err(details) => {
-            return RpcResponse::error(
+            let normalized = serde_json::json!({
+                "code": "invalid_command",
+                "message": "Command validation failed",
+                "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
+                    &details
+                ),
+            });
+            return RpcResponse::error_with_data(
                 id,
                 error::INVALID_PARAMS,
-                serde_json::json!({
-                    "code": "invalid_command",
-                    "message": "Command validation failed",
-                    "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(
-                        &details
-                    ),
-                })
-                .to_string(),
+                "Command validation failed",
+                normalized,
             );
         }
     };
@@ -128,7 +173,15 @@ pub async fn handle_send(
             };
             RpcResponse::success(id, result)
         }
-        Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+        Err(e) => {
+            let normalized = normalize_send_error(params.to.as_deref(), &e);
+            let message = normalized
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Comms send failed")
+                .to_string();
+            RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, normalized)
+        }
     }
 }
 
@@ -170,6 +223,9 @@ pub async fn handle_peers(
                 "source": format!("{:?}", p.source),
                 "sendable_kinds": p.sendable_kinds,
                 "capabilities": p.capabilities,
+                "reachability": p.reachability,
+                "last_unreachable_reason": p.last_unreachable_reason,
+                "meta": p.meta,
             })
         })
         .collect();
@@ -195,6 +251,7 @@ pub(crate) fn build_comms_command(
         source: params.source.clone(),
         stream: params.stream.clone(),
         allow_self_session: params.allow_self_session,
+        handling_mode: params.handling_mode.clone(),
     };
     request.parse(session_id)
 }
@@ -235,6 +292,7 @@ mod tests {
             source: None,
             stream: None,
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
@@ -260,6 +318,7 @@ mod tests {
             source: None,
             stream: None,
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
@@ -285,6 +344,7 @@ mod tests {
             source: None,
             stream: Some("invalid".to_string()),
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
@@ -311,6 +371,7 @@ mod tests {
             source: None,
             stream: None,
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);
@@ -337,6 +398,7 @@ mod tests {
             source: Some("webhookd".to_string()),
             stream: None,
             allow_self_session: None,
+            handling_mode: None,
         };
         let session_id = meerkat_core::SessionId::new();
         let result = build_comms_command(&params, &session_id);

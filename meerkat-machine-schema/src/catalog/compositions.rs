@@ -1,0 +1,9687 @@
+use crate::{
+    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionInvariant,
+    CompositionInvariantKind, CompositionSchema, CompositionStateLimits, CompositionWitness,
+    CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
+    CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
+    EntryInput, Expr, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
+    ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
+};
+use std::collections::BTreeMap;
+
+pub fn runtime_pipeline_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "runtime_pipeline".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_ingress".into(),
+                machine_name: "RuntimeIngressMachine".into(),
+                actor: "ordinary_ingress".into(),
+            },
+            MachineInstance {
+                instance_id: "turn_execution".into(),
+                machine_name: "TurnExecutionMachine".into(),
+                actor: "turn_executor".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![
+            EntryInput {
+                name: "control_initialize".into(),
+                machine: "runtime_control".into(),
+                input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "runtime_admission_accepted".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AdmissionAccepted".into(),
+            },
+            EntryInput {
+                name: "admit_queued_work".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "AdmitQueued".into(),
+            },
+            EntryInput {
+                name: "admit_consumed_on_accept".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "AdmitConsumedOnAccept".into(),
+            },
+            EntryInput {
+                name: "stage_drain_snapshot".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "StageDrainSnapshot".into(),
+            },
+            EntryInput {
+                name: "control_attach_executor".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AttachExecutor".into(),
+            },
+            EntryInput {
+                name: "control_detach_executor".into(),
+                machine: "runtime_control".into(),
+                input_variant: "DetachExecutor".into(),
+            },
+            EntryInput {
+                name: "control_recover_requested".into(),
+                machine: "runtime_control".into(),
+                input_variant: "RecoverRequested".into(),
+            },
+            EntryInput {
+                name: "control_retire_requested".into(),
+                machine: "runtime_control".into(),
+                input_variant: "RetireRequested".into(),
+            },
+            EntryInput {
+                name: "control_reset_requested".into(),
+                machine: "runtime_control".into(),
+                input_variant: "ResetRequested".into(),
+            },
+            EntryInput {
+                name: "control_stop_requested".into(),
+                machine: "runtime_control".into(),
+                input_variant: "StopRequested".into(),
+            },
+            EntryInput {
+                name: "control_destroy_requested".into(),
+                machine: "runtime_control".into(),
+                input_variant: "DestroyRequested".into(),
+            },
+            EntryInput {
+                name: "primitive_applied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "PrimitiveApplied".into(),
+            },
+            EntryInput {
+                name: "llm_returned_tool_calls".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedToolCalls".into(),
+            },
+            EntryInput {
+                name: "llm_returned_terminal".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedTerminal".into(),
+            },
+            EntryInput {
+                name: "tool_calls_resolved".into(),
+                machine: "turn_execution".into(),
+                input_variant: "ToolCallsResolved".into(),
+            },
+            EntryInput {
+                name: "boundary_continue".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryContinue".into(),
+            },
+            EntryInput {
+                name: "boundary_complete".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryComplete".into(),
+            },
+            EntryInput {
+                name: "recoverable_failure".into(),
+                machine: "turn_execution".into(),
+                input_variant: "RecoverableFailure".into(),
+            },
+            EntryInput {
+                name: "fatal_failure".into(),
+                machine: "turn_execution".into(),
+                input_variant: "FatalFailure".into(),
+            },
+            EntryInput {
+                name: "retry_requested".into(),
+                machine: "turn_execution".into(),
+                input_variant: "RetryRequested".into(),
+            },
+            EntryInput {
+                name: "cancel_now".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancelNow".into(),
+            },
+            EntryInput {
+                name: "cancel_after_boundary".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancelAfterBoundary".into(),
+            },
+            EntryInput {
+                name: "cancellation_observed".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancellationObserved".into(),
+            },
+            EntryInput {
+                name: "acknowledge_terminal".into(),
+                machine: "turn_execution".into(),
+                input_variant: "AcknowledgeTerminal".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "admitted_work_enters_ingress".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "content_shape".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "policy".into(),
+                        source: RouteBindingSource::Literal(Expr::String("PromptAdmission".into())),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "staged_run_notifies_control".into(),
+                from_machine: "runtime_ingress".into(),
+                effect_variant: "ReadyForRun".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "control_starts_execution".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget {
+                    machine: "turn_execution".into(),
+                    input_variant: "StartConversationRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_boundary_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "BoundaryApplied".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "BoundaryApplied".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "run_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "run_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "boundary_sequence".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "boundary_sequence".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_completion_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_completion_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_failure_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_failure_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_cancel_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_cancel_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+            reason: "control commands preempt ordinary admission".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "admitted_work_reaches_ingress_through_runtime_control".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "admitted_work_enters_ingress".into(),
+                    to_machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "runtime-admitted ordinary work reaches ingress only through the runtime-control admission handoff".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "control_preempts_ordinary_work".into(),
+                kind: CompositionInvariantKind::SchedulerRulePresent {
+                    rule: SchedulerRule::PreemptWhenReady {
+                        higher: "control_plane".into(),
+                        lower: "ordinary_ingress".into(),
+                    },
+                },
+                statement: "control_plane outranks ordinary_ingress whenever both are ready".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "begin_run_requires_staged_drain".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                    from_machine: "runtime_ingress".into(),
+                    effect_variant: "ReadyForRun".into(),
+                },
+                statement: "runtime control may begin a run only from ingress-owned staged work"
+                    .into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "begun_run_must_start_execution".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "turn_execution".into(),
+                    input_variant: "StartConversationRun".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitRunPrimitive".into(),
+                },
+                statement:
+                    "a begun run must flow into turn execution through the canonical primitive handoff"
+                        .into(),
+                references_machines: vec!["runtime_control".into(), "turn_execution".into()],
+                references_actors: vec!["control_plane".into(), "turn_executor".into()],
+            },
+            CompositionInvariant {
+                name: "execution_failure_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunFailed".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "turn-execution failure must route into ingress rollback and runtime lifecycle handling"
+                        .into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "execution_cancel_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCancelled".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "turn-execution cancellation must route into ingress rollback and runtime lifecycle handling"
+                        .into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "execution_completion_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCompleted".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCompleted".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCompleted".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "turn-execution completion must route into ingress consumption and runtime lifecycle handling"
+                        .into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "prompt_queue_idle".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Idle"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 3,
+                    pending_input_limit: 2,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 2,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "prompt_steer_idle".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Idle"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 3,
+                    pending_input_limit: 2,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 3,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+            // Attached admission witnesses — parallel to idle witnesses
+            CompositionWitness {
+                name: "prompt_queue_attached".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AttachExecutor".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Attached"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AttachFromIdle"),
+                    witness_transition("runtime_control", "AdmissionAcceptedAttachedQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AttachFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AttachFromIdle",
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 4,
+                    pending_input_limit: 3,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 2,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "prompt_steer_attached".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AttachExecutor".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Attached"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AttachFromIdle"),
+                    witness_transition("runtime_control", "AdmissionAcceptedAttachedSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AttachFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AttachFromIdle",
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedAttachedSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 4,
+                    pending_input_limit: 3,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 3,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "prompt_queue_running".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "seed_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("seed_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "admitted_work_enters_ingress".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Running"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(false),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(false),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(false),
+                            },
+                        ],
+                    ),
+                    witness_state("turn_execution", Some("ApplyingPrimitive"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("runtime_control", "AdmissionAcceptedRunningQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "runtime_control",
+                        "AdmissionAcceptedRunningQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedRunningQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 4,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 5,
+                    seq_limit: 3,
+                    set_limit: 3,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "prompt_steer_running".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "seed_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("seed_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "admitted_work_enters_ingress".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Running"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "wake_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_pending".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("prompt_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "wake_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "process_requested".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    ),
+                    witness_state("turn_execution", Some("ApplyingPrimitive"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("runtime_control", "AdmissionAcceptedRunningSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "runtime_control",
+                        "AdmissionAcceptedRunningSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedRunningSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 4,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 6,
+                    seq_limit: 3,
+                    set_limit: 3,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "steer_batch_running".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "seed_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            false,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "prompt_2",
+                            "WorkInput",
+                            "InlineImage",
+                            false,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("seed_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_2".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![
+                                    Expr::String("prompt_1".into()),
+                                    Expr::String("prompt_2".into()),
+                                ]),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![
+                    "control_starts_execution".into(),
+                    "admitted_work_enters_ingress".into(),
+                    "staged_run_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "current_run".into(),
+                                expr: Expr::Some(Box::new(Expr::String("runid_2".into()))),
+                            },
+                            CompositionWitnessField {
+                                field: "current_run_contributors".into(),
+                                expr: Expr::SeqLiteral(vec![
+                                    Expr::String("prompt_1".into()),
+                                    Expr::String("prompt_2".into()),
+                                ]),
+                            },
+                            CompositionWitnessField {
+                                field: "queue".into(),
+                                expr: Expr::SeqLiteral(vec![]),
+                            },
+                        ],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("runtime_control", "AdmissionAcceptedRunningSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedRunningSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 5,
+                    emitted_effect_limit: 8,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "success_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) },
+                            CompositionWitnessField { field: "contributing_work_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "execution_boundary_updates_ingress".into(),
+                    "execution_completion_updates_ingress".into(),
+                    "execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![CompositionWitnessField {
+                        field: "current_run_id".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("runtime_ingress", Some("Active"), vec![CompositionWitnessField {
+                        field: "current_run".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "failure_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) },
+                            CompositionWitnessField { field: "contributing_work_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "FatalFailure".into(),
+                        fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "execution_failure_updates_ingress".into(),
+                    "execution_failure_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![CompositionWitnessField {
+                        field: "current_run_id".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("runtime_ingress", Some("Active"), vec![CompositionWitnessField {
+                        field: "current_run".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("turn_execution", Some("Failed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_ingress",
+                        "RunFailedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_control",
+                        "RunFailedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 7,
+                    pending_input_limit: 4,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 5,
+                    emitted_effect_limit: 5,
+                    seq_limit: 4,
+                    set_limit: 5,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "cancel_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) },
+                            CompositionWitnessField { field: "contributing_work_ids".into(), expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]) },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelNow".into(),
+                        fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancellationObserved".into(),
+                        fields: vec![CompositionWitnessField { field: "run_id".into(), expr: Expr::String("runid_1".into()) }],
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "execution_cancel_updates_ingress".into(),
+                    "execution_cancel_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![CompositionWitnessField {
+                        field: "current_run_id".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("runtime_ingress", Some("Active"), vec![CompositionWitnessField {
+                        field: "current_run".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancellationObserved"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_ingress",
+                        "RunCancelledFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_control",
+                        "RunCancelledToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 5,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 5,
+                    emitted_effect_limit: 5,
+                    seq_limit: 5,
+                    set_limit: 5,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "cancel_after_boundary_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("inputid_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields("runid_1", "TextOnly", false, false),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelAfterBoundary".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "staged_run_notifies_control".into(),
+                    "control_starts_execution".into(),
+                    "execution_cancel_updates_ingress".into(),
+                    "execution_cancel_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![CompositionWitnessField {
+                        field: "current_run".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
+                    witness_transition("turn_execution", "CancelAfterBoundaryFromCallingLlm"),
+                    witness_transition("turn_execution", "LlmReturnedTerminal"),
+                    witness_transition("turn_execution", "BoundaryCompleteCancelsAfterBoundary"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "PrimitiveAppliedConversationTurn",
+                        "turn_execution",
+                        "CancelAfterBoundaryFromCallingLlm",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancelAfterBoundaryFromCallingLlm",
+                        "turn_execution",
+                        "BoundaryCompleteCancelsAfterBoundary",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryCompleteCancelsAfterBoundary",
+                        "runtime_ingress",
+                        "RunCancelledFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryCompleteCancelsAfterBoundary",
+                        "runtime_control",
+                        "RunCancelledToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 5,
+                    set_limit: 5,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "control_preemption".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "inputid_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "policydecision_1",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "ordinary_ingress".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "runtime_control",
+                    "Initialize",
+                    "runtime_ingress",
+                        "AdmitQueuedSteer",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 2,
+                    pending_input_limit: 2,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 1,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 1,
+                },
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::from([
+            ("ContentShapeValues".into(), 1),
+            ("HandlingModeValues".into(), 2),
+            ("PolicyDecisionValues".into(), 1),
+            ("RequestIdValues".into(), 1),
+            ("ReservationKeyValues".into(), 1),
+            ("RunIdValues".into(), 1),
+            ("StringValues".into(), 1),
+            ("WorkIdValues".into(), 2),
+        ]),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    }
+}
+
+pub fn external_tool_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "external_tool_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "external_tool_surface".into(),
+                machine_name: "ExternalToolSurfaceMachine".into(),
+                actor: "surface_boundary".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "turn_execution".into(),
+                machine_name: "TurnExecutionMachine".into(),
+                actor: "turn_executor".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("surface_boundary"),
+            machine_actor("control_plane"),
+            machine_actor("turn_executor"),
+            owner_actor("surface_host"),
+        ],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "surface_completion".into(),
+                producer_instance: "external_tool_surface".into(),
+                effect_variant: "ScheduleSurfaceCompletion".into(),
+                realizing_actor: "surface_host".into(),
+                correlation_fields: vec![
+                    "surface_id".into(),
+                    "operation".into(),
+                    "pending_task_sequence".into(),
+                    "staged_intent_sequence".into(),
+                    "applied_at_turn".into(),
+                ],
+                obligation_fields: vec![
+                    "surface_id".into(),
+                    "operation".into(),
+                    "pending_task_sequence".into(),
+                    "staged_intent_sequence".into(),
+                    "applied_at_turn".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "external_tool_surface".into(),
+                        input_variant: "PendingSucceeded".into(),
+                        field_bindings: vec![
+                            binding("surface_id", obligation_field("surface_id")),
+                            binding("operation", obligation_field("operation")),
+                            binding(
+                                "pending_task_sequence",
+                                obligation_field("pending_task_sequence"),
+                            ),
+                            binding(
+                                "staged_intent_sequence",
+                                obligation_field("staged_intent_sequence"),
+                            ),
+                            binding("applied_at_turn", obligation_field("applied_at_turn")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "external_tool_surface".into(),
+                        input_variant: "PendingFailed".into(),
+                        field_bindings: vec![
+                            binding("surface_id", obligation_field("surface_id")),
+                            binding("operation", obligation_field("operation")),
+                            binding(
+                                "pending_task_sequence",
+                                obligation_field("pending_task_sequence"),
+                            ),
+                            binding(
+                                "staged_intent_sequence",
+                                obligation_field("staged_intent_sequence"),
+                            ),
+                            binding("applied_at_turn", obligation_field("applied_at_turn")),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback under surface connection liveness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-mcp/src/generated/protocol_surface_completion.rs",
+                    ProtocolGenerationMode::EffectExtractor,
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceAuthority"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceMutator"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceInput"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceEffect"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceTransition"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceError"),
+                    None,
+                    None,
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition, SurfaceDeltaOperation, SurfaceId, TurnNumber};",
+                    ],
+                ),
+            },
+            EffectHandoffProtocol {
+                name: "surface_snapshot_alignment".into(),
+                producer_instance: "external_tool_surface".into(),
+                effect_variant: "RefreshVisibleSurfaceSet".into(),
+                realizing_actor: "surface_host".into(),
+                correlation_fields: vec!["snapshot_epoch".into()],
+                obligation_fields: vec!["snapshot_epoch".into()],
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: "external_tool_surface".into(),
+                    input_variant: "SnapshotAligned".into(),
+                    field_bindings: vec![binding(
+                        "snapshot_epoch",
+                        obligation_field("snapshot_epoch"),
+                    )],
+                }],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual snapshot acknowledgement under surface host liveness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs",
+                    ProtocolGenerationMode::EffectExtractor,
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceAuthority"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceMutator"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceInput"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceEffect"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceTransition"),
+                    Some("crate::external_tool_surface_authority::ExternalToolSurfaceError"),
+                    None,
+                    None,
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::external_tool_surface_authority::{ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError, ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition};",
+                    ],
+                ),
+            },
+        ],
+        entry_inputs: vec![
+            EntryInput {
+                name: "control_initialize".into(),
+                machine: "runtime_control".into(),
+                input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "stage_add".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "StageAdd".into(),
+            },
+            EntryInput {
+                name: "stage_remove".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "StageRemove".into(),
+            },
+            EntryInput {
+                name: "stage_reload".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "StageReload".into(),
+            },
+            EntryInput {
+                name: "pending_succeeded".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "PendingSucceeded".into(),
+            },
+            EntryInput {
+                name: "pending_failed".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "PendingFailed".into(),
+            },
+            EntryInput {
+                name: "call_started".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "CallStarted".into(),
+            },
+            EntryInput {
+                name: "call_finished".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "CallFinished".into(),
+            },
+            EntryInput {
+                name: "finalize_removal_clean".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "FinalizeRemovalClean".into(),
+            },
+            EntryInput {
+                name: "finalize_removal_forced".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "FinalizeRemovalForced".into(),
+            },
+            EntryInput {
+                name: "snapshot_aligned".into(),
+                machine: "external_tool_surface".into(),
+                input_variant: "SnapshotAligned".into(),
+            },
+            EntryInput {
+                name: "turn_start_conversation".into(),
+                machine: "turn_execution".into(),
+                input_variant: "StartConversationRun".into(),
+            },
+            EntryInput {
+                name: "turn_primitive_applied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "PrimitiveApplied".into(),
+            },
+            EntryInput {
+                name: "turn_llm_returned_terminal".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedTerminal".into(),
+            },
+            EntryInput {
+                name: "turn_boundary_complete".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryComplete".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "surface_delta_notifies_runtime_control".into(),
+                from_machine: "external_tool_surface".into(),
+                effect_variant: "EmitExternalToolDelta".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "ExternalToolDeltaReceived".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "turn_boundary_applies_surface_changes".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "BoundaryApplied".into(),
+                to: RouteTarget {
+                    machine: "external_tool_surface".into(),
+                    input_variant: "ApplyBoundary".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "surface_id".into(),
+                        source: RouteBindingSource::OwnerProvided,
+                    },
+                    RouteFieldBinding {
+                        to_field: "applied_at_turn".into(),
+                        source: RouteBindingSource::OwnerProvided,
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "surface_boundary".into(),
+            reason: "runtime control decisions outrank pending surface churn".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "surface_boundary".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "external_tool_delta_enters_runtime_control".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_control".into(),
+                    input_variant: "ExternalToolDeltaReceived".into(),
+                    from_machine: "external_tool_surface".into(),
+                    effect_variant: "EmitExternalToolDelta".into(),
+                },
+                statement:
+                    "canonical external-tool deltas enter runtime through the runtime-control boundary"
+                        .into(),
+                references_machines: vec!["external_tool_surface".into(), "runtime_control".into()],
+                references_actors: vec!["surface_boundary".into(), "control_plane".into()],
+            },
+            CompositionInvariant {
+                name: "boundary_application_reaches_surface_authority".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "turn_boundary_applies_surface_changes".into(),
+                    to_machine: "external_tool_surface".into(),
+                    input_variant: "ApplyBoundary".into(),
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "BoundaryApplied".into(),
+                },
+                statement:
+                    "turn-execution boundary application enters external-tool surface authority through the explicit owner-bridged route with owner-selected surface identity and applied_at_turn"
+                        .into(),
+                references_machines: vec!["turn_execution".into(), "external_tool_surface".into()],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "surface_boundary".into(),
+                    "surface_host".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "control_preempts_surface_boundary".into(),
+                kind: CompositionInvariantKind::SchedulerRulePresent {
+                    rule: SchedulerRule::PreemptWhenReady {
+                        higher: "control_plane".into(),
+                        lower: "surface_boundary".into(),
+                    },
+                },
+                statement: "runtime control outranks surface-boundary work when both are ready".into(),
+                references_machines: vec!["runtime_control".into(), "external_tool_surface".into()],
+                references_actors: vec!["control_plane".into(), "surface_boundary".into()],
+            },
+            CompositionInvariant {
+                name: "surface_completion_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "external_tool_surface".into(),
+                    effect_variant: "ScheduleSurfaceCompletion".into(),
+                    protocol_name: "surface_completion".into(),
+                },
+                statement:
+                    "ScheduleSurfaceCompletion effect is covered by surface_completion handoff protocol"
+                        .into(),
+                references_machines: vec!["external_tool_surface".into()],
+                references_actors: vec!["surface_host".into()],
+            },
+            CompositionInvariant {
+                name: "surface_snapshot_alignment_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "external_tool_surface".into(),
+                    effect_variant: "RefreshVisibleSurfaceSet".into(),
+                    protocol_name: "surface_snapshot_alignment".into(),
+                },
+                statement:
+                    "RefreshVisibleSurfaceSet effect is covered by surface_snapshot_alignment handoff protocol"
+                        .into(),
+                references_machines: vec!["external_tool_surface".into()],
+                references_actors: vec!["surface_host".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "surface_add_notifies_control".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "StageAdd".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "surface_id".into(),
+                            expr: Expr::String("default_surface".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "StartConversationRun".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "turn_boundary_applies_surface_changes".into(),
+                    "surface_delta_notifies_runtime_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("external_tool_surface", Some("Operating"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("external_tool_surface", "StageAdd"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
+                    witness_transition("turn_execution", "LlmReturnedTerminal"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("external_tool_surface", "ApplyBoundaryAdd"),
+                    witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "turn_execution",
+                        "LlmReturnedTerminal",
+                        "turn_execution",
+                        "BoundaryComplete",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                    ),
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                        "runtime_control",
+                        "ExternalToolDeltaReceivedIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 4,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "turn_boundary_reaches_surface".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "StageAdd".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "surface_id".into(),
+                            expr: Expr::String("default_surface".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "StartConversationRun".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "turn_boundary_applies_surface_changes".into(),
+                    "surface_delta_notifies_runtime_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                    witness_state("external_tool_surface", Some("Operating"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("external_tool_surface", "StageAdd"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
+                    witness_transition("turn_execution", "LlmReturnedTerminal"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("external_tool_surface", "ApplyBoundaryAdd"),
+                    witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "turn_execution",
+                        "LlmReturnedTerminal",
+                        "turn_execution",
+                        "BoundaryComplete",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                    ),
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                        "runtime_control",
+                        "ExternalToolDeltaReceivedIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 14,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 8,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "control_preempts_surface".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "StageAdd".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "surface_id".into(),
+                            expr: Expr::String("surface_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "surface_boundary".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("external_tool_surface", "StageAdd"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "runtime_control",
+                    "Initialize",
+                    "external_tool_surface",
+                    "StageAdd",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 2,
+                    pending_input_limit: 2,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 1,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+            // Witness: surface completion handoff protocol feedback path
+            CompositionWitness {
+                name: "surface_completion_feedback".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "StageAdd".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "surface_id".into(),
+                            expr: Expr::String("default_surface".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "StartConversationRun".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // Owner feedback: PendingSucceeded closes the handoff obligation
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "PendingSucceeded".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "surface_id".into(),
+                                expr: Expr::String("default_surface".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation".into(),
+                                expr: Expr::String("Add".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "pending_task_sequence".into(),
+                                expr: Expr::U64(1),
+                            },
+                            CompositionWitnessField {
+                                field: "staged_intent_sequence".into(),
+                                expr: Expr::U64(1),
+                            },
+                            CompositionWitnessField {
+                                field: "applied_at_turn".into(),
+                                expr: Expr::String("turn_1".into()),
+                            },
+                        ],
+                    },
+                    // Owner feedback: SnapshotAligned closes snapshot-alignment obligation
+                    CompositionWitnessInput {
+                        machine: "external_tool_surface".into(),
+                        input_variant: "SnapshotAligned".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "snapshot_epoch".into(),
+                            expr: Expr::U64(1),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "turn_boundary_applies_surface_changes".into(),
+                    "surface_delta_notifies_runtime_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("external_tool_surface", Some("Operating"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("external_tool_surface", "StageAdd"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "PrimitiveAppliedConversationTurn"),
+                    witness_transition("turn_execution", "LlmReturnedTerminal"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("external_tool_surface", "ApplyBoundaryAdd"),
+                    witness_transition("runtime_control", "ExternalToolDeltaReceivedIdle"),
+                    witness_transition("external_tool_surface", "PendingSucceededAdd"),
+                    witness_transition("external_tool_surface", "SnapshotAligned"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "turn_execution",
+                        "LlmReturnedTerminal",
+                        "turn_execution",
+                        "BoundaryComplete",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                    ),
+                    // ApplyBoundaryAdd emits ScheduleSurfaceCompletion — owner realizes
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "ApplyBoundaryAdd",
+                        "external_tool_surface",
+                        "PendingSucceededAdd",
+                    ),
+                    witness_transition_order(
+                        "external_tool_surface",
+                        "PendingSucceededAdd",
+                        "external_tool_surface",
+                        "SnapshotAligned",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 12,
+                    pending_input_limit: 8,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 8,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 3,
+                },
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        // Focused analysis bundle: tests tool surface interactions, not the full
+        // runtime pipeline. SubmitRunPrimitive → TurnExecution route is intentionally
+        // omitted (covered by runtime_pipeline composition).
+        closed_world: false,
+    }
+}
+
+pub fn peer_runtime_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "peer_runtime_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "peer_comms".into(),
+                machine_name: "PeerCommsMachine".into(),
+                actor: "peer_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_ingress".into(),
+                machine_name: "RuntimeIngressMachine".into(),
+                actor: "ordinary_ingress".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("peer_plane"),
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![
+            EntryInput {
+                name: "control_initialize".into(),
+                machine: "runtime_control".into(),
+                input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "trust_peer".into(),
+                machine: "peer_comms".into(),
+                input_variant: "TrustPeer".into(),
+            },
+            EntryInput {
+                name: "receive_peer_envelope".into(),
+                machine: "peer_comms".into(),
+                input_variant: "ReceivePeerEnvelope".into(),
+            },
+            EntryInput {
+                name: "submit_typed_peer_input".into(),
+                machine: "peer_comms".into(),
+                input_variant: "SubmitTypedPeerInput".into(),
+            },
+            EntryInput {
+                name: "runtime_admission_accepted".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AdmissionAccepted".into(),
+            },
+            EntryInput {
+                name: "ingress_stage_drain_snapshot".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "StageDrainSnapshot".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "peer_candidate_enters_runtime_admission".into(),
+                from_machine: "peer_comms".into(),
+                effect_variant: "SubmitPeerInputCandidate".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "raw_item_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "content_shape".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Literal(Expr::String("Steer".into())),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "admitted_peer_work_enters_ingress".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "content_shape".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "policy".into(),
+                        source: RouteBindingSource::Literal(Expr::String("PeerQueued".into())),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "peer_ingress_ready_begins_run".into(),
+                from_machine: "runtime_ingress".into(),
+                effect_variant: "ReadyForRun".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "peer_plane".into(),
+            reason: "runtime admission/control outranks peer delivery once both are ready".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "peer_plane".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "peer_work_enters_runtime_via_canonical_admission".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                    from_machine: "peer_comms".into(),
+                    effect_variant: "SubmitPeerInputCandidate".into(),
+                },
+                statement:
+                    "peer-classified work enters the runtime through the runtime-control admission surface"
+                        .into(),
+                references_machines: vec!["peer_comms".into(), "runtime_control".into()],
+                references_actors: vec!["peer_plane".into(), "control_plane".into()],
+            },
+            CompositionInvariant {
+                name: "peer_admission_flows_into_ingress".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "peer-admitted work is handed from runtime control into canonical ingress ownership"
+                        .into(),
+                references_machines: vec![
+                    "peer_comms".into(),
+                    "runtime_control".into(),
+                    "runtime_ingress".into(),
+                ],
+                references_actors: vec![
+                    "peer_plane".into(),
+                    "control_plane".into(),
+                    "ordinary_ingress".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "control_preempts_peer_delivery".into(),
+                kind: CompositionInvariantKind::SchedulerRulePresent {
+                    rule: SchedulerRule::PreemptWhenReady {
+                        higher: "control_plane".into(),
+                        lower: "peer_plane".into(),
+                    },
+                },
+                statement: "runtime control outranks peer delivery once both planes are ready".into(),
+                references_machines: vec!["peer_comms".into(), "runtime_control".into()],
+                references_actors: vec!["peer_plane".into(), "control_plane".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "trusted_peer_enters_runtime".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "TrustPeer".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "peer_id".into(),
+                            expr: Expr::String("peer_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "ReceivePeerEnvelope".into(),
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "Message",
+                            "see attached diagram",
+                            "InlineImage",
+                            None,
+                            None,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "SubmitTypedPeerInput".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "raw_item_id".into(),
+                            expr: Expr::String("raw_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec!["peer_candidate_enters_runtime_admission".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("peer_comms", Some("Delivered"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("peer_comms", "TrustPeer"),
+                    witness_transition("peer_comms", "ReceiveTrustedPeerEnvelope"),
+                    witness_transition("peer_comms", "SubmitTypedPeerInputDelivered"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "peer_comms",
+                    "ReceiveTrustedPeerEnvelope",
+                    "peer_comms",
+                    "SubmitTypedPeerInputDelivered",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 5,
+                    pending_input_limit: 4,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 2,
+                    emitted_effect_limit: 2,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "admitted_peer_work_enters_ingress".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "TrustPeer".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "peer_id".into(),
+                            expr: Expr::String("peer_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "ReceivePeerEnvelope".into(),
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "request",
+                            "inspect this inline image",
+                            "InlineImage",
+                            Some("req_1"),
+                            Some("resv_1"),
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "SubmitTypedPeerInput".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "raw_item_id".into(),
+                            expr: Expr::String("raw_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "raw_1",
+                            "PeerInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec![
+                    "peer_candidate_enters_runtime_admission".into(),
+                    "admitted_peer_work_enters_ingress".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("peer_comms", "SubmitTypedPeerInputDelivered"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "peer_comms",
+                        "SubmitTypedPeerInputDelivered",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 6,
+                    pending_input_limit: 5,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 3,
+                    seq_limit: 5,
+                    set_limit: 5,
+                    map_limit: 5,
+                },
+            },
+            CompositionWitness {
+                name: "peer_ingress_ready_begins_run".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "TrustPeer".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "peer_id".into(),
+                            expr: Expr::String("peer_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "ReceivePeerEnvelope".into(),
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "request",
+                            "run staging handoff",
+                            "TextOnly",
+                            Some("req_1"),
+                            Some("resv_1"),
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "SubmitTypedPeerInput".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "raw_item_id".into(),
+                            expr: Expr::String("raw_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "raw_1",
+                            "PeerInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("raw_1".into())]),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![
+                    "peer_candidate_enters_runtime_admission".into(),
+                    "admitted_peer_work_enters_ingress".into(),
+                    "peer_ingress_ready_begins_run".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Running"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("peer_comms", "SubmitTypedPeerInputDelivered"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 7,
+                    pending_input_limit: 6,
+                    pending_route_limit: 3,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 4,
+                    seq_limit: 5,
+                    set_limit: 5,
+                    map_limit: 5,
+                },
+            },
+            CompositionWitness {
+                name: "control_preempts_peer_delivery".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "TrustPeer".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "peer_id".into(),
+                            expr: Expr::String("peer_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "ReceivePeerEnvelope".into(),
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "Message",
+                            "priority handoff",
+                            "TextOnly",
+                            None,
+                            None,
+                        ),
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "peer_plane".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("peer_comms", "TrustPeer"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "runtime_control",
+                    "Initialize",
+                    "peer_comms",
+                    "TrustPeer",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 3,
+                    pending_input_limit: 3,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 1,
+                    seq_limit: 3,
+                    set_limit: 3,
+                    map_limit: 3,
+                },
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    }
+}
+
+pub fn ops_runtime_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "ops_runtime_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "ops_lifecycle".into(),
+                machine_name: "OpsLifecycleMachine".into(),
+                actor: "ops_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_ingress".into(),
+                machine_name: "RuntimeIngressMachine".into(),
+                actor: "ordinary_ingress".into(),
+            },
+            MachineInstance {
+                instance_id: "turn_execution".into(),
+                machine_name: "TurnExecutionMachine".into(),
+                actor: "turn_executor".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("ops_plane"),
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+            owner_actor("agent_loop"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "ops_barrier_satisfaction".into(),
+            producer_instance: "ops_lifecycle".into(),
+            effect_variant: "WaitAllSatisfied".into(),
+            realizing_actor: "agent_loop".into(),
+            correlation_fields: vec!["operation_ids".into()],
+            obligation_fields: vec!["wait_request_id".into(), "operation_ids".into()],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "turn_execution".into(),
+                input_variant: "OpsBarrierSatisfied".into(),
+                field_bindings: vec![
+                    binding("run_id", owner_context("run_id")),
+                    binding("operation_ids", obligation_field("operation_ids")),
+                ],
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback under task-scheduling fairness".into(),
+            ),
+            rust: protocol_rust(
+                "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::turn_execution_authority::TurnExecutionAuthority"),
+                Some("crate::turn_execution_authority::TurnExecutionMutator"),
+                Some("crate::turn_execution_authority::TurnExecutionInput"),
+                None,
+                Some("crate::turn_execution_authority::TurnExecutionTransition"),
+                Some("crate::error::AgentError"),
+                None,
+                Some("crate::ops_lifecycle::WaitAllSatisfied"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::AgentError;",
+                    "use crate::lifecycle::identifiers::{RunId, WaitRequestId};",
+                    "use crate::ops::OperationId;",
+                    "use crate::ops_lifecycle::WaitAllSatisfied;",
+                    "use crate::turn_execution_authority::{TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition};",
+                ],
+            ),
+        }],
+        entry_inputs: vec![
+            EntryInput {
+                name: "control_initialize".into(),
+                machine: "runtime_control".into(),
+                input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "ops_wait_all".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "BeginWaitAll".into(),
+            },
+            EntryInput {
+                name: "turn_ops_barrier_satisfied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "OpsBarrierSatisfied".into(),
+            },
+            EntryInput {
+                name: "register_operation".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "RegisterOperation".into(),
+            },
+            EntryInput {
+                name: "provisioning_succeeded".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "ProvisioningSucceeded".into(),
+            },
+            EntryInput {
+                name: "provisioning_failed".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "ProvisioningFailed".into(),
+            },
+            EntryInput {
+                name: "peer_ready".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "PeerReady".into(),
+            },
+            EntryInput {
+                name: "register_watcher".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "RegisterWatcher".into(),
+            },
+            EntryInput {
+                name: "progress_reported".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "ProgressReported".into(),
+            },
+            EntryInput {
+                name: "complete_operation".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "CompleteOperation".into(),
+            },
+            EntryInput {
+                name: "fail_operation".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "FailOperation".into(),
+            },
+            EntryInput {
+                name: "cancel_operation".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "CancelOperation".into(),
+            },
+            EntryInput {
+                name: "retire_requested".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "RetireRequested".into(),
+            },
+            EntryInput {
+                name: "retire_completed".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "RetireCompleted".into(),
+            },
+            EntryInput {
+                name: "collect_terminal".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "CollectTerminal".into(),
+            },
+            EntryInput {
+                name: "runtime_admission_accepted".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AdmissionAccepted".into(),
+            },
+            EntryInput {
+                name: "ingress_stage_drain_snapshot".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "StageDrainSnapshot".into(),
+            },
+            EntryInput {
+                name: "turn_primitive_applied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "PrimitiveApplied".into(),
+            },
+            EntryInput {
+                name: "turn_llm_returned_terminal".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedTerminal".into(),
+            },
+            EntryInput {
+                name: "turn_boundary_complete".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryComplete".into(),
+            },
+            EntryInput {
+                name: "turn_fatal_failure".into(),
+                machine: "turn_execution".into(),
+                input_variant: "FatalFailure".into(),
+            },
+            EntryInput {
+                name: "turn_cancel_now".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancelNow".into(),
+            },
+            EntryInput {
+                name: "turn_cancel_after_boundary".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancelAfterBoundary".into(),
+            },
+            EntryInput {
+                name: "turn_cancellation_observed".into(),
+                machine: "turn_execution".into(),
+                input_variant: "CancellationObserved".into(),
+            },
+            // Barrier-related turn_execution inputs
+            EntryInput {
+                name: "turn_llm_returned_tool_calls".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedToolCalls".into(),
+            },
+            EntryInput {
+                name: "turn_register_pending_ops".into(),
+                machine: "turn_execution".into(),
+                input_variant: "RegisterPendingOps".into(),
+            },
+            EntryInput {
+                name: "turn_tool_calls_resolved".into(),
+                machine: "turn_execution".into(),
+                input_variant: "ToolCallsResolved".into(),
+            },
+            EntryInput {
+                name: "turn_boundary_continue".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryContinue".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "op_event_enters_runtime_admission".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "SubmitOpEvent".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "operation_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Literal(Expr::String("Steer".into())),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "admitted_op_work_enters_ingress".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "policy".into(),
+                        source: RouteBindingSource::Literal(Expr::String("OperationQueued".into())),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "ingress_ready_starts_runtime_control".into(),
+                from_machine: "runtime_ingress".into(),
+                effect_variant: "ReadyForRun".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "runtime_control_starts_execution".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget {
+                    machine: "turn_execution".into(),
+                    input_variant: "StartConversationRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_boundary_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "BoundaryApplied".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "BoundaryApplied".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "run_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "run_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "boundary_sequence".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "boundary_sequence".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_completion_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_completion_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_failure_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_failure_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_cancel_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "execution_cancel_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+            reason: "runtime control preempts ordinary ingress while async-op work is being routed".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "async_op_events_reenter_runtime_via_operation_input".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                    from_machine: "ops_lifecycle".into(),
+                    effect_variant: "SubmitOpEvent".into(),
+                },
+                statement:
+                    "async-operation lifecycle events re-enter runtime through the canonical operation-input admission surface"
+                        .into(),
+                references_machines: vec!["ops_lifecycle".into(), "runtime_control".into()],
+                references_actors: vec!["ops_plane".into(), "control_plane".into()],
+            },
+            CompositionInvariant {
+                name: "admitted_op_work_flows_into_ingress".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "runtime-admitted operation work is handed into canonical ingress ownership"
+                        .into(),
+                references_machines: vec![
+                    "ops_lifecycle".into(),
+                    "runtime_control".into(),
+                    "runtime_ingress".into(),
+                ],
+                references_actors: vec![
+                    "ops_plane".into(),
+                    "control_plane".into(),
+                    "ordinary_ingress".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "op_execution_failure_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunFailed".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "turn-execution failure after operation admission is handled by both ingress and runtime control"
+                        .into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "op_execution_cancel_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCancelled".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "turn-execution cancellation after operation admission is handled by both ingress and runtime control"
+                        .into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "barrier_satisfaction_handoff_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "ops_lifecycle".into(),
+                    effect_variant: "WaitAllSatisfied".into(),
+                    protocol_name: "ops_barrier_satisfaction".into(),
+                },
+                statement:
+                    "OpsLifecycle WaitAllSatisfied effect is covered by the ops_barrier_satisfaction handoff protocol, requiring owner feedback before TurnExecution advances"
+                        .into(),
+                references_machines: vec![
+                    "ops_lifecycle".into(),
+                    "turn_execution".into(),
+                ],
+                references_actors: vec![
+                    "ops_plane".into(),
+                    "agent_loop".into(),
+                    "turn_executor".into(),
+                ],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "op_success_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("BackgroundToolOp".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "op_event_enters_runtime_admission".into(),
+                    "admitted_op_work_enters_ingress".into(),
+                    "ingress_ready_starts_runtime_control".into(),
+                    "runtime_control_starts_execution".into(),
+                    "execution_boundary_updates_ingress".into(),
+                    "execution_completion_updates_ingress".into(),
+                    "execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("ops_lifecycle", Some("Active"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "RegisterOperation"),
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "ProvisioningSucceeded",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 7,
+                    emitted_effect_limit: 7,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "op_failure_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("BackgroundToolOp".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "FatalFailure".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "op_event_enters_runtime_admission".into(),
+                    "admitted_op_work_enters_ingress".into(),
+                    "ingress_ready_starts_runtime_control".into(),
+                    "runtime_control_starts_execution".into(),
+                    "execution_failure_updates_ingress".into(),
+                    "execution_failure_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                    witness_state("turn_execution", Some("Failed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_ingress",
+                        "RunFailedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_control",
+                        "RunFailedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "op_cancel_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("BackgroundToolOp".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelNow".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancellationObserved".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "op_event_enters_runtime_admission".into(),
+                    "admitted_op_work_enters_ingress".into(),
+                    "ingress_ready_starts_runtime_control".into(),
+                    "runtime_control_starts_execution".into(),
+                    "execution_cancel_updates_ingress".into(),
+                    "execution_cancel_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancellationObserved"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_ingress",
+                        "RunCancelledFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_control",
+                        "RunCancelledToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 3,
+                },
+            },
+            CompositionWitness {
+                name: "control_preempts_op_ingress".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_2",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["admitted_op_work_enters_ingress".into()],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "ordinary_ingress".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 6,
+                    pending_input_limit: 3,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 2,
+                    emitted_effect_limit: 5,
+                    seq_limit: 4,
+                    set_limit: 5,
+                    map_limit: 2,
+                },
+            },
+            // Barrier satisfaction: tool loop with barrier ops triggers the
+            // authority-owned wait lifecycle, then owner feedback closes the seam.
+            CompositionWitness {
+                name: "barrier_tool_loop_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("BackgroundToolOp".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    // LLM returns tool calls -> WaitingForOps
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedToolCalls".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "tool_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                        ],
+                    },
+                    // Register barrier ops
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "RegisterPendingOps".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "op_refs".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "barrier_operation_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "has_barrier_ops".into(),
+                                expr: Expr::Bool(true),
+                            },
+                        ],
+                    },
+                    // OpsLifecycle completes -> shell begins the authority-owned wait lifecycle.
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "CompleteOperation".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "BeginWaitAll".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "wait_request_id".into(),
+                                expr: Expr::String("wait_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    // Owner feedback feeds the validated barrier set into TurnExecution.
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "OpsBarrierSatisfied".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("op_1".into())]),
+                            },
+                        ],
+                    },
+                    // ToolCallsResolved -> DrainingBoundary
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "ToolCallsResolved".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // BoundaryContinue -> CallingLlm (next turn)
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryContinue".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    // LLM returns terminal -> DrainingBoundary -> Completed
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "op_event_enters_runtime_admission".into(),
+                    "admitted_op_work_enters_ingress".into(),
+                    "ingress_ready_starts_runtime_control".into(),
+                    "runtime_control_starts_execution".into(),
+                    "execution_boundary_updates_ingress".into(),
+                    "execution_completion_updates_ingress".into(),
+                    "execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("ops_lifecycle", Some("Active"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "RegisterOperation"),
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("ops_lifecycle", "CompleteOperation"),
+                    witness_transition("ops_lifecycle", "BeginWaitAllImmediate"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "LlmReturnedToolCalls"),
+                    witness_transition("turn_execution", "RegisterPendingOps"),
+                    witness_transition("turn_execution", "OpsBarrierSatisfied"),
+                    witness_transition("turn_execution", "ToolCallsResolved"),
+                    witness_transition("turn_execution", "BoundaryContinue"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "CompleteOperation",
+                        "ops_lifecycle",
+                        "BeginWaitAllImmediate",
+                    ),
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "BeginWaitAllImmediate",
+                        "turn_execution",
+                        "OpsBarrierSatisfied",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "OpsBarrierSatisfied",
+                        "turn_execution",
+                        "ToolCallsResolved",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "ToolCallsResolved",
+                        "turn_execution",
+                        "BoundaryContinue",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 16,
+                    pending_input_limit: 15,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 9,
+                    emitted_effect_limit: 10,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 3,
+                },
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    }
+}
+
+pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "surface_event_runtime_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_ingress".into(),
+                machine_name: "RuntimeIngressMachine".into(),
+                actor: "ordinary_ingress".into(),
+            },
+            MachineInstance {
+                instance_id: "turn_execution".into(),
+                machine_name: "TurnExecutionMachine".into(),
+                actor: "turn_executor".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![
+            EntryInput {
+                name: "control_initialize".into(),
+                machine: "runtime_control".into(),
+                input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "surface_submit_candidate".into(),
+                machine: "runtime_control".into(),
+                input_variant: "SubmitWork".into(),
+            },
+            EntryInput {
+                name: "runtime_admission_accepted".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AdmissionAccepted".into(),
+            },
+            EntryInput {
+                name: "ingress_stage_drain_snapshot".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "StageDrainSnapshot".into(),
+            },
+            EntryInput {
+                name: "turn_primitive_applied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "PrimitiveApplied".into(),
+            },
+            EntryInput {
+                name: "turn_llm_returned_terminal".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedTerminal".into(),
+            },
+            EntryInput {
+                name: "turn_boundary_complete".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryComplete".into(),
+            },
+            EntryInput {
+                name: "turn_fatal_failure".into(),
+                machine: "turn_execution".into(),
+                input_variant: "FatalFailure".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "surface_event_enters_ingress".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "content_shape".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "content_shape".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "request_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "request_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "reservation_key".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "reservation_key".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "policy".into(),
+                        source: RouteBindingSource::Literal(Expr::String(
+                            "ExternalEventQueued".into(),
+                        )),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_ingress_ready_starts_runtime_control".into(),
+                from_machine: "runtime_ingress".into(),
+                effect_variant: "ReadyForRun".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_runtime_control_starts_execution".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget {
+                    machine: "turn_execution".into(),
+                    input_variant: "StartConversationRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_boundary_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "BoundaryApplied".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "BoundaryApplied".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "run_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "run_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "boundary_sequence".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "boundary_sequence".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_completion_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_completion_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_failure_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_failure_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_cancel_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "surface_execution_cancel_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+            reason: "runtime control preempts surface event ingress work".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "surface_event_uses_canonical_runtime_admission".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "surface external events enter runtime ingress only through runtime-control admission".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "surface_event_begin_run_requires_staged_drain".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                    from_machine: "runtime_ingress".into(),
+                    effect_variant: "ReadyForRun".into(),
+                },
+                statement:
+                    "surface-originated work begins a run only after ingress-owned staging".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "surface_event_execution_completion_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCompleted".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCompleted".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCompleted".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "surface-originated execution completion updates both ingress and runtime control".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "surface_event_execution_failure_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunFailed".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "surface-originated execution failure updates both ingress and runtime control".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "surface_event_execution_cancel_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCancelled".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "surface-originated execution cancellation updates both ingress and runtime control".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "control_preempts_surface_event_ingress".into(),
+                kind: CompositionInvariantKind::SchedulerRulePresent {
+                    rule: SchedulerRule::PreemptWhenReady {
+                        higher: "control_plane".into(),
+                        lower: "ordinary_ingress".into(),
+                    },
+                },
+                statement: "runtime control outranks surface event ingress when both are ready".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "surface_event_success_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_surface_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_surface_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "surface_event_enters_ingress".into(),
+                    "surface_ingress_ready_starts_runtime_control".into(),
+                    "surface_runtime_control_starts_execution".into(),
+                    "surface_execution_boundary_updates_ingress".into(),
+                    "surface_execution_completion_updates_ingress".into(),
+                    "surface_execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Idle"),
+                        vec![CompositionWitnessField {
+                            field: "current_run_id".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 7,
+                    emitted_effect_limit: 7,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "surface_event_inline_image_success_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "InlineImage",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "InlineImage",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_surface_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_surface_1",
+                            "InlineImage",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "surface_event_enters_ingress".into(),
+                    "surface_ingress_ready_starts_runtime_control".into(),
+                    "surface_runtime_control_starts_execution".into(),
+                    "surface_execution_boundary_updates_ingress".into(),
+                    "surface_execution_completion_updates_ingress".into(),
+                    "surface_execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "runtime_control",
+                        Some("Idle"),
+                        vec![CompositionWitnessField {
+                            field: "current_run_id".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 7,
+                    emitted_effect_limit: 7,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "surface_event_failure_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_surface_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "FatalFailure".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "surface_event_enters_ingress".into(),
+                    "surface_ingress_ready_starts_runtime_control".into(),
+                    "surface_runtime_control_starts_execution".into(),
+                    "surface_execution_failure_updates_ingress".into(),
+                    "surface_execution_failure_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Failed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_ingress",
+                        "RunFailedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_control",
+                        "RunFailedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "surface_event_cancel_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_surface_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("external_evt_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelNow".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancellationObserved".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_surface_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "surface_event_enters_ingress".into(),
+                    "surface_ingress_ready_starts_runtime_control".into(),
+                    "surface_runtime_control_starts_execution".into(),
+                    "surface_execution_cancel_updates_ingress".into(),
+                    "surface_execution_cancel_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![CompositionWitnessField {
+                        field: "current_run_id".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleQueue"),
+                    witness_transition("runtime_ingress", "AdmitQueuedQueue"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancellationObserved"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleQueue",
+                        "runtime_ingress",
+                        "AdmitQueuedQueue",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_ingress",
+                        "RunCancelledFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_control",
+                        "RunCancelledToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "surface_event_control_preemption".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "external_evt_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["surface_event_enters_ingress".into()],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "ordinary_ingress".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 5,
+                    pending_input_limit: 4,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 3,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 3,
+                },
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    }
+}
+
+pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "continuation_runtime_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_ingress".into(),
+                machine_name: "RuntimeIngressMachine".into(),
+                actor: "ordinary_ingress".into(),
+            },
+            MachineInstance {
+                instance_id: "turn_execution".into(),
+                machine_name: "TurnExecutionMachine".into(),
+                actor: "turn_executor".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+        ],
+        handoff_protocols: vec![],
+        entry_inputs: vec![
+            EntryInput {
+                name: "control_initialize".into(),
+                machine: "runtime_control".into(),
+                input_variant: "Initialize".into(),
+            },
+            EntryInput {
+                name: "continuation_submit_candidate".into(),
+                machine: "runtime_control".into(),
+                input_variant: "SubmitWork".into(),
+            },
+            EntryInput {
+                name: "runtime_admission_accepted".into(),
+                machine: "runtime_control".into(),
+                input_variant: "AdmissionAccepted".into(),
+            },
+            EntryInput {
+                name: "ingress_stage_drain_snapshot".into(),
+                machine: "runtime_ingress".into(),
+                input_variant: "StageDrainSnapshot".into(),
+            },
+            EntryInput {
+                name: "turn_primitive_applied".into(),
+                machine: "turn_execution".into(),
+                input_variant: "PrimitiveApplied".into(),
+            },
+            EntryInput {
+                name: "turn_llm_returned_terminal".into(),
+                machine: "turn_execution".into(),
+                input_variant: "LlmReturnedTerminal".into(),
+            },
+            EntryInput {
+                name: "turn_boundary_complete".into(),
+                machine: "turn_execution".into(),
+                input_variant: "BoundaryComplete".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "continuation_enters_ingress".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: true,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Literal(Expr::String("Steer".into())),
+                    },
+                    RouteFieldBinding {
+                        to_field: "policy".into(),
+                        source: RouteBindingSource::Literal(Expr::String(
+                            "ContinuationQueued".into(),
+                        )),
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_ingress_ready_starts_runtime_control".into(),
+                from_machine: "runtime_ingress".into(),
+                effect_variant: "ReadyForRun".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_runtime_control_starts_execution".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget {
+                    machine: "turn_execution".into(),
+                    input_variant: "StartConversationRun".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_completion_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_completion_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_boundary_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "BoundaryApplied".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "BoundaryApplied".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "run_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "run_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "boundary_sequence".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "boundary_sequence".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_failure_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_failure_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_cancel_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_ingress".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "continuation_execution_cancel_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "runtime_control".into(),
+                    input_variant: "RunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+            reason: "runtime control preempts continuation ingress work".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "continuation_uses_canonical_runtime_admission".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "runtime-owned continuation work enters ingress only through runtime-control admission".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "continuation_begin_run_requires_staged_drain".into(),
+                kind: CompositionInvariantKind::ObservedInputOriginatesFromEffect {
+                    to_machine: "runtime_control".into(),
+                    input_variant: "BeginRun".into(),
+                    from_machine: "runtime_ingress".into(),
+                    effect_variant: "ReadyForRun".into(),
+                },
+                statement:
+                    "continuation work begins a run only after ingress-owned staging".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "continuation_execution_completion_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCompleted".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCompleted".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCompleted".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "continuation execution completion updates both ingress and runtime control".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "continuation_execution_failure_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunFailed".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunFailed".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "continuation execution failure updates both ingress and runtime control".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "continuation_execution_cancel_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCancelled".into(),
+                    required_targets: vec![
+                        RouteTarget {
+                            machine: "runtime_ingress".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                        RouteTarget {
+                            machine: "runtime_control".into(),
+                            input_variant: "RunCancelled".into(),
+                        },
+                    ],
+                },
+                statement:
+                    "continuation execution cancellation updates both ingress and runtime control".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "control_preempts_continuation_ingress".into(),
+                kind: CompositionInvariantKind::SchedulerRulePresent {
+                    rule: SchedulerRule::PreemptWhenReady {
+                        higher: "control_plane".into(),
+                        lower: "ordinary_ingress".into(),
+                    },
+                },
+                statement: "runtime control outranks continuation ingress when both are ready".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "terminal_response_continuation_success".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_cont_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("continuation_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_cont_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_cont_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_cont_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "continuation_enters_ingress".into(),
+                    "continuation_ingress_ready_starts_runtime_control".into(),
+                    "continuation_runtime_control_starts_execution".into(),
+                    "continuation_execution_boundary_updates_ingress".into(),
+                    "continuation_execution_completion_updates_ingress".into(),
+                    "continuation_execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "host_mode_continuation_success".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "host_continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "host_continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_host_cont_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("host_continuation_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_host_cont_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_host_cont_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_host_cont_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "continuation_enters_ingress".into(),
+                    "continuation_ingress_ready_starts_runtime_control".into(),
+                    "continuation_runtime_control_starts_execution".into(),
+                    "continuation_execution_boundary_updates_ingress".into(),
+                    "continuation_execution_completion_updates_ingress".into(),
+                    "continuation_execution_completion_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "continuation_failure_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_cont_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("continuation_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "FatalFailure".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_cont_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "continuation_enters_ingress".into(),
+                    "continuation_ingress_ready_starts_runtime_control".into(),
+                    "continuation_runtime_control_starts_execution".into(),
+                    "continuation_execution_failure_updates_ingress".into(),
+                    "continuation_execution_failure_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Failed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_ingress",
+                        "RunFailedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_control",
+                        "RunFailedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "continuation_cancel_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_cont_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("continuation_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelNow".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_cont_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancellationObserved".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_cont_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "continuation_enters_ingress".into(),
+                    "continuation_ingress_ready_starts_runtime_control".into(),
+                    "continuation_runtime_control_starts_execution".into(),
+                    "continuation_execution_cancel_updates_ingress".into(),
+                    "continuation_execution_cancel_notifies_control".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![CompositionWitnessField {
+                        field: "current_run_id".into(),
+                        expr: Expr::None,
+                    }]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancellationObserved"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_ingress",
+                        "RunCancelledFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_control",
+                        "RunCancelledToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 6,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 6,
+                    emitted_effect_limit: 6,
+                    seq_limit: 6,
+                    set_limit: 6,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "continuation_control_preemption".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "SubmitWork".into(),
+                        fields: submit_candidate_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "continuation_1",
+                            "ContinuationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec!["continuation_enters_ingress".into()],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "ordinary_ingress".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "runtime_control",
+                        "Initialize",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 5,
+                    pending_input_limit: 4,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 3,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 3,
+                },
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    }
+}
+
+pub fn mob_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "mob_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "mob_lifecycle".into(),
+                machine_name: "MobLifecycleMachine".into(),
+                actor: "mob_lifecycle_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_orchestrator".into(),
+                machine_name: "MobOrchestratorMachine".into(),
+                actor: "mob_orchestrator_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_member_lifecycle_anchor".into(),
+                machine_name: "MobMemberLifecycleAnchorMachine".into(),
+                actor: "mob_member_lifecycle_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_runtime_bridge_anchor".into(),
+                machine_name: "MobRuntimeBridgeAnchorMachine".into(),
+                actor: "mob_runtime_bridge_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_wiring_anchor".into(),
+                machine_name: "MobWiringAnchorMachine".into(),
+                actor: "mob_wiring_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "mob_helper_result_anchor".into(),
+                machine_name: "MobHelperResultAnchorMachine".into(),
+                actor: "mob_helper_result_anchor_actor".into(),
+            },
+            MachineInstance {
+                instance_id: "flow_run".into(),
+                machine_name: "FlowRunMachine".into(),
+                actor: "flow_engine".into(),
+            },
+            MachineInstance {
+                instance_id: "ops_lifecycle".into(),
+                machine_name: "OpsLifecycleMachine".into(),
+                actor: "ops_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "peer_comms".into(),
+                machine_name: "PeerCommsMachine".into(),
+                actor: "peer_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_control".into(),
+                machine_name: "RuntimeControlMachine".into(),
+                actor: "control_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "runtime_ingress".into(),
+                machine_name: "RuntimeIngressMachine".into(),
+                actor: "ordinary_ingress".into(),
+            },
+            MachineInstance {
+                instance_id: "turn_execution".into(),
+                machine_name: "TurnExecutionMachine".into(),
+                actor: "turn_executor".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("mob_lifecycle_actor"),
+            machine_actor("mob_orchestrator_actor"),
+            machine_actor("mob_member_lifecycle_anchor_actor"),
+            machine_actor("mob_runtime_bridge_anchor_actor"),
+            machine_actor("mob_wiring_anchor_actor"),
+            machine_actor("mob_helper_result_anchor_actor"),
+            machine_actor("flow_engine"),
+            machine_actor("ops_plane"),
+            machine_actor("peer_plane"),
+            machine_actor("control_plane"),
+            machine_actor("ordinary_ingress"),
+            machine_actor("turn_executor"),
+            owner_actor("agent_loop"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "ops_barrier_satisfaction".into(),
+            producer_instance: "ops_lifecycle".into(),
+            effect_variant: "WaitAllSatisfied".into(),
+            realizing_actor: "agent_loop".into(),
+            correlation_fields: vec!["operation_ids".into()],
+            obligation_fields: vec!["wait_request_id".into(), "operation_ids".into()],
+            allowed_feedback_inputs: vec![FeedbackInputRef {
+                machine_instance: "turn_execution".into(),
+                input_variant: "OpsBarrierSatisfied".into(),
+                field_bindings: vec![
+                    binding("run_id", owner_context("run_id")),
+                    binding("operation_ids", obligation_field("operation_ids")),
+                ],
+            }],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback under task-scheduling fairness".into(),
+            ),
+            rust: protocol_rust(
+                "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::turn_execution_authority::TurnExecutionAuthority"),
+                Some("crate::turn_execution_authority::TurnExecutionMutator"),
+                Some("crate::turn_execution_authority::TurnExecutionInput"),
+                None,
+                Some("crate::turn_execution_authority::TurnExecutionTransition"),
+                Some("crate::error::AgentError"),
+                None,
+                Some("crate::ops_lifecycle::WaitAllSatisfied"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::AgentError;",
+                    "use crate::lifecycle::identifiers::{RunId, WaitRequestId};",
+                    "use crate::ops::OperationId;",
+                    "use crate::ops_lifecycle::WaitAllSatisfied;",
+                    "use crate::turn_execution_authority::{TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition};",
+                ],
+            ),
+        }],
+        entry_inputs: vec![
+            EntryInput { name: "control_initialize".into(), machine: "runtime_control".into(), input_variant: "Initialize".into() },
+            EntryInput { name: "mob_initialize".into(), machine: "mob_orchestrator".into(), input_variant: "InitializeOrchestrator".into() },
+            EntryInput { name: "mob_bind_coordinator".into(), machine: "mob_orchestrator".into(), input_variant: "BindCoordinator".into() },
+            EntryInput { name: "mob_unbind_coordinator".into(), machine: "mob_orchestrator".into(), input_variant: "UnbindCoordinator".into() },
+            EntryInput { name: "mob_stage_spawn".into(), machine: "mob_orchestrator".into(), input_variant: "StageSpawn".into() },
+            EntryInput { name: "mob_complete_spawn".into(), machine: "mob_orchestrator".into(), input_variant: "CompleteSpawn".into() },
+            EntryInput { name: "mob_start_flow".into(), machine: "mob_orchestrator".into(), input_variant: "StartFlow".into() },
+            EntryInput { name: "mob_complete_flow".into(), machine: "mob_orchestrator".into(), input_variant: "CompleteFlow".into() },
+            EntryInput { name: "flow_create_run".into(), machine: "flow_run".into(), input_variant: "CreateRun".into() },
+            EntryInput { name: "flow_start_run".into(), machine: "flow_run".into(), input_variant: "StartRun".into() },
+            EntryInput { name: "flow_dispatch_step".into(), machine: "flow_run".into(), input_variant: "DispatchStep".into() },
+            EntryInput { name: "flow_complete_step".into(), machine: "flow_run".into(), input_variant: "CompleteStep".into() },
+            EntryInput { name: "flow_record_step_output".into(), machine: "flow_run".into(), input_variant: "RecordStepOutput".into() },
+            EntryInput { name: "flow_fail_step".into(), machine: "flow_run".into(), input_variant: "FailStep".into() },
+            EntryInput { name: "flow_skip_step".into(), machine: "flow_run".into(), input_variant: "SkipStep".into() },
+            EntryInput { name: "flow_cancel_step".into(), machine: "flow_run".into(), input_variant: "CancelStep".into() },
+            EntryInput { name: "ops_register_operation".into(), machine: "ops_lifecycle".into(), input_variant: "RegisterOperation".into() },
+            EntryInput { name: "ops_provisioning_succeeded".into(), machine: "ops_lifecycle".into(), input_variant: "ProvisioningSucceeded".into() },
+            EntryInput { name: "ops_progress_reported".into(), machine: "ops_lifecycle".into(), input_variant: "ProgressReported".into() },
+            EntryInput { name: "ops_complete_operation".into(), machine: "ops_lifecycle".into(), input_variant: "CompleteOperation".into() },
+            EntryInput { name: "ops_fail_operation".into(), machine: "ops_lifecycle".into(), input_variant: "FailOperation".into() },
+            EntryInput { name: "ops_cancel_operation".into(), machine: "ops_lifecycle".into(), input_variant: "CancelOperation".into() },
+            EntryInput { name: "peer_trust".into(), machine: "peer_comms".into(), input_variant: "TrustPeer".into() },
+            EntryInput { name: "peer_receive".into(), machine: "peer_comms".into(), input_variant: "ReceivePeerEnvelope".into() },
+            EntryInput { name: "peer_submit".into(), machine: "peer_comms".into(), input_variant: "SubmitTypedPeerInput".into() },
+            EntryInput { name: "runtime_admission_accepted".into(), machine: "runtime_control".into(), input_variant: "AdmissionAccepted".into() },
+            EntryInput { name: "ingress_stage_drain_snapshot".into(), machine: "runtime_ingress".into(), input_variant: "StageDrainSnapshot".into() },
+            EntryInput { name: "runtime_begin_run".into(), machine: "runtime_control".into(), input_variant: "BeginRun".into() },
+            EntryInput { name: "turn_start_conversation".into(), machine: "turn_execution".into(), input_variant: "StartConversationRun".into() },
+            EntryInput { name: "turn_boundary_complete".into(), machine: "turn_execution".into(), input_variant: "BoundaryComplete".into() },
+            EntryInput { name: "turn_primitive_applied".into(), machine: "turn_execution".into(), input_variant: "PrimitiveApplied".into() },
+            EntryInput { name: "turn_llm_returned_terminal".into(), machine: "turn_execution".into(), input_variant: "LlmReturnedTerminal".into() },
+            EntryInput { name: "turn_fatal_failure".into(), machine: "turn_execution".into(), input_variant: "FatalFailure".into() },
+            EntryInput { name: "turn_cancel_now".into(), machine: "turn_execution".into(), input_variant: "CancelNow".into() },
+            EntryInput { name: "turn_cancel_after_boundary".into(), machine: "turn_execution".into(), input_variant: "CancelAfterBoundary".into() },
+            EntryInput { name: "turn_cancellation_observed".into(), machine: "turn_execution".into(), input_variant: "CancellationObserved".into() },
+        ],
+        routes: vec![
+            Route {
+                name: "mob_supervisor_activation_starts_lifecycle".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "ActivateSupervisor".into(),
+                to: RouteTarget {
+                    machine: "mob_lifecycle".into(),
+                    input_variant: "Start".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "flow_step_dispatch_enters_runtime_admission".into(),
+                from_machine: "flow_run".into(),
+                effect_variant: "AdmitStepWork".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitWork".into() },
+                bindings: vec![
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "step_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Queue".into())) },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_activation_starts_flow_run".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "FlowActivated".into(),
+                to: RouteTarget {
+                    machine: "flow_run".into(),
+                    input_variant: "StartRun".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_activation_marks_lifecycle_run".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "FlowActivated".into(),
+                to: RouteTarget {
+                    machine: "mob_lifecycle".into(),
+                    input_variant: "StartRun".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_async_op_event_enters_runtime_admission".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "SubmitOpEvent".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitWork".into() },
+                bindings: vec![
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "operation_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Steer".into())) },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_peer_candidate_enters_runtime_admission".into(),
+                from_machine: "peer_comms".into(),
+                effect_variant: "SubmitPeerInputCandidate".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "SubmitWork".into() },
+                bindings: vec![
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "raw_item_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Literal(Expr::String("Steer".into())) },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_peer_candidate_tracks_wiring".into(),
+                from_machine: "peer_comms".into(),
+                effect_variant: "SubmitPeerInputCandidate".into(),
+                to: RouteTarget {
+                    machine: "mob_wiring_anchor".into(),
+                    input_variant: "PeerInputAdmitted".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "raw_item_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "raw_item_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "peer_input_class".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "peer_input_class".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_admitted_work_enters_ingress".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget { machine: "runtime_ingress".into(), input_variant: "AdmitQueued".into() },
+                bindings: vec![
+                    RouteFieldBinding { to_field: "work_id".into(), source: RouteBindingSource::Field { from_field: "work_id".into(), allow_named_alias: true } },
+                    RouteFieldBinding { to_field: "handling_mode".into(), source: RouteBindingSource::Field { from_field: "handling_mode".into(), allow_named_alias: false } },
+                    RouteFieldBinding { to_field: "policy".into(), source: RouteBindingSource::Literal(Expr::String("MobQueued".into())) },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_runtime_admission_tracks_wiring".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitAdmittedIngressEffect".into(),
+                to: RouteTarget {
+                    machine: "mob_wiring_anchor".into(),
+                    input_variant: "RuntimeWorkAdmitted".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "work_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "work_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "handling_mode".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "handling_mode".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ingress_ready_starts_runtime_control".into(),
+                from_machine: "runtime_ingress".into(),
+                effect_variant: "ReadyForRun".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "BeginRun".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_runtime_control_starts_execution".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget { machine: "turn_execution".into(), input_variant: "StartConversationRun".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_runtime_start_tracks_bridge".into(),
+                from_machine: "runtime_control".into(),
+                effect_variant: "SubmitRunPrimitive".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunSubmitted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_terminalization_completes_orchestrator".into(),
+                from_machine: "flow_run".into(),
+                effect_variant: "FlowTerminalized".into(),
+                to: RouteTarget {
+                    machine: "mob_orchestrator".into(),
+                    input_variant: "CompleteFlow".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "FlowDeactivated".into(),
+                to: RouteTarget {
+                    machine: "mob_lifecycle".into(),
+                    input_variant: "FinishRun".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_boundary_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "BoundaryApplied".into(),
+                to: RouteTarget { machine: "runtime_ingress".into(), input_variant: "BoundaryApplied".into() },
+                bindings: vec![
+                    RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } },
+                    RouteFieldBinding { to_field: "boundary_sequence".into(), source: RouteBindingSource::Field { from_field: "boundary_sequence".into(), allow_named_alias: false } },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_completion_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCompleted".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_completion_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "RunCompleted".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_completion_tracks_bridge".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_completion_anchors_helper_result".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCompleted".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorCompleted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_failure_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunFailed".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_failure_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "RunFailed".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_failure_tracks_bridge".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_failure_anchors_helper_result".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunFailed".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorFailed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_cancel_updates_ingress".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCancelled".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_cancel_notifies_control".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "RunCancelled".into() },
+                bindings: vec![RouteFieldBinding { to_field: "run_id".into(), source: RouteBindingSource::Field { from_field: "run_id".into(), allow_named_alias: false } }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_cancel_tracks_bridge".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_execution_cancel_anchors_helper_result".into(),
+                from_machine: "turn_execution".into(),
+                effect_variant: "RunCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorCancelled".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "run_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "run_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_deactivate_supervisor_stops_lifecycle".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "DeactivateSupervisor".into(),
+                to: RouteTarget { machine: "mob_lifecycle".into(), input_variant: "Stop".into() },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_member_force_cancelled_stops_runtime".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "MemberForceCancelled".into(),
+                to: RouteTarget { machine: "runtime_control".into(), input_variant: "StopRequested".into() },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_member_force_cancel_tracks_bridge".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "MemberForceCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeStopRequested".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_member_force_cancel_anchors_helper_result".into(),
+                from_machine: "mob_orchestrator".into(),
+                effect_variant: "MemberForceCancelled".into(),
+                to: RouteTarget {
+                    machine: "mob_helper_result_anchor".into(),
+                    input_variant: "AnchorForceCancelled".into(),
+                },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_escalate_supervisor_stops_orchestrator".into(),
+                from_machine: "flow_run".into(),
+                effect_variant: "EscalateSupervisor".into(),
+                to: RouteTarget { machine: "mob_orchestrator".into(), input_variant: "StopOrchestrator".into() },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_cleanup_destroys_orchestrator".into(),
+                from_machine: "mob_lifecycle".into(),
+                effect_variant: "RequestCleanup".into(),
+                to: RouteTarget { machine: "mob_orchestrator".into(), input_variant: "DestroyOrchestrator".into() },
+                bindings: vec![],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_peer_ready_trusts_peer_comms".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "ExposeOperationPeer".into(),
+                to: RouteTarget {
+                    machine: "peer_comms".into(),
+                    input_variant: "TrustPeer".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "peer_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "operation_id".into(),
+                        allow_named_alias: true,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_peer_ready_tracks_member_lifecycle".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "ExposeOperationPeer".into(),
+                to: RouteTarget {
+                    machine: "mob_member_lifecycle_anchor".into(),
+                    input_variant: "MemberPeerExposed".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "operation_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "operation_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_peer_ready_tracks_wiring".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "ExposeOperationPeer".into(),
+                to: RouteTarget {
+                    machine: "mob_wiring_anchor".into(),
+                    input_variant: "OperationPeerTrusted".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "operation_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "operation_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "mob_ops_terminal_tracks_member_lifecycle".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "NotifyOpWatcher".into(),
+                to: RouteTarget {
+                    machine: "mob_member_lifecycle_anchor".into(),
+                    input_variant: "MemberTerminalized".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "operation_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "operation_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "terminal_outcome".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "terminal_outcome".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![ActorPriority {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+            reason: "runtime control preempts mob-side ingress work when both are ready".into(),
+        }],
+        scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+            higher: "control_plane".into(),
+            lower: "ordinary_ingress".into(),
+        }],
+        invariants: vec![
+            CompositionInvariant {
+                name: "mob_supervisor_activation_starts_lifecycle".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_supervisor_activation_starts_lifecycle".into(),
+                    to_machine: "mob_lifecycle".into(),
+                    input_variant: "Start".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "ActivateSupervisor".into(),
+                },
+                statement:
+                    "mob-orchestrator supervisor activation starts the lifecycle substrate through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "mob_lifecycle".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "mob_lifecycle_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_flow_activation_starts_flow_run".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_activation_starts_flow_run".into(),
+                    to_machine: "flow_run".into(),
+                    input_variant: "StartRun".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "FlowActivated".into(),
+                },
+                statement:
+                    "mob-orchestrator flow activation starts the flow-run machine through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "flow_run".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "flow_engine".into()],
+            },
+            CompositionInvariant {
+                name: "mob_flow_activation_marks_lifecycle_run".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_activation_marks_lifecycle_run".into(),
+                    to_machine: "mob_lifecycle".into(),
+                    input_variant: "StartRun".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "FlowActivated".into(),
+                },
+                statement:
+                    "mob-orchestrator flow activation increments lifecycle run ownership through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "mob_lifecycle".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "mob_lifecycle_actor".into()],
+            },
+            CompositionInvariant {
+                name: "flow_dispatch_uses_canonical_runtime_admission".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "flow_step_dispatch_enters_runtime_admission".into(),
+                    to_machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                    from_machine: "flow_run".into(),
+                    effect_variant: "AdmitStepWork".into(),
+                },
+                statement:
+                    "flow-run step dispatch reaches runtime only through the runtime-control admission surface".into(),
+                references_machines: vec!["flow_run".into(), "runtime_control".into()],
+                references_actors: vec!["flow_engine".into(), "control_plane".into()],
+            },
+            CompositionInvariant {
+                name: "mob_async_lifecycle_events_use_operation_input".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_async_op_event_enters_runtime_admission".into(),
+                    to_machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                    from_machine: "ops_lifecycle".into(),
+                    effect_variant: "SubmitOpEvent".into(),
+                },
+                statement:
+                    "mob-backed async lifecycle events re-enter runtime through the operation-input admission path".into(),
+                references_machines: vec!["ops_lifecycle".into(), "runtime_control".into()],
+                references_actors: vec!["ops_plane".into(), "control_plane".into()],
+            },
+            CompositionInvariant {
+                name: "mob_peer_work_uses_canonical_runtime_admission".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_peer_candidate_enters_runtime_admission".into(),
+                    to_machine: "runtime_control".into(),
+                    input_variant: "SubmitWork".into(),
+                    from_machine: "peer_comms".into(),
+                    effect_variant: "SubmitPeerInputCandidate".into(),
+                },
+                statement:
+                    "member peer communication enters runtime only through canonical admission".into(),
+                references_machines: vec!["peer_comms".into(), "runtime_control".into()],
+                references_actors: vec!["peer_plane".into(), "control_plane".into()],
+            },
+            CompositionInvariant {
+                name: "mob_runtime_work_flows_into_ingress".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_admitted_work_enters_ingress".into(),
+                    to_machine: "runtime_ingress".into(),
+                    input_variant: "AdmitQueued".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "mob-originated admitted work is handed into canonical ingress ownership".into(),
+                references_machines: vec![
+                    "runtime_control".into(),
+                    "runtime_ingress".into(),
+                    "flow_run".into(),
+                    "ops_lifecycle".into(),
+                    "peer_comms".into(),
+                ],
+                references_actors: vec![
+                    "control_plane".into(),
+                    "ordinary_ingress".into(),
+                    "flow_engine".into(),
+                    "ops_plane".into(),
+                    "peer_plane".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_runtime_admission_is_observed_by_wiring_anchor".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_runtime_admission_tracks_wiring".into(),
+                    to_machine: "mob_wiring_anchor".into(),
+                    input_variant: "RuntimeWorkAdmitted".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitAdmittedIngressEffect".into(),
+                },
+                statement:
+                    "mob runtime admission effects are mirrored into the wiring observation anchor".into(),
+                references_machines: vec!["runtime_control".into(), "mob_wiring_anchor".into()],
+                references_actors: vec!["control_plane".into(), "mob_wiring_anchor_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_runtime_start_is_observed_by_bridge_anchor".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_runtime_start_tracks_bridge".into(),
+                    to_machine: "mob_runtime_bridge_anchor".into(),
+                    input_variant: "RuntimeRunSubmitted".into(),
+                    from_machine: "runtime_control".into(),
+                    effect_variant: "SubmitRunPrimitive".into(),
+                },
+                statement:
+                    "mob run handoff into turn execution is mirrored into the runtime-bridge observation anchor".into(),
+                references_machines: vec![
+                    "runtime_control".into(),
+                    "turn_execution".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                ],
+                references_actors: vec![
+                    "control_plane".into(),
+                    "turn_executor".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_flow_terminalization_completes_orchestrator".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_terminalization_completes_orchestrator".into(),
+                    to_machine: "mob_orchestrator".into(),
+                    input_variant: "CompleteFlow".into(),
+                    from_machine: "flow_run".into(),
+                    effect_variant: "FlowTerminalized".into(),
+                },
+                statement:
+                    "flow terminalization closes the orchestrator-side active flow through an explicit route".into(),
+                references_machines: vec!["flow_run".into(), "mob_orchestrator".into()],
+                references_actors: vec!["flow_engine".into(), "mob_orchestrator_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                    to_machine: "mob_lifecycle".into(),
+                    input_variant: "FinishRun".into(),
+                    from_machine: "mob_orchestrator".into(),
+                    effect_variant: "FlowDeactivated".into(),
+                },
+                statement:
+                    "orchestrator flow deactivation closes the lifecycle run count through an explicit route".into(),
+                references_machines: vec!["mob_orchestrator".into(), "mob_lifecycle".into()],
+                references_actors: vec!["mob_orchestrator_actor".into(), "mob_lifecycle_actor".into()],
+            },
+            CompositionInvariant {
+                name: "mob_execution_failure_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunFailed".into(),
+                    required_targets: vec![
+                        RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunFailed".into() },
+                        RouteTarget { machine: "runtime_control".into(), input_variant: "RunFailed".into() },
+                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunFailed".into() },
+                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorFailed".into() },
+                    ],
+                },
+                statement:
+                    "mob turn-execution failure is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                    "mob_helper_result_anchor".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_helper_result_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_execution_cancel_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCancelled".into(),
+                    required_targets: vec![
+                        RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCancelled".into() },
+                        RouteTarget { machine: "runtime_control".into(), input_variant: "RunCancelled".into() },
+                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunCancelled".into() },
+                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorCancelled".into() },
+                    ],
+                },
+                statement:
+                    "mob turn-execution cancellation is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                    "mob_helper_result_anchor".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_helper_result_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_execution_completion_is_handled".into(),
+                kind: CompositionInvariantKind::OutcomeHandled {
+                    from_machine: "turn_execution".into(),
+                    effect_variant: "RunCompleted".into(),
+                    required_targets: vec![
+                        RouteTarget { machine: "runtime_ingress".into(), input_variant: "RunCompleted".into() },
+                        RouteTarget { machine: "runtime_control".into(), input_variant: "RunCompleted".into() },
+                        RouteTarget { machine: "mob_runtime_bridge_anchor".into(), input_variant: "RuntimeRunCompleted".into() },
+                        RouteTarget { machine: "mob_helper_result_anchor".into(), input_variant: "AnchorCompleted".into() },
+                    ],
+                },
+                statement:
+                    "mob turn-execution completion is handled by ingress/runtime control and mirrored into runtime-bridge and helper-result observation anchors".into(),
+                references_machines: vec![
+                    "turn_execution".into(),
+                    "runtime_ingress".into(),
+                    "runtime_control".into(),
+                    "mob_runtime_bridge_anchor".into(),
+                    "mob_helper_result_anchor".into(),
+                ],
+                references_actors: vec![
+                    "turn_executor".into(),
+                    "ordinary_ingress".into(),
+                    "control_plane".into(),
+                    "mob_runtime_bridge_anchor_actor".into(),
+                    "mob_helper_result_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "control_preempts_mob_ingress".into(),
+                kind: CompositionInvariantKind::SchedulerRulePresent {
+                    rule: SchedulerRule::PreemptWhenReady {
+                        higher: "control_plane".into(),
+                        lower: "ordinary_ingress".into(),
+                    },
+                },
+                statement: "runtime control outranks mob-side ingress work when both are ready".into(),
+                references_machines: vec!["runtime_control".into(), "runtime_ingress".into()],
+                references_actors: vec!["control_plane".into(), "ordinary_ingress".into()],
+            },
+            CompositionInvariant {
+                name: "mob_ops_peer_ready_trusts_peer_comms".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_ops_peer_ready_trusts_peer_comms".into(),
+                    to_machine: "peer_comms".into(),
+                    input_variant: "TrustPeer".into(),
+                    from_machine: "ops_lifecycle".into(),
+                    effect_variant: "ExposeOperationPeer".into(),
+                },
+                statement:
+                    "trust handoff assumes the exposed operation peer is identified by the operation_id alias mapping".into(),
+                references_machines: vec!["ops_lifecycle".into(), "peer_comms".into()],
+                references_actors: vec!["ops_plane".into(), "peer_plane".into()],
+            },
+            CompositionInvariant {
+                name: "mob_member_lifecycle_terminal_events_are_observed".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_ops_terminal_tracks_member_lifecycle".into(),
+                    to_machine: "mob_member_lifecycle_anchor".into(),
+                    input_variant: "MemberTerminalized".into(),
+                    from_machine: "ops_lifecycle".into(),
+                    effect_variant: "NotifyOpWatcher".into(),
+                },
+                statement:
+                    "mob member lifecycle terminal events are mirrored from ops lifecycle into the member-lifecycle observation anchor".into(),
+                references_machines: vec![
+                    "ops_lifecycle".into(),
+                    "mob_member_lifecycle_anchor".into(),
+                ],
+                references_actors: vec![
+                    "ops_plane".into(),
+                    "mob_member_lifecycle_anchor_actor".into(),
+                ],
+            },
+            CompositionInvariant {
+                name: "mob_wiring_anchor_tracks_peer_candidates".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "mob_peer_candidate_tracks_wiring".into(),
+                    to_machine: "mob_wiring_anchor".into(),
+                    input_variant: "PeerInputAdmitted".into(),
+                    from_machine: "peer_comms".into(),
+                    effect_variant: "SubmitPeerInputCandidate".into(),
+                },
+                statement:
+                    "mob peer candidate admission is mirrored into the wiring observation anchor through an explicit route".into(),
+                references_machines: vec!["peer_comms".into(), "mob_wiring_anchor".into()],
+                references_actors: vec!["peer_plane".into(), "mob_wiring_anchor_actor".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "mob_flow_success_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "CreateRun".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "InitializeOrchestrator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "BindCoordinator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "StartFlow".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "DispatchStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "CompleteStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "RecordStepOutput".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "TerminalizeCompleted".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![
+                    "mob_supervisor_activation_starts_lifecycle".into(),
+                    "mob_flow_activation_starts_flow_run".into(),
+                    "mob_flow_activation_marks_lifecycle_run".into(),
+                    "flow_step_dispatch_enters_runtime_admission".into(),
+                    "mob_admitted_work_enters_ingress".into(),
+                    "mob_runtime_admission_tracks_wiring".into(),
+                    "mob_ingress_ready_starts_runtime_control".into(),
+                    "mob_runtime_control_starts_execution".into(),
+                    "mob_runtime_start_tracks_bridge".into(),
+                    "mob_execution_boundary_updates_ingress".into(),
+                    "mob_execution_completion_updates_ingress".into(),
+                    "mob_execution_completion_notifies_control".into(),
+                    "mob_execution_completion_tracks_bridge".into(),
+                    "mob_execution_completion_anchors_helper_result".into(),
+                    "mob_flow_terminalization_completes_orchestrator".into(),
+                    "mob_flow_deactivation_finishes_lifecycle_run".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "mob_orchestrator",
+                        Some("Running"),
+                        vec![
+                            CompositionWitnessField {
+                                field: "coordinator_bound".into(),
+                                expr: Expr::Bool(true),
+                            },
+                            CompositionWitnessField {
+                                field: "active_flow_count".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
+                    ),
+                    witness_state(
+                        "mob_lifecycle",
+                        Some("Running"),
+                        vec![CompositionWitnessField {
+                            field: "active_run_count".into(),
+                            expr: Expr::U64(0),
+                        }],
+                    ),
+                    witness_state("flow_run", Some("Completed"), vec![]),
+                    witness_state(
+                        "runtime_control",
+                        Some("Idle"),
+                        vec![CompositionWitnessField {
+                            field: "current_run_id".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("mob_orchestrator", "InitializeOrchestrator"),
+                    witness_transition("mob_lifecycle", "Start"),
+                    witness_transition("mob_orchestrator", "BindCoordinator"),
+                    witness_transition("mob_orchestrator", "StartFlow"),
+                    witness_transition("flow_run", "CreateRun"),
+                    witness_transition("flow_run", "StartRun"),
+                    witness_transition("mob_lifecycle", "StartRun"),
+                    witness_transition("flow_run", "DispatchStep"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                    witness_transition("flow_run", "CompleteStep"),
+                    witness_transition("flow_run", "RecordStepOutput"),
+                    witness_transition("flow_run", "TerminalizeCompleted"),
+                    witness_transition("mob_orchestrator", "CompleteFlow"),
+                    witness_transition("mob_lifecycle", "FinishRun"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "InitializeOrchestrator",
+                        "mob_lifecycle",
+                        "Start",
+                    ),
+                    witness_transition_order(
+                        "mob_lifecycle",
+                        "Start",
+                        "mob_orchestrator",
+                        "BindCoordinator",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "BindCoordinator",
+                        "mob_orchestrator",
+                        "StartFlow",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "StartFlow",
+                        "flow_run",
+                        "StartRun",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "StartFlow",
+                        "mob_lifecycle",
+                        "StartRun",
+                    ),
+                    witness_transition_order(
+                        "flow_run",
+                        "DispatchStep",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                    witness_transition_order(
+                        "flow_run",
+                        "TerminalizeCompleted",
+                        "mob_orchestrator",
+                        "CompleteFlow",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "CompleteFlow",
+                        "mob_lifecycle",
+                        "FinishRun",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 18,
+                    pending_input_limit: 10,
+                    pending_route_limit: 3,
+                    delivered_route_limit: 14,
+                    emitted_effect_limit: 14,
+                    seq_limit: 8,
+                    set_limit: 8,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "mob_async_op_admission".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("MobMemberChild".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "TrustPeer".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "peer_id".into(),
+                            expr: Expr::String("peer_ready".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "op_1",
+                            "OperationInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec![
+                    "mob_async_op_event_enters_runtime_admission".into(),
+                    "mob_admitted_work_enters_ingress".into(),
+                    "mob_ops_peer_ready_trusts_peer_comms".into(),
+                    "mob_ops_peer_ready_tracks_member_lifecycle".into(),
+                    "mob_ops_peer_ready_tracks_wiring".into(),
+                    "mob_ops_terminal_tracks_member_lifecycle".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("ops_lifecycle", Some("Active"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "RegisterOperation"),
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "ProvisioningSucceeded",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 6,
+                    pending_input_limit: 5,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 4,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "mob_peer_admission".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "TrustPeer".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "peer_id".into(),
+                            expr: Expr::String("peer_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "ReceivePeerEnvelope".into(),
+                        fields: peer_envelope_fields(
+                            "raw_1",
+                            "peer_1",
+                            "Message",
+                            "mob peer handoff",
+                            "InlineImage",
+                            None,
+                            None,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "peer_comms".into(),
+                        input_variant: "SubmitTypedPeerInput".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "raw_item_id".into(),
+                            expr: Expr::String("raw_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "raw_1",
+                            "PeerInput",
+                            "InlineImage",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec![
+                    "mob_peer_candidate_enters_runtime_admission".into(),
+                    "mob_peer_candidate_tracks_wiring".into(),
+                    "mob_admitted_work_enters_ingress".into(),
+                    "mob_runtime_admission_tracks_wiring".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("peer_comms", Some("Delivered"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state("runtime_ingress", Some("Active"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("peer_comms", "TrustPeer"),
+                    witness_transition("peer_comms", "ReceiveTrustedPeerEnvelope"),
+                    witness_transition("peer_comms", "SubmitTypedPeerInputDelivered"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "peer_comms",
+                        "ReceiveTrustedPeerEnvelope",
+                        "peer_comms",
+                        "SubmitTypedPeerInputDelivered",
+                    ),
+                    witness_transition_order(
+                        "peer_comms",
+                        "SubmitTypedPeerInputDelivered",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 7,
+                    pending_input_limit: 5,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 4,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "mob_failure_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "CreateRun".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "StartRun".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "DispatchStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "FatalFailure".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "flow_step_dispatch_enters_runtime_admission".into(),
+                    "mob_admitted_work_enters_ingress".into(),
+                    "mob_ingress_ready_starts_runtime_control".into(),
+                    "mob_runtime_control_starts_execution".into(),
+                    "mob_runtime_start_tracks_bridge".into(),
+                    "mob_execution_failure_updates_ingress".into(),
+                    "mob_execution_failure_notifies_control".into(),
+                    "mob_execution_failure_tracks_bridge".into(),
+                    "mob_execution_failure_anchors_helper_result".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Failed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("flow_run", "DispatchStep"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "FatalFailureFromApplyingPrimitive"),
+                    witness_transition("runtime_ingress", "RunFailedFromActive"),
+                    witness_transition("runtime_control", "RunFailedToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "flow_run",
+                        "DispatchStep",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_ingress",
+                        "RunFailedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "FatalFailureFromApplyingPrimitive",
+                        "runtime_control",
+                        "RunFailedToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 9,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 7,
+                    emitted_effect_limit: 7,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "mob_cancel_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "CreateRun".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "StartRun".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "DispatchStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancelNow".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "CancellationObserved".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "flow_step_dispatch_enters_runtime_admission".into(),
+                    "mob_admitted_work_enters_ingress".into(),
+                    "mob_ingress_ready_starts_runtime_control".into(),
+                    "mob_runtime_control_starts_execution".into(),
+                    "mob_runtime_start_tracks_bridge".into(),
+                    "mob_execution_cancel_updates_ingress".into(),
+                    "mob_execution_cancel_notifies_control".into(),
+                    "mob_execution_cancel_tracks_bridge".into(),
+                    "mob_execution_cancel_anchors_helper_result".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Cancelled"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("flow_run", "DispatchStep"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "CancelNowFromApplyingPrimitive"),
+                    witness_transition("turn_execution", "CancellationObserved"),
+                    witness_transition("runtime_ingress", "RunCancelledFromActive"),
+                    witness_transition("runtime_control", "RunCancelledToIdle"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "flow_run",
+                        "DispatchStep",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancelNowFromApplyingPrimitive",
+                        "turn_execution",
+                        "CancellationObserved",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_ingress",
+                        "RunCancelledFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "CancellationObserved",
+                        "runtime_control",
+                        "RunCancelledToIdle",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 10,
+                    pending_input_limit: 7,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 7,
+                    emitted_effect_limit: 7,
+                    seq_limit: 7,
+                    set_limit: 7,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "mob_stop_and_cleanup_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "InitializeOrchestrator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "BindCoordinator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "StopOrchestrator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_lifecycle".into(),
+                        input_variant: "BeginCleanup".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![
+                    "mob_supervisor_activation_starts_lifecycle".into(),
+                    "mob_deactivate_supervisor_stops_lifecycle".into(),
+                    "mob_cleanup_destroys_orchestrator".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("mob_orchestrator", Some("Destroyed"), vec![]),
+                    witness_state("mob_lifecycle", Some("Stopped"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("mob_orchestrator", "InitializeOrchestrator"),
+                    witness_transition("mob_lifecycle", "Start"),
+                    witness_transition("mob_orchestrator", "BindCoordinator"),
+                    witness_transition("mob_orchestrator", "StopOrchestrator"),
+                    witness_transition("mob_lifecycle", "Stop"),
+                    witness_transition("mob_lifecycle", "BeginCleanup"),
+                    witness_transition("mob_orchestrator", "DestroyOrchestrator"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "InitializeOrchestrator",
+                        "mob_lifecycle",
+                        "Start",
+                    ),
+                    witness_transition_order(
+                        "mob_lifecycle",
+                        "Start",
+                        "mob_orchestrator",
+                        "BindCoordinator",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "BindCoordinator",
+                        "mob_orchestrator",
+                        "StopOrchestrator",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "StopOrchestrator",
+                        "mob_lifecycle",
+                        "Stop",
+                    ),
+                    witness_transition_order(
+                        "mob_lifecycle",
+                        "Stop",
+                        "mob_lifecycle",
+                        "BeginCleanup",
+                    ),
+                    witness_transition_order(
+                        "mob_lifecycle",
+                        "BeginCleanup",
+                        "mob_orchestrator",
+                        "DestroyOrchestrator",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 8,
+                    pending_input_limit: 5,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 4,
+                    emitted_effect_limit: 6,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "mob_force_cancel_stops_runtime_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "InitializeOrchestrator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "BindCoordinator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "ForceCancelMember".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![
+                    "mob_supervisor_activation_starts_lifecycle".into(),
+                    "mob_member_force_cancelled_stops_runtime".into(),
+                    "mob_member_force_cancel_tracks_bridge".into(),
+                    "mob_member_force_cancel_anchors_helper_result".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("mob_orchestrator", Some("Running"), vec![]),
+                    witness_state("runtime_control", Some("Stopped"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("mob_orchestrator", "InitializeOrchestrator"),
+                    witness_transition("mob_lifecycle", "Start"),
+                    witness_transition("mob_orchestrator", "BindCoordinator"),
+                    witness_transition("mob_orchestrator", "ForceCancelMember"),
+                    witness_transition("runtime_control", "StopRequested"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "InitializeOrchestrator",
+                        "mob_lifecycle",
+                        "Start",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "BindCoordinator",
+                        "mob_orchestrator",
+                        "ForceCancelMember",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "ForceCancelMember",
+                        "runtime_control",
+                        "StopRequested",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 6,
+                    pending_input_limit: 4,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 3,
+                    emitted_effect_limit: 5,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 2,
+                },
+            },
+            CompositionWitness {
+                name: "mob_escalation_stops_orchestrator_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "CreateRun".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "step_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "ordered_steps".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependencies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_dependency_modes".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_branches".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_has_conditions".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_collection_policies".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "step_quorum_thresholds".into(),
+                                expr: Expr::EmptyMap,
+                            },
+                            CompositionWitnessField {
+                                field: "escalation_threshold".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "InitializeOrchestrator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "BindCoordinator".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "mob_orchestrator".into(),
+                        input_variant: "StartFlow".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "DispatchStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "AdmissionAccepted".into(),
+                        fields: admission_accepted_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            true,
+                            true,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "StageDrainSnapshot".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "run_id".into(),
+                                expr: Expr::String("runid_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "contributing_work_ids".into(),
+                                expr: Expr::SeqLiteral(vec![Expr::String("step_1".into())]),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "PrimitiveApplied".into(),
+                        fields: primitive_applied_fields(
+                            "runid_1",
+                            "TextOnly",
+                            false,
+                            false,
+                        ),
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "LlmReturnedTerminal".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "turn_execution".into(),
+                        input_variant: "BoundaryComplete".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "run_id".into(),
+                            expr: Expr::String("runid_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "flow_run".into(),
+                        input_variant: "FailStep".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "step_id".into(),
+                            expr: Expr::String("step_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "mob_supervisor_activation_starts_lifecycle".into(),
+                    "mob_flow_activation_starts_flow_run".into(),
+                    "mob_flow_activation_marks_lifecycle_run".into(),
+                    "flow_step_dispatch_enters_runtime_admission".into(),
+                    "mob_admitted_work_enters_ingress".into(),
+                    "mob_ingress_ready_starts_runtime_control".into(),
+                    "mob_runtime_control_starts_execution".into(),
+                    "mob_execution_boundary_updates_ingress".into(),
+                    "mob_execution_completion_updates_ingress".into(),
+                    "mob_execution_completion_notifies_control".into(),
+                    "mob_escalate_supervisor_stops_orchestrator".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("mob_orchestrator", Some("Stopped"), vec![]),
+                    witness_state("mob_lifecycle", Some("Running"), vec![]),
+                    witness_state("flow_run", Some("Running"), vec![]),
+                    witness_state("runtime_control", Some("Idle"), vec![]),
+                    witness_state(
+                        "runtime_ingress",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "current_run".into(),
+                            expr: Expr::None,
+                        }],
+                    ),
+                    witness_state("turn_execution", Some("Completed"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("mob_orchestrator", "InitializeOrchestrator"),
+                    witness_transition("mob_lifecycle", "Start"),
+                    witness_transition("mob_orchestrator", "BindCoordinator"),
+                    witness_transition("mob_orchestrator", "StartFlow"),
+                    witness_transition("flow_run", "CreateRun"),
+                    witness_transition("flow_run", "StartRun"),
+                    witness_transition("mob_lifecycle", "StartRun"),
+                    witness_transition("flow_run", "DispatchStep"),
+                    witness_transition("runtime_control", "AdmissionAcceptedIdleSteer"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                    witness_transition("runtime_ingress", "StageDrainSnapshotFromActive"),
+                    witness_transition("runtime_control", "BeginRunFromIdle"),
+                    witness_transition("turn_execution", "StartConversationRun"),
+                    witness_transition("turn_execution", "BoundaryComplete"),
+                    witness_transition("runtime_ingress", "RunCompletedFromActive"),
+                    witness_transition("runtime_control", "RunCompletedToIdle"),
+                    witness_transition("flow_run", "FailStepEscalating"),
+                    witness_transition("mob_orchestrator", "StopOrchestrator"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "InitializeOrchestrator",
+                        "mob_lifecycle",
+                        "Start",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "BindCoordinator",
+                        "mob_orchestrator",
+                        "StartFlow",
+                    ),
+                    witness_transition_order(
+                        "mob_orchestrator",
+                        "StartFlow",
+                        "flow_run",
+                        "StartRun",
+                    ),
+                    witness_transition_order(
+                        "flow_run",
+                        "DispatchStep",
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "AdmissionAcceptedIdleSteer",
+                        "runtime_ingress",
+                        "AdmitQueuedSteer",
+                    ),
+                    witness_transition_order(
+                        "runtime_ingress",
+                        "StageDrainSnapshotFromActive",
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                    ),
+                    witness_transition_order(
+                        "runtime_control",
+                        "BeginRunFromIdle",
+                        "turn_execution",
+                        "StartConversationRun",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_ingress",
+                        "RunCompletedFromActive",
+                    ),
+                    witness_transition_order(
+                        "turn_execution",
+                        "BoundaryComplete",
+                        "runtime_control",
+                        "RunCompletedToIdle",
+                    ),
+                    witness_transition_order(
+                        "flow_run",
+                        "FailStepEscalating",
+                        "mob_orchestrator",
+                        "StopOrchestrator",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 20,
+                    pending_input_limit: 12,
+                    pending_route_limit: 3,
+                    delivered_route_limit: 14,
+                    emitted_effect_limit: 18,
+                    seq_limit: 8,
+                    set_limit: 8,
+                    map_limit: 4,
+                },
+            },
+            CompositionWitness {
+                name: "mob_control_preemption".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "runtime_control".into(),
+                        input_variant: "Initialize".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "runtime_ingress".into(),
+                        input_variant: "AdmitQueued".into(),
+                        fields: admit_queued_fields(
+                            "step_1",
+                            "WorkInput",
+                            "TextOnly",
+                            "MobQueued",
+                            true,
+                            true,
+                        ),
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![SchedulerRule::PreemptWhenReady {
+                    higher: "control_plane".into(),
+                    lower: "ordinary_ingress".into(),
+                }],
+                expected_states: vec![witness_state("runtime_control", Some("Idle"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("runtime_control", "Initialize"),
+                    witness_transition("runtime_ingress", "AdmitQueuedSteer"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "runtime_control",
+                    "Initialize",
+                    "runtime_ingress",
+                        "AdmitQueuedSteer",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 3,
+                    pending_input_limit: 2,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 1,
+                    seq_limit: 2,
+                    set_limit: 2,
+                    map_limit: 2,
+                },
+            },
+        ],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        // mob_bundle CI open-exploration is skipped (step_limit: 0 → initial state only).
+        // Invariants are covered by focused compositions (runtime_pipeline, ops_runtime_bundle,
+        // peer_runtime_bundle, ops_peer_bundle). mob_bundle value is in its witnesses.
+        ci_limits: Some(CompositionStateLimits {
+            step_limit: 0,
+            pending_input_limit: 1,
+            pending_route_limit: 1,
+            delivered_route_limit: 1,
+            emitted_effect_limit: 1,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        }),
+        closed_world: true,
+    }
+}
+
+pub fn ops_peer_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "ops_peer_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "ops_lifecycle".into(),
+                machine_name: "OpsLifecycleMachine".into(),
+                actor: "ops_plane".into(),
+            },
+            MachineInstance {
+                instance_id: "peer_comms".into(),
+                machine_name: "PeerCommsMachine".into(),
+                actor: "peer_plane".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("ops_plane"),
+            machine_actor("peer_plane"),
+            owner_actor("agent_loop"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "ops_barrier_satisfaction".into(),
+            producer_instance: "ops_lifecycle".into(),
+            effect_variant: "WaitAllSatisfied".into(),
+            realizing_actor: "agent_loop".into(),
+            correlation_fields: vec!["operation_ids".into()],
+            obligation_fields: vec!["wait_request_id".into(), "operation_ids".into()],
+            allowed_feedback_inputs: vec![],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "owner acknowledges barrier satisfaction; no turn-execution in this composition scope"
+                    .into(),
+            ),
+            rust: protocol_rust(
+                "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::turn_execution_authority::TurnExecutionAuthority"),
+                Some("crate::turn_execution_authority::TurnExecutionMutator"),
+                Some("crate::turn_execution_authority::TurnExecutionInput"),
+                None,
+                Some("crate::turn_execution_authority::TurnExecutionTransition"),
+                Some("crate::error::AgentError"),
+                None,
+                Some("crate::ops_lifecycle::WaitAllSatisfied"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::AgentError;",
+                    "use crate::lifecycle::identifiers::{RunId, WaitRequestId};",
+                    "use crate::ops::OperationId;",
+                    "use crate::ops_lifecycle::WaitAllSatisfied;",
+                    "use crate::turn_execution_authority::{TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition};",
+                ],
+            ),
+        }],
+        entry_inputs: vec![
+            EntryInput {
+                name: "register_operation".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "RegisterOperation".into(),
+            },
+            EntryInput {
+                name: "provisioning_succeeded".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "ProvisioningSucceeded".into(),
+            },
+            EntryInput {
+                name: "peer_ready".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "PeerReady".into(),
+            },
+            EntryInput {
+                name: "complete_operation".into(),
+                machine: "ops_lifecycle".into(),
+                input_variant: "CompleteOperation".into(),
+            },
+            EntryInput {
+                name: "peer_trust".into(),
+                machine: "peer_comms".into(),
+                input_variant: "TrustPeer".into(),
+            },
+            EntryInput {
+                name: "peer_receive".into(),
+                machine: "peer_comms".into(),
+                input_variant: "ReceivePeerEnvelope".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "ops_peer_ready_trusts_peer_comms".into(),
+                from_machine: "ops_lifecycle".into(),
+                effect_variant: "ExposeOperationPeer".into(),
+                to: RouteTarget {
+                    machine: "peer_comms".into(),
+                    input_variant: "TrustPeer".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "peer_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "operation_id".into(),
+                        allow_named_alias: true,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "ops_peer_ready_trusts_peer_comms".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "ops_peer_ready_trusts_peer_comms".into(),
+                    to_machine: "peer_comms".into(),
+                    input_variant: "TrustPeer".into(),
+                    from_machine: "ops_lifecycle".into(),
+                    effect_variant: "ExposeOperationPeer".into(),
+                },
+                statement:
+                    "ops-lifecycle peer-ready effect triggers peer-comms trust establishment through an explicit route".into(),
+                references_machines: vec!["ops_lifecycle".into(), "peer_comms".into()],
+                references_actors: vec!["ops_plane".into(), "peer_plane".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "ops_peer_ready_trusts_peer_comms_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "RegisterOperation".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "operation_id".into(),
+                                expr: Expr::String("op_1".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "operation_kind".into(),
+                                expr: Expr::String("MobMemberChild".into()),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "ProvisioningSucceeded".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "ops_lifecycle".into(),
+                        input_variant: "PeerReady".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "operation_id".into(),
+                            expr: Expr::String("op_1".into()),
+                        }],
+                    },
+                ],
+                expected_routes: vec![
+                    "ops_peer_ready_trusts_peer_comms".into(),
+                ],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state("ops_lifecycle", Some("Active"), vec![]),
+                    witness_state("peer_comms", Some("Absent"), vec![]),
+                ],
+                expected_transitions: vec![
+                    witness_transition("ops_lifecycle", "RegisterOperation"),
+                    witness_transition("ops_lifecycle", "ProvisioningSucceeded"),
+                    witness_transition("ops_lifecycle", "PeerReady"),
+                    witness_transition("peer_comms", "TrustPeer"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "RegisterOperation",
+                        "ops_lifecycle",
+                        "ProvisioningSucceeded",
+                    ),
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "ProvisioningSucceeded",
+                        "ops_lifecycle",
+                        "PeerReady",
+                    ),
+                    witness_transition_order(
+                        "ops_lifecycle",
+                        "PeerReady",
+                        "peer_comms",
+                        "TrustPeer",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 5,
+                    pending_input_limit: 4,
+                    pending_route_limit: 2,
+                    delivered_route_limit: 2,
+                    emitted_effect_limit: 4,
+                    seq_limit: 4,
+                    set_limit: 4,
+                    map_limit: 4,
+                },
+            },
+        ],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: None,
+        closed_world: true,
+    }
+}
+
+fn witness_state(
+    machine: &str,
+    phase: Option<&str>,
+    fields: Vec<CompositionWitnessField>,
+) -> CompositionWitnessState {
+    CompositionWitnessState {
+        machine: machine.into(),
+        phase: phase.map(Into::into),
+        fields,
+    }
+}
+
+fn witness_transition(machine: &str, transition: &str) -> CompositionWitnessTransition {
+    CompositionWitnessTransition {
+        machine: machine.into(),
+        transition: transition.into(),
+    }
+}
+
+fn witness_transition_order(
+    earlier_machine: &str,
+    earlier_transition: &str,
+    later_machine: &str,
+    later_transition: &str,
+) -> CompositionWitnessTransitionOrder {
+    CompositionWitnessTransitionOrder {
+        earlier: witness_transition(earlier_machine, earlier_transition),
+        later: witness_transition(later_machine, later_transition),
+    }
+}
+
+fn submit_candidate_fields(
+    work_id: &str,
+    _work_kind: &str,
+    content_shape: &str,
+) -> Vec<CompositionWitnessField> {
+    vec![
+        CompositionWitnessField {
+            field: "work_id".into(),
+            expr: Expr::String(work_id.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "handling_mode".into(),
+            expr: Expr::String("Queue".into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: Expr::None,
+        },
+    ]
+}
+
+fn admission_accepted_fields(
+    work_id: &str,
+    _work_kind: &str,
+    content_shape: &str,
+    _wake: bool,
+    process: bool,
+) -> Vec<CompositionWitnessField> {
+    let handling_mode = if process { "Steer" } else { "Queue" };
+    vec![
+        CompositionWitnessField {
+            field: "work_id".into(),
+            expr: Expr::String(work_id.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "handling_mode".into(),
+            expr: Expr::String(handling_mode.into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "admission_effect".into(),
+            expr: Expr::String("SubmitAdmittedIngressEffect".into()),
+        },
+    ]
+}
+
+fn admit_queued_fields(
+    work_id: &str,
+    _work_kind: &str,
+    content_shape: &str,
+    policy: &str,
+    _wake: bool,
+    process: bool,
+) -> Vec<CompositionWitnessField> {
+    let handling_mode = if process { "Steer" } else { "Queue" };
+    vec![
+        CompositionWitnessField {
+            field: "work_id".into(),
+            expr: Expr::String(work_id.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "handling_mode".into(),
+            expr: Expr::String(handling_mode.into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: Expr::None,
+        },
+        CompositionWitnessField {
+            field: "policy".into(),
+            expr: Expr::String(policy.into()),
+        },
+    ]
+}
+
+fn primitive_applied_fields(
+    run_id: &str,
+    admitted_content_shape: &str,
+    vision_enabled: bool,
+    image_tool_results_enabled: bool,
+) -> Vec<CompositionWitnessField> {
+    vec![
+        CompositionWitnessField {
+            field: "run_id".into(),
+            expr: Expr::String(run_id.into()),
+        },
+        CompositionWitnessField {
+            field: "admitted_content_shape".into(),
+            expr: Expr::String(admitted_content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "vision_enabled".into(),
+            expr: Expr::Bool(vision_enabled),
+        },
+        CompositionWitnessField {
+            field: "image_tool_results_enabled".into(),
+            expr: Expr::Bool(image_tool_results_enabled),
+        },
+    ]
+}
+
+fn peer_envelope_fields(
+    raw_item_id: &str,
+    peer_id: &str,
+    raw_kind: &str,
+    text_projection: &str,
+    content_shape: &str,
+    request_id: Option<&str>,
+    reservation_key: Option<&str>,
+) -> Vec<CompositionWitnessField> {
+    vec![
+        CompositionWitnessField {
+            field: "raw_item_id".into(),
+            expr: Expr::String(raw_item_id.into()),
+        },
+        CompositionWitnessField {
+            field: "peer_id".into(),
+            expr: Expr::String(peer_id.into()),
+        },
+        CompositionWitnessField {
+            field: "raw_kind".into(),
+            expr: Expr::String(raw_kind.into()),
+        },
+        CompositionWitnessField {
+            field: "text_projection".into(),
+            expr: Expr::String(text_projection.into()),
+        },
+        CompositionWitnessField {
+            field: "content_shape".into(),
+            expr: Expr::String(content_shape.into()),
+        },
+        CompositionWitnessField {
+            field: "request_id".into(),
+            expr: request_id
+                .map(|value| Expr::Some(Box::new(Expr::String(value.into()))))
+                .unwrap_or(Expr::None),
+        },
+        CompositionWitnessField {
+            field: "reservation_key".into(),
+            expr: reservation_key
+                .map(|value| Expr::Some(Box::new(Expr::String(value.into()))))
+                .unwrap_or(Expr::None),
+        },
+    ]
+}
+
+pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "comms_drain_lifecycle".into(),
+        machines: vec![MachineInstance {
+            instance_id: "comms_drain".into(),
+            machine_name: "CommsDrainLifecycleMachine".into(),
+            actor: "drain_plane".into(),
+        }],
+        actors: vec![machine_actor("drain_plane"), owner_actor("session_host")],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "comms_drain_spawn".into(),
+                producer_instance: "comms_drain".into(),
+                effect_variant: "SpawnDrainTask".into(),
+                realizing_actor: "session_host".into(),
+                correlation_fields: vec![],
+                obligation_fields: vec!["mode".into()],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "comms_drain".into(),
+                        input_variant: "TaskSpawned".into(),
+                        field_bindings: vec![],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "comms_drain".into(),
+                        input_variant: "TaskExited".into(),
+                        field_bindings: vec![binding("reason", owner_context("reason"))],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback under task-scheduling fairness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-core/src/generated/protocol_comms_drain_spawn.rs",
+                    ProtocolGenerationMode::Executor,
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleAuthority"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleMutator"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleInput"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleEffect"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleTransition"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleError"),
+                    Some("EnsureRunning"),
+                    None,
+                    ProtocolHelperReturnShape::EffectsAndObligation,
+                    &[
+                        "use crate::comms_drain_lifecycle_authority::{CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError, CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainMode, DrainExitReason};",
+                    ],
+                ),
+            },
+            EffectHandoffProtocol {
+                name: "comms_drain_abort".into(),
+                producer_instance: "comms_drain".into(),
+                effect_variant: "AbortDrainTask".into(),
+                realizing_actor: "session_host".into(),
+                correlation_fields: vec![],
+                obligation_fields: vec![],
+                allowed_feedback_inputs: vec![FeedbackInputRef {
+                    machine_instance: "comms_drain".into(),
+                    input_variant: "AbortObserved".into(),
+                    field_bindings: vec![],
+                }],
+                closure_policy: ClosurePolicy::TerminalClosure,
+                liveness_annotation: None,
+                rust: protocol_rust(
+                    "meerkat-core/src/generated/protocol_comms_drain_abort.rs",
+                    ProtocolGenerationMode::Executor,
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleAuthority"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleMutator"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleInput"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleEffect"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleTransition"),
+                    Some("crate::comms_drain_lifecycle_authority::CommsDrainLifecycleError"),
+                    Some("StopRequested"),
+                    None,
+                    ProtocolHelperReturnShape::EffectsAndObligation,
+                    &[
+                        "use crate::comms_drain_lifecycle_authority::{CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError, CommsDrainLifecycleInput, CommsDrainLifecycleMutator};",
+                    ],
+                ),
+            },
+        ],
+        entry_inputs: vec![
+            EntryInput {
+                name: "drain_ensure_running".into(),
+                machine: "comms_drain".into(),
+                input_variant: "EnsureRunning".into(),
+            },
+            EntryInput {
+                name: "drain_task_spawned".into(),
+                machine: "comms_drain".into(),
+                input_variant: "TaskSpawned".into(),
+            },
+            EntryInput {
+                name: "drain_task_exited".into(),
+                machine: "comms_drain".into(),
+                input_variant: "TaskExited".into(),
+            },
+            EntryInput {
+                name: "drain_stop_requested".into(),
+                machine: "comms_drain".into(),
+                input_variant: "StopRequested".into(),
+            },
+            EntryInput {
+                name: "drain_abort_observed".into(),
+                machine: "comms_drain".into(),
+                input_variant: "AbortObserved".into(),
+            },
+        ],
+        routes: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "spawn_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "comms_drain".into(),
+                    effect_variant: "SpawnDrainTask".into(),
+                    protocol_name: "comms_drain_spawn".into(),
+                },
+                statement: "SpawnDrainTask effect is covered by comms_drain_spawn handoff protocol"
+                    .into(),
+                references_machines: vec!["comms_drain".into()],
+                references_actors: vec!["session_host".into()],
+            },
+            CompositionInvariant {
+                name: "abort_protocol_covered".into(),
+                kind: CompositionInvariantKind::HandoffProtocolCovered {
+                    producer_instance: "comms_drain".into(),
+                    effect_variant: "AbortDrainTask".into(),
+                    protocol_name: "comms_drain_abort".into(),
+                },
+                statement: "AbortDrainTask effect is covered by comms_drain_abort handoff protocol"
+                    .into(),
+                references_machines: vec!["comms_drain".into()],
+                references_actors: vec!["session_host".into()],
+            },
+        ],
+        witnesses: vec![
+            // Happy path: Inactive -> Starting -> Running -> Stopped (via stop)
+            CompositionWitness {
+                name: "spawn_run_stop".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "PersistentHost".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "TaskSpawned".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "StopRequested".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![CompositionWitnessState {
+                    machine: "comms_drain".into(),
+                    phase: Some("Stopped".into()),
+                    fields: vec![],
+                }],
+                expected_transitions: vec![
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromInactive".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "TaskSpawnedFromStarting".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "StopRequestedFromRunning".into(),
+                    },
+                ],
+                expected_transition_order: vec![
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromInactive".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                    },
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "StopRequestedFromRunning".into(),
+                        },
+                    },
+                ],
+                state_limits: CompositionStateLimits::ci_defaults(),
+            },
+            // Respawn path: failure in PersistentHost -> ExitedRespawnable -> re-spawn
+            CompositionWitness {
+                name: "failure_respawn".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "PersistentHost".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "TaskExited".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "reason".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "DrainExitReason".into(),
+                                variant: "Failed".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "PersistentHost".into(),
+                            },
+                        }],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![CompositionWitnessState {
+                    machine: "comms_drain".into(),
+                    phase: Some("Starting".into()),
+                    fields: vec![],
+                }],
+                expected_transitions: vec![
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromInactive".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "TaskExitedFromStartingRespawnable".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromExitedRespawnable".into(),
+                    },
+                ],
+                expected_transition_order: vec![
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromInactive".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskExitedFromStartingRespawnable".into(),
+                        },
+                    },
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskExitedFromStartingRespawnable".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromExitedRespawnable".into(),
+                        },
+                    },
+                ],
+                state_limits: CompositionStateLimits::ci_defaults(),
+            },
+            // Abort observed path: Running -> AbortObserved -> Stopped
+            CompositionWitness {
+                name: "abort_observed".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "EnsureRunning".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "mode".into(),
+                            expr: Expr::NamedVariant {
+                                enum_name: "CommsDrainMode".into(),
+                                variant: "Timed".into(),
+                            },
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "TaskSpawned".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "comms_drain".into(),
+                        input_variant: "AbortObserved".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![CompositionWitnessState {
+                    machine: "comms_drain".into(),
+                    phase: Some("Stopped".into()),
+                    fields: vec![],
+                }],
+                expected_transitions: vec![
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "EnsureRunningFromInactive".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "TaskSpawnedFromStarting".into(),
+                    },
+                    CompositionWitnessTransition {
+                        machine: "comms_drain".into(),
+                        transition: "AbortObservedFromActive".into(),
+                    },
+                ],
+                expected_transition_order: vec![
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "EnsureRunningFromInactive".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                    },
+                    CompositionWitnessTransitionOrder {
+                        earlier: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "TaskSpawnedFromStarting".into(),
+                        },
+                        later: CompositionWitnessTransition {
+                            machine: "comms_drain".into(),
+                            transition: "AbortObservedFromActive".into(),
+                        },
+                    },
+                ],
+                state_limits: CompositionStateLimits::ci_defaults(),
+            },
+        ],
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(CompositionStateLimits::ci_defaults()),
+        closed_world: true,
+    }
+}
+
+fn machine_actor(name: &str) -> ActorSchema {
+    ActorSchema {
+        name: name.into(),
+        kind: ActorKind::Machine,
+    }
+}
+
+fn owner_actor(name: &str) -> ActorSchema {
+    ActorSchema {
+        name: name.into(),
+        kind: ActorKind::Owner,
+    }
+}
+
+fn binding(input_field: &str, source: FeedbackFieldSource) -> FeedbackFieldBinding {
+    FeedbackFieldBinding {
+        input_field: input_field.into(),
+        source,
+    }
+}
+
+fn obligation_field(name: &str) -> FeedbackFieldSource {
+    FeedbackFieldSource::ObligationField(name.into())
+}
+
+fn owner_context(name: &str) -> FeedbackFieldSource {
+    FeedbackFieldSource::OwnerContext(name.into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn protocol_rust(
+    module_path: &str,
+    generation_mode: ProtocolGenerationMode,
+    authority_type_path: Option<&str>,
+    mutator_trait_path: Option<&str>,
+    input_enum_path: Option<&str>,
+    effect_enum_path: Option<&str>,
+    transition_type_path: Option<&str>,
+    error_type_path: Option<&str>,
+    executor_trigger_input_variant: Option<&str>,
+    bridge_source_type_path: Option<&str>,
+    helper_return_shape: ProtocolHelperReturnShape,
+    required_imports: &[&str],
+) -> ProtocolRustBinding {
+    ProtocolRustBinding {
+        module_path: module_path.into(),
+        generation_mode,
+        required_imports: required_imports.iter().map(|item| (*item).into()).collect(),
+        authority_type_path: authority_type_path.map(str::to_owned),
+        mutator_trait_path: mutator_trait_path.map(str::to_owned),
+        input_enum_path: input_enum_path.map(str::to_owned),
+        effect_enum_path: effect_enum_path.map(str::to_owned),
+        transition_type_path: transition_type_path.map(str::to_owned),
+        error_type_path: error_type_path.map(str::to_owned),
+        executor_trigger_input_variant: executor_trigger_input_variant.map(str::to_owned),
+        bridge_source_type_path: bridge_source_type_path.map(str::to_owned),
+        helper_return_shape,
+    }
+}

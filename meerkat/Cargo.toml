@@ -16,7 +16,7 @@ categories.workspace = true
 meerkat-core = { workspace = true, features = ["jsonschema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
-meerkat-runtime = { workspace = true, optional = true }
+meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-session = { workspace = true }
 meerkat-memory = { workspace = true, optional = true }
@@ -75,7 +75,6 @@ sqlite-store = ["meerkat-store/sqlite", "meerkat-runtime/sqlite-store"]
 # Session capabilities
 session-store = [
     "meerkat-session/session-store",
-    "dep:meerkat-runtime",
     "meerkat-runtime/redb-store",
     "meerkat-runtime/sqlite-store",
     "meerkat-store/sqlite",
@@ -86,7 +85,6 @@ memory-store-session = ["dep:meerkat-memory"]
 # Optional subsystems
 comms = ["dep:meerkat-comms", "dep:parking_lot", "meerkat-tools/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
-sub-agents = ["meerkat-tools/sub-agents"]
 skills = ["dep:meerkat-skills", "meerkat-skills/skills-http", "meerkat-tools/skills"]
 
 [package.metadata.cargo-machete]
@@ -160,11 +158,6 @@ required-features = ["jsonl-store", "memory-store-session"]
 [[example]]
 name = "015-session-persistence"
 path = "../examples/015-session-persistence-rs/main.rs"
-required-features = ["jsonl-store"]
-
-[[example]]
-name = "016-sub-agent-orchestration"
-path = "../examples/016-sub-agent-orchestration-rs/main.rs"
 required-features = ["jsonl-store"]
 
 [[example]]

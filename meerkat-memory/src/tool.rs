@@ -88,7 +88,10 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         if call.name != TOOL_NAME {
             return Err(ToolError::NotFound {
                 name: call.name.to_string(),
@@ -125,7 +128,8 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
             call.id.to_string(),
             serde_json::to_string(&results_json).unwrap_or_else(|_| "[]".to_string()),
             false,
-        ))
+        )
+        .into())
     }
 }
 
@@ -226,10 +230,10 @@ mod tests {
         let (id, raw, name) = make_call(r#"{"query": "project codename"}"#);
         let view = call_view(&id, &raw, &name);
 
-        let result = dispatcher.dispatch(view).await.unwrap();
-        assert!(!result.is_error);
+        let outcome = dispatcher.dispatch(view).await.unwrap();
+        assert!(!outcome.result.is_error);
 
-        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert!(!parsed.is_empty());
         assert!(parsed[0]["content"].as_str().unwrap().contains("AURORA"));
         assert!(parsed[0]["score"].as_f64().unwrap() > 0.0);
@@ -244,10 +248,10 @@ mod tests {
         let (id, raw, name) = make_call(r#"{"query": "anything"}"#);
         let view = call_view(&id, &raw, &name);
 
-        let result = dispatcher.dispatch(view).await.unwrap();
-        assert!(!result.is_error);
+        let outcome = dispatcher.dispatch(view).await.unwrap();
+        assert!(!outcome.result.is_error);
 
-        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert!(parsed.is_empty());
     }
 
@@ -265,8 +269,8 @@ mod tests {
         let (id, raw, name) = make_call(r#"{"query": "testing", "limit": 3}"#);
         let view = call_view(&id, &raw, &name);
 
-        let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
+        let outcome = dispatcher.dispatch(view).await.unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert_eq!(parsed.len(), 3);
     }
 
@@ -284,8 +288,8 @@ mod tests {
         let (id, raw, name) = make_call(r#"{"query": "Rust"}"#);
         let view = call_view(&id, &raw, &name);
 
-        let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
+        let outcome = dispatcher.dispatch(view).await.unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert_eq!(parsed.len(), DEFAULT_LIMIT);
     }
 
@@ -301,8 +305,8 @@ mod tests {
         let (id, raw, name) = make_call(r#"{"query": "quantum physics"}"#);
         let view = call_view(&id, &raw, &name);
 
-        let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
+        let outcome = dispatcher.dispatch(view).await.unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert!(parsed.is_empty());
     }
 
@@ -350,8 +354,8 @@ mod tests {
         let (id, raw, name) = make_call(r#"{"query": "science", "limit": 100}"#);
         let view = call_view(&id, &raw, &name);
 
-        let result = dispatcher.dispatch(view).await.unwrap();
-        let parsed: Vec<Value> = serde_json::from_str(&result.text_content()).unwrap();
+        let outcome = dispatcher.dispatch(view).await.unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&outcome.result.text_content()).unwrap();
         assert!(parsed.len() <= 20);
     }
 

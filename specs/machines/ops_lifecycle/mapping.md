@@ -70,3 +70,146 @@ The seam spec names the final concrete owner and trait:
 - shell-local job registries still own progress, terminality, or watcher truth
 - child completion still leaks through comms/transcript/tool-result projection
   instead of remaining purely typed lifecycle output
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `OpsLifecycleMachine`
+
+### Code Anchors
+- `ops_vocab`: `meerkat-core/src/ops.rs` — shared async-operation vocabulary precursor
+- `mob_provisioner`: `meerkat-mob/src/runtime/provisioner.rs` — mob-backed child lifecycle precursor
+- `shell_job_manager`: `meerkat-tools/src/builtin/shell/job_manager.rs` — background tool-operation lifecycle precursor
+
+### Scenarios
+- `register-progress-terminal` — async operation registers, reports progress, and reaches a terminal outcome
+- `peer-ready-handoff` — child operation hands off to peer comms at peer_ready
+- `cancel-and-watch` — async operation cancellation resolves watcher semantics exactly once
+
+### Transitions
+- `RegisterOperation`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `ProvisioningSucceeded`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `ProvisioningFailedCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `ProvisioningFailed`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `AbortProvisioningCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `AbortProvisioning`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `PeerReady`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `peer-ready-handoff`
+- `RegisterWatcher`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `ProgressReported`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `peer-ready-handoff`
+- `CompleteOperationCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CompleteOperation`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `FailOperationCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `FailOperation`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `CancelOperationCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `CancelOperation`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `RetireRequested`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `RetireCompletedCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `RetireCompleted`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CollectTerminal`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `OwnerTerminatedCompletesWait`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `OwnerTerminated`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `BeginWaitAllImmediate`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `BeginWaitAllPending`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CancelWaitAll`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `cancel-and-watch`
+- `CollectCompleted`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+
+### Effects
+- `SubmitOpEvent`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `NotifyOpWatcher`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `ExposeOperationPeer`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `RetainTerminalRecord`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `EvictCompletedRecord`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `WaitAllSatisfied`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `CollectCompletedResult`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `ConcurrencyLimitExceeded`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+
+### Invariants
+- `terminal_buffered_only_for_terminal_states`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `peer_ready_implies_mob_member_child`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `peer-ready-handoff`
+- `peer_ready_implies_present`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`, `peer-ready-handoff`
+- `present_operations_keep_kind_identity`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `terminal_statuses_have_matching_terminal_outcome`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+- `nonterminal_statuses_have_no_terminal_outcome`
+  - anchors: `ops_vocab`, `mob_provisioner`, `shell_job_manager`
+  - scenarios: `register-progress-terminal`
+
+
+<!-- GENERATED_COVERAGE_END -->

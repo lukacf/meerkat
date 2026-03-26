@@ -15,9 +15,11 @@ pub mod tokio {
 }
 
 pub mod agent;
+pub mod blob;
 pub mod budget;
 pub mod checkpoint;
 pub mod comms;
+pub mod comms_drain_lifecycle_authority;
 pub mod compact;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,12 +31,16 @@ pub mod event;
 pub mod event_injector;
 pub mod event_tap;
 pub mod gateway;
+pub mod generated;
 pub mod hooks;
+pub mod image_content;
 pub mod interaction;
 pub mod lifecycle;
 pub mod mcp_config;
 pub mod memory;
+pub mod model_defaults;
 pub mod ops;
+pub mod ops_lifecycle;
 pub mod peer_meta;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
@@ -47,36 +53,45 @@ pub mod session;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
-pub mod sub_agent;
 pub mod time_compat;
 pub mod tool_scope;
 pub mod turn_boundary;
+pub mod turn_execution_authority;
 pub mod types;
 pub mod wait_interrupt;
 
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsCapabilityError, CommsRuntime, ExternalToolNotice, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult,
+    CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
+    LlmStreamResult,
 };
+pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};
 pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, SendAndStreamError, SendError, SendReceipt, StreamError,
-    StreamScope,
+    PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, SendAndStreamError,
+    SendError, SendReceipt, StreamError, StreamScope,
 };
-pub use compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
+pub use comms_drain_lifecycle_authority::{
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
+    CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainLifecycleTransition,
+    CommsDrainMode, CommsDrainPhase, DrainExitReason,
+};
+pub use compact::{
+    CompactionConfig, CompactionContext, CompactionResult, Compactor,
+    SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
+};
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use peer_meta::PeerMeta;
 
 pub use config::{
-    AgentConfig, BudgetConfig, CommsAuthMode, CommsRuntimeConfig, CommsRuntimeMode, Config,
-    ConfigDelta, ConfigError, ConfigScope, HookEntryConfig, HookRunOverrides, HookRuntimeConfig,
-    HooksConfig, LimitsConfig, ModelDefaults, PlainEventSource, ProviderConfig, ProviderSettings,
-    ResolvedSubAgentConfig, RetryConfig, ShellDefaults, StorageConfig, StoreConfig,
-    SubAgentsConfig, ToolsConfig,
+    AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
+    CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
+    HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig, ModelDefaults,
+    PlainEventSource, ProviderConfig, ProviderSettings, RetryConfig, ShellDefaults, StorageConfig,
+    StoreConfig, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{
@@ -89,9 +104,10 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentEvent, BudgetType, EventEnvelope, ScopedAgentEvent, StreamScopeFrame,
-    ToolConfigChangeOperation, ToolConfigChangedPayload, VerboseEventConfig, agent_event_type,
-    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
+    AgentEvent, BudgetType, EventEnvelope, ExternalToolDelta, ExternalToolDeltaPhase,
+    ScopedAgentEvent, StreamScopeFrame, ToolConfigChangeOperation, ToolConfigChangedPayload,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
+    format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -104,6 +120,11 @@ pub use hooks::{
     HookLlmResponse, HookOutcome, HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode,
     HookRevision, HookToolCall, HookToolResult, apply_tool_result_patch, default_failure_policy,
 };
+pub use image_content::{
+    MissingBlobBehavior, collect_blob_ids_from_blocks, collect_blob_ids_from_messages,
+    externalize_content_blocks, externalize_content_input, externalize_messages_from,
+    hydrate_content_blocks, hydrate_content_input, hydrate_messages_for_execution,
+};
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
     PeerInputClass, ResponseStatus,
@@ -114,10 +135,16 @@ pub use lifecycle::{
     RunControlCommand, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
+pub use model_defaults::ModelOperationalDefaultsResolver;
 pub use ops::{
-    ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent, OperationId,
-    OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec, SubAgentState,
-    ToolAccessPolicy, WorkKind,
+    AsyncOpRef, ConcurrencyLimits, ContextStrategy, ForkBranch, ForkBudgetPolicy, OpEvent,
+    OperationId, OperationPolicy, OperationResult, OperationSpec, ResultShape, SpawnSpec,
+    ToolAccessPolicy, ToolDispatchOutcome, WaitPolicy, WorkKind,
+};
+pub use ops_lifecycle::{
+    OperationCompletionWatch, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
+    OperationProgressUpdate, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
+    OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT, SystemPromptConfig};
@@ -139,20 +166,25 @@ pub use service::{
 };
 pub use session::{
     PendingSystemContextAppend, SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION,
-    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session, SessionMeta,
-    SessionMetadata, SessionSystemContextState, SessionTooling, SystemContextStageError,
+    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
+    SessionLlmIdentity, SessionMeta, SessionMetadata, SessionSystemContextState, SessionTooling,
+    SystemContextStageError,
 };
 pub use state::LoopState;
-pub use sub_agent::{SubAgentCommsInfo, SubAgentCompletion, SubAgentInfo, SubAgentManager};
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,
     ToolScopeRevision, ToolScopeStageError,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
+pub use turn_execution_authority::{
+    ContentShape, TurnExecutionAuthority, TurnExecutionEffect, TurnExecutionInput,
+    TurnExecutionMutator, TurnExecutionTransition, TurnPhase, TurnPrimitiveKind,
+    TurnTerminalOutcome,
+};
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
-    ContentInput, Message, OutputSchema, ProviderMeta, RunResult, SecurityMode, SessionId,
-    StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolResult, Usage,
-    UserMessage, has_images,
+    ContentInput, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta, RunResult,
+    SecurityMode, SessionId, StopReason, SystemMessage, ToolCall, ToolCallIter, ToolCallView,
+    ToolDef, ToolResult, Usage, UserMessage, has_images,
 };
 pub use wait_interrupt::{WaitInterrupt, WaitInterruptBindError, WaitInterruptReceiver};

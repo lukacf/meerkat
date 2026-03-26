@@ -1,8 +1,146 @@
 from __future__ import annotations
 
-from typing import Any
-
+from typing import Any, Literal, NotRequired, TypedDict
 from .streaming import EventSubscription
+
+RenderClass = Literal[
+    "user_prompt",
+    "peer_message",
+    "peer_request",
+    "peer_response",
+    "external_event",
+    "flow_step",
+    "continuation",
+    "system_notice",
+    "tool_scope_notice",
+    "ops_progress",
+]
+RenderSalience = Literal["background", "normal", "important", "urgent"]
+RenderMetadata = TypedDict(
+    "RenderMetadata",
+    {"class": RenderClass, "salience": NotRequired[RenderSalience]},
+)
+
+MemberDeliveryReceipt = TypedDict(
+    "MemberDeliveryReceipt",
+    {
+        "member_id": str,
+        "session_id": str,
+        "handling_mode": Literal["queue", "steer"],
+    },
+)
+
+MemberRespawnReceipt = TypedDict(
+    "MemberRespawnReceipt",
+    {
+        "member_id": str,
+        "old_session_id": NotRequired[str | None],
+        "new_session_id": NotRequired[str | None],
+    },
+)
+
+MobRespawnResult = TypedDict(
+    "MobRespawnResult",
+    {
+        "status": Literal["completed", "topology_restore_failed"],
+        "receipt": MemberRespawnReceipt,
+        "failed_peer_ids": NotRequired[list[str]],
+    },
+)
+
+MobUnreachablePeer = TypedDict(
+    "MobUnreachablePeer",
+    {
+        "peer": str,
+        "reason": NotRequired[str],
+    },
+)
+
+MobPeerConnectivitySnapshot = TypedDict(
+    "MobPeerConnectivitySnapshot",
+    {
+        "reachable_peer_count": int,
+        "unknown_peer_count": int,
+        "unreachable_peers": list[MobUnreachablePeer],
+    },
+)
+
+MobMemberSnapshot = TypedDict(
+    "MobMemberSnapshot",
+    {
+        "status": str,
+        "output_preview": NotRequired[str],
+        "error": NotRequired[str],
+        "tokens_used": int,
+        "is_final": bool,
+        "current_session_id": NotRequired[str],
+        "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+    },
+)
+
+MobKickoffMemberSnapshot = TypedDict(
+    "MobKickoffMemberSnapshot",
+    {
+        "meerkat_id": str,
+        "status": str,
+        "output_preview": NotRequired[str],
+        "error": NotRequired[str],
+        "tokens_used": int,
+        "is_final": bool,
+        "current_session_id": NotRequired[str],
+        "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
+    },
+)
+
+MobHelperResult = TypedDict(
+    "MobHelperResult",
+    {
+        "output": NotRequired[str],
+        "tokens_used": int,
+        "session_id": NotRequired[str],
+    },
+)
+MobSpawnSpec = TypedDict(
+    "MobSpawnSpec",
+    {
+        "profile": str,
+        "meerkat_id": str,
+        "initial_message": NotRequired[str | list[dict[str, Any]] | None],
+        "runtime_mode": NotRequired[str | None],
+        "backend": NotRequired[str | None],
+        "resume_session_id": NotRequired[str | None],
+        "labels": NotRequired[dict[str, str] | None],
+        "context": NotRequired[dict[str, Any] | None],
+        "additional_instructions": NotRequired[list[str] | None],
+    },
+)
+
+
+
+class Member:
+    """Capability-bearing mob member handle."""
+
+    def __init__(self, mob: "Mob", meerkat_id: str):
+        self._mob = mob
+        self.meerkat_id = meerkat_id
+
+    async def send(
+        self,
+        content: str | list[dict[str, Any]],
+        *,
+        handling_mode: Literal["queue", "steer"] = "queue",
+        render_metadata: RenderMetadata | None = None,
+    ) -> MemberDeliveryReceipt:
+        return await self._mob._client.send_mob_member_content(
+            self._mob.id,
+            self.meerkat_id,
+            content,
+            handling_mode=handling_mode,
+            render_metadata=render_metadata,
+        )
+
+    async def events(self) -> EventSubscription:
+        return await self._mob.subscribe_member_events(self.meerkat_id)
 
 
 class Mob:
@@ -44,24 +182,84 @@ class Mob:
             context=context,
             additional_instructions=additional_instructions,
         )
+    async def spawn_many(
+        self,
+        specs: list[MobSpawnSpec],
+    ) -> list[dict[str, Any]]:
+        return await self._client.spawn_mob_members(self.id, specs)
+
 
     async def retire(self, meerkat_id: str) -> None:
         await self._client.retire_mob_member(self.id, meerkat_id)
 
-    async def respawn(self, meerkat_id: str, initial_message: str | list[dict] | None = None) -> None:
-        await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
+    async def respawn(
+        self,
+        meerkat_id: str,
+        initial_message: str | list[dict[str, Any]] | None = None,
+    ) -> MobRespawnResult:
+        return await self._client.respawn_mob_member(self.id, meerkat_id, initial_message)
 
-    async def wire(self, a: str, b: str) -> None:
-        await self._client.wire_mob_members(self.id, a, b)
+    async def force_cancel(self, meerkat_id: str) -> None:
+        await self._client.force_cancel_mob_member(self.id, meerkat_id)
 
-    async def unwire(self, a: str, b: str) -> None:
-        await self._client.unwire_mob_members(self.id, a, b)
+    async def member_status(self, meerkat_id: str) -> MobMemberSnapshot:
+        return await self._client.mob_member_status(self.id, meerkat_id)
+
+    async def wait_for_kickoff_complete(
+        self,
+        *,
+        member_ids: list[str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[MobKickoffMemberSnapshot]:
+        return await self._client.wait_mob_kickoff(
+            self.id,
+            member_ids=member_ids,
+            timeout_ms=timeout_ms,
+        )
+
+    async def spawn_helper(
+        self,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+    ) -> MobHelperResult:
+        return await self._client.spawn_mob_helper(
+            self.id,
+            prompt,
+            meerkat_id=meerkat_id,
+            profile_name=profile_name,
+        )
+
+    async def fork_helper(
+        self,
+        source_member_id: str,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+        fork_context: dict[str, Any] | None = None,
+    ) -> MobHelperResult:
+        return await self._client.fork_mob_helper(
+            self.id,
+            source_member_id,
+            prompt,
+            meerkat_id=meerkat_id,
+            profile_name=profile_name,
+            fork_context=fork_context,
+        )
+
+    async def wire(self, member: str, peer: str | dict[str, Any]) -> None:
+        await self._client.wire_mob_members(self.id, member, peer)
+
+    async def unwire(self, member: str, peer: str | dict[str, Any]) -> None:
+        await self._client.unwire_mob_members(self.id, member, peer)
 
     async def lifecycle(self, action: str) -> None:
         await self._client.mob_lifecycle(self.id, action)
 
-    async def send_message(self, meerkat_id: str, message: str | list[dict]) -> None:
-        await self._client.send_mob_message(self.id, meerkat_id, message)
+    def member(self, meerkat_id: str) -> Member:
+        return Member(self, meerkat_id)
 
     async def append_system_context(
         self,

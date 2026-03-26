@@ -28,7 +28,7 @@ impl Pack for ImplementPack {
     fn flow_step_count(&self) -> usize { 0 } // comms-driven review loop
 
     fn definition(&self, _task: &str, _context: &str, overrides: &BTreeMap<String, String>, pp: Option<&Value>) -> MobDefinition {
-        let tools = ToolConfig { comms: true, ..ToolConfig::default() };
+        let tools = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };
 
         let mut profiles = BTreeMap::new();
         profiles.insert(ProfileName::from("implementer"), Profile {

@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::AgentFactory;
 use meerkat_client::{LlmClient, LlmError};
-use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
+use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore, StopReason};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
+use meerkat_store::MemoryBlobStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
@@ -68,11 +69,12 @@ fn spawn_test_server() -> (
     let factory = AgentFactory::new(temp.path().join("sessions"));
     let config = Config::default();
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
     let mut runtime = SessionRuntime::new(
         factory,
         config,
         10,
-        meerkat::PersistenceBundle::new(store, None),
+        meerkat::PersistenceBundle::new(store, None, blob_store),
         meerkat_rpc::router::NotificationSink::noop(),
     );
     let config_store: Arc<dyn meerkat_core::ConfigStore> =
@@ -801,16 +803,25 @@ async fn initialize_methods_list_complete() {
         "session/create",
         "session/list",
         "session/read",
+        "session/history",
         "session/archive",
+        "session/external_event",
         "session/inject_context",
         "session/stream_open",
         "session/stream_close",
         "turn/start",
         "turn/interrupt",
+        "runtime/state",
+        "runtime/accept",
+        "runtime/retire",
+        "runtime/reset",
+        "input/state",
+        "input/list",
         "config/get",
         "config/set",
         "config/patch",
         "capabilities/get",
+        "models/catalog",
         "skills/list",
         "skills/inspect",
         "tools/register",
@@ -822,8 +833,68 @@ async fn initialize_methods_list_complete() {
         );
     }
 
+    #[cfg(feature = "mob")]
+    {
+        let expected_mob = [
+            "mob/prefabs",
+            "mob/create",
+            "mob/list",
+            "mob/status",
+            "mob/lifecycle",
+            "mob/spawn",
+            "mob/spawn_many",
+            "mob/retire",
+            "mob/respawn",
+            "mob/wire",
+            "mob/unwire",
+            "mob/members",
+            "mob/send",
+            "mob/events",
+            "mob/append_system_context",
+            "mob/flows",
+            "mob/flow_run",
+            "mob/flow_status",
+            "mob/flow_cancel",
+            "mob/spawn_helper",
+            "mob/fork_helper",
+            "mob/force_cancel",
+            "mob/member_status",
+            "mob/tools",
+            "mob/call",
+            "mob/stream_open",
+            "mob/stream_close",
+        ];
+        for method in &expected_mob {
+            assert!(
+                method_names.contains(method),
+                "Missing mob method '{method}' in initialize response. Got: {method_names:?}"
+            );
+        }
+    }
+
     drop(writer);
     handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn notification_catalog_lists_live_stream_notifications() {
+    let notifications = meerkat_contracts::rpc_notification_names(
+        meerkat_contracts::RpcMethodCatalogOptions::documented_surface(),
+    );
+
+    for expected in [
+        "initialized",
+        "session/event",
+        "session/stream_event",
+        "session/stream_end",
+        "mob/stream_event",
+        "mob/stream_end",
+    ] {
+        assert!(
+            notifications.iter().any(|name| name == expected),
+            "notification catalog missing {expected}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

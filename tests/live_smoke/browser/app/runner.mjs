@@ -236,7 +236,14 @@ async function scenarioRawMob004({ wasm }) {
   assert(initialMembers.length === 1, `expected one member after spawn: ${JSON.stringify(initialMembers)}`);
 
   const subscriptionHandle = await wasm.mob_member_subscribe(mobId, 'worker-1');
-  await wasm.mob_send_message(mobId, 'worker-1', 'Reply with a browser mob smoke acknowledgement.');
+  await wasm.mob_member_send(
+    mobId,
+    'worker-1',
+    JSON.stringify({
+      content: 'Reply with a browser mob smoke acknowledgement.',
+      handling_mode: 'queue',
+    }),
+  );
   const seenSubscriptionItems = [];
   const subscriptionItems = await pollUntil(
     async () => {

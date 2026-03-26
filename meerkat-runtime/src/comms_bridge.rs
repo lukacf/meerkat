@@ -1,24 +1,68 @@
-//! CommsInputBridge — translates InboxInteraction → v9 Input::PeerInput.
+//! Runtime comms bridge helpers.
 //!
-//! This bridge maps the existing comms system (InboxInteraction) into the
-//! v9 input model without changing meerkat-core's comms module.
+//! These helpers translate drained comms interactions into the runtime-owned
+//! input families used by the comms classification bridge.
 
 use chrono::Utc;
-use meerkat_core::interaction::{InboxInteraction, InteractionContent, ResponseStatus};
+use meerkat_core::interaction::{
+    ClassifiedInboxInteraction, InboxInteraction, InteractionContent, PeerInputClass,
+    ResponseStatus,
+};
 use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::{CorrelationId, LogicalRuntimeId};
 use crate::input::{
-    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
-    ResponseProgressPhase, ResponseTerminalStatus,
+    ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
+    PeerConvention, PeerInput, ResponseProgressPhase, ResponseTerminalStatus,
 };
+
+/// Convert a classified comms interaction into the appropriate runtime-owned
+/// input family.
+pub fn classified_interaction_to_runtime_input(
+    classified: &ClassifiedInboxInteraction,
+    runtime_id: &LogicalRuntimeId,
+) -> Input {
+    let interaction = &classified.interaction;
+
+    if classified.class == PeerInputClass::PlainEvent {
+        let source_name = interaction
+            .from
+            .strip_prefix("event:")
+            .unwrap_or(interaction.from.as_str());
+        let blocks = external_event_blocks(interaction);
+        return Input::ExternalEvent(ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: source_name.to_string(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: true,
+                    operator_eligible: true,
+                },
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
+            },
+            event_type: source_name.to_string(),
+            payload: external_event_payload(interaction),
+            blocks,
+            handling_mode: interaction.handling_mode,
+            render_metadata: interaction.render_metadata.clone(),
+        });
+    }
+
+    interaction_to_peer_input(interaction, runtime_id)
+}
 
 /// Convert an `InboxInteraction` to a v9 `Input::Peer`.
 pub fn interaction_to_peer_input(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
-    let (convention, body) = map_convention(&interaction.content);
+    let convention = map_convention(interaction);
     let durability = map_durability(&convention);
 
     Input::Peer(PeerInput {
@@ -39,53 +83,96 @@ pub fn interaction_to_peer_input(
             correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
         },
         convention: Some(convention),
-        body,
-        blocks: None,
+        body: peer_rendered_body(interaction),
+        blocks: peer_blocks(interaction),
     })
 }
 
-fn map_convention(content: &InteractionContent) -> (PeerConvention, String) {
-    match content {
-        InteractionContent::Message { body, .. } => (PeerConvention::Message, body.clone()),
-        InteractionContent::Request { intent, params, .. } => (
-            PeerConvention::Request {
-                request_id: uuid::Uuid::now_v7().to_string(),
-                intent: intent.clone(),
-            },
-            serde_json::to_string(params).unwrap_or_default(),
-        ),
+fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
+    match &interaction.content {
+        InteractionContent::Message { .. } => PeerConvention::Message,
+        InteractionContent::Request { intent, .. } => PeerConvention::Request {
+            request_id: interaction.id.0.to_string(),
+            intent: intent.clone(),
+        },
         InteractionContent::Response {
             status,
-            result,
             in_reply_to,
             ..
         } => {
             let request_id = in_reply_to.to_string();
-            let body = serde_json::to_string(result).unwrap_or_default();
             match status {
-                ResponseStatus::Completed => (
-                    PeerConvention::ResponseTerminal {
-                        request_id,
-                        status: ResponseTerminalStatus::Completed,
-                    },
-                    body,
-                ),
-                ResponseStatus::Failed => (
-                    PeerConvention::ResponseTerminal {
-                        request_id,
-                        status: ResponseTerminalStatus::Failed,
-                    },
-                    body,
-                ),
-                ResponseStatus::Accepted => (
-                    PeerConvention::ResponseProgress {
-                        request_id,
-                        phase: ResponseProgressPhase::Accepted,
-                    },
-                    body,
-                ),
+                ResponseStatus::Completed => PeerConvention::ResponseTerminal {
+                    request_id,
+                    status: ResponseTerminalStatus::Completed,
+                },
+                ResponseStatus::Failed => PeerConvention::ResponseTerminal {
+                    request_id,
+                    status: ResponseTerminalStatus::Failed,
+                },
+                ResponseStatus::Accepted => PeerConvention::ResponseProgress {
+                    request_id,
+                    phase: ResponseProgressPhase::Accepted,
+                },
             }
         }
+    }
+}
+
+fn peer_rendered_body(interaction: &InboxInteraction) -> String {
+    match &interaction.content {
+        InteractionContent::Message { body, .. } => {
+            if !interaction.rendered_text.is_empty() {
+                return interaction.rendered_text.clone();
+            }
+            body.clone()
+        }
+        InteractionContent::Request { params, .. } => {
+            if !interaction.rendered_text.is_empty() {
+                return interaction.rendered_text.clone();
+            }
+            serde_json::to_string(params).unwrap_or_default()
+        }
+        InteractionContent::Response { result, .. } => {
+            if !interaction.rendered_text.is_empty() {
+                return interaction.rendered_text.clone();
+            }
+            serde_json::to_string(result).unwrap_or_default()
+        }
+    }
+}
+
+fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types::ContentBlock>> {
+    match &interaction.content {
+        InteractionContent::Message { blocks, .. } => blocks.clone(),
+        _ => None,
+    }
+}
+
+fn external_event_payload(interaction: &InboxInteraction) -> serde_json::Value {
+    match &interaction.content {
+        InteractionContent::Message { body, .. } => serde_json::json!({ "body": body }),
+        InteractionContent::Request { intent, params } => {
+            serde_json::json!({ "intent": intent, "params": params })
+        }
+        InteractionContent::Response {
+            in_reply_to,
+            status,
+            result,
+        } => serde_json::json!({
+            "in_reply_to": in_reply_to,
+            "status": status,
+            "result": result,
+        }),
+    }
+}
+
+fn external_event_blocks(
+    interaction: &InboxInteraction,
+) -> Option<Vec<meerkat_core::types::ContentBlock>> {
+    match &interaction.content {
+        InteractionContent::Message { blocks, .. } => blocks.clone(),
+        _ => None,
     }
 }
 
@@ -115,6 +202,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -136,13 +225,252 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
             assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
+            match p.convention.as_ref() {
+                Some(PeerConvention::Request { request_id, .. }) => {
+                    assert_eq!(request_id, &interaction.id.0.to_string());
+                }
+                other => panic!("Expected request convention, got {other:?}"),
+            }
             assert_eq!(p.header.durability, InputDurability::Durable);
         } else {
             panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn plain_event_to_external_event_input() {
+        let classified = ClassifiedInboxInteraction {
+            class: PeerInputClass::PlainEvent,
+            lifecycle_peer: None,
+            interaction: InboxInteraction {
+                from: "event:webhook".into(),
+                content: InteractionContent::Message {
+                    body: "{\"ok\":true}".into(),
+                    blocks: None,
+                },
+                id: make_interaction_id(),
+                rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+            },
+        };
+        let input =
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+        match input {
+            Input::ExternalEvent(event) => {
+                assert_eq!(event.event_type, "webhook");
+                assert_eq!(event.payload["body"], "{\"ok\":true}");
+                assert_eq!(event.blocks, None);
+                assert_eq!(
+                    event.handling_mode,
+                    meerkat_core::types::HandlingMode::Queue
+                );
+                assert_eq!(event.render_metadata, None);
+            }
+            other => panic!("Expected ExternalEvent input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_named_event_prefix_stays_peer_without_plain_event_class() {
+        let classified = ClassifiedInboxInteraction {
+            class: PeerInputClass::ActionableMessage,
+            lifecycle_peer: None,
+            interaction: InboxInteraction {
+                from: "event:webhook".into(),
+                content: InteractionContent::Message {
+                    body: "hello".into(),
+                    blocks: None,
+                },
+                id: make_interaction_id(),
+                rendered_text: "[COMMS MESSAGE from event:webhook]\nhello".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+            },
+        };
+        let input =
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+        match input {
+            Input::Peer(peer) => {
+                assert_eq!(peer.body, "[COMMS MESSAGE from event:webhook]\nhello");
+                match peer.header.source {
+                    InputOrigin::Peer { peer_id, .. } => assert_eq!(peer_id, "event:webhook"),
+                    other => panic!("Expected peer source, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Peer input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_body_uses_rendered_text_projection() {
+        let interaction = InboxInteraction {
+            from: "event:webhook".into(),
+            content: InteractionContent::Request {
+                intent: "mob.peer_added".into(),
+                params: serde_json::json!({"peer":"agent-1"}),
+            },
+            id: make_interaction_id(),
+            rendered_text: "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
+                .into(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        };
+        let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
+        if let Input::Peer(peer) = input {
+            assert_eq!(
+                peer.body,
+                "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
+            );
+        } else {
+            panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn message_blocks_are_preserved_on_peer_input() {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "see image".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            },
+        ];
+        let interaction = InboxInteraction {
+            from: "peer-1".into(),
+            content: InteractionContent::Message {
+                body: "see image".into(),
+                blocks: Some(blocks.clone()),
+            },
+            id: make_interaction_id(),
+            rendered_text: "[COMMS MESSAGE from peer-1]\nsee image".into(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        };
+        let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
+        if let Input::Peer(peer) = input {
+            assert_eq!(peer.body, "[COMMS MESSAGE from peer-1]\nsee image");
+            assert_eq!(peer.blocks, Some(blocks));
+        } else {
+            panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn multimodal_message_uses_rendered_projection_while_preserving_blocks() {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption text".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            },
+        ];
+        let interaction = InboxInteraction {
+            from: "peer-1".into(),
+            content: InteractionContent::Message {
+                body: "please inspect this image".into(),
+                blocks: Some(blocks),
+            },
+            id: make_interaction_id(),
+            rendered_text: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        };
+        let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
+        if let Input::Peer(peer) = input {
+            assert_eq!(
+                peer.body,
+                "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]"
+            );
+        } else {
+            panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn plain_event_blocks_are_preserved_on_external_event_input() {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "see image".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            },
+        ];
+        let classified = ClassifiedInboxInteraction {
+            class: PeerInputClass::PlainEvent,
+            lifecycle_peer: None,
+            interaction: InboxInteraction {
+                from: "event:webhook".into(),
+                content: InteractionContent::Message {
+                    body: "see image".into(),
+                    blocks: Some(blocks.clone()),
+                },
+                id: make_interaction_id(),
+                rendered_text: "[EVENT via webhook] see image".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+            },
+        };
+        let input =
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+        match input {
+            Input::ExternalEvent(event) => {
+                assert_eq!(event.payload["body"], "see image");
+                assert!(event.payload.get("blocks").is_none());
+                assert_eq!(event.blocks, Some(blocks));
+                assert_eq!(
+                    event.handling_mode,
+                    meerkat_core::types::HandlingMode::Queue
+                );
+                assert_eq!(event.render_metadata, None);
+            }
+            other => panic!("Expected ExternalEvent input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_event_preserves_handling_mode_and_render_metadata() {
+        let render_metadata = meerkat_core::types::RenderMetadata {
+            class: meerkat_core::types::RenderClass::ExternalEvent,
+            salience: meerkat_core::types::RenderSalience::Urgent,
+        };
+        let classified = ClassifiedInboxInteraction {
+            class: PeerInputClass::PlainEvent,
+            lifecycle_peer: None,
+            interaction: InboxInteraction {
+                from: "event:webhook".into(),
+                content: InteractionContent::Message {
+                    body: "urgent".into(),
+                    blocks: None,
+                },
+                id: make_interaction_id(),
+                rendered_text: "[EVENT via webhook] urgent".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                render_metadata: Some(render_metadata.clone()),
+            },
+        };
+
+        match classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test")) {
+            Input::ExternalEvent(event) => {
+                assert_eq!(
+                    event.handling_mode,
+                    meerkat_core::types::HandlingMode::Steer
+                );
+                assert_eq!(event.render_metadata, Some(render_metadata));
+            }
+            other => panic!("Expected ExternalEvent input, got {other:?}"),
         }
     }
 
@@ -158,6 +486,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -186,6 +516,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -213,6 +545,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
@@ -239,6 +573,8 @@ mod tests {
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
         };
         let input =
             interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("agent-runtime-1"));
@@ -270,6 +606,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
             InboxInteraction {
                 from: "p".into(),
@@ -279,6 +617,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
             InboxInteraction {
                 from: "p".into(),
@@ -289,6 +629,8 @@ mod tests {
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
             },
         ];
 

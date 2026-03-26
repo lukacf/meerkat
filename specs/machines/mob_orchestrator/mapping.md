@@ -54,3 +54,85 @@ This is intentional:
 - `MobActor` still centralizes the orchestration concerns this contract makes
   explicit
 
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `MobOrchestratorMachine`
+
+### Code Anchors
+- `mob_runtime_actor`: `meerkat-mob/src/runtime/actor.rs` — orchestration owner precursor
+- `mob_runtime_builder`: `meerkat-mob/src/runtime/builder.rs` — runtime-mode/builder orchestration precursor
+- `mob_definition`: `meerkat-mob/src/definition.rs` — definition-level coordinator/topology precursor
+
+### Scenarios
+- `coordinator-bind-and-supervise` — orchestrator binds coordinator authority and supervision
+- `pending-spawn-ledger` — pending spawn and completion semantics remain explicit
+- `topology-revision` — topology/orchestration revisions remain monotonic and owned
+
+### Transitions
+- `InitializeOrchestrator`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `BindCoordinator`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `UnbindCoordinator`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `StageSpawn`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `pending-spawn-ledger`
+- `CompleteSpawn`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `pending-spawn-ledger`
+- `StartFlow`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `CompleteFlow`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `StopOrchestrator`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `ResumeOrchestrator`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `MarkCompleted`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `DestroyOrchestrator`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `ForceCancelMember`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+
+### Effects
+- `ActivateSupervisor`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `DeactivateSupervisor`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `FlowActivated`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `FlowDeactivated`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`
+- `EmitOrchestratorNotice`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+- `MemberForceCancelled`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+
+### Invariants
+- `destroyed_is_terminal`
+  - anchors: `mob_runtime_actor`, `mob_runtime_builder`, `mob_definition`
+  - scenarios: `coordinator-bind-and-supervise`, `topology-revision`
+
+
+<!-- GENERATED_COVERAGE_END -->

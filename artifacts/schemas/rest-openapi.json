@@ -10,12 +10,22 @@
         "summary": "Get runtime capabilities"
       }
     },
+    "/comms/peers": {
+      "get": {
+        "summary": "List resolved comms peers"
+      }
+    },
+    "/comms/send": {
+      "post": {
+        "summary": "Send a comms message"
+      }
+    },
     "/config": {
       "get": {
-        "summary": "Get config"
+        "summary": "Read config"
       },
       "patch": {
-        "summary": "Patch config"
+        "summary": "Merge-patch config"
       },
       "put": {
         "summary": "Replace config"
@@ -26,17 +36,98 @@
         "summary": "Health check"
       }
     },
+    "/input/{id}/list": {
+      "get": {
+        "summary": "List runtime inputs for a session"
+      }
+    },
+    "/input/{session_id}/{input_id}": {
+      "get": {
+        "summary": "Get a runtime input state"
+      }
+    },
+    "/mob/call": {
+      "post": {
+        "summary": "Invoke a mob tool call"
+      }
+    },
+    "/mob/prefabs": {
+      "get": {
+        "summary": "List mob prefabs"
+      }
+    },
+    "/mob/tools": {
+      "get": {
+        "summary": "List mob tools"
+      }
+    },
+    "/mob/{id}/events": {
+      "get": {
+        "summary": "SSE mob event stream"
+      }
+    },
+    "/mob/{id}/fork-helper": {
+      "post": {
+        "summary": "Fork a helper member in a mob"
+      }
+    },
+    "/mob/{id}/members/{meerkat_id}/cancel": {
+      "post": {
+        "summary": "Force-cancel a mob member"
+      }
+    },
+    "/mob/{id}/members/{meerkat_id}/respawn": {
+      "post": {
+        "summary": "Respawn a mob member with topology restore"
+      }
+    },
+    "/mob/{id}/members/{meerkat_id}/status": {
+      "get": {
+        "summary": "Get live status for a mob member"
+      }
+    },
+    "/mob/{id}/spawn-helper": {
+      "post": {
+        "summary": "Spawn a helper member in a mob"
+      }
+    },
     "/models/catalog": {
       "get": {
         "summary": "Get the compiled-in model catalog"
       }
     },
+    "/runtime/{id}/accept": {
+      "post": {
+        "summary": "Accept a runtime input"
+      }
+    },
+    "/runtime/{id}/reset": {
+      "post": {
+        "summary": "Reset a runtime"
+      }
+    },
+    "/runtime/{id}/retire": {
+      "post": {
+        "summary": "Retire a runtime"
+      }
+    },
+    "/runtime/{id}/state": {
+      "get": {
+        "summary": "Get runtime state"
+      }
+    },
     "/sessions": {
+      "get": {
+        "summary": "List sessions"
+      },
       "post": {
         "summary": "Create and run a new session"
       }
     },
     "/sessions/{id}": {
+      "delete": {
+        "summary": "Archive a session"
+      },
       "get": {
         "summary": "Get session details"
       }
@@ -46,9 +137,19 @@
         "summary": "SSE event stream"
       }
     },
+    "/sessions/{id}/external-events": {
+      "post": {
+        "summary": "Queue a runtime-backed external event"
+      }
+    },
     "/sessions/{id}/history": {
       "get": {
         "summary": "Get full session history"
+      }
+    },
+    "/sessions/{id}/interrupt": {
+      "post": {
+        "summary": "Interrupt a running session"
       }
     },
     "/sessions/{id}/mcp/add": {
@@ -72,6 +173,21 @@
     "/sessions/{id}/messages": {
       "post": {
         "summary": "Continue session with new message"
+      }
+    },
+    "/sessions/{id}/system_context": {
+      "post": {
+        "summary": "Append system context to a session"
+      }
+    },
+    "/skills": {
+      "get": {
+        "summary": "List available skills"
+      }
+    },
+    "/skills/{id}": {
+      "get": {
+        "summary": "Inspect a skill"
       }
     }
   }

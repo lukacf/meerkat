@@ -59,13 +59,13 @@ def resolve_features(manifest: dict) -> list[str]:
         # Session capabilities
         "session-store", "session-compaction",
         # Subsystems
-        "comms", "mcp", "sub-agents", "skills",
+        "comms", "mcp", "skills",
     ]
 
     # Start with CLI defaults (matches [features] default in Cargo.toml)
     defaults = [
         "anthropic", "openai", "gemini", "jsonl-store",
-        "sub-agents", "skills", "comms", "mcp",
+        "skills", "comms", "mcp",
     ]
 
     result = []

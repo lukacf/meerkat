@@ -20,6 +20,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
+use super::types::JobId;
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Maximum number of characters to keep in output before truncation.
@@ -428,6 +429,11 @@ impl BuiltinTool for ShellTool {
 
         // Handle background execution
         if input.background {
+            if !self.job_manager.exports_canonical_async_ops() {
+                return Err(BuiltinToolError::execution_failed(
+                    "background shell execution requires canonical session binding",
+                ));
+            }
             let job_id = self
                 .job_manager
                 .spawn_job(
@@ -473,6 +479,22 @@ impl BuiltinTool for ShellTool {
         Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
             |e| BuiltinToolError::execution_failed(e.to_string()),
         )?))
+    }
+
+    fn async_ops_for_output(&self, output: &ToolOutput) -> Vec<meerkat_core::ops::AsyncOpRef> {
+        match output {
+            ToolOutput::Json(value) => value
+                .get("job_id")
+                .and_then(Value::as_str)
+                .map(JobId::from_string)
+                .and_then(|job_id| self.job_manager.canonical_operation_for_job(&job_id))
+                .into_iter()
+                // Shell background jobs are detached — they run independently
+                // and do not block the turn boundary.
+                .map(meerkat_core::ops::AsyncOpRef::detached)
+                .collect(),
+            ToolOutput::Blocks(_) => Vec::new(),
+        }
     }
 }
 
@@ -841,7 +863,14 @@ mod tests {
     async fn integration_real_shell_tool_call_background_success() {
         let temp_dir = TempDir::new().unwrap();
         let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
-        let tool = ShellTool::new(config);
+        let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let manager = Arc::new(
+            crate::builtin::shell::job_manager::JobManager::new(config.clone())
+                .with_owner_session_id(meerkat_core::types::SessionId::new())
+                .with_ops_registry(Arc::clone(&registry)),
+        );
+        let tool = ShellTool::with_job_manager(config, manager);
 
         // Try background execution
         let result = tool
@@ -855,6 +884,69 @@ mod tests {
         let val = result.unwrap().into_json().unwrap();
         assert!(val["job_id"].is_string());
         assert_eq!(val["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn unbound_background_shell_execution_fails_fast() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let tool = ShellTool::new(config);
+
+        let err = tool
+            .call(json!({
+                "command": "sleep 60",
+                "background": true
+            }))
+            .await
+            .expect_err("unbound background shell must fail");
+        assert!(matches!(err, BuiltinToolError::ExecutionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn bound_background_shell_output_produces_detached_async_op() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let manager = Arc::new(
+            crate::builtin::shell::job_manager::JobManager::new(config.clone())
+                .with_owner_session_id(meerkat_core::types::SessionId::new())
+                .with_ops_registry(Arc::clone(&registry)),
+        );
+        let tool = ShellTool::with_job_manager(config, manager);
+
+        let output = tool
+            .call(json!({
+                "command": "sleep 60",
+                "background": true
+            }))
+            .await
+            .expect("background shell call");
+
+        let json = output.clone().into_json().expect("json output");
+        let job_id = crate::builtin::shell::JobId::from_string(
+            json["job_id"].as_str().expect("job id string").to_string(),
+        );
+        assert!(
+            json.get("operation_id").is_none(),
+            "public shell background output must not expose raw operation_id"
+        );
+        let operation_id = tool
+            .job_manager
+            .canonical_operation_for_job(&job_id)
+            .expect("canonical operation for job");
+
+        let async_ops = tool.async_ops_for_output(&output);
+        assert_eq!(async_ops.len(), 1);
+        assert_eq!(
+            async_ops[0],
+            meerkat_core::ops::AsyncOpRef::detached(operation_id)
+        );
+
+        tool.job_manager
+            .cancel_job(&job_id)
+            .await
+            .expect("cancel background job");
     }
 
     #[tokio::test]

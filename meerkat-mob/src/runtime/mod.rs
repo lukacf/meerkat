@@ -12,7 +12,7 @@ use crate::error::MobError;
 use crate::event::{MemberRef, MobEventKind, NewMobEvent};
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use crate::roster::{Roster, RosterEntry};
-use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
+use crate::run::{FlowRunConfig, MobRun};
 use crate::storage::MobStorage;
 use crate::store::{MobEventStore, MobRunStore};
 use crate::tasks::{MobTask, TaskBoard, TaskStatus};
@@ -27,7 +27,7 @@ use meerkat_core::service::SessionService;
 use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolDef, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
@@ -55,10 +55,17 @@ mod edge_locks;
 mod event_router;
 mod events;
 mod flow;
+mod flow_run_kernel;
 mod handle;
+mod mob_lifecycle_authority;
+mod mob_orchestrator_authority;
+mod ops_adapter;
+mod orchestrator_kernel;
 mod path;
+mod pending_spawn_lineage;
 mod provision_guard;
 mod provisioner;
+mod roster_authority;
 mod session_service;
 mod spawn_policy;
 mod state;
@@ -82,7 +89,16 @@ use tools::compose_external_tools_for_profile;
 
 pub use builder::MobBuilder;
 pub use event_router::{MobEventRouterConfig, MobEventRouterHandle};
-pub use handle::{MobEventsView, MobHandle, SpawnMemberSpec};
+pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
+pub use handle::{
+    HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
+    MemberSessionRef, MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot,
+    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget,
+    SpawnMemberSpec,
+};
+pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
+use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
+use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 pub use state::MobState;

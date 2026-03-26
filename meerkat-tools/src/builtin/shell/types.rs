@@ -1,8 +1,7 @@
 //! Shell tool types for background job execution
 //!
-//! This module defines the core types for shell job management including
+//! This module defines the app-facing types for shell job management including
 //! [`JobId`], [`JobStatus`], [`BackgroundJob`], and [`JobSummary`].
-
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for background jobs

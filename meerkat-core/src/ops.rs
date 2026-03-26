@@ -1,6 +1,6 @@
 //! Async operation types for Meerkat
 //!
-//! Unified abstraction for tool calls, shell commands, and sub-agents.
+//! Unified abstraction for tool calls, shell commands, and delegated branches.
 
 use crate::budget::BudgetLimits;
 use crate::types::Message;
@@ -10,6 +10,93 @@ use uuid::Uuid;
 /// Unique identifier for an operation
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OperationId(pub Uuid);
+
+/// Wait policy for async operations.
+///
+/// Determines whether an operation blocks the turn boundary (`Barrier`) or runs
+/// independently (`Detached`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitPolicy {
+    /// Operation must complete before `ToolCallsResolved` can fire.
+    Barrier,
+    /// Operation runs independently and does not block the turn.
+    Detached,
+}
+
+/// Typed async operation reference carrying an operation ID and its wait policy.
+///
+/// Replaces raw `OperationId` sequences in the TurnExecution machine state to
+/// enable barrier-aware scheduling. Only `Barrier` ops block the turn boundary;
+/// `Detached` ops are recorded but do not gate `ToolCallsResolved`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AsyncOpRef {
+    pub operation_id: OperationId,
+    pub wait_policy: WaitPolicy,
+}
+
+impl WaitPolicy {
+    /// Normal tool-call operations that must complete before the turn boundary.
+    pub fn barrier() -> Self {
+        Self::Barrier
+    }
+
+    /// Background or mob-child operations that run independently of the turn.
+    pub fn detached() -> Self {
+        Self::Detached
+    }
+}
+
+impl AsyncOpRef {
+    /// Create a barrier op ref — blocks the turn boundary until resolved.
+    pub fn barrier(operation_id: OperationId) -> Self {
+        Self {
+            operation_id,
+            wait_policy: WaitPolicy::barrier(),
+        }
+    }
+
+    /// Create a detached op ref — runs independently, does not block the turn.
+    pub fn detached(operation_id: OperationId) -> Self {
+        Self {
+            operation_id,
+            wait_policy: WaitPolicy::detached(),
+        }
+    }
+}
+
+/// Outcome of a tool dispatch, separating transcript data from execution metadata.
+///
+/// `result` is what the model sees (conversation/transcript). `async_ops` is
+/// what the runtime scheduler sees (barrier/detached classification). This
+/// prevents hooks, persistence, and message serialization from accidentally
+/// owning barrier semantics.
+#[derive(Debug, Clone)]
+pub struct ToolDispatchOutcome {
+    /// The tool result for the conversation transcript.
+    pub result: crate::types::ToolResult,
+    /// Async operations started by this dispatch, with typed wait policies.
+    ///
+    /// Empty for synchronous tools. Barrier ops block the turn boundary;
+    /// detached ops run independently.
+    pub async_ops: Vec<AsyncOpRef>,
+}
+
+impl ToolDispatchOutcome {
+    /// Create an outcome with no async operations (synchronous tool).
+    pub fn sync_result(result: crate::types::ToolResult) -> Self {
+        Self {
+            result,
+            async_ops: Vec::new(),
+        }
+    }
+}
+
+impl From<crate::types::ToolResult> for ToolDispatchOutcome {
+    fn from(result: crate::types::ToolResult) -> Self {
+        Self::sync_result(result)
+    }
+}
 
 impl OperationId {
     /// Create a new operation ID
@@ -38,8 +125,6 @@ pub enum WorkKind {
     ToolCall,
     /// Shell command execution
     ShellCommand,
-    /// Sub-agent (spawn or fork)
-    SubAgent,
 }
 
 /// Shape of the operation's result
@@ -54,7 +139,7 @@ pub enum ResultShape {
     Batch,
 }
 
-/// How much context a sub-agent receives
+/// How much context a delegated branch receives
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ContextStrategy {
@@ -84,7 +169,7 @@ pub enum ForkBudgetPolicy {
     Remaining,
 }
 
-/// Tool access control for sub-agents
+/// Tool access control for delegated branches
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ToolAccessPolicy {
@@ -123,7 +208,7 @@ pub struct OperationSpec {
 }
 
 /// Result of a completed operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub id: OperationId,
     pub content: String,
@@ -162,11 +247,11 @@ pub enum OpEvent {
 /// Concurrency limits for operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConcurrencyLimits {
-    /// Maximum sub-agent nesting depth
+    /// Maximum delegated-branch nesting depth
     pub max_depth: u32,
     /// Maximum concurrent operations (all types)
     pub max_concurrent_ops: usize,
-    /// Maximum concurrent sub-agents specifically
+    /// Maximum concurrent delegated branches specifically
     pub max_concurrent_agents: usize,
     /// Maximum children per parent agent
     pub max_children_per_agent: usize,
@@ -183,18 +268,18 @@ impl Default for ConcurrencyLimits {
     }
 }
 
-/// Specification for spawning a new sub-agent
+/// Specification for spawning a new delegated branch
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SpawnSpec {
-    /// The prompt/task for the sub-agent
+    /// The prompt/task for the delegated branch
     pub prompt: String,
-    /// How much context the sub-agent receives
+    /// How much context the delegated branch receives
     pub context: ContextStrategy,
-    /// Which tools the sub-agent can access
+    /// Which tools the delegated branch can access
     pub tool_access: ToolAccessPolicy,
-    /// Budget allocation for the sub-agent
+    /// Budget allocation for the delegated branch
     pub budget: BudgetLimits,
-    /// If false, sub-agent cannot spawn/fork further
+    /// If false, the delegated branch cannot spawn/fork further
     pub allow_spawn: bool,
     /// System prompt override (None = inherit from parent)
     pub system_prompt: Option<String>,
@@ -211,24 +296,24 @@ pub struct ForkBranch {
     pub tool_access: Option<ToolAccessPolicy>,
 }
 
-/// State of a running sub-agent
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubAgentState {
-    /// Sub-agent is running
-    Running,
-    /// Sub-agent completed successfully
-    Completed,
-    /// Sub-agent failed with error
-    Failed,
-    /// Sub-agent was cancelled
-    Cancelled,
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barrier_constructor_produces_barrier_policy() {
+        assert_eq!(WaitPolicy::barrier(), WaitPolicy::Barrier);
+        let op_ref = AsyncOpRef::barrier(OperationId::new());
+        assert_eq!(op_ref.wait_policy, WaitPolicy::Barrier);
+    }
+
+    #[test]
+    fn detached_constructor_produces_detached_policy() {
+        assert_eq!(WaitPolicy::detached(), WaitPolicy::Detached);
+        let op_ref = AsyncOpRef::detached(OperationId::new());
+        assert_eq!(op_ref.wait_policy, WaitPolicy::Detached);
+    }
 
     #[test]
     fn test_operation_id_encoding() {
@@ -248,10 +333,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(WorkKind::ShellCommand).unwrap(),
             "shell_command"
-        );
-        assert_eq!(
-            serde_json::to_value(WorkKind::SubAgent).unwrap(),
-            "sub_agent"
         );
     }
 

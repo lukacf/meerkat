@@ -9,6 +9,7 @@ use crate::{AgentFactory, AgentToolDispatcher, Config, HookEngine, HooksConfig};
 use crate::{CommsRuntime, CoreCommsConfig};
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::{AgentEvent, format_verbose_event};
 use meerkat_hooks::DefaultHookEngine;
 use meerkat_tools::builtin::shell::ShellConfig;
@@ -18,6 +19,60 @@ use meerkat_tools::{
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn canonical_session_comms_identity_root(
+    user_config_root: Option<&Path>,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(root) = user_config_root {
+        return Ok(root.join(".rkat").join("session_comms_identity"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "HOME is not set; cannot resolve session comms identity root".to_string()
+        })?;
+        #[allow(clippy::needless_return)]
+        return Ok(std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("meerkat")
+            .join("session_comms_identity"));
+    }
+
+    #[cfg(windows)]
+    {
+        let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+            "LOCALAPPDATA is not set; cannot resolve session comms identity root".to_string()
+        })?;
+        return Ok(std::path::PathBuf::from(local_app_data)
+            .join("meerkat")
+            .join("session_comms_identity"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(xdg_state_home) = std::env::var_os("XDG_STATE_HOME") {
+            return Ok(std::path::PathBuf::from(xdg_state_home)
+                .join("meerkat")
+                .join("session_comms_identity"));
+        }
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "HOME is not set; cannot resolve session comms identity root".to_string()
+        })?;
+        Ok(std::path::PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("meerkat")
+            .join("session_comms_identity"))
+    }
+
+    #[cfg(not(any(target_os = "macos", windows, unix)))]
+    {
+        Err("session-scoped comms identity root is unsupported on this platform".to_string())
+    }
+}
 
 /// Resolve layered hooks config (global -> project) without duplicating project entries.
 pub async fn resolve_layered_hooks_config(
@@ -113,13 +168,41 @@ pub fn create_default_hook_engine(hooks_config: HooksConfig) -> Option<Arc<dyn H
 /// * `session_id` - Optional session ID for tracking tool usage
 ///
 /// # Returns
-/// An `Arc<dyn AgentToolDispatcher>` ready to use with `AgentBuilder::build()`
+/// An `Arc<dyn AgentToolDispatcher>` ready to use with `AgentBuilder::build()`.
+///
+/// For built-in async tools that must participate in a shared canonical ops
+/// registry, use [`create_dispatcher_with_builtins_with_ops_lifecycle`] and pass
+/// the same registry to `AgentBuilder::with_ops_lifecycle(...)`.
 pub async fn create_dispatcher_with_builtins(
     factory: &AgentFactory,
     config: BuiltinToolConfig,
     shell_config: Option<ShellConfig>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     session_id: Option<String>,
+) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+    create_dispatcher_with_builtins_with_ops_lifecycle(
+        factory,
+        config,
+        shell_config,
+        external,
+        session_id,
+        None,
+    )
+    .await
+}
+
+/// Create a tool dispatcher with built-in tools enabled and an explicit ops registry.
+///
+/// When built-in async tools such as `shell` are enabled, pass the same registry
+/// to [`meerkat_core::AgentBuilder::with_ops_lifecycle`] so async operations
+/// resolve to canonical `AsyncOpRef`s owned by the caller's lifecycle registry.
+pub async fn create_dispatcher_with_builtins_with_ops_lifecycle(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
+    shell_config: Option<ShellConfig>,
+    external: Option<Arc<dyn AgentToolDispatcher>>,
+    session_id: Option<String>,
+    ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let store = Arc::new(MemoryTaskStore::new());
     factory
@@ -130,6 +213,7 @@ pub async fn create_dispatcher_with_builtins(
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
         )
         .await
 }
@@ -145,6 +229,29 @@ pub async fn create_dispatcher_with_builtins_persisted(
     session_id: Option<String>,
     task_store_path: impl AsRef<Path>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+    create_dispatcher_with_builtins_persisted_with_ops_lifecycle(
+        factory,
+        config,
+        shell_config,
+        external,
+        session_id,
+        task_store_path,
+        None,
+    )
+    .await
+}
+
+/// Create a tool dispatcher with built-in tools, a file-backed task store,
+/// and an explicit ops registry.
+pub async fn create_dispatcher_with_builtins_persisted_with_ops_lifecycle(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
+    shell_config: Option<ShellConfig>,
+    external: Option<Arc<dyn AgentToolDispatcher>>,
+    session_id: Option<String>,
+    task_store_path: impl AsRef<Path>,
+    ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let store = Arc::new(FileTaskStore::new(task_store_path.as_ref().to_path_buf()));
     factory
         .build_builtin_dispatcher(
@@ -154,6 +261,7 @@ pub async fn create_dispatcher_with_builtins_persisted(
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
         )
         .await
 }
@@ -169,6 +277,26 @@ pub async fn create_dispatcher_with_builtins_in_project(
     shell_config: Option<ShellConfig>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
     session_id: Option<String>,
+) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+    create_dispatcher_with_builtins_in_project_with_ops_lifecycle(
+        factory,
+        config,
+        shell_config,
+        external,
+        session_id,
+        None,
+    )
+    .await
+}
+
+/// Create a built-in dispatcher using the nearest `.rkat` project root and an explicit ops registry.
+pub async fn create_dispatcher_with_builtins_in_project_with_ops_lifecycle(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
+    shell_config: Option<ShellConfig>,
+    external: Option<Arc<dyn AgentToolDispatcher>>,
+    session_id: Option<String>,
+    ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     let project_root_override = factory.project_root.clone();
     let project_root = tokio::task::spawn_blocking(move || {
@@ -201,6 +329,7 @@ pub async fn create_dispatcher_with_builtins_in_project(
             shell_config,
             external,
             session_id,
+            ops_lifecycle,
         )
         .await
 }
@@ -216,6 +345,24 @@ pub async fn create_builtins_dispatcher(
     create_dispatcher_with_builtins(factory, config, None, None, session_id).await
 }
 
+/// Create a tool dispatcher with only built-in task tools and an explicit ops registry.
+pub async fn create_builtins_dispatcher_with_ops_lifecycle(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
+    session_id: Option<String>,
+    ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+    create_dispatcher_with_builtins_with_ops_lifecycle(
+        factory,
+        config,
+        None,
+        None,
+        session_id,
+        ops_lifecycle,
+    )
+    .await
+}
+
 /// Create a tool dispatcher with built-in task and shell tools.
 pub async fn create_shell_dispatcher(
     factory: &AgentFactory,
@@ -224,6 +371,25 @@ pub async fn create_shell_dispatcher(
     session_id: Option<String>,
 ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
     create_dispatcher_with_builtins(factory, config, Some(shell_config), None, session_id).await
+}
+
+/// Create a tool dispatcher with built-in task and shell tools and an explicit ops registry.
+pub async fn create_shell_dispatcher_with_ops_lifecycle(
+    factory: &AgentFactory,
+    config: BuiltinToolConfig,
+    shell_config: ShellConfig,
+    session_id: Option<String>,
+    ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
+    create_dispatcher_with_builtins_with_ops_lifecycle(
+        factory,
+        config,
+        Some(shell_config),
+        None,
+        session_id,
+        ops_lifecycle,
+    )
+    .await
 }
 
 /// Build a comms runtime from the config and base directory.
@@ -354,6 +520,98 @@ pub async fn build_comms_runtime_from_config_scoped_with_silent_intents(
     Ok(runtime)
 }
 
+#[cfg(feature = "comms")]
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
+pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
+    config: &Config,
+    base_dir: impl AsRef<Path>,
+    user_config_root: Option<&Path>,
+    comms_name: &str,
+    peer_meta: Option<meerkat_core::PeerMeta>,
+    inproc_namespace: Option<String>,
+    session_id: &meerkat_core::SessionId,
+    silent_intents: std::sync::Arc<std::collections::HashSet<String>>,
+) -> Result<CommsRuntime, String> {
+    let event_listen_tcp = config
+        .comms
+        .event_address
+        .as_ref()
+        .map(|addr| {
+            addr.parse()
+                .map_err(|e| format!("Invalid event_address '{addr}': {e}"))
+        })
+        .transpose()?;
+
+    let runtime = match config.comms.mode {
+        CommsRuntimeMode::Inproc => CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            comms_name,
+            inproc_namespace.clone(),
+            canonical_session_comms_identity_root(user_config_root)?,
+            session_id,
+            silent_intents.clone(),
+        )
+        .await
+        .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,
+        CommsRuntimeMode::Tcp => {
+            let address = config
+                .comms
+                .address
+                .as_ref()
+                .ok_or_else(|| "comms.address is required when comms.mode = tcp".to_string())?;
+            let listen_tcp = address
+                .parse()
+                .map_err(|e| format!("Invalid comms TCP address '{address}': {e}"))?;
+            let comms = CoreCommsConfig {
+                enabled: true,
+                name: comms_name.to_string(),
+                inproc_namespace: inproc_namespace.clone(),
+                listen_tcp: Some(listen_tcp),
+                auth: config.comms.auth,
+                event_listen_tcp,
+                ..Default::default()
+            };
+            let resolved = comms.resolve_paths(base_dir.as_ref());
+            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
+                .await
+                .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
+            rt.start_listeners()
+                .await
+                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+            rt
+        }
+        CommsRuntimeMode::Uds => {
+            let address = config
+                .comms
+                .address
+                .as_ref()
+                .ok_or_else(|| "comms.address is required when comms.mode = uds".to_string())?;
+            let comms = CoreCommsConfig {
+                enabled: true,
+                name: comms_name.to_string(),
+                inproc_namespace: inproc_namespace.clone(),
+                listen_uds: Some(std::path::PathBuf::from(address)),
+                auth: config.comms.auth,
+                event_listen_tcp,
+                ..Default::default()
+            };
+            let resolved = comms.resolve_paths(base_dir.as_ref());
+            let mut rt = CommsRuntime::new_with_silent_intents(resolved, silent_intents.clone())
+                .await
+                .map_err(|e| format!("Failed to create comms runtime: {e}"))?;
+            rt.start_listeners()
+                .await
+                .map_err(|e| format!("Failed to start comms listeners: {e}"))?;
+            rt
+        }
+    };
+
+    if let Some(meta) = peer_meta {
+        runtime.set_peer_meta(meta);
+    }
+
+    Ok(runtime)
+}
+
 // compose_tools_with_comms moved to lib.rs for wasm32 availability
 
 /// Configuration for the SDK event logger helper.
@@ -396,6 +654,7 @@ mod tests {
     use super::*;
     use meerkat_core::ToolCallView;
     use meerkat_core::ToolError;
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::{
         HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig,
     };
@@ -413,9 +672,24 @@ mod tests {
             name,
             args: &args_raw,
         };
-        let result = dispatcher.dispatch(call).await?;
-        let text = result.text_content();
+        let outcome = dispatcher.dispatch(call).await?;
+        let text = outcome.result.text_content();
         serde_json::from_str(&text).or(Ok(serde_json::Value::String(text)))
+    }
+
+    async fn dispatch_outcome(
+        dispatcher: &dyn AgentToolDispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+        let args_raw =
+            serde_json::value::RawValue::from_string(args.to_string()).expect("valid args json");
+        let call = ToolCallView {
+            id: "test-outcome",
+            name,
+            args: &args_raw,
+        };
+        dispatcher.dispatch(call).await
     }
 
     #[tokio::test]
@@ -538,6 +812,57 @@ mod tests {
         assert!(get_result.is_ok());
         let retrieved = get_result.unwrap();
         assert_eq!(retrieved.get("subject").unwrap(), "File store test");
+    }
+
+    #[tokio::test]
+    async fn test_shell_dispatcher_with_ops_lifecycle_emits_async_ops() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp_dir.path().join("sessions"));
+        let shell_config =
+            meerkat_tools::builtin::shell::ShellConfig::with_project_root(temp_dir.path().into());
+        let mut config = BuiltinToolConfig::default();
+        config.policy.enable.insert("shell".to_string());
+        config.policy.enable.insert("shell_job_cancel".to_string());
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+
+        let dispatcher = create_shell_dispatcher_with_ops_lifecycle(
+            &factory,
+            config,
+            shell_config,
+            Some(meerkat_core::types::SessionId::new().to_string()),
+            Some(Arc::clone(&registry)),
+        )
+        .await
+        .unwrap();
+
+        let outcome = dispatch_outcome(
+            dispatcher.as_ref(),
+            "shell",
+            serde_json::json!({
+                "command": "sleep 60",
+                "background": true
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.async_ops.len(),
+            1,
+            "sdk helper must pass ops registry through to built-in async tools"
+        );
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("json result");
+        let _ = dispatch_json(
+            dispatcher.as_ref(),
+            "shell_job_cancel",
+            serde_json::json!({
+                "job_id": payload["job_id"].as_str().expect("job id"),
+            }),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]

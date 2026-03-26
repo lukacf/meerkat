@@ -33,7 +33,7 @@
             <label for="gemini-key">Gemini</label>
             <input type="password" id="gemini-key" placeholder="AI..." autocomplete="off" />
           </div>
-          <p class="key-hint">Enter at least one API key. More keys = more providers for sub-agents.</p>
+          <p class="key-hint">Enter at least one API key. More keys = more providers for specialist members.</p>
         </div>
 
         <button id="boot-btn">Boot VM &amp; Start</button>
@@ -58,31 +58,31 @@
           </div>
         </div>
 
-        <!-- Right: sub-agent panels (30%) -->
+        <!-- Right: specialist panels (30%) -->
         <div id="sub-pane">
-          <div class="sub-agent-panel" id="panel-planner">
-            <div class="sub-agent-header">
+          <div class="member-panel" id="panel-planner">
+            <div class="member-panel-header">
               <span class="agent-name">planner</span>
               <span class="agent-model" id="model-planner"></span>
               <span class="agent-status" id="status-planner">&#9679; idle</span>
             </div>
-            <div class="sub-agent-stream" id="stream-planner"></div>
+            <div class="member-panel-stream" id="stream-planner"></div>
           </div>
-          <div class="sub-agent-panel" id="panel-coder">
-            <div class="sub-agent-header">
+          <div class="member-panel" id="panel-coder">
+            <div class="member-panel-header">
               <span class="agent-name">coder</span>
               <span class="agent-model" id="model-coder"></span>
               <span class="agent-status" id="status-coder">&#9679; idle</span>
             </div>
-            <div class="sub-agent-stream" id="stream-coder"></div>
+            <div class="member-panel-stream" id="stream-coder"></div>
           </div>
-          <div class="sub-agent-panel" id="panel-reviewer">
-            <div class="sub-agent-header">
+          <div class="member-panel" id="panel-reviewer">
+            <div class="member-panel-header">
               <span class="agent-name">reviewer</span>
               <span class="agent-model" id="model-reviewer"></span>
               <span class="agent-status" id="status-reviewer">&#9679; idle</span>
             </div>
-            <div class="sub-agent-stream" id="stream-reviewer"></div>
+            <div class="member-panel-stream" id="stream-reviewer"></div>
           </div>
         </div>
       </div>

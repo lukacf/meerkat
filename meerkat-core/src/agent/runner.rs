@@ -2,11 +2,8 @@
 
 use crate::budget::Budget;
 use crate::error::AgentError;
-use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
-use crate::ops::{
-    ForkBranch, ForkBudgetPolicy, OperationId, OperationResult, SpawnSpec, ToolAccessPolicy,
-};
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
 use crate::session::{PendingSystemContextAppend, Session};
@@ -22,60 +19,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{
-    Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    FilteredToolDispatcher,
-};
-
-/// Async trait for accepting runtime inputs from the host-mode comms layer.
-///
-/// Implementations live in `meerkat-runtime` and call `RuntimeSessionAdapter::accept_input()`.
-/// The host-mode code in `comms_impl.rs` uses this to route new-run work through the
-/// runtime authority instead of calling `self.run()` directly.
-///
-/// The sink awaits only admission (durable-before-ack), NOT execution completion.
-/// The host loop continues immediately after admission.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait RuntimeInputSink: Send + Sync {
-    /// Accept a peer interaction as a runtime input.
-    async fn accept_peer_input(
-        &self,
-        interaction: crate::interaction::InboxInteraction,
-    ) -> Result<(), String>;
-
-    /// Accept a continuation signal as a runtime input.
-    async fn accept_continuation(&self) -> Result<(), String>;
-}
-
-fn spawn_scoped_forwarder(
-    mut child_event_rx: mpsc::Receiver<AgentEvent>,
-    scoped_tx: mpsc::Sender<ScopedAgentEvent>,
-    parent_scope_path: Arc<Vec<StreamScopeFrame>>,
-    child_scope_frame: StreamScopeFrame,
-) -> tokio::task::JoinHandle<()> {
-    let base_scope_path = if parent_scope_path.is_empty() {
-        vec![
-            StreamScopeFrame::Primary {
-                session_id: "unknown".to_string(),
-            },
-            child_scope_frame,
-        ]
-    } else {
-        let mut path = (*parent_scope_path).clone();
-        path.push(child_scope_frame);
-        path
-    };
-
-    tokio::spawn(async move {
-        while let Some(event) = child_event_rx.recv().await {
-            let scoped = ScopedAgentEvent::new(base_scope_path.clone(), event);
-            if scoped_tx.send(scoped).await.is_err() {
-                break;
-            }
-        }
-    })
-}
+use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 
 /// Minimal runner interface for an Agent.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -140,14 +84,6 @@ where
     /// `run()` / `run_with_events()` call.
     pub fn replace_client(&mut self, client: Arc<C>) {
         self.client = client;
-    }
-
-    /// Set the runtime input sink for host-mode comms routing.
-    ///
-    /// When set, passthrough interactions and continuation runs in host-mode
-    /// are routed through the sink instead of calling `self.run()` directly.
-    pub fn set_runtime_input_sink(&mut self, sink: Arc<dyn RuntimeInputSink>) {
-        self.runtime_input_sink = Some(sink);
     }
 
     #[cfg(test)]
@@ -280,334 +216,13 @@ where
     }
 
     /// Persist the current session through the configured checkpointer after syncing control state.
-    pub(crate) async fn checkpoint_current_session(&mut self) {
+    #[allow(dead_code)] // Used by persistent session service.
+    #[doc(hidden)]
+    pub async fn checkpoint_current_session(&mut self) {
         self.sync_system_context_state_to_session();
         if let Some(ref cp) = self.checkpointer {
             cp.checkpoint(&self.session).await;
         }
-    }
-
-    /// Spawn a new sub-agent with minimal context
-    ///
-    /// The sub-agent runs independently with its own budget and tool access.
-    /// Results are collected at turn boundaries.
-    pub async fn spawn(&self, spec: SpawnSpec) -> Result<OperationId, AgentError> {
-        // Check depth limit
-        if self.depth + 1 > self.sub_agent_manager.limits.max_depth {
-            return Err(AgentError::DepthLimitExceeded {
-                depth: self.depth + 1,
-                max: self.sub_agent_manager.limits.max_depth,
-            });
-        }
-
-        // Check if we can spawn more sub-agents
-        if !self.sub_agent_manager.can_spawn().await {
-            return Err(AgentError::SubAgentLimitExceeded {
-                limit: self.sub_agent_manager.limits.max_concurrent_agents,
-            });
-        }
-
-        // Validate tool access policy
-        let all_tools = self.tools.tools();
-        let allowed_tools = self
-            .sub_agent_manager
-            .apply_tool_access_policy(&all_tools, &spec.tool_access);
-
-        if let ToolAccessPolicy::AllowList(ref names) = spec.tool_access {
-            for name in names {
-                if !all_tools.iter().any(|t| &t.name == name) {
-                    return Err(AgentError::InvalidToolAccess { tool: name.clone() });
-                }
-            }
-        }
-
-        // Apply context strategy to get messages for sub-agent
-        let messages = self
-            .sub_agent_manager
-            .apply_context_strategy(&self.session, &spec.context);
-
-        // Create sub-agent session with context
-        let mut sub_session = Session::new();
-        for msg in messages {
-            sub_session.push(msg);
-        }
-        if let Some(sys_prompt) = &spec.system_prompt {
-            sub_session.set_system_prompt(sys_prompt.clone());
-        }
-
-        // Generate operation ID
-        let op_id = OperationId::new();
-
-        // Register the sub-agent
-        self.sub_agent_manager
-            .register(op_id.clone(), "spawn".to_string())
-            .await?;
-
-        // Clone components for the spawned task
-        let client = self.client.clone();
-        let store = self.store.clone();
-        let prompt = spec.prompt.clone();
-        let budget = spec.budget.clone();
-        let sub_agent_manager = self.sub_agent_manager.clone();
-        let op_id_clone = op_id.clone();
-        let depth = self.depth + 1;
-        let model = self.config.model.clone();
-        let max_tokens = self.config.max_tokens_per_turn;
-        let parent_scoped_event_tx = self.default_scoped_event_tx.clone();
-        let parent_scope_path = self.default_scope_path.clone();
-
-        // Create filtered tools based on policy
-        let allowed_tool_names: Vec<String> =
-            allowed_tools.iter().map(|t| t.name.clone()).collect();
-        let filtered_tools = Arc::new(FilteredToolDispatcher::new(
-            self.tools.clone(),
-            allowed_tool_names,
-        ));
-
-        // Spawn the sub-agent in a background task
-        tokio::spawn(async move {
-            let start = crate::time_compat::Instant::now();
-
-            // Build sub-agent with filtered tools
-            let mut sub_agent = AgentBuilder::new()
-                .model(&model)
-                .max_tokens_per_turn(max_tokens)
-                .budget(budget)
-                .resume_session(sub_session)
-                .build(client, filtered_tools, store)
-                .await;
-
-            let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
-                let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
-                let child_scope_frame = StreamScopeFrame::SubAgent {
-                    agent_id: op_id_clone.to_string(),
-                    tool_call_id: None,
-                    label: Some("spawn".to_string()),
-                };
-                let forwarder = spawn_scoped_forwarder(
-                    child_event_rx,
-                    scoped_tx,
-                    Arc::new(parent_scope_path.clone()),
-                    child_scope_frame,
-                );
-                (
-                    sub_agent
-                        .run_with_events(prompt.into(), child_event_tx)
-                        .await,
-                    Some(forwarder),
-                )
-            } else {
-                (sub_agent.run(prompt.into()).await, None)
-            };
-            if let Some(forwarder) = forwarder_task {
-                let _ = forwarder.await;
-            }
-
-            // Report completion
-            match result {
-                Ok(run_result) => {
-                    sub_agent_manager
-                        .complete(
-                            &op_id_clone,
-                            OperationResult {
-                                id: op_id_clone.clone(),
-                                content: run_result.text,
-                                is_error: false,
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                tokens_used: run_result.usage.total_tokens(),
-                            },
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    sub_agent_manager.fail(&op_id_clone, e.to_string()).await;
-                }
-            }
-        });
-
-        tracing::info!(
-            "Spawned sub-agent {} at depth {} with {} tools",
-            op_id,
-            depth,
-            allowed_tools.len()
-        );
-
-        Ok(op_id)
-    }
-
-    /// Fork the current conversation into parallel branches
-    ///
-    /// Each branch gets a copy of the full conversation history and runs independently.
-    pub async fn fork(
-        &self,
-        branches: Vec<ForkBranch>,
-        budget_policy: ForkBudgetPolicy,
-    ) -> Result<Vec<OperationId>, AgentError> {
-        // Check depth limit
-        if self.depth + 1 > self.sub_agent_manager.limits.max_depth {
-            return Err(AgentError::DepthLimitExceeded {
-                depth: self.depth + 1,
-                max: self.sub_agent_manager.limits.max_depth,
-            });
-        }
-
-        // Check if we can spawn enough sub-agents
-        let running = self.sub_agent_manager.running_ids().await.len();
-        if running + branches.len() > self.sub_agent_manager.limits.max_concurrent_agents {
-            return Err(AgentError::SubAgentLimitExceeded {
-                limit: self.sub_agent_manager.limits.max_concurrent_agents,
-            });
-        }
-
-        // Allocate budget for each branch
-        let remaining_tokens = self.budget.remaining();
-        let budgets = self.sub_agent_manager.allocate_fork_budget(
-            remaining_tokens,
-            branches.len(),
-            &budget_policy,
-        );
-
-        let mut op_ids = Vec::with_capacity(branches.len());
-
-        for (i, branch) in branches.into_iter().enumerate() {
-            let op_id = OperationId::new();
-
-            // Validate tool access if specified
-            if let Some(ToolAccessPolicy::AllowList(names)) = &branch.tool_access {
-                let all_tools = self.tools.tools();
-                for name in names {
-                    if !all_tools.iter().any(|t| &t.name == name) {
-                        return Err(AgentError::InvalidToolAccess { tool: name.clone() });
-                    }
-                }
-            }
-
-            // Register the branch as a sub-agent
-            self.sub_agent_manager
-                .register(op_id.clone(), branch.name.clone())
-                .await?;
-
-            // Apply tool access policy for this branch
-            let all_tools = self.tools.tools();
-            let allowed_tools = match &branch.tool_access {
-                Some(policy) => self
-                    .sub_agent_manager
-                    .apply_tool_access_policy(&all_tools, policy),
-                None => all_tools.to_vec(), // Inherit all tools
-            };
-            let allowed_tool_names: Vec<String> =
-                allowed_tools.iter().map(|t| t.name.clone()).collect();
-            let filtered_tools = Arc::new(FilteredToolDispatcher::new(
-                self.tools.clone(),
-                allowed_tool_names,
-            ));
-
-            // Clone components for the spawned task
-            let client = self.client.clone();
-            let store = self.store.clone();
-            let prompt = branch.prompt.clone();
-            let budget = budgets[i].clone();
-            let sub_agent_manager = self.sub_agent_manager.clone();
-            let op_id_clone = op_id.clone();
-            let model = self.config.model.clone();
-            let max_tokens = self.config.max_tokens_per_turn;
-            let branch_name = branch.name.clone();
-            let parent_scoped_event_tx = self.default_scoped_event_tx.clone();
-            let parent_scope_path = self.default_scope_path.clone();
-
-            // Create session with full history (fork uses FullHistory context)
-            let mut fork_session = Session::new();
-            for msg in self.session.messages() {
-                fork_session.push(msg.clone());
-            }
-
-            // Spawn the branch in a background task
-            tokio::spawn(async move {
-                let start = crate::time_compat::Instant::now();
-
-                // Build sub-agent for this branch with filtered tools
-                let mut sub_agent = AgentBuilder::new()
-                    .model(&model)
-                    .max_tokens_per_turn(max_tokens)
-                    .budget(budget)
-                    .resume_session(fork_session)
-                    .build(client, filtered_tools, store)
-                    .await;
-
-                let (result, forwarder_task) = if let Some(scoped_tx) = parent_scoped_event_tx {
-                    let (child_event_tx, child_event_rx) = mpsc::channel::<AgentEvent>(64);
-                    let child_scope_frame = StreamScopeFrame::SubAgent {
-                        agent_id: op_id_clone.to_string(),
-                        tool_call_id: None,
-                        label: Some(branch_name.clone()),
-                    };
-                    let forwarder = spawn_scoped_forwarder(
-                        child_event_rx,
-                        scoped_tx,
-                        Arc::new(parent_scope_path.clone()),
-                        child_scope_frame,
-                    );
-                    (
-                        sub_agent
-                            .run_with_events(prompt.into(), child_event_tx)
-                            .await,
-                        Some(forwarder),
-                    )
-                } else {
-                    (sub_agent.run(prompt.into()).await, None)
-                };
-                if let Some(forwarder) = forwarder_task {
-                    let _ = forwarder.await;
-                }
-
-                // Report completion
-                match result {
-                    Ok(run_result) => {
-                        sub_agent_manager
-                            .complete(
-                                &op_id_clone,
-                                OperationResult {
-                                    id: op_id_clone.clone(),
-                                    content: format!("[{}] {}", branch_name, run_result.text),
-                                    is_error: false,
-                                    duration_ms: start.elapsed().as_millis() as u64,
-                                    tokens_used: run_result.usage.total_tokens(),
-                                },
-                            )
-                            .await;
-                    }
-                    Err(e) => {
-                        sub_agent_manager.fail(&op_id_clone, e.to_string()).await;
-                    }
-                }
-            });
-
-            tracing::info!(
-                "Forked branch '{}' as {} at depth {}",
-                branch.name,
-                op_id,
-                self.depth + 1
-            );
-
-            op_ids.push(op_id);
-        }
-
-        Ok(op_ids)
-    }
-
-    /// Cancel a running sub-agent
-    pub async fn cancel_sub_agent(&self, op_id: &OperationId) {
-        self.sub_agent_manager.cancel(op_id).await;
-    }
-
-    /// Collect completed sub-agent results (called at turn boundaries)
-    pub async fn collect_sub_agent_results(&self) -> Vec<OperationResult> {
-        self.sub_agent_manager.collect_completed().await
-    }
-
-    /// Check if there are running sub-agents
-    pub async fn has_running_sub_agents(&self) -> bool {
-        self.sub_agent_manager.has_running().await
     }
 
     async fn run_started_hooks(
@@ -886,8 +501,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
-        self.extraction_mode = false;
-        self.extraction_attempts = 0;
+        self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -954,7 +568,7 @@ where
     ///
     /// Uses the existing pending user message in the session (does NOT push a new one).
     /// Emits lifecycle events when `event_tx` is provided. Also used by
-    /// the host-mode continuation path after response injection.
+    /// the keep-alive continuation path after response injection.
     pub(super) async fn run_pending_inner(
         &mut self,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
@@ -974,8 +588,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
-        self.extraction_mode = false;
-        self.extraction_attempts = 0;
+        self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -1010,8 +623,16 @@ where
 
     /// Cancel the current run
     pub fn cancel(&mut self) {
-        if !self.state.is_terminal() {
-            let _ = self.state.transition(LoopState::Cancelling);
+        use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
+
+        // Route through the authority whenever cancellation is requested.
+        let input = if let Some(run_id) = self.turn_authority.active_run().cloned() {
+            TurnExecutionInput::CancelNow { run_id }
+        } else {
+            TurnExecutionInput::ForceCancelNoRun
+        };
+        if let Ok(transition) = self.turn_authority.apply(input) {
+            self.state = transition.next_phase.to_loop_state();
         }
     }
 

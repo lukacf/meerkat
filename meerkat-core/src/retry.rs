@@ -16,6 +16,13 @@ pub struct RetryPolicy {
     pub max_delay: Duration,
     /// Multiplier for exponential backoff
     pub multiplier: f64,
+    /// Hard timeout for a single LLM call.
+    ///
+    /// `None` means no agent-loop call timeout is applied.
+    /// When set, the agent loop wraps each LLM call with this deadline.
+    /// This is distinct from provider-native timeouts owned by the client layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout: Option<Duration>,
 }
 
 impl Default for RetryPolicy {
@@ -25,6 +32,7 @@ impl Default for RetryPolicy {
             initial_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(30),
             multiplier: 2.0,
+            call_timeout: None,
         }
     }
 }
@@ -39,6 +47,7 @@ impl RetryPolicy {
     pub fn no_retry() -> Self {
         Self {
             max_retries: 0,
+            call_timeout: None,
             ..Default::default()
         }
     }
@@ -64,6 +73,12 @@ impl RetryPolicy {
     /// Set backoff multiplier
     pub fn with_multiplier(mut self, multiplier: f64) -> Self {
         self.multiplier = multiplier;
+        self
+    }
+
+    /// Set the hard per-call timeout for individual LLM calls
+    pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.call_timeout = timeout;
         self
     }
 
@@ -123,13 +138,24 @@ mod tests {
         assert_eq!(policy.initial_delay, Duration::from_millis(500));
         assert_eq!(policy.max_delay, Duration::from_secs(30));
         assert_eq!(policy.multiplier, 2.0);
+        assert_eq!(policy.call_timeout, None);
     }
 
     #[test]
     fn test_retry_policy_no_retry() {
         let policy = RetryPolicy::no_retry();
         assert_eq!(policy.max_retries, 0);
+        assert_eq!(policy.call_timeout, None);
         assert!(!policy.should_retry(0));
+    }
+
+    #[test]
+    fn test_call_timeout_builder() {
+        let policy = RetryPolicy::default().with_call_timeout(Some(Duration::from_secs(45)));
+        assert_eq!(policy.call_timeout, Some(Duration::from_secs(45)));
+
+        let policy = policy.with_call_timeout(None);
+        assert_eq!(policy.call_timeout, None);
     }
 
     #[test]
@@ -187,5 +213,23 @@ mod tests {
         assert_eq!(parsed.initial_delay, policy.initial_delay);
         assert_eq!(parsed.max_delay, policy.max_delay);
         assert_eq!(parsed.multiplier, policy.multiplier);
+        assert_eq!(parsed.call_timeout, None);
+    }
+
+    #[test]
+    fn test_retry_policy_serialization_with_call_timeout() {
+        let policy = RetryPolicy::default().with_call_timeout(Some(Duration::from_secs(60)));
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: RetryPolicy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.call_timeout, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_retry_policy_deserialization_missing_call_timeout() {
+        // Existing JSON without call_timeout should deserialize with None
+        let json = r#"{"max_retries":3,"initial_delay":{"secs":0,"nanos":500000000},"max_delay":{"secs":30,"nanos":0},"multiplier":2.0}"#;
+        let parsed: RetryPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.call_timeout, None);
     }
 }

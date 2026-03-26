@@ -28,6 +28,12 @@ Model Context Protocol (MCP) is the tool protocol Meerkat uses in two ways: as a
 
 The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients can call.
 
+`meerkat_run` and `meerkat_resume` keep the same public MCP tool contract, but
+their execution path is runtime-backed: `meerkat_run` allocates a session
+through the shared session service and waits for that admitted turn to finish,
+and `meerkat_resume` re-enters the same `session_id` instead of starting a
+second surface-local execution loop.
+
 | Tool | Description |
 |------|-------------|
 | `meerkat_run` | Start a new agent session |
@@ -234,7 +240,7 @@ Start a new Meerkat agent session with the given prompt.
     "enable_shell": false,
     "shell_timeout_secs": 30
   },
-  "host_mode": false,
+  "keep_alive": null,
   "comms_name": null,
   "hooks_override": null
 }
@@ -276,8 +282,8 @@ Start a new Meerkat agent session with the given prompt.
   JSON schema for structured output (wrapper or raw schema).
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null">
+  Max retries for structured output validation. Omit / `null` to use the product default on run or inherit the persisted session value on resume.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">
@@ -292,24 +298,24 @@ Start a new Meerkat agent session with the given prompt.
   Tool definitions for the agent (see [McpToolDef schema](#mcptooldef-schema) below).
 </ParamField>
 
-<ParamField body="enable_builtins" type="bool" default="false">
-  Enable built-in tools (task management, etc.).
+<ParamField body="enable_builtins" type="bool | null" default="null">
+  Builtins override. Omit / `null` to use the default on run or inherit the persisted session value on resume.
 </ParamField>
 
 <ParamField body="builtin_config" type="object | null" default="null">
   Config for builtins (only used when `enable_builtins` is true).
 </ParamField>
 
-<ParamField body="builtin_config.enable_shell" type="bool" default="false">
-  Enable shell tools.
+<ParamField body="builtin_config.enable_shell" type="bool | null" default="null">
+  Shell-tools override. Omit / `null` to use the default on run or inherit the persisted session value on resume.
 </ParamField>
 
 <ParamField body="builtin_config.shell_timeout_secs" type="u64 | null" default="30">
   Default shell command timeout.
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Run in host mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep session alive after turn for comms. On `meerkat_run`, `null`/omitted uses the run default (`false`), `true` enables, and `false` explicitly disables. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -342,7 +348,9 @@ When tools with `handler: "callback"` are provided and the agent requests a tool
 
 ### meerkat_resume
 
-Resume an existing session or provide tool results for pending tool calls.
+Resume an existing runtime-backed session or provide tool results for pending
+tool calls. The call waits for the resumed turn to complete and returns the same
+`session_id` that `meerkat_run` originally materialized.
 
 <CodeGroup>
 ```json Request (minimal)
@@ -368,7 +376,7 @@ Resume an existing session or provide tool results for pending tool calls.
   ],
   "enable_builtins": false,
   "builtin_config": null,
-  "host_mode": false,
+  "keep_alive": null,
   "comms_name": null,
   "model": null,
   "max_tokens": null,
@@ -425,17 +433,25 @@ Resume an existing session or provide tool results for pending tool calls.
   Whether this is an error result.
 </ParamField>
 
-<ParamField body="enable_builtins" type="bool" default="false">
-  Enable built-in tools.
+<ParamField body="enable_builtins" type="bool | null" default="null">
+  Builtins override. Omit / `null` to inherit the persisted session value.
 </ParamField>
 
 <ParamField body="builtin_config" type="object | null" default="null">
   Builtin tool config.
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Enable host mode.
+<ParamField body="builtin_config.enable_shell" type="bool | null" default="null">
+  Shell-tools override. Omit / `null` to inherit the persisted session value.
 </ParamField>
+
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep-alive override for this resume. `null` = inherit persisted session intent, `true` = enable, `false` = disable.
+</ParamField>
+
+<Note>
+`meerkat_run` and `meerkat_resume` follow the same commit/cancel rule as the other interactive surfaces: committed success is not rewritten to cancellation, and post-commit create failure returns session identity so the session can be resumed.
+</Note>
 
 <ParamField body="comms_name" type="string | null" default="from session">
   Agent name for comms.
@@ -578,11 +594,6 @@ Returns the runtime capability set with status resolved against config.
       "id": "comms",
       "description": "Inter-agent communication",
       "status": {"NotCompiled": {"feature": "comms"}}
-    },
-    {
-      "id": "sub_agents",
-      "description": "Sub-agent forking and spawning",
-      "status": "Available"
     },
     {
       "id": "memory_store",

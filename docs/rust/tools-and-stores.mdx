@@ -160,13 +160,16 @@ The built-in `view_image` tool uses this mechanism to read image files from disk
 </Tabs>
 
 <Accordion title="Implementing a custom store">
-Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()`:
+Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()`. Then build a runtime-backed `SessionService` so the custom store participates in the canonical session lifecycle instead of only a one-off direct agent.
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{AgentFactory, SessionStore, SessionFilter, StoreError, Session, SessionId};
+use meerkat::{
+    AgentFactory, Config, SessionStore, SessionFilter, StoreError, Session, SessionId,
+    build_persistent_service, open_realm_persistence_in,
+};
 use meerkat_core::SessionMeta;
-use meerkat_store;
+use meerkat_store::RealmBackend;
 use std::sync::Arc;
 
 struct BigQueryStore { /* your storage backend */ }
@@ -194,22 +197,29 @@ impl SessionStore for BigQueryStore {
 
 // Wire into AgentFactory — all factory features (comms, hooks, skills, etc.) work unchanged
 let store: Arc<dyn SessionStore> = Arc::new(BigQueryStore { /* ... */ });
-let realm = meerkat_store::realm_paths("team-alpha");
-let factory = AgentFactory::new(realm.root.clone())
-    .runtime_root(realm.root)
+let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
+let (_manifest, persistence) = open_realm_persistence_in(
+    &realms_root,
+    "team-alpha",
+    Some(RealmBackend::Sqlite),
+    None,
+).await?;
+let factory = AgentFactory::new(realms_root.clone())
+    .runtime_root(realms_root)
     .session_store(store)
     .builtins(true)
     .shell(true);
 
-let mut agent = factory.build_agent(build_config, &config).await?;
-// Agent auto-saves to BigQuery after each turn
+let config = Config::load().await?;
+let service = build_persistent_service(factory, config, 64, persistence);
+// Sessions created through `service` now persist through BigQuery
 ```
 
 <Note>
 Prefer `SessionStore` + `session_store()` over implementing `AgentSessionStore` directly.
 `SessionStore` is the richer trait (with `list`, `delete`, `exists`) and `AgentFactory`
 automatically wraps it via `StoreAdapter`. Implementing `AgentSessionStore` directly
-bypasses the factory and loses comms, hooks, skills, and sub-agent wiring.
+bypasses the factory and loses runtime-backed session orchestration.
 </Note>
 </Accordion>
 
@@ -256,5 +266,5 @@ router.shutdown().await;
 ## See also
 
 - [Rust SDK overview](/rust/overview) - getting started, sessions, events
-- [Rust SDK advanced](/rust/advanced) - AgentBuilder, providers, sub-agents
+- [Rust SDK advanced](/rust/advanced) - expert-only direct agent construction, providers, hooks
 - [Tools concept](/concepts/tools) - how the tool system works

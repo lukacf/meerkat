@@ -97,6 +97,20 @@ fn params_schema() -> &'static serde_json::Value {
 /// Build a profile for a Gemini model, or `None` if unrecognized.
 pub fn profile(model: &str) -> Option<ModelProfile> {
     let family = detect_family(model)?;
+    // Gemini flash variants are fast models with short expected call envelopes.
+    // Pro variants support thinking and may take significantly longer.
+    let m_lower = model.to_ascii_lowercase();
+    let is_flash = m_lower.contains("flash");
+    let call_timeout_secs = if is_flash {
+        Some(120) // 2 minutes: flash models are fast, timeout signals a real problem
+    } else {
+        match family {
+            "gemini-3" => Some(600), // 10 minutes: thinking-capable pro model
+            "gemini-2" => Some(180), // 3 minutes: older non-flash model
+            "gemini-1" => Some(180), // 3 minutes: legacy model
+            _ => None,
+        }
+    };
     Some(ModelProfile {
         provider: "gemini".to_string(),
         model_family: family.to_string(),
@@ -106,6 +120,7 @@ pub fn profile(model: &str) -> Option<ModelProfile> {
         vision: true,
         image_tool_results: true,
         params_schema: params_schema().clone(),
+        call_timeout_secs,
     })
 }
 

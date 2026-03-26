@@ -100,14 +100,14 @@ Clippy: `cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- 
 2. **cargo clean scope**: `cargo clean -p <crate>` only cleans native. Use `rm -rf target/wasm32-unknown-unknown`.
 3. **cfg inside async_trait**: May not propagate. Move cfg-gated logic to standalone functions outside the impl.
 4. **Feature unioning**: Workspace `tokio = { features = ["full"] }` pulls mio which fails on wasm32. Each crate needs target-specific deps.
-5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for EphemeralSessionService.
+5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for the embedded ephemeral substrate used in WASM.
 6. **Flow JSON**: Flow engine parses step output as JSON. Prompts must match or use `expected_schema_ref`.
 
 ## Subsystem Availability on wasm32
 
 Full: agent loop, LLM providers (browser fetch), sessions (ephemeral), comms (inproc), mob orchestration (in-memory), tools (non-shell utility/task/comms/skill surfaces, including `view_image` for vision-capable models), tool scoping (`ToolScope` + per-turn overlays), skills (embedded), hooks (in-process), config (in-memory), compaction, multimodal content (`ContentInput`/`ContentBlock` parsing at WASM bridge).
 
-Excluded: shell tools, filesystem-mutating builtins such as `apply_patch`, filesystem persistence, MCP client (rmcp), network comms (TCP/UDS), sub-agent spawning.
+Excluded: shell tools, filesystem-mutating builtins such as `apply_patch`, filesystem persistence, MCP client (rmcp), network comms (TCP/UDS).
 
 ## Key Files
 

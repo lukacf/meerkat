@@ -5,6 +5,7 @@ use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use parking_lot::RwLock;
@@ -23,6 +24,25 @@ impl CommsToolDispatcher<NoOpDispatcher> {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
+        };
+        let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
+        Self {
+            tool_context,
+            inner: None,
+            tool_defs,
+        }
+    }
+
+    pub fn new_with_runtime(
+        router: Arc<Router>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(runtime),
         };
         let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
@@ -42,6 +62,7 @@ impl<T: AgentToolDispatcher> CommsToolDispatcher<T> {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
         };
         let mut tools = comms_tool_defs();
         tools.extend(inner.tools().iter().map(Arc::clone));
@@ -62,7 +83,7 @@ impl AgentToolDispatcher for NoOpDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         Arc::from([])
     }
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
@@ -98,18 +119,14 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if let Some((normalized_name, normalized_args)) = normalize_comms_call(call.name, args) {
             let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                result.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else if let Some(inner) = &self.inner {
             inner.dispatch(call).await
         } else {
@@ -135,6 +152,28 @@ impl DynCommsToolDispatcher {
         let tool_context = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
+        };
+        let mut tools = comms_tool_defs();
+        tools.extend(inner.tools().iter().map(Arc::clone));
+        let tool_defs: Arc<[Arc<ToolDef>]> = tools.into();
+        Self {
+            tool_context,
+            inner,
+            tool_defs,
+        }
+    }
+
+    pub fn new_with_runtime(
+        router: Arc<Router>,
+        trusted_peers: Arc<RwLock<TrustedPeers>>,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        inner: Arc<dyn AgentToolDispatcher>,
+    ) -> Self {
+        let tool_context = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(runtime),
         };
         let mut tools = comms_tool_defs();
         tools.extend(inner.tools().iter().map(Arc::clone));
@@ -154,18 +193,14 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if let Some((normalized_name, normalized_args)) = normalize_comms_call(call.name, args) {
             let result = handle_tools_call(&self.tool_context, normalized_name, &normalized_args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult::new(
-                call.id.to_string(),
-                result.to_string(),
-                false,
-            ))
+            Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else {
             self.inner.dispatch(call).await
         }
@@ -174,9 +209,14 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
 
 pub fn wrap_with_comms(
     tools: Arc<dyn AgentToolDispatcher>,
-    runtime: &CommsRuntime,
+    runtime: Arc<CommsRuntime>,
 ) -> Arc<dyn AgentToolDispatcher> {
     let router = runtime.router_arc();
     let trusted_peers = runtime.trusted_peers_shared();
-    Arc::new(DynCommsToolDispatcher::new(router, trusted_peers, tools))
+    Arc::new(DynCommsToolDispatcher::new_with_runtime(
+        router,
+        trusted_peers,
+        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
+        tools,
+    ))
 }

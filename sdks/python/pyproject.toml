@@ -11,7 +11,7 @@ license = {text = "MIT OR Apache-2.0"}
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest", "pytest-asyncio", "tomli; python_version < '3.11'"]
 
 [tool.setuptools.packages.find]
 include = ["meerkat*"]

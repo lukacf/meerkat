@@ -17,33 +17,32 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 
 ```bash
 # Build everything
-cargo build --workspace
+./scripts/repo-cargo build --workspace
 
 # Run fast tests (unit + integration-fast; skips doctests)
-cargo test --workspace --lib --bins --tests
+./scripts/repo-cargo nextest run --workspace --show-progress none --status-level none --final-status-level fail
 
 # Run all tests including doc-tests (SLOW due to doc-test compilation)
-cargo test --workspace
+./scripts/repo-cargo test --workspace
 
 # Run integration-real tests (ignored by default; spawns processes / requires binaries)
-cargo test --workspace integration_real -- --ignored --test-threads=1
+./scripts/repo-cargo nextest run --workspace --run-ignored ignored-only -E 'test(integration_real)' --test-threads=1
 
 # Run E2E tests (ignored by default; live APIs / full-system resources)
-cargo test --workspace e2e_ -- --ignored --test-threads=1
+./scripts/repo-cargo nextest run --workspace --run-ignored ignored-only -E 'test(e2e_)' --test-threads=1
 
 # Cargo aliases (defined in .cargo/config.toml)
-cargo rct       # Fast tests (unit + integration-fast)
-cargo unit      # Unit tests only
-cargo int       # Integration-fast tests only
-cargo int-real  # Integration-real tests (ignored)
-cargo e2e       # E2E tests (ignored)
+./scripts/cargo-rct       # Fast tests (unit + integration-fast)
+./scripts/repo-cargo unit # Unit tests only
+./scripts/repo-cargo int  # Integration-fast tests only
+./scripts/repo-cargo int-real  # Integration-real tests (ignored)
+./scripts/repo-cargo e2e  # E2E tests (ignored)
 
 # Run the CLI
-cargo run -p meerkat-cli -- run "prompt"
-./target/debug/rkat run "prompt"
+./scripts/repo-cargo run -p meerkat-cli -- run "prompt"
 
 # Run a specific example
-ANTHROPIC_API_KEY=... cargo run --example simple
+ANTHROPIC_API_KEY=... ./scripts/repo-cargo run --example simple
 ```
 
 ## Architecture
@@ -90,6 +89,8 @@ meerkat-web-runtime → WASM browser deployment target (wasm_bindgen exports)
 **Agent loop state machine:** `CallingLlm` → `WaitingForOps` → `DrainingEvents` → `Completed` (with `ErrorRecovery` and `Cancelling` branches)
 
 **Crate ownership:** `meerkat-core` owns trait contracts. `meerkat-store` owns `SessionStore` implementations. `meerkat-session` owns session orchestration (`EphemeralSessionService`, `PersistentSessionService`) and `EventStore`. `meerkat-memory` owns `HnswMemoryStore`. The facade (`meerkat`) wires features, re-exports, and provides `FactoryAgentBuilder`/`FactoryAgent`/`build_ephemeral_service`.
+
+**Machine authority rule:** For canonical machine-owned domains, semantic state mutation must flow through generated machine authority, not handwritten reducers. See [RMAT](/Users/luka/src/meerkat/docs/architecture/RMAT.md).
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
@@ -206,7 +207,7 @@ make fmt         # Auto-fix formatting
 make audit       # Security audit via cargo-deny
 ```
 
-**`make ci` runs** (in order): `fmt-check` → `legacy-surface-gate` → `verify-version-parity` → `lint` → `lint-feature-matrix` → `test-all` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `audit`
+**`make ci` runs** (in order): `fmt-check` → `legacy-surface-gate` → `rmat-read-seam-lint` → `verify-version-parity` → `lint` → `lint-feature-matrix` → `test-all` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `rmat-audit` → `audit`
 
 ### GitHub Workflows
 
@@ -306,10 +307,10 @@ This updates:
 
 ```bash
 make release-preflight       # Full CI + schema freshness + changelog check
-cargo release patch          # Bump, tag, push (uses cargo-release)
+./scripts/repo-cargo release patch  # Bump, tag, push (uses cargo-release)
 ```
 
-**What `cargo release patch` does:**
+**What `./scripts/repo-cargo release patch` does:**
 
 1. Bumps `workspace.package.version` in `Cargo.toml`
 2. Fires `scripts/release-hook.sh` (pre-release hook, sentinel-guarded to run once):

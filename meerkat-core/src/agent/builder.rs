@@ -1,15 +1,15 @@
 //! Agent builder.
 
 use crate::budget::{Budget, BudgetLimits};
-use crate::config::{AgentConfig, HookRunOverrides};
+use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides};
 use crate::hooks::HookEngine;
+use crate::model_defaults::ModelOperationalDefaultsResolver;
 use crate::ops::ConcurrencyLimits;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::prompt::SystemPromptConfig;
 use crate::retry::RetryPolicy;
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::sub_agent::SubAgentManager;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope};
@@ -18,10 +18,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{
-    Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime,
-    InlinePeerNotificationPolicy,
-};
+use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, CommsRuntime};
 
 /// Builder for creating an Agent
 #[derive(Default)]
@@ -40,13 +37,14 @@ pub struct AgentBuilder {
     pub(super) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     pub(super) skill_engine: Option<Arc<crate::skills::SkillRuntime>>,
     pub(super) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
+    pub(super) blob_store: Option<Arc<dyn crate::BlobStore>>,
     pub(super) silent_comms_intents: Vec<String>,
-    pub(super) runtime_input_sink: Option<Arc<dyn crate::agent::runner::RuntimeInputSink>>,
+    pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
-    pub(super) default_scoped_event_tx: Option<mpsc::Sender<crate::event::ScopedAgentEvent>>,
-    pub(super) default_scope_path: Vec<crate::event::StreamScopeFrame>,
+    pub(super) model_defaults_resolver: Option<Arc<dyn ModelOperationalDefaultsResolver>>,
+    pub(super) call_timeout_override: CallTimeoutOverride,
 }
 
 impl AgentBuilder {
@@ -67,23 +65,24 @@ impl AgentBuilder {
             memory_store: None,
             skill_engine: None,
             checkpointer: None,
+            blob_store: None,
             silent_comms_intents: Vec::new(),
-            runtime_input_sink: None,
+            ops_lifecycle: None,
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
-            default_scoped_event_tx: None,
-            default_scope_path: Vec::new(),
+            model_defaults_resolver: None,
+            call_timeout_override: CallTimeoutOverride::default(),
         }
     }
 
-    /// Set concurrency limits for sub-agents
+    /// Set concurrency limits for delegated branches
     pub fn concurrency_limits(mut self, limits: ConcurrencyLimits) -> Self {
         self.concurrency_limits = limits;
         self
     }
 
-    /// Set the nesting depth for sub-agents
+    /// Set the nesting depth for delegated branches
     pub fn depth(mut self, depth: u32) -> Self {
         self.depth = depth;
         self
@@ -213,8 +212,8 @@ impl AgentBuilder {
         }
 
         let budget = Budget::new(self.budget_limits.unwrap_or_default());
-        let sub_agent_manager = Arc::new(SubAgentManager::new(self.concurrency_limits, self.depth));
         let tool_scope = ToolScope::new(tools.tools());
+        let compaction_cadence = crate::agent::compact::load_compaction_cadence(&session);
 
         let mut agent = Agent {
             config: self.config,
@@ -226,46 +225,29 @@ impl AgentBuilder {
             budget,
             retry_policy: self.retry_policy,
             state: LoopState::CallingLlm,
-            sub_agent_manager,
             depth: self.depth,
             comms_runtime: self.comms_runtime,
             hook_engine: self.hook_engine,
             hook_run_overrides: self.hook_run_overrides,
             compactor: self.compactor,
             last_input_tokens: 0,
-            last_compaction_turn: None,
+            compaction_cadence,
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
+            pending_fatal_diagnostic: None,
             silent_comms_intents: self.silent_comms_intents,
-            inline_peer_notification_policy: {
-                match InlinePeerNotificationPolicy::try_from_raw(self.max_inline_peer_notifications)
-                {
-                    Ok(policy) => policy,
-                    Err(value) => {
-                        tracing::warn!(
-                            max_inline_peer_notifications = value,
-                            "invalid max_inline_peer_notifications value; using default threshold"
-                        );
-                        InlinePeerNotificationPolicy::AtMost(
-                            crate::agent::DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS,
-                        )
-                    }
-                }
-            },
-            peer_notification_suppression_active: false,
             checkpointer: self.checkpointer,
+            blob_store: self.blob_store,
             event_tap: self
                 .event_tap
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             system_context_state,
             default_event_tx: self.default_event_tx,
-            default_scoped_event_tx: self.default_scoped_event_tx,
-            default_scope_path: self.default_scope_path,
-            host_drain_active: false,
-            runtime_input_sink: self.runtime_input_sink,
-            extraction_mode: false,
-            extraction_attempts: 0,
+            ops_lifecycle: self.ops_lifecycle,
+            turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
+            model_defaults_resolver: self.model_defaults_resolver,
+            call_timeout_override: self.call_timeout_override,
             extraction_result: None,
             extraction_schema_warnings: None,
             extraction_last_error: None,
@@ -306,12 +288,18 @@ impl AgentBuilder {
         agent
     }
 
-    /// Set the session checkpointer for host-mode persistence.
+    /// Set the session checkpointer for keep-alive persistence.
     pub fn with_checkpointer(
         mut self,
         cp: Arc<dyn crate::checkpoint::SessionCheckpointer>,
     ) -> Self {
         self.checkpointer = Some(cp);
+        self
+    }
+
+    /// Set the blob store used to hydrate image refs before execution.
+    pub fn with_blob_store(mut self, blob_store: Arc<dyn crate::BlobStore>) -> Self {
+        self.blob_store = Some(blob_store);
         self
     }
 
@@ -328,9 +316,12 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the runtime input sink for routing host-mode new-run work through the runtime.
-    pub fn with_runtime_input_sink(mut self, sink: Arc<dyn super::RuntimeInputSink>) -> Self {
-        self.runtime_input_sink = Some(sink);
+    /// Set the ops lifecycle registry for async operation tracking.
+    pub fn with_ops_lifecycle(
+        mut self,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+    ) -> Self {
+        self.ops_lifecycle = Some(registry);
         self
     }
 
@@ -356,21 +347,26 @@ impl AgentBuilder {
         self
     }
 
-    /// Set a default scoped event channel for attributed multi-agent streaming.
-    pub fn with_default_scoped_event_tx(
+    /// Set the model operational defaults resolver for profile-derived call timeouts.
+    ///
+    /// The resolver is consulted at each LLM call to look up model-specific
+    /// operational defaults (e.g., call timeout) for the current effective
+    /// model/provider. This enables hot-swap-aware default resolution.
+    pub fn with_model_defaults_resolver(
         mut self,
-        scoped_event_tx: mpsc::Sender<crate::event::ScopedAgentEvent>,
+        resolver: Arc<dyn ModelOperationalDefaultsResolver>,
     ) -> Self {
-        self.default_scoped_event_tx = Some(scoped_event_tx);
+        self.model_defaults_resolver = Some(resolver);
         self
     }
 
-    /// Set the base scope path used for attributed nested stream events.
-    pub fn with_default_scope_path(
-        mut self,
-        scope_path: Vec<crate::event::StreamScopeFrame>,
-    ) -> Self {
-        self.default_scope_path = scope_path;
+    /// Set the explicit call-timeout override from the build/config composition seam.
+    ///
+    /// - `Inherit`: defer to profile-derived default via the resolver
+    /// - `Disabled`: explicitly suppress call timeout
+    /// - `Value(d)`: explicitly set call timeout to `d`
+    pub fn with_call_timeout_override(mut self, override_value: CallTimeoutOverride) -> Self {
+        self.call_timeout_override = override_value;
         self
     }
 }
@@ -383,9 +379,7 @@ mod tests {
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentEvent;
     use crate::event_tap::EventTapState;
-    use crate::types::{
-        AssistantBlock, StopReason, ToolCallView, ToolDef, ToolResult, UserMessage,
-    };
+    use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
     use std::sync::atomic::AtomicBool;
     use tokio::sync::mpsc;
@@ -416,6 +410,10 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
     }
 
     struct MockTools;
@@ -427,7 +425,10 @@ mod tests {
             Arc::new([])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             Err(ToolError::NotFound {
                 name: call.name.to_string(),
             })

@@ -1,0 +1,332 @@
+project: "Meerkat 0.5"
+last_updated: "2026-03-17"
+package_location: ".rct"
+execution_form: "rct-development-build-first"
+validated_target_baseline_commit: "4e350279"
+authority_note: "This plan is the authoritative RCT phase model for the docs-local 0.5 package. It uses the validated target machine/composition baseline as a prerequisite reference and applies the repo-specific build-first Luka Loop ordering to the implementation cutover."
+
+phases:
+  - id: 0
+    title: "Boundary Validation And Representation Foundations"
+    gate: 0
+    goal: "Prove the machine/tooling/public-contract assumptions, create the type foundation, and normalize the architecture package into a contradiction-free executable model before behavior work begins."
+    dependencies: []
+    spec_ids:
+      - TYPE-001
+      - TYPE-002
+      - TYPE-003
+      - TYPE-004
+      - TYPE-005
+      - TYPE-006
+      - TYPE-007
+      - TYPE-008
+      - TYPE-009
+      - TYPE-010
+      - TYPE-011
+      - TYPE-012
+      - TYPE-013
+      - TYPE-014
+      - TYPE-015
+      - TYPE-016
+      - TYPE-017
+      - TYPE-018
+      - TYPE-019
+      - TYPE-020
+      - CONTRACT-001
+      - CONTRACT-002
+      - CONTRACT-003
+      - CONTRACT-004
+      - CONTRACT-005
+      - CONTRACT-006
+      - CONTRACT-007
+      - CONTRACT-008
+      - CONTRACT-009
+      - CONTRACT-010
+      - CONTRACT-011
+      - CONTRACT-012
+      - CONTRACT-013
+      - CONTRACT-014
+      - CONTRACT-015
+      - CONTRACT-016
+    decision_ids:
+      - DEC-001
+      - DEC-002
+      - DEC-003
+      - DEC-004
+      - DEC-005
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+      - methodology-integrity
+    legacy_crosswalk:
+      execution_plan_phases: [0, 1]
+      implementation_plan_workstreams: [A]
+      note: "Phase 0 folds the existing package-lock and formal-bundle assumptions into a true RCT boundary-validation gate."
+    exit_gate: "All boundary assumptions are either proven or normalized into firm requirements, and no requirement family remains implicit."
+
+  - id: 1
+    title: "Target Definition And Chokepoint Tests"
+    gate: 1
+    goal: "Write the full red-ok target: every end-to-end scenario and every critical integration chokepoint is named, wired, and fails only at missing behavior."
+    dependencies: [0]
+    spec_ids:
+      - CHOKE-001
+      - CHOKE-002
+      - CHOKE-003
+      - CHOKE-004
+      - CHOKE-005
+      - CHOKE-006
+      - CHOKE-007
+      - CHOKE-008
+      - CHOKE-009
+      - CHOKE-010
+      - CHOKE-011
+      - CHOKE-012
+      - CHOKE-013
+      - CHOKE-014
+      - E2E-001
+      - E2E-002
+      - E2E-003
+      - E2E-004
+      - E2E-005
+      - E2E-006
+      - E2E-007
+      - E2E-008
+      - E2E-009
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: []
+      implementation_plan_workstreams: []
+      note: "The current 0.5 package does not have an explicit red-ok target-definition phase; this is an RCT overlay added to make the implementation plan executable."
+    exit_gate: "Every declared E2E and chokepoint test exists, is fully wired, and fails only at the missing behavior layer."
+
+  - id: 2
+    title: "In-Repo Artifact Landing And Schema Bootstrap"
+    gate: 2
+    goal: "Land the in-repo machine bundle, machine-authority/codegen crates, xtask entrypoints, and the first honest generated machines without freezing unresolved runtime semantics too early."
+    dependencies: [0, 1]
+    spec_ids:
+      - REQ-001
+      - REQ-002
+      - REQ-024
+      - INV-008
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [1]
+      implementation_plan_workstreams: [A]
+      note: "This phase narrows Slice 1 so the final runtime ingress/control schema freeze waits for phase 3 semantics closure."
+    exit_gate: "The machine bundle is in-repo, xtask and CI gates are real, and early generated machines are limited to the ones whose semantics are already closed enough to be honest."
+
+  - id: 3
+    title: "Runtime Ingress And Control Semantics Closure"
+    gate: 2
+    goal: "Close runtime taxonomy, contributor model, control-plane exactness, and policy algebra before final runtime ingress/control machine generation and host-mode cutover."
+    dependencies: [2]
+    spec_ids:
+      - REQ-004
+      - REQ-005
+      - REQ-006
+      - REQ-007
+      - INV-002
+      - INV-003
+      - INV-004
+      - INV-012
+    decision_ids:
+      - DEC-001
+      - DEC-002
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [2]
+      implementation_plan_workstreams: [B]
+    exit_gate: "The runtime input algebra, contributor stance, control-plane semantics, and policy algebra are explicit, tested, and ready to freeze into final runtime machine artifacts."
+
+  - id: 4
+    title: "Shared Async-Operation Lifecycle Substrate"
+    gate: 2
+    goal: "Land the shared async-operation lifecycle substrate, delete the separate subagent path, and eliminate lifecycle truth leakage from mob/comms/tool compatibility paths."
+    dependencies: [2, 3]
+    spec_ids:
+      - REQ-011
+      - REQ-012
+      - INV-006
+      - INV-007
+    decision_ids:
+      - DEC-004
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [3]
+      implementation_plan_workstreams: [C]
+    exit_gate: "Mob-backed child work and background async operations share one authoritative lifecycle owner, no separate subagent mechanism survives, and lifecycle truth no longer leaks through comms or projections."
+
+  - id: 5
+    title: "Host-Mode Cutover And Turn-Peer Convergence"
+    gate: 2
+    goal: "Remove the second ordinary execution path by landing the runtime/comms bridge, narrowing TurnExecution ownership, and deleting host-loop scheduling authority."
+    dependencies: [3, 4]
+    spec_ids:
+      - REQ-008
+      - REQ-009
+      - REQ-010
+      - INV-001
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [4]
+      implementation_plan_workstreams: [D]
+      note: "This phase implicitly includes the missing host-loop design-spike closure the outline called out; checklist tasks make that artifact explicit."
+    exit_gate: "Ordinary peer/event work reaches execution only through runtime admission, and Agent no longer owns long-lived host/runtime orchestration."
+
+  - id: 6
+    title: "External Tool Contract And Machine-Authority Harness"
+    gate: 2
+    goal: "Lock the external-tool outward contract and land the advanced machine-authority verification harness before richer generated-kernel convergence and surface cutovers depend on it."
+    dependencies: [2, 3]
+    spec_ids:
+      - REQ-015
+      - REQ-016
+      - REQ-023
+      - INV-008
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [5, 8]
+      implementation_plan_workstreams: [F, H]
+      note: "This deliberately pulls harness scaffolding earlier than the implementation-plan critical-path diagram."
+    exit_gate: "Typed outward tool-surface contract is explicit, transcript notices are derivative, and richer generated-kernel machines have a real repo verification harness."
+
+  - id: 7
+    title: "Mob Convergence And Kernel Extraction"
+    gate: 2
+    goal: "Finish the mob owner split and land explicit lifecycle, flow, and orchestration boundaries on top of the shared substrates and the advanced machine-authority harness."
+    dependencies: [4, 6]
+    spec_ids:
+      - REQ-013
+      - REQ-014
+      - INV-005
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [5]
+      implementation_plan_workstreams: [E, H]
+    exit_gate: "MobActor is no longer a monolithic lifecycle/orchestration owner and the durable truth boundaries are explicit and testable."
+
+  - id: 8
+    title: "Server Surface Cutovers"
+    gate: 2
+    goal: "Cut CLI, REST, and JSON-RPC over to canonical runtime-backed external-event and execution semantics using the final canonical route and method names."
+    dependencies: [5]
+    spec_ids:
+      - REQ-017
+      - REQ-025
+      - INV-009
+      - INV-011
+    decision_ids:
+      - DEC-003
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [6]
+      implementation_plan_workstreams: [G]
+      note: "Server surfaces are split out from MCP/WASM/SDK work because they do not all share the same prerequisites."
+    exit_gate: "CLI, REST, and JSON-RPC have no ordinary execution side path, REST uses /sessions/{id}/external-events, JSON-RPC uses session/external_event, and any temporary compatibility adapter has an explicit one-phase deletion deadline."
+
+  - id: 9
+    title: "MCP And Browser Surface Cutovers"
+    gate: 2
+    goal: "Cut MCP server and WASM/browser over after the runtime path, external-tool contract, and explicit browser capability posture are landed."
+    dependencies: [5, 6]
+    spec_ids:
+      - REQ-018
+      - REQ-019
+      - REQ-025
+      - INV-009
+      - INV-011
+    decision_ids:
+      - DEC-005
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [6]
+      implementation_plan_workstreams: [G]
+    exit_gate: "MCP and browser surfaces run only through runtime-backed session/execution state, bootstrap is explicit in the browser, browser-local tools are runtime-scoped, and no second browser or MCP execution owner survives."
+
+  - id: 10
+    title: "SDK And Docs Parity"
+    gate: 2
+    goal: "Regenerate bindings and align Rust/Python/TypeScript docs, wrappers, examples, and changelog posture to the settled 0.5 runtime path."
+    dependencies: [8, 9]
+    spec_ids:
+      - REQ-020
+      - REQ-021
+      - REQ-025
+      - INV-011
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [6]
+      implementation_plan_workstreams: [G]
+    exit_gate: "SDKs are thin wrappers over settled contracts and the docs/examples default to runtime-backed embedding."
+
+  - id: 11
+    title: "Final Deletions And Release Closure"
+    gate: 3
+    goal: "Close the release with all canonical machines in final modes, all bypasses deleted, and all surface and machine verification gates green."
+    dependencies: [5, 7, 8, 9, 10]
+    spec_ids:
+      - REQ-003
+      - REQ-022
+      - INV-001
+      - INV-005
+      - INV-006
+      - INV-007
+      - INV-008
+      - INV-009
+      - INV-010
+      - INV-011
+      - INV-012
+      - E2E-009
+    reviewers:
+      - spec-auditor
+      - integration-sheriff
+      - rct-guardian
+      - performance-gate
+    legacy_crosswalk:
+      execution_plan_phases: [7, 8]
+      implementation_plan_workstreams: [H]
+    exit_gate: "One runtime path, one owner per temporal concern, all canonical machines verified in final mode, all surfaces green, and the deletion ledger complete."

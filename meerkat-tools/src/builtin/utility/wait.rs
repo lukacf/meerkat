@@ -49,6 +49,15 @@ impl WaitTool {
             interrupt_rx: Some(rx),
         }
     }
+
+    /// Returns a clone of the interrupt receiver, if one is configured.
+    ///
+    /// Used to carry forward interrupt wiring across dispatcher rebuilds
+    /// (e.g., ops-lifecycle rebinding creates a fresh `CompositeDispatcher`
+    /// and must re-apply the interrupt receiver from the old dispatcher).
+    pub fn interrupt_receiver(&self) -> Option<WaitInterruptReceiver> {
+        self.interrupt_rx.clone()
+    }
 }
 
 impl Default for WaitTool {
@@ -77,7 +86,7 @@ impl BuiltinTool for WaitTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "wait".into(),
-            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like sub-agents. Wait is interrupted early when peer messages arrive. Maximum wait time is 60 seconds (1 minute).".into(),
+            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like delegated work or long-running background tasks. Wait is interrupted early when peer messages arrive. Maximum wait time is 60 seconds (1 minute).".into(),
             input_schema: crate::schema::schema_for::<WaitArgs>(),
         }
     }
@@ -169,7 +178,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let _ = tx.send(Some(WaitInterrupt {
-                reason: "Received message from sub-agent: Task completed".to_string(),
+                reason: "Received message from delegated worker: Task completed".to_string(),
             }));
         });
 
@@ -187,7 +196,12 @@ mod tests {
         );
         assert_eq!(result["status"], "interrupted");
         assert!(result["waited_seconds"].as_f64().unwrap() < 1.0);
-        assert!(result["reason"].as_str().unwrap().contains("sub-agent"));
+        assert!(
+            result["reason"]
+                .as_str()
+                .unwrap()
+                .contains("delegated worker")
+        );
     }
 
     #[tokio::test]

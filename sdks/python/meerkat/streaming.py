@@ -126,11 +126,31 @@ class _StdoutDispatcher:
                 if future and not future.done():
                     if data.get("error"):
                         err = data["error"]
+                        raw_message = err.get("message", "Unknown error")
+                        nested_code = None
+                        nested_message = None
+                        nested_details = err.get("data")
+                        if isinstance(nested_details, dict):
+                            nested_code = nested_details.get("code")
+                            nested_message = nested_details.get("message")
+                            nested_details = nested_details.get(
+                                "details",
+                                nested_details.get("reason", nested_details),
+                            )
+                        if isinstance(raw_message, str):
+                            try:
+                                parsed = json.loads(raw_message)
+                            except json.JSONDecodeError:
+                                parsed = None
+                            if isinstance(parsed, dict):
+                                nested_code = parsed.get("code")
+                                nested_message = parsed.get("message")
+                                nested_details = parsed.get("details", parsed.get("reason", nested_details))
                         future.set_exception(
                             MeerkatError(
-                                str(err.get("code", "UNKNOWN")),
-                                err.get("message", "Unknown error"),
-                                err.get("data"),
+                                str(nested_code or err.get("code", "UNKNOWN")),
+                                str(nested_message or raw_message),
+                                nested_details,
                             )
                         )
                     else:
@@ -154,7 +174,7 @@ class _StdoutDispatcher:
                 if method in {"session/stream_event", "mob/stream_event"}:
                     stream_id = str(params.get("stream_id", ""))
                     raw_event = params.get("event") or params
-                    # Preserve scope fields when present (sub-agent / mob-member scoped events).
+                    # Preserve scope fields when present (delegated-branch / mob-member scoped events).
                     scope_id = params.get("scope_id")
                     scope_path = params.get("scope_path")
                     if scope_id is not None or scope_path is not None:

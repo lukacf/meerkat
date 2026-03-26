@@ -96,8 +96,9 @@ RuntimeState {
 }
 ```
 
-`MobMcpState::new(service)` wraps `EphemeralSessionService<FactoryAgentBuilder>`.
-All mob operations create sessions through the same service.
+`MobMcpState::new(service)` wraps `EphemeralSessionService<FactoryAgentBuilder>` as an embedded substrate.
+All mob operations create sessions through that same service, but runtime-owned
+surface semantics like `keep_alive` still belong to the hosting runtime layer.
 
 ## Mob Spawn Spec Format
 

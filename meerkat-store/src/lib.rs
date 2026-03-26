@@ -9,6 +9,7 @@ pub mod tokio {
 }
 
 pub mod adapter;
+pub mod blob;
 mod error;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,8 +29,11 @@ pub mod redb_store;
 pub mod sqlite_store;
 
 pub use adapter::StoreAdapter;
+pub use blob::MemoryBlobStore;
 pub use error::StoreError;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use blob::FsBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use index::SessionIndex;
 #[cfg(not(target_arch = "wasm32"))]

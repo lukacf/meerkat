@@ -11,6 +11,113 @@ import type {
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
 
+export type MobHandlingMode = "queue" | "steer";
+export type MobRenderClass =
+  | "user_prompt"
+  | "peer_message"
+  | "peer_request"
+  | "peer_response"
+  | "external_event"
+  | "flow_step"
+  | "continuation"
+  | "system_notice"
+  | "tool_scope_notice"
+  | "ops_progress";
+
+export interface MobRenderMetadata extends Record<string, unknown> {
+  class: MobRenderClass;
+  salience?: "background" | "normal" | "important" | "urgent";
+}
+
+export interface MemberSendOptions {
+  handlingMode?: MobHandlingMode;
+  renderMetadata?: MobRenderMetadata;
+}
+
+export interface MemberDeliveryReceipt {
+  memberId: string;
+  sessionId: string;
+  handlingMode: MobHandlingMode;
+}
+
+export interface MemberRespawnReceipt {
+  memberId: string;
+  oldSessionId?: string;
+  newSessionId?: string;
+}
+
+export interface MobRespawnResult {
+  status: "completed" | "topology_restore_failed";
+  receipt: MemberRespawnReceipt;
+  failedPeerIds?: string[];
+}
+
+export interface MobMemberSnapshot {
+  status: string;
+  outputPreview?: string;
+  error?: string;
+  tokensUsed: number;
+  isFinal: boolean;
+  currentSessionId?: string;
+  peerConnectivity?: {
+    reachablePeerCount: number;
+    unknownPeerCount: number;
+    unreachablePeers: Array<{
+      peer: string;
+      reason?: string;
+    }>;
+  };
+}
+
+export interface MobKickoffWaitOptions {
+  memberIds?: string[];
+  timeoutMs?: number;
+}
+
+export interface MobKickoffMemberSnapshot extends MobMemberSnapshot {
+  meerkatId: string;
+}
+
+export interface ExternalPeerTarget {
+  readonly external: {
+    readonly name: string;
+    readonly peer_id: string;
+    readonly address: string;
+  };
+}
+
+export type MobPeerTarget = string | ExternalPeerTarget;
+
+export interface MobHelperResult {
+  output?: string;
+  tokensUsed: number;
+  sessionId?: string;
+}
+
+export class Member {
+  private readonly client: MeerkatClient;
+  readonly mobId: string;
+  readonly meerkatId: string;
+
+  /** @internal */
+  constructor(client: MeerkatClient, mobId: string, meerkatId: string) {
+    this.client = client;
+    this.mobId = mobId;
+    this.meerkatId = meerkatId;
+  }
+
+  async send(
+    content: string | ContentBlock[],
+    options?: MemberSendOptions,
+  ): Promise<MemberDeliveryReceipt> {
+    return this.client.sendMobMemberContent(this.mobId, this.meerkatId, content, options);
+  }
+
+  async events(): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, this.meerkatId);
+  }
+}
+
 export class Mob {
   private readonly client: MeerkatClient;
   readonly mobId: string;
@@ -37,24 +144,56 @@ export class Mob {
     await this.client.retireMobMember(this.mobId, meerkatId);
   }
 
-  async respawn(meerkatId: string, initialMessage?: string | ContentBlock[]): Promise<void> {
-    await this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
+  async respawn(
+    meerkatId: string,
+    initialMessage?: string | ContentBlock[],
+  ): Promise<MobRespawnResult> {
+    return this.client.respawnMobMember(this.mobId, meerkatId, initialMessage);
   }
 
-  async wire(a: string, b: string): Promise<void> {
-    await this.client.wireMobMembers(this.mobId, a, b);
+  async forceCancel(meerkatId: string): Promise<void> {
+    await this.client.forceCancelMobMember(this.mobId, meerkatId);
   }
 
-  async unwire(a: string, b: string): Promise<void> {
-    await this.client.unwireMobMembers(this.mobId, a, b);
+  async memberStatus(meerkatId: string): Promise<MobMemberSnapshot> {
+    return this.client.mobMemberStatus(this.mobId, meerkatId);
+  }
+
+  async waitForKickoffComplete(
+    options?: MobKickoffWaitOptions,
+  ): Promise<MobKickoffMemberSnapshot[]> {
+    return this.client.waitMobKickoff(this.mobId, options);
+  }
+
+  async spawnHelper(
+    prompt: string,
+    options?: { meerkatId?: string; profileName?: string },
+  ): Promise<MobHelperResult> {
+    return this.client.spawnMobHelper(this.mobId, prompt, options);
+  }
+
+  async forkHelper(
+    sourceMemberId: string,
+    prompt: string,
+    options?: { meerkatId?: string; profileName?: string; forkContext?: Record<string, unknown> },
+  ): Promise<MobHelperResult> {
+    return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
+  }
+
+  async wire(member: string, peer: MobPeerTarget): Promise<void> {
+    await this.client.wireMobMembers(this.mobId, member, peer);
+  }
+
+  async unwire(member: string, peer: MobPeerTarget): Promise<void> {
+    await this.client.unwireMobMembers(this.mobId, member, peer);
   }
 
   async listMembers(): Promise<MobMember[]> {
     return this.client.listMobMembers(this.mobId);
   }
 
-  async sendMessage(meerkatId: string, message: string | ContentBlock[]): Promise<void> {
-    await this.client.sendMobMessage(this.mobId, meerkatId, message);
+  member(meerkatId: string): Member {
+    return new Member(this.client, this.mobId, meerkatId);
   }
 
   async appendSystemContext(

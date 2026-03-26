@@ -103,18 +103,6 @@ inventory::submit! {
     }
 }
 
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-inventory::submit! {
-    meerkat_contracts::CapabilityRegistration {
-        id: meerkat_contracts::CapabilityId::SubAgents,
-        description: "Sub-agent management: agent_spawn, agent_fork, agent_status, agent_cancel, agent_list",
-        scope: meerkat_contracts::CapabilityScope::Universal,
-        requires_feature: Some("sub-agents"),
-        prerequisites: &[],
-        status_resolver: None,
-    }
-}
-
 // Skill registrations
 inventory::submit! {
     meerkat_skills::SkillRegistration {
@@ -137,19 +125,6 @@ inventory::submit! {
         scope: meerkat_core::skills::SkillScope::Builtin,
         requires_capabilities: &["builtins", "shell"],
         body: include_str!("../skills/shell-patterns/SKILL.md"),
-        extensions: &[],
-    }
-}
-
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-inventory::submit! {
-    meerkat_skills::SkillRegistration {
-        id: "sub-agent-orchestration",
-        name: "Sub-Agent Orchestration",
-        description: "When to agent_spawn vs agent_fork, model selection, result aggregation",
-        scope: meerkat_core::skills::SkillScope::Builtin,
-        requires_capabilities: &["sub_agents"],
-        body: include_str!("../skills/sub-agent-orchestration/SKILL.md"),
         extensions: &[],
     }
 }

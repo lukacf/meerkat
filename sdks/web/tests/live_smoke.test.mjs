@@ -319,10 +319,9 @@ test(
       });
       assert.ok(["staged", "duplicate"].includes(appended.status));
 
-      const subscription = await mob.subscribe("reviewer-1");
+      const subscription = await mob.member("reviewer-1").subscribe();
       try {
-        await mob.sendMessage(
-          "reviewer-1",
+        await mob.member("reviewer-1").send(
           "Reply with REVIEWER_READY_47 and include [WASM-SWARM-47].",
         );
         const items = await waitForSubscriptionItems(
@@ -340,6 +339,8 @@ test(
       const reviewer = members.find((member) => member.meerkat_id === "reviewer-1");
       assert.ok(reviewer);
       assert.equal(reviewer.member_ref.session_id, reviewerSessionId);
+      const reviewerSnapshot = await mob.memberStatus("reviewer-1");
+      assert.equal(reviewerSnapshot.current_session_id, reviewerSessionId);
 
       const ledger = await mob.events("", 200);
       assert.ok(Array.isArray(ledger));
@@ -354,8 +355,7 @@ test(
       ]);
       assert.equal(brokenSpawn[0]?.status, "ok");
       await assert.rejects(
-        () => mob.sendMessage(
-          "broken-1",
+        () => mob.member("broken-1").send(
           "This turn must fail because the member model is invalid.",
         ),
       );
@@ -427,14 +427,12 @@ test(
       const reviewerSessionId = spawned[2].member_ref?.session_id;
       assert.ok(reviewerSessionId);
 
-      const allSubscription = await mob.subscribeAll();
+      const allSubscription = await mob.subscribeEvents();
       try {
-        await mob.sendMessage(
-          "analyst-1",
+        await mob.member("analyst-1").send(
           "Reply with ANALYST_READY_48.",
         );
-        await mob.sendMessage(
-          "reviewer-1",
+        await mob.member("reviewer-1").send(
           "Reply with REVIEWER_READY_48.",
         );
         const items = await waitForSubscriptionItems(

@@ -36,6 +36,37 @@ impl std::fmt::Display for RunId {
     }
 }
 
+/// Opaque identifier for an authority-owned async wait request.
+///
+/// Runtime-owned barrier waits use this to distinguish the wait lifecycle from
+/// the turn `RunId` they eventually feed back into.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaitRequestId(pub Uuid);
+
+impl WaitRequestId {
+    /// Create a new wait request ID using UUID v7 (time-ordered).
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Create from an existing UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+}
+
+impl Default for WaitRequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for WaitRequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Opaque identifier for an input accepted by the runtime layer.
 ///
 /// Core passes this through in `contributing_input_ids` on receipts and events
@@ -109,6 +140,28 @@ mod tests {
     }
 
     #[test]
+    fn wait_request_id_new_is_unique() {
+        let a = WaitRequestId::new();
+        let b = WaitRequestId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn wait_request_id_serde_roundtrip() {
+        let id = WaitRequestId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: WaitRequestId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn wait_request_id_display() {
+        let uuid = Uuid::nil();
+        let id = WaitRequestId::from_uuid(uuid);
+        assert_eq!(id.to_string(), "00000000-0000-0000-0000-000000000000");
+    }
+
+    #[test]
     fn input_id_serde_roundtrip() {
         let id = InputId::new();
         let json = serde_json::to_string(&id).unwrap();
@@ -127,9 +180,11 @@ mod tests {
     fn run_id_and_input_id_are_distinct_types() {
         // Compile-time type safety: these are different types
         let run_id = RunId::new();
+        let wait_request_id = WaitRequestId::new();
         let input_id = InputId::new();
         // They cannot be compared directly (different types)
         let _ = run_id;
+        let _ = wait_request_id;
         let _ = input_id;
     }
 }

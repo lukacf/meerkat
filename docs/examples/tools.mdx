@@ -45,7 +45,7 @@ impl AgentToolDispatcher for MathTools {
 
 ## Enable built-in tools
 
-Built-in tool categories: builtins (`enable_builtins`, including task tools plus utility helpers like `wait`, `datetime`, and `apply_patch`), shell (`enable_shell`), sub-agents (`enable_subagents`), semantic memory (`enable_memory`), and mob orchestration (`enable_mob`).
+Built-in tool categories: builtins (`enable_builtins`, including task tools plus utility helpers like `wait`, `datetime`, and `apply_patch`), shell (`enable_shell`), semantic memory (`enable_memory`), and mob orchestration (`enable_mob`).
 
 <Tabs>
   <Tab title="CLI">
@@ -60,8 +60,6 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
     rkat run -x --enable-mob "Coordinate the team"
     rkat run -x -M "Coordinate the team"
 
-    # Disable sub-agents explicitly
-    rkat run -x --no-subagents "Run a shell command"
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -73,7 +71,6 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
         "prompt": "List files in /tmp",
         "enable_builtins": true,
         "enable_shell": true,
-        "enable_subagents": false,
         "enable_memory": true,
         "enable_mob": true
       }
@@ -88,7 +85,6 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
         "prompt": "List files in /tmp",
         "enable_builtins": true,
         "enable_shell": true,
-        "enable_subagents": false,
         "enable_memory": true,
         "enable_mob": true
       }'
@@ -103,7 +99,6 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
         "enable_shell": true,
         "shell_timeout_secs": 30
       },
-      "enable_subagents": true,
       "enable_memory": true,
       "enable_mob": true
     }
@@ -116,7 +111,6 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
         "List files in /tmp",
         enable_builtins=True,
         enable_shell=True,
-        enable_subagents=False,
         enable_memory=True,
         enable_mob=True,
     )
@@ -127,7 +121,6 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
     const session = await client.createSession("List files in /tmp", {
       enableBuiltins: true,
       enableShell: true,
-      enableSubagents: false,
       enableMemory: true,
       enableMob: true,
     });
@@ -138,11 +131,10 @@ Built-in tool categories: builtins (`enable_builtins`, including task tools plus
     let factory = AgentFactory::new(root)
         .builtins(true)
         .shell(true)
-        .subagents(true)
         .memory(true)
         .mob(true);
 
-    let service = build_ephemeral_service(factory, config, 64);
+    let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
         prompt: "List files in /tmp".into(),
         ..Default::default()
@@ -320,7 +312,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
     # Allow-list specific tools for this turn
     rkat resume --session 01936f8a-... \
       --allow-tool shell --allow-tool read_file \
-      --block-tool agent_spawn \
+      --block-tool task_create \
       "Execute the next step"
     ```
   </Tab>
@@ -334,7 +326,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
         "prompt": "Execute the next step",
         "flow_tool_overlay": {
           "allowed_tools": ["shell", "read_file"],
-          "blocked_tools": ["agent_spawn"]
+          "blocked_tools": ["task_create"]
         }
       }
     }
@@ -349,7 +341,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
         "prompt": "Execute the next step",
         "flow_tool_overlay": {
           "allowed_tools": ["shell", "read_file"],
-          "blocked_tools": ["agent_spawn"]
+          "blocked_tools": ["task_create"]
         }
       }'
     ```
@@ -372,7 +364,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
         "Execute the next step",
         flow_tool_overlay={
             "allowed_tools": ["shell", "read_file"],
-            "blocked_tools": ["agent_spawn"],
+            "blocked_tools": ["task_create"],
         },
     )
     ```
@@ -382,7 +374,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
     const result = await session.turn("Execute the next step", {
       flowToolOverlay: {
         allowedTools: ["shell", "read_file"],
-        blockedTools: ["agent_spawn"],
+        blockedTools: ["task_create"],
       },
     });
     ```

@@ -8,14 +8,25 @@ prefixed generated types which are now an internal implementation detail.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Union
+from typing import Any, Literal, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
+    InputListParams as InputListParams,
+    InputListResult as InputListResult,
     McpAddParams as McpAddParams,
     McpLiveOpResponse as McpLiveOpResponse,
     McpReloadParams as McpReloadParams,
     McpRemoveParams as McpRemoveParams,
+    RuntimeAcceptParams as RuntimeAcceptParams,
+    RuntimeAcceptResult as RuntimeAcceptResult,
+    RuntimeResetParams as RuntimeResetParams,
+    RuntimeResetResult as RuntimeResetResult,
+    RuntimeRetireParams as RuntimeRetireParams,
+    RuntimeRetireResult as RuntimeRetireResult,
+    RuntimeStateParams as RuntimeStateParams,
+    RuntimeStateResult as RuntimeStateResult,
+    WireInputState as WireInputState,
 )
 
 # Re-export Usage from events so there's a single canonical definition.
@@ -37,6 +48,41 @@ class SkillKey:
 SkillRef = Union[SkillKey, str]
 """A skill reference — either a :class:`SkillKey` or a legacy string like
 ``"<source_uuid>/<skill_name>"``."""
+
+
+class TextBlock(TypedDict):
+    type: Literal["text"]
+    text: str
+
+
+class InlineImageBlock(TypedDict, total=False):
+    type: Literal["image"]
+    media_type: str
+    source: Literal["inline"]
+    data: str
+
+
+class BlobImageBlock(TypedDict):
+    type: Literal["image"]
+    media_type: str
+    source: Literal["blob"]
+    blob_id: str
+
+
+ContentBlock = Union[TextBlock, InlineImageBlock, BlobImageBlock]
+"""A multimodal content block accepted by input-bearing APIs."""
+
+ContentInput = str | list[ContentBlock]
+"""Canonical content input accepted by input-bearing APIs and returned by history surfaces."""
+
+
+@dataclass(frozen=True, slots=True)
+class BlobPayload:
+    """Raw blob bytes fetched by blob id."""
+
+    blob_id: str = ""
+    media_type: str = ""
+    data_base64: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +164,11 @@ class SessionInfo:
     updated_at: str = ""
     message_count: int = 0
     total_tokens: int = 0
+    labels: dict[str, str] = field(default_factory=dict)
     is_active: bool = False
+    model: str = ""
+    provider: str = ""
+    last_assistant_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +185,7 @@ class SessionToolResult:
     """Tool result captured in transcript history."""
 
     tool_use_id: str = ""
-    content: str = ""
+    content: ContentInput = ""
     is_error: bool = False
 
 
@@ -156,7 +206,7 @@ class SessionMessage:
     """Canonical transcript message returned by session history APIs."""
 
     role: str = ""
-    content: str | None = None
+    content: ContentInput | None = None
     tool_calls: list[SessionToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     blocks: list[SessionAssistantBlock] = field(default_factory=list)

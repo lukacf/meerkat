@@ -4,7 +4,7 @@ description: "Index of public types, traits, and error codes in Meerkat."
 icon: "book"
 ---
 
-This page is a quick-lookup index. For detailed usage with examples, see the [Rust SDK reference](/rust/overview).
+This page is a quick-lookup index. For settled 0.5 session/runtime semantics, see [Session contracts](/reference/session-contracts). For detailed usage with examples, see the [Rust SDK reference](/rust/overview).
 
 ## Core types
 
@@ -92,7 +92,7 @@ Mob runtime APIs live primarily in:
 | `spawn_with_options(...).await` | Spawn member with runtime mode and backend overrides |
 | `retire(...).await` | Retire member |
 | `wire(...).await` / `unwire(...).await` | Peer graph mutation |
-| `send_message(...).await` / `internal_turn(...).await` | Turn dispatch |
+| `member(...).send(...).await` / `internal_turn(...).await` | Turn dispatch |
 | `stop().await` / `resume().await` / `complete().await` / `destroy().await` | Lifecycle transitions |
 | `list_flows()` / `run_flow(...).await` / `flow_status(...).await` / `cancel_flow(...).await` | Flow runtime control |
 | `task_create(...).await` / `task_update(...).await` / `task_list().await` | Shared task board |
@@ -102,6 +102,7 @@ Mob runtime APIs live primarily in:
 
 ```rust
 use std::sync::Arc;
+use meerkat_core::types::HandlingMode;
 use meerkat_mob::{
     FlowId, MeerkatId, MobBuilder, MobDefinition, MobSessionService, MobStorage, ProfileName,
 };
@@ -127,9 +128,8 @@ async fn orchestrate(
     handle
         .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
         .await?;
-    handle
-        .send_message(MeerkatId::from("lead-1"), "Coordinate work.".to_string())
-        .await?;
+    let lead = handle.member(&MeerkatId::from("lead-1")).await?;
+    lead.send("Coordinate work.", HandlingMode::Queue, None).await?;
 
     let run_id = handle
         .run_flow(FlowId::from("release_flow"), serde_json::json!({"severity":"critical"}))
@@ -177,7 +177,9 @@ For cross-surface behavior and examples (CLI/RPC/REST/MCP/Python/TypeScript), se
 |-----------------|---------|---------------|
 | `AgentFactory::new(store_root)` | Create a factory for building agents | [Rust SDK](/rust/overview#quick-start) |
 | `AgentFactory::session_store(store)` | Override session store (e.g. BigQuery, DynamoDB) | [Rust SDK: custom stores](/rust/tools-and-stores#session-stores) |
-| `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service | [Rust SDK](/rust/overview#sessions) |
+| `open_realm_persistence_in(root, realm, backend, origin)` | Open a realm-backed persistence bundle for runtime-backed Rust embedding | [Rust SDK](/rust/overview#quick-start) |
+| `build_persistent_service(factory, config, cap, persistence)` | Build the runtime-backed persistent session substrate used by the main Rust path | [Rust SDK](/rust/overview#quick-start) |
+| `build_ephemeral_service(factory, config, cap)` | Build an in-memory Queue-only substrate for testing and embedded use | [Rust SDK](/rust/overview#quick-start) |
 | `Config::load()` | Load layered config (legacy/global-project flow) | [Configuration](/concepts/configuration) |
 
 ## Structured output types
@@ -234,10 +236,10 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
 | `WireUsage` | Token/cost usage breakdown |
-| `ContractVersion` | Semver version (`0.4.1` currently) |
+| `ContractVersion` | Semver version (`0.4.13` currently) |
 | `CoreCreateParams` | Session creation parameters |
 | `StructuredOutputParams` | Schema + retry count |
-| `CommsParams` | Host mode + agent name |
+| `CommsParams` | Keep-alive + comms identity parameters |
 | `HookParams` | Hook override entries |
 | `SkillsParams` | Skill enablement + references |
 

@@ -7,6 +7,9 @@ use crate::InboxSender;
 use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
+use crate::peer_directory_reachability_authority::{
+    PeerDirectoryReachabilityAuthority, ReachabilityKey,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
@@ -16,16 +19,21 @@ use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, EventStream, InputStreamMode, PeerDirectoryEntry, PeerDirectorySource, PeerName,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerSpec,
+    PeerReachabilityReason, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    TrustedPeerSpec,
 };
 use meerkat_core::config::PlainEventSource;
+use meerkat_core::hydrate_content_blocks;
 use meerkat_core::time_compat::Instant;
+use meerkat_core::{BlobStore, MissingBlobBehavior};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -98,6 +106,34 @@ impl StreamRegistryEntry {
 
 type InteractionStreamRegistry = Arc<Mutex<HashMap<Uuid, StreamRegistryEntry>>>;
 
+#[cfg(not(target_arch = "wasm32"))]
+static SESSION_IDENTITY_CLAIMS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SessionIdentityClaim {
+    session_id: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SessionIdentityClaim {
+    fn acquire(session_id: &meerkat_core::SessionId) -> Result<Self, CommsRuntimeError> {
+        let session_id = session_id.to_string();
+        let mut claims = SESSION_IDENTITY_CLAIMS.lock();
+        if !claims.insert(session_id.clone()) {
+            return Err(CommsRuntimeError::SessionIdentityInUse(session_id));
+        }
+        Ok(Self { session_id })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SessionIdentityClaim {
+    fn drop(&mut self) {
+        SESSION_IDENTITY_CLAIMS.lock().remove(&self.session_id);
+    }
+}
+
 struct InteractionStream {
     id: Uuid,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
@@ -112,6 +148,12 @@ struct ResolvedPeer {
     address: String,
     source: PeerDirectorySource,
     meta: crate::PeerMeta,
+}
+
+impl ResolvedPeer {
+    fn reachability_key(&self) -> ReachabilityKey {
+        ReachabilityKey::new(self.name.as_str(), self.peer_id.as_str())
+    }
 }
 
 impl InteractionStream {
@@ -274,7 +316,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream,
                 allow_self_session,
                 session_id: _,
-                blocks: _,
+                blocks,
+                handling_mode,
             } => {
                 // Self-input guard: when allow_self_session is false, this runtime's
                 // inbox is the target, which is a self-loop. Reject unless explicitly
@@ -290,8 +333,12 @@ impl CoreCommsRuntime for CommsRuntime {
                         let injector = CoreCommsRuntime::event_injector(self).ok_or_else(|| {
                             SendError::Unsupported("event injector unavailable".into())
                         })?;
+                        let content = match blocks {
+                            Some(blocks) => meerkat_core::types::ContentInput::Blocks(blocks),
+                            None => meerkat_core::types::ContentInput::Text(body),
+                        };
                         injector
-                            .inject(body, PlainEventSource::from(source))
+                            .inject(content, PlainEventSource::from(source), handling_mode, None)
                             .map_err(map_event_injector_error)?;
                         Ok(SendReceipt::InputAccepted {
                             interaction_id: meerkat_core::InteractionId(Uuid::new_v4()),
@@ -300,7 +347,13 @@ impl CoreCommsRuntime for CommsRuntime {
                     }
                     InputStreamMode::ReserveInteraction => {
                         let interaction_id = Uuid::new_v4();
-                        self.register_interaction_stream(interaction_id, body, source)?;
+                        self.register_interaction_stream(
+                            interaction_id,
+                            body,
+                            blocks,
+                            source,
+                            handling_mode,
+                        )?;
                         Ok(SendReceipt::InputAccepted {
                             interaction_id: meerkat_core::InteractionId(interaction_id),
                             stream_reserved: true,
@@ -405,7 +458,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream: InputStreamMode::ReserveInteraction,
                 allow_self_session,
                 session_id: _,
-                blocks: _,
+                blocks,
+                handling_mode,
             } => {
                 if !allow_self_session {
                     return Err(SendAndStreamError::Send(SendError::Validation(
@@ -414,7 +468,13 @@ impl CoreCommsRuntime for CommsRuntime {
                     )));
                 }
                 let interaction_id = Uuid::new_v4();
-                self.register_interaction_stream(interaction_id, body, source)?;
+                self.register_interaction_stream(
+                    interaction_id,
+                    body,
+                    blocks,
+                    source,
+                    handling_mode,
+                )?;
                 let receipt = SendReceipt::InputAccepted {
                     interaction_id: meerkat_core::InteractionId(interaction_id),
                     stream_reserved: true,
@@ -564,12 +624,8 @@ impl CoreCommsRuntime for CommsRuntime {
 
                         let (content, rendered_text) = match envelope.kind {
                             MessageKind::Message { body, blocks } => {
-                                let text = match &blocks {
-                                    Some(b) if !b.is_empty() => meerkat_core::types::text_content(b),
-                                    _ => body.clone(),
-                                };
                                 let rendered = format!(
-                                    "[COMMS MESSAGE from {from_peer}]\n{text}"
+                                    "[COMMS MESSAGE from {from_peer}]\n{body}"
                                 );
                                 (
                                     meerkat_core::InteractionContent::Message { body, blocks },
@@ -660,6 +716,8 @@ impl CoreCommsRuntime for CommsRuntime {
                                 from: from_peer,
                                 content,
                                 rendered_text,
+                                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                                render_metadata: None,
                             },
                             class: entry.class,
                             lifecycle_peer: entry.lifecycle_peer,
@@ -668,10 +726,16 @@ impl CoreCommsRuntime for CommsRuntime {
                     crate::types::InboxItem::PlainEvent {
                         body,
                         source,
+                        handling_mode,
                         interaction_id,
                         blocks,
+                        render_metadata,
+                        ..
                     } => {
-                        let rendered = format!("[EVENT via {source}] {body}");
+                        let rendered = meerkat_core::interaction::format_external_event_projection(
+                            &source.to_string(),
+                            Some(&body),
+                        );
                         Some(meerkat_core::ClassifiedInboxInteraction {
                             interaction: meerkat_core::InboxInteraction {
                                 id: meerkat_core::InteractionId(
@@ -680,14 +744,12 @@ impl CoreCommsRuntime for CommsRuntime {
                                 from: format!("event:{source}"),
                                 content: meerkat_core::InteractionContent::Message { body, blocks },
                                 rendered_text: rendered,
+                                handling_mode,
+                                render_metadata,
                             },
                             class: entry.class,
                             lifecycle_peer: entry.lifecycle_peer,
                         })
-                    }
-                    crate::types::InboxItem::SubagentResult { .. } => {
-                        // Subagent results handled separately
-                        None
                     }
                 }
             })
@@ -714,20 +776,12 @@ fn map_event_injector_error(error: meerkat_core::event_injector::EventInjectorEr
     }
 }
 
-fn map_router_send_error(err: crate::router::SendError) -> SendError {
-    match err {
-        crate::router::SendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
-        crate::router::SendError::PeerOffline => SendError::PeerOffline,
-        crate::router::SendError::Transport(_) | crate::router::SendError::Io(_) => {
-            SendError::Internal(err.to_string())
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum CommsRuntimeError {
     #[error("Identity error: {0}")]
     IdentityError(String),
+    #[error("Session identity already active: {0}")]
+    SessionIdentityInUse(String),
     #[error("Trust load error: {0}")]
     TrustLoadError(String),
     #[error("Listener error: {0}")]
@@ -757,16 +811,20 @@ pub struct CommsRuntime {
     listener_handles: Vec<ListenerHandle>,
     #[cfg(not(target_arch = "wasm32"))]
     listeners_started: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    _session_identity_claim: Option<SessionIdentityClaim>,
     keypair: Arc<Keypair>,
     require_peer_auth: bool,
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
+    peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
     #[allow(dead_code)] // Kept alive — shared with IngressClassificationContext via Arc
     silent_intents: Arc<HashSet<String>>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.
     actionable_notify: Option<Arc<tokio::sync::Notify>>,
+    blob_store: Option<Arc<dyn BlobStore>>,
 }
 
 impl CommsRuntime {
@@ -821,13 +879,18 @@ impl CommsRuntime {
             config: config.clone(),
             listener_handles: Vec::new(),
             listeners_started: false,
+            _session_identity_claim: None,
             keypair: Arc::new(keypair),
             require_peer_auth: config.require_peer_auth,
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            peer_directory_reachability: Arc::new(Mutex::new(
+                PeerDirectoryReachabilityAuthority::new(),
+            )),
             silent_intents,
             actionable_notify,
+            blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -910,13 +973,100 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             listeners_started: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            _session_identity_claim: None,
             keypair: Arc::new(keypair),
             require_peer_auth: true,
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            peer_directory_reachability: Arc::new(Mutex::new(
+                PeerDirectoryReachabilityAuthority::new(),
+            )),
             silent_intents,
             actionable_notify,
+            blob_store: None,
+        };
+        InprocRegistry::global().register_with_meta_in_namespace(
+            namespace.as_deref().unwrap_or(""),
+            name,
+            runtime.public_key,
+            inbox_sender,
+            crate::PeerMeta::default(),
+        );
+        Ok(runtime)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn inproc_only_session_scoped_with_silent_intents(
+        name: &str,
+        namespace: Option<String>,
+        identity_root: std::path::PathBuf,
+        session_id: &meerkat_core::SessionId,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
+        let claim = SessionIdentityClaim::acquire(session_id)?;
+        let identity_dir = identity_root.join(session_id.to_string());
+        let keypair = Keypair::load_or_generate(&identity_dir)
+            .await
+            .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
+        let public_key = keypair.public_key();
+        let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+
+        let classification_context = Arc::new(crate::classify::IngressClassificationContext {
+            require_peer_auth: true,
+            trusted_peers: trusted_peers.clone(),
+            silent_intents: silent_intents.clone(),
+        });
+        let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
+        let inbox_notify = inbox.notify();
+        let actionable_notify = inbox.classified_actionable_notify();
+        let comms_config = crate::CommsConfig::default();
+        let config = ResolvedCommsConfig {
+            enabled: true,
+            name: name.to_string(),
+            inproc_namespace: namespace.clone(),
+            identity_dir: identity_dir.clone(),
+            trusted_peers_path: identity_dir.join("trusted_peers.json"),
+            listen_uds: None,
+            listen_tcp: None,
+            event_listen_tcp: None,
+            #[cfg(unix)]
+            event_listen_uds: None,
+            comms_config: comms_config.clone(),
+            auth: meerkat_core::CommsAuthMode::Open,
+            require_peer_auth: true,
+            allow_external_unauthenticated: false,
+        };
+        let router = Router::with_shared_peers(
+            keypair.clone(),
+            trusted_peers.clone(),
+            comms_config,
+            inbox_sender.clone(),
+            true,
+        )
+        .with_inproc_namespace(namespace.clone());
+        let runtime = Self {
+            public_key,
+            router: Arc::new(router),
+            trusted_peers,
+            inbox: Arc::new(AsyncMutex::new(inbox)),
+            inbox_notify,
+            config,
+            listener_handles: Vec::new(),
+            listeners_started: false,
+            _session_identity_claim: Some(claim),
+            keypair: Arc::new(keypair),
+            require_peer_auth: true,
+            dismiss_flag: AtomicBool::new(false),
+            subscriber_registry: crate::event_injector::new_subscriber_registry(),
+            interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            peer_directory_reachability: Arc::new(Mutex::new(
+                PeerDirectoryReachabilityAuthority::new(),
+            )),
+            silent_intents,
+            actionable_notify,
+            blob_store: None,
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -936,6 +1086,53 @@ impl CommsRuntime {
         #[cfg(target_arch = "wasm32")]
         {
             &self.name
+        }
+    }
+
+    /// Set the blob store used to resolve blob-backed image blocks before
+    /// transport send. Comms stays byte-oriented; refs never cross the peer
+    /// boundary.
+    pub fn set_blob_store(&mut self, blob_store: Arc<dyn BlobStore>) {
+        self.blob_store = Some(blob_store);
+    }
+
+    async fn hydrate_message_kind_for_transport(
+        &self,
+        kind: crate::types::MessageKind,
+    ) -> Result<crate::types::MessageKind, SendError> {
+        match kind {
+            crate::types::MessageKind::Message {
+                body,
+                blocks: Some(mut blocks),
+            } => {
+                if blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        meerkat_core::types::ContentBlock::Image {
+                            data: meerkat_core::types::ImageData::Blob { .. },
+                            ..
+                        }
+                    )
+                }) {
+                    let blob_store = self.blob_store.as_ref().ok_or_else(|| {
+                        SendError::Internal(
+                            "blob-backed comms message requires blob store".to_string(),
+                        )
+                    })?;
+                    hydrate_content_blocks(
+                        blob_store.as_ref(),
+                        &mut blocks,
+                        MissingBlobBehavior::Error,
+                    )
+                    .await
+                    .map_err(|err| SendError::Internal(err.to_string()))?;
+                }
+                Ok(crate::types::MessageKind::Message {
+                    body,
+                    blocks: Some(blocks),
+                })
+            }
+            other => Ok(other),
         }
     }
 
@@ -1070,13 +1267,17 @@ impl CommsRuntime {
     /// Discovery and sendability are derived from trusted peers, with in-proc peers
     /// included when auth is disabled.
     async fn resolve_peer_directory(&self) -> Vec<PeerDirectoryEntry> {
+        let resolved = self.resolved_peers_snapshot().await;
+        self.reconcile_peer_directory(&resolved);
         let sendable_kinds = vec![
             "peer_message".to_string(),
             "peer_request".to_string(),
             "peer_response".to_string(),
         ];
         let mut peers = Vec::new();
-        self.for_each_resolved_peer(|peer| {
+        let reachability = self.peer_directory_reachability.lock();
+        for peer in resolved {
+            let snapshot = reachability.snapshot_for(&peer.reachability_key());
             peers.push(PeerDirectoryEntry {
                 name: peer.name,
                 peer_id: peer.peer_id,
@@ -1084,17 +1285,30 @@ impl CommsRuntime {
                 source: peer.source,
                 sendable_kinds: sendable_kinds.clone(),
                 capabilities: serde_json::json!({}),
+                reachability: snapshot.reachability,
+                last_unreachable_reason: snapshot.last_unreachable_reason,
                 meta: peer.meta,
             });
-        })
-        .await;
+        }
         peers
     }
 
     /// Resolve peer count using the same filtering/dedup rules as
     /// `resolve_peer_directory`, without materializing directory entries.
     async fn resolve_peer_count(&self) -> usize {
-        self.for_each_resolved_peer(|_| {}).await
+        self.resolved_peers_snapshot().await.len()
+    }
+
+    async fn resolved_peers_snapshot(&self) -> Vec<ResolvedPeer> {
+        let mut peers = Vec::new();
+        self.for_each_resolved_peer(|peer| peers.push(peer)).await;
+        peers
+    }
+
+    fn reconcile_peer_directory(&self, peers: &[ResolvedPeer]) {
+        self.peer_directory_reachability
+            .lock()
+            .reconcile_resolved_directory(peers.iter().map(ResolvedPeer::reachability_key));
     }
 
     async fn for_each_resolved_peer<F>(&self, mut on_peer: F) -> usize
@@ -1193,10 +1407,54 @@ impl CommsRuntime {
         peer_name: &str,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
-        self.router
-            .send(peer_name, kind)
-            .await
-            .map_err(map_router_send_error)
+        let resolved = self.resolved_peers_snapshot().await;
+        self.reconcile_peer_directory(&resolved);
+        let resolved_peer = resolved
+            .into_iter()
+            .find(|peer| peer.name.as_str() == peer_name);
+        let kind = self.hydrate_message_kind_for_transport(kind).await?;
+        let result = self.router.send(peer_name, kind).await;
+        match result {
+            Ok(envelope_id) => {
+                if let Some(peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability
+                        .lock()
+                        .record_send_succeeded(&peer.reachability_key());
+                }
+                Ok(envelope_id)
+            }
+            Err(crate::router::SendError::PeerNotFound(peer)) => {
+                if let Some(resolved_peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().record_send_failed(
+                        &resolved_peer.reachability_key(),
+                        PeerReachabilityReason::OfflineOrNoAck,
+                    );
+                    Err(SendError::PeerNotFound(peer))
+                } else {
+                    Err(SendError::PeerNotFound(peer))
+                }
+            }
+            Err(crate::router::SendError::PeerOffline) => {
+                if let Some(peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().record_send_failed(
+                        &peer.reachability_key(),
+                        PeerReachabilityReason::OfflineOrNoAck,
+                    );
+                }
+                Err(SendError::PeerOffline)
+            }
+            Err(
+                error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
+            ) => {
+                if let Some(peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().record_send_failed(
+                        &peer.reachability_key(),
+                        PeerReachabilityReason::TransportError,
+                    );
+                }
+                Err(SendError::Internal(error.to_string()))
+            }
+        }
     }
 
     /// Mark an interaction stream as completed (terminal event received).
@@ -1269,7 +1527,9 @@ impl CommsRuntime {
         &self,
         interaction_id: Uuid,
         body: String,
+        blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
         source: meerkat_core::InputSource,
+        handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<(), SendError> {
         let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
         self.subscriber_registry
@@ -1286,8 +1546,10 @@ impl CommsRuntime {
                 .send_classified(crate::types::InboxItem::PlainEvent {
                     body,
                     source: PlainEventSource::from(source),
+                    handling_mode,
                     interaction_id: Some(interaction_id),
-                    blocks: None,
+                    blocks,
+                    render_metadata: None,
                 })
         {
             self.interaction_stream_registry
@@ -1517,18 +1779,61 @@ mod tests {
     use crate::event_injector::CommsEventInjector;
     use crate::identity::Signature;
     use crate::types::{Envelope, InboxItem, MessageKind, Status};
+    use async_trait::async_trait;
     use futures::StreamExt;
     use meerkat_core::event_injector::SubscribableInjector;
     use meerkat_core::{
-        SendError,
+        BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
-            InputSource, InputStreamMode, PeerDirectorySource, PeerName, StreamError, StreamScope,
+            InputSource, InputStreamMode, PeerDirectorySource, PeerName, PeerReachability,
+            PeerReachabilityReason, StreamError, StreamScope, TrustedPeerSpec,
         },
         interaction::InteractionId,
-        types::SessionId,
+        types::{ContentBlock, ImageData, SessionId},
     };
+    use parking_lot::Mutex;
+    use std::{collections::HashMap, sync::Arc};
     use tokio::time::{Duration, timeout};
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct TestBlobStore {
+        blobs: Mutex<HashMap<BlobId, BlobPayload>>,
+    }
+
+    #[async_trait]
+    impl BlobStore for TestBlobStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::from(format!("sha256:test-{media_type}-{data}"));
+            let payload = BlobPayload {
+                blob_id: blob_id.clone(),
+                media_type: media_type.to_string(),
+                data: data.to_string(),
+            };
+            self.blobs.lock().insert(blob_id.clone(), payload);
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs.lock().remove(blob_id);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
 
     fn test_runtime_config(name: &str, tmp: &tempfile::TempDir) -> ResolvedCommsConfig {
         ResolvedCommsConfig {
@@ -1736,6 +2041,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_drain_inbox_interactions_multimodal_message_keeps_body_as_projection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("multimodal-body-projection", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let sender = Keypair::generate();
+        runtime.router.add_trusted_peer(crate::TrustedPeer {
+            name: "sender".to_string(),
+            pubkey: sender.public_key(),
+            addr: "tcp://127.0.0.1:4200".to_string(),
+            meta: crate::PeerMeta::default(),
+        });
+
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption text".to_string(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc123".into(),
+            },
+        ];
+        let msg = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Message {
+                body: "please inspect this".to_string(),
+                blocks: Some(blocks.clone()),
+            },
+        );
+
+        runtime
+            .router
+            .inbox_sender()
+            .send_classified(InboxItem::External { envelope: msg })
+            .unwrap();
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        let interaction = &interactions[0];
+        assert_eq!(
+            interaction.rendered_text,
+            "[COMMS MESSAGE from sender]\nplease inspect this"
+        );
+        match &interaction.content {
+            meerkat_core::InteractionContent::Message {
+                body,
+                blocks: got_blocks,
+            } => {
+                assert_eq!(body, "please inspect this");
+                assert_eq!(got_blocks.as_ref(), Some(&blocks));
+            }
+            other => panic!("expected message content, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_subscription_correlation_e2e_one_shot() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("subscription", &tmp);
@@ -1746,7 +2108,12 @@ mod tests {
             runtime.subscriber_registry.clone(),
         );
         let sub = injector
-            .inject_with_subscription("tracked".to_string(), meerkat_core::PlainEventSource::Rpc)
+            .inject_with_subscription(
+                "tracked".to_string().into(),
+                meerkat_core::PlainEventSource::Rpc,
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
             .unwrap();
         let tracked_id = sub.id;
 
@@ -1758,6 +2125,134 @@ mod tests {
         assert!(first.is_some(), "subscriber should be found");
         let second = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
         assert!(second.is_none(), "subscriber should be one-shot");
+    }
+
+    #[tokio::test]
+    async fn test_subscription_correlation_preserves_inline_blocks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("subscription-blocks", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let injector = CommsEventInjector::new(
+            runtime.router.inbox_sender().clone(),
+            runtime.subscriber_registry.clone(),
+        );
+        let sub = injector
+            .inject_with_subscription(
+                meerkat_core::types::ContentInput::Blocks(vec![
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "tracked".to_string(),
+                    },
+                    meerkat_core::types::ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "aGVsbG8=".into(),
+                    },
+                ]),
+                meerkat_core::PlainEventSource::Rpc,
+                meerkat_core::types::HandlingMode::Queue,
+                None,
+            )
+            .unwrap();
+        let tracked_id = sub.id;
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].id, tracked_id);
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::Message { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("blocks preserved");
+                assert!(
+                    blocks.iter().any(|block| matches!(
+                        block,
+                        meerkat_core::types::ContentBlock::Image { .. }
+                    )),
+                    "expected inline image block to survive into drained interaction"
+                );
+            }
+            other => panic!("expected message interaction, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Phase 1 red-ok comms bridge + parent wait suite"]
+    async fn runtime_bridge_red_ok_send_and_stream_reserves_one_interaction_channel() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("phase1-bridge-{suffix}")).unwrap();
+
+        let cmd = CommsCommand::Input {
+            blocks: None,
+            session_id: SessionId::new(),
+            body: "phase 1 bridge input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            source: InputSource::Rpc,
+            stream: InputStreamMode::ReserveInteraction,
+            allow_self_session: true,
+        };
+
+        let (receipt, _stream) = CoreCommsRuntime::send_and_stream(&runtime, cmd)
+            .await
+            .expect("send_and_stream should reserve interaction scope");
+
+        let interaction_id = match receipt {
+            SendReceipt::InputAccepted {
+                interaction_id,
+                stream_reserved,
+            } => {
+                assert!(
+                    stream_reserved,
+                    "bridge receipt should advertise reservation"
+                );
+                interaction_id
+            }
+            other => panic!("expected InputAccepted, got {other:?}"),
+        };
+
+        let duplicate =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id));
+        assert!(
+            matches!(duplicate, Err(StreamError::AlreadyAttached(_))),
+            "reserved interaction streams should reject a second attachment"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "Phase 1 red-ok comms bridge + parent wait suite"]
+    async fn runtime_bridge_red_ok_completed_interaction_terminates_reserved_stream() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("phase1-complete-{suffix}")).unwrap();
+
+        let receipt = CoreCommsRuntime::send(
+            &runtime,
+            CommsCommand::Input {
+                blocks: None,
+                session_id: SessionId::new(),
+                body: "complete reserved interaction".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                source: InputSource::Rpc,
+                stream: InputStreamMode::ReserveInteraction,
+                allow_self_session: true,
+            },
+        )
+        .await
+        .expect("send should succeed");
+
+        let interaction_id = match receipt {
+            SendReceipt::InputAccepted { interaction_id, .. } => interaction_id,
+            other => panic!("expected InputAccepted, got {other:?}"),
+        };
+
+        let mut stream =
+            CoreCommsRuntime::stream(&runtime, StreamScope::Interaction(interaction_id))
+                .expect("reserved stream should attach");
+        runtime.mark_interaction_complete(interaction_id.0);
+
+        let terminal = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("stream should terminate promptly after completion");
+        assert!(
+            terminal.is_none(),
+            "interaction completion should close the reserved stream for parent waiters"
+        );
     }
 
     #[tokio::test]
@@ -1774,13 +2269,48 @@ mod tests {
                 blocks: None,
                 body: "evt".to_string(),
                 source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 interaction_id: Some(interaction_id),
+                render_metadata: None,
             })
             .unwrap();
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         assert_eq!(interactions[0].id.0, interaction_id);
+    }
+
+    #[tokio::test]
+    async fn test_plain_event_preserves_handling_mode_and_render_metadata_in_classified_drain() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("plain-hints", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+        let render_metadata = meerkat_core::types::RenderMetadata {
+            class: meerkat_core::types::RenderClass::ExternalEvent,
+            salience: meerkat_core::types::RenderSalience::Urgent,
+        };
+
+        runtime
+            .router
+            .inbox_sender()
+            .send_classified(InboxItem::PlainEvent {
+                blocks: None,
+                body: "evt".to_string(),
+                source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                interaction_id: None,
+                render_metadata: Some(render_metadata.clone()),
+            })
+            .unwrap();
+
+        let interactions = runtime.drain_classified_inbox_interactions().await.unwrap();
+        assert_eq!(interactions.len(), 1);
+        let interaction = &interactions[0].interaction;
+        assert_eq!(
+            interaction.handling_mode,
+            meerkat_core::types::HandlingMode::Steer
+        );
+        assert_eq!(interaction.render_metadata, Some(render_metadata));
     }
 
     #[test]
@@ -1800,6 +2330,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "standalone test input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::None,
             allow_self_session: true,
@@ -1833,6 +2364,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "streaming input".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -1871,6 +2403,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "duplicate stream test".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -1913,6 +2446,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "send before stream attach".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -1941,6 +2475,7 @@ mod tests {
             blocks: None,
             session_id: SessionId::new(),
             body: "stream-first".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2033,6 +2568,65 @@ mod tests {
             &interactions[0].content,
             meerkat_core::InteractionContent::Message { body, .. } if body == "greeting"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_core_send_hydrates_blob_refs_before_transport() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-blob-{suffix}");
+        let receiver_name = format!("receiver-blob-{suffix}");
+        let mut sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob_ref = blob_store
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+        sender.set_blob_store(blob_store);
+
+        sender.router.add_trusted_peer(crate::TrustedPeer {
+            name: receiver_name.clone(),
+            pubkey: receiver.public_key(),
+            addr: format!("inproc://{receiver_name}"),
+            meta: crate::PeerMeta::default(),
+        });
+
+        receiver.router.add_trusted_peer(crate::TrustedPeer {
+            name: sender_name.clone(),
+            pubkey: sender.public_key(),
+            addr: format!("inproc://{sender_name}"),
+            meta: crate::PeerMeta::default(),
+        });
+
+        let cmd = CommsCommand::PeerMessage {
+            blocks: Some(vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id,
+                },
+            }]),
+            to: PeerName::new(receiver_name).expect("receiver_name is a valid peer name"),
+            body: "blob-backed image".to_string(),
+        };
+
+        let receipt = CoreCommsRuntime::send(&sender, cmd).await;
+        assert!(matches!(receipt, Ok(SendReceipt::PeerMessageSent { .. })));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::Message { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("received blocks");
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Image {
+                        data: ImageData::Inline { data },
+                        ..
+                    } if data == "aGVsbG8="
+                ));
+            }
+            other => panic!("expected message interaction, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2212,6 +2806,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_session_scoped_inproc_identity_preserves_peer_id_for_same_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new();
+        let runtime = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-peer",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("create first session-scoped runtime");
+        let first_peer_id = runtime.public_key().to_peer_id();
+        drop(runtime);
+
+        let rebuilt = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-peer",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("recreate session-scoped runtime");
+        let rebuilt_peer_id = rebuilt.public_key().to_peer_id();
+
+        assert_eq!(
+            rebuilt_peer_id, first_peer_id,
+            "same session id should preserve the inproc peer_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_scoped_inproc_identity_rejects_second_live_activation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new();
+        let _runtime = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-lock",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("create first session-scoped runtime");
+
+        let error = match CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-lock",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        {
+            Ok(_) => panic!("second live activation should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, CommsRuntimeError::SessionIdentityInUse(_)),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_scoped_inproc_identity_does_not_restore_trust_from_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_id = SessionId::new();
+        let sender = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-trust",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("create session-scoped runtime");
+        let peer = CommsRuntime::inproc_only("session-scoped-trust-peer").unwrap();
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                "session-scoped-trust-peer",
+                peer.public_key().to_peer_id(),
+                format!("inproc://{}", peer.participant_name()),
+            )
+            .expect("trusted peer spec"),
+        )
+        .await
+        .expect("add trusted peer");
+        assert_eq!(
+            sender.peers().await.len(),
+            1,
+            "trust should be visible while live"
+        );
+        drop(sender);
+
+        let rebuilt = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
+            "session-scoped-trust",
+            None,
+            tmp.path().join("session-identities"),
+            &session_id,
+            Arc::new(HashSet::new()),
+        )
+        .await
+        .expect("recreate session-scoped runtime");
+
+        assert!(
+            rebuilt.peers().await.is_empty(),
+            "session-scoped identity should preserve the keypair without replaying trusted peers"
+        );
+    }
+
+    #[tokio::test]
     async fn test_core_peers_includes_trusted_without_self() {
         let suffix = Uuid::new_v4().simple().to_string();
         let peer_name = format!("trusted-only-{suffix}");
@@ -2255,6 +2963,171 @@ mod tests {
         assert!(peer.sendable_kinds.contains(&"peer_message".to_string()));
         assert!(peer.sendable_kinds.contains(&"peer_request".to_string()));
         assert!(peer.sendable_kinds.contains(&"peer_response".to_string()));
+        assert_eq!(peer.reachability, PeerReachability::Unknown);
+        assert_eq!(peer.last_unreachable_reason, None);
+    }
+
+    #[tokio::test]
+    async fn test_core_peers_send_success_marks_peer_reachable() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("reach-sender-{suffix}");
+        let receiver_name = format!("reach-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                &receiver_name,
+                receiver.public_key().to_peer_id(),
+                format!("inproc://{receiver_name}"),
+            )
+            .expect("valid trusted peer"),
+        )
+        .await
+        .expect("add trusted peer");
+
+        let peers_before = CoreCommsRuntime::peers(&sender).await;
+        let before = peers_before
+            .iter()
+            .find(|entry| entry.name.as_str() == receiver_name)
+            .expect("receiver should be listed before send");
+        assert_eq!(before.reachability, PeerReachability::Unknown);
+
+        CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+                body: "hello".to_string(),
+            },
+        )
+        .await
+        .expect("send should succeed");
+
+        let peers_after = CoreCommsRuntime::peers(&sender).await;
+        let after = peers_after
+            .iter()
+            .find(|entry| entry.name.as_str() == receiver_name)
+            .expect("receiver should still be listed");
+        assert_eq!(after.reachability, PeerReachability::Reachable);
+        assert_eq!(after.last_unreachable_reason, None);
+    }
+
+    #[tokio::test]
+    async fn test_core_peers_transport_failure_marks_peer_unreachable() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender = CommsRuntime::inproc_only(&format!("transport-sender-{suffix}")).unwrap();
+        let peer_name = format!("transport-peer-{suffix}");
+        let peer_key = Keypair::generate().public_key().to_peer_id();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(&peer_name, peer_key, "tcp://127.0.0.1:9")
+                .expect("valid trusted peer"),
+        )
+        .await
+        .expect("add trusted peer");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(peer_name.clone()).expect("valid peer name"),
+                body: "hello".to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SendError::Internal(_))),
+            "transport failure should surface as internal send error, got: {result:?}"
+        );
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let entry = peers
+            .iter()
+            .find(|listed| listed.name.as_str() == peer_name)
+            .expect("trusted peer should remain listed after transport failure");
+        assert_eq!(entry.reachability, PeerReachability::Unreachable);
+        assert_eq!(
+            entry.last_unreachable_reason,
+            Some(PeerReachabilityReason::TransportError)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_send_target_does_not_create_directory_entry() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender = CommsRuntime::inproc_only(&format!("unknown-target-{suffix}")).unwrap();
+        let missing_name = format!("missing-{suffix}");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(missing_name.clone()).expect("valid peer name"),
+                body: "hello".to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SendError::PeerNotFound(ref peer)) if peer == &missing_name),
+            "missing peer should fail with PeerNotFound, got: {result:?}"
+        );
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        assert!(
+            peers
+                .iter()
+                .all(|entry| entry.name.as_str() != missing_name),
+            "unknown attempted target must not become a directory entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_core_peers_resolved_peer_not_found_marks_peer_unreachable() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender =
+            CommsRuntime::inproc_only(&format!("resolved-missing-sender-{suffix}")).unwrap();
+        let missing_name = format!("resolved-missing-peer-{suffix}");
+        let missing_key = Keypair::generate().public_key().to_peer_id();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                &missing_name,
+                missing_key,
+                format!("inproc://{missing_name}"),
+            )
+            .expect("valid trusted peer"),
+        )
+        .await
+        .expect("add trusted peer");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(missing_name.clone()).expect("valid peer name"),
+                body: "hello".to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SendError::PeerNotFound(ref peer)) if peer == &missing_name),
+            "resolved missing peer should preserve PeerNotFound, got: {result:?}"
+        );
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let entry = peers
+            .iter()
+            .find(|listed| listed.name.as_str() == missing_name)
+            .expect("trusted peer should remain listed after failed send");
+        assert_eq!(entry.reachability, PeerReachability::Unreachable);
+        assert_eq!(
+            entry.last_unreachable_reason,
+            Some(PeerReachabilityReason::OfflineOrNoAck)
+        );
     }
 
     /// Truthfulness invariant: every peer/kind in peers() must be sendable.
@@ -2332,6 +3205,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2361,6 +3235,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2466,6 +3341,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "no stream".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::None,
             allow_self_session: true,
@@ -2500,6 +3376,7 @@ mod tests {
             blocks: None,
             session_id: session_id.clone(),
             body: "hello".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::ReserveInteraction,
             allow_self_session: true,
@@ -2532,6 +3409,7 @@ mod tests {
             blocks: None,
             session_id: meerkat_core::SessionId::new(),
             body: "blocked".to_string(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             source: meerkat_core::InputSource::Rpc,
             stream: InputStreamMode::None,
             allow_self_session: false,

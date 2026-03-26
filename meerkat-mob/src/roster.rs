@@ -2,10 +2,19 @@
 //!
 //! The `Roster` is a projection built from `MeerkatSpawned`, `MeerkatRetired`,
 //! `PeersWired`, and `PeersUnwired` events.
+//!
+//! Projection contract:
+//! - `Roster` is not canonical transport/comms trust truth.
+//! - Canonical wiring side effects (trust edges, notifications, lock discipline)
+//!   are performed by runtime orchestration.
+//! - `Roster` stores the event/projected peer graph used for read surfaces and
+//!   consistency checks.
+//! - `wire`/`unwire`/`remove` are projection mutations only.
 
 use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{MeerkatId, ProfileName};
 use crate::runtime_mode::MobRuntimeMode;
+use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,14 +42,32 @@ pub struct RosterEntry {
     /// Runtime mode for this member.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
+    /// Public comms peer identifier when this member exposes a comms runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
     /// Lifecycle state (Active or Retiring).
     #[serde(default)]
     pub state: MemberState,
     /// Set of peer meerkat IDs this meerkat is wired to.
     pub wired_to: BTreeSet<MeerkatId>,
+    /// Trusted specs for external peers keyed by their projected peer name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_peer_specs: BTreeMap<MeerkatId, TrustedPeerSpec>,
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+}
+
+/// Directed projection presence state for an undirected peer edge.
+///
+/// This reflects only roster-projected `wired_to` membership; it does not
+/// imply comms trust/runtime side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WiringEdgeState {
+    Absent,
+    AOnly,
+    BOnly,
+    Bidirectional,
 }
 
 /// Parameters for adding a new member to the roster.
@@ -49,6 +76,7 @@ pub struct RosterAddEntry {
     pub profile: ProfileName,
     pub runtime_mode: MobRuntimeMode,
     pub member_ref: MemberRef,
+    pub peer_id: Option<String>,
     pub labels: BTreeMap<String, String>,
 }
 
@@ -91,6 +119,7 @@ impl Roster {
                     profile: role.clone(),
                     runtime_mode: *runtime_mode,
                     member_ref: member_ref.clone(),
+                    peer_id: None,
                     labels: labels.clone(),
                 });
             }
@@ -99,6 +128,13 @@ impl Roster {
             }
             MobEventKind::PeersWired { a, b } => {
                 self.wire(a, b);
+            }
+            MobEventKind::ExternalPeerWired { local, spec } => {
+                let peer_name = MeerkatId::from(spec.name.clone());
+                self.wire_external(local, &peer_name, spec.clone());
+            }
+            MobEventKind::ExternalPeerUnwired { local, peer_name } => {
+                self.unwire_external(local, peer_name);
             }
             MobEventKind::PeersUnwired { a, b } => {
                 self.unwire(a, b);
@@ -121,25 +157,34 @@ impl Roster {
                     profile: entry.profile,
                     member_ref: entry.member_ref,
                     runtime_mode: entry.runtime_mode,
+                    peer_id: entry.peer_id,
                     state: MemberState::default(),
                     wired_to: BTreeSet::new(),
+                    external_peer_specs: BTreeMap::new(),
                     labels: entry.labels,
                 },
             )
             .is_none()
     }
 
-    /// Remove a meerkat from the roster. Also removes it from all peer wiring sets.
+    /// Remove a meerkat from the roster projection.
+    ///
+    /// Projection-only behavior: this prunes `wired_to` references from peers
+    /// but does not perform runtime trust-edge teardown.
     pub fn remove(&mut self, meerkat_id: &MeerkatId) {
         if self.entries.remove(meerkat_id).is_some() {
             // Remove this meerkat from all other entries' wired_to sets
             for entry in self.entries.values_mut() {
                 entry.wired_to.remove(meerkat_id);
+                entry.external_peer_specs.remove(meerkat_id);
             }
         }
     }
 
-    /// Wire two meerkats together (bidirectional).
+    /// Wire two meerkats in the roster projection (bidirectional set update).
+    ///
+    /// Projection-only behavior: caller is responsible for canonical runtime
+    /// trust establishment and lifecycle/event ordering.
     pub fn wire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         if let Some(entry_a) = self.entries.get_mut(a) {
             entry_a.wired_to.insert(b.clone());
@@ -149,13 +194,101 @@ impl Roster {
         }
     }
 
-    /// Unwire two meerkats (bidirectional).
+    /// Wire a local meerkat to an external peer name in the roster projection.
+    pub fn wire_external(
+        &mut self,
+        local: &MeerkatId,
+        peer_name: &MeerkatId,
+        spec: TrustedPeerSpec,
+    ) {
+        if let Some(entry) = self.entries.get_mut(local) {
+            entry.wired_to.insert(peer_name.clone());
+            entry.external_peer_specs.insert(peer_name.clone(), spec);
+        }
+    }
+
+    /// Unwire two meerkats in the roster projection (bidirectional set update).
+    ///
+    /// Projection-only behavior: caller is responsible for canonical runtime
+    /// trust removal and lifecycle/event ordering.
     pub fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) {
         if let Some(entry_a) = self.entries.get_mut(a) {
             entry_a.wired_to.remove(b);
         }
         if let Some(entry_b) = self.entries.get_mut(b) {
             entry_b.wired_to.remove(a);
+        }
+    }
+
+    /// Unwire a local meerkat from an external peer in the roster projection.
+    pub fn unwire_external(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
+        if let Some(entry) = self.entries.get_mut(local) {
+            entry.wired_to.remove(peer_name);
+            entry.external_peer_specs.remove(peer_name);
+        }
+    }
+
+    /// Returns true if both members currently have reciprocal projected edges.
+    pub fn has_bidirectional_edge(&self, a: &MeerkatId, b: &MeerkatId) -> bool {
+        matches!(self.wiring_edge_state(a, b), WiringEdgeState::Bidirectional)
+    }
+
+    /// Returns the directed projection presence state for edge `(a, b)`.
+    pub fn wiring_edge_state(&self, a: &MeerkatId, b: &MeerkatId) -> WiringEdgeState {
+        let a_has_b = self
+            .entries
+            .get(a)
+            .is_some_and(|entry| entry.wired_to.contains(b));
+        let b_has_a = self
+            .entries
+            .get(b)
+            .is_some_and(|entry| entry.wired_to.contains(a));
+        match (a_has_b, b_has_a) {
+            (false, false) => WiringEdgeState::Absent,
+            (true, false) => WiringEdgeState::AOnly,
+            (false, true) => WiringEdgeState::BOnly,
+            (true, true) => WiringEdgeState::Bidirectional,
+        }
+    }
+
+    /// Returns `true` when every projected edge is reciprocal and endpoint-present.
+    pub fn is_wiring_projection_consistent(&self) -> bool {
+        self.wiring_projection_inconsistencies().is_empty()
+    }
+
+    /// Returns canonicalized endpoint pairs with projection inconsistencies.
+    ///
+    /// An inconsistency means a directed edge to another local member is not
+    /// reciprocated. Missing peers are treated as external projection targets.
+    pub fn wiring_projection_inconsistencies(&self) -> Vec<(MeerkatId, MeerkatId)> {
+        let mut inconsistencies = BTreeSet::<(MeerkatId, MeerkatId)>::new();
+        for (a_id, a_entry) in &self.entries {
+            for b_id in &a_entry.wired_to {
+                if let Some(b_entry) = self.entries.get(b_id)
+                    && !b_entry.wired_to.contains(a_id)
+                {
+                    let pair = if a_id <= b_id {
+                        (a_id.clone(), b_id.clone())
+                    } else {
+                        (b_id.clone(), a_id.clone())
+                    };
+                    inconsistencies.insert(pair);
+                }
+            }
+        }
+        inconsistencies.into_iter().collect()
+    }
+
+    /// Debug-only assertion helper for projection consistency checks.
+    pub fn debug_assert_wiring_projection_consistent(&self) {
+        let _ = self;
+        #[cfg(debug_assertions)]
+        {
+            let inconsistencies = self.wiring_projection_inconsistencies();
+            debug_assert!(
+                inconsistencies.is_empty(),
+                "roster wiring projection is inconsistent: {inconsistencies:?}"
+            );
         }
     }
 
@@ -186,6 +319,15 @@ impl Roster {
                     session_id: Some(session_id),
                 },
             };
+            return true;
+        }
+        false
+    }
+
+    /// Update the resolved comms peer id for an existing meerkat.
+    pub fn set_peer_id(&mut self, meerkat_id: &MeerkatId, peer_id: Option<String>) -> bool {
+        if let Some(entry) = self.entries.get_mut(meerkat_id) {
+            entry.peer_id = peer_id;
             return true;
         }
         false
@@ -289,6 +431,7 @@ mod tests {
     use super::*;
     use crate::ids::MobId;
     use chrono::Utc;
+    use meerkat_core::comms::TrustedPeerSpec;
     use uuid::Uuid;
 
     fn session_id() -> SessionId {
@@ -308,6 +451,7 @@ mod tests {
             profile,
             runtime_mode,
             member_ref,
+            peer_id: None,
             labels: BTreeMap::new(),
         })
     }
@@ -464,6 +608,43 @@ mod tests {
 
         let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
         assert_eq!(peers_a.len(), 1); // No duplicates (BTreeSet)
+    }
+
+    #[test]
+    fn test_roster_wire_external_treats_missing_peer_as_external() {
+        let mut roster = Roster::new();
+        add_member(
+            &mut roster,
+            MeerkatId::from("a"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_session_id(session_id()),
+        );
+
+        roster.wire_external(
+            &MeerkatId::from("a"),
+            &MeerkatId::from("remote-mob/worker/agent-b"),
+            TrustedPeerSpec::new(
+                "remote-mob/worker/agent-b",
+                "ed25519:remote-b",
+                "inproc://remote-mob/worker/agent-b",
+            )
+            .expect("valid trusted peer spec"),
+        );
+
+        let peers_a = roster.wired_peers_of(&MeerkatId::from("a")).unwrap();
+        assert!(peers_a.contains(&MeerkatId::from("remote-mob/worker/agent-b")));
+        assert!(
+            roster
+                .get(&MeerkatId::from("a"))
+                .expect("entry should exist")
+                .external_peer_specs
+                .contains_key(&MeerkatId::from("remote-mob/worker/agent-b"))
+        );
+        assert!(
+            roster.is_wiring_projection_consistent(),
+            "missing local peer should be treated as an external projection target"
+        );
     }
 
     #[test]
@@ -638,12 +819,14 @@ mod tests {
             profile: ProfileName::from("worker"),
             member_ref: MemberRef::from_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
+            peer_id: None,
             state: MemberState::default(),
             wired_to: {
                 let mut s = BTreeSet::new();
                 s.insert(MeerkatId::from("peer-1"));
                 s
             },
+            external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -809,8 +992,10 @@ mod tests {
             profile: ProfileName::from("worker"),
             member_ref: MemberRef::from_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
+            peer_id: None,
             state: MemberState::Active,
             wired_to: BTreeSet::new(),
+            external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -928,6 +1113,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id()),
+            peer_id: None,
             labels: {
                 let mut m = BTreeMap::new();
                 m.insert("faction".to_string(), "north".to_string());
@@ -939,6 +1125,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id()),
+            peer_id: None,
             labels: {
                 let mut m = BTreeMap::new();
                 m.insert("faction".to_string(), "south".to_string());
@@ -958,6 +1145,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id()),
+            peer_id: None,
             labels: {
                 let mut m = BTreeMap::new();
                 m.insert("tier".to_string(), "1".to_string());
@@ -969,6 +1157,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id()),
+            peer_id: None,
             labels: {
                 let mut m = BTreeMap::new();
                 m.insert("tier".to_string(), "1".to_string());
@@ -980,6 +1169,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id()),
+            peer_id: None,
             labels: {
                 let mut m = BTreeMap::new();
                 m.insert("tier".to_string(), "2".to_string());
@@ -998,6 +1188,7 @@ mod tests {
             profile: ProfileName::from("worker"),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             member_ref: MemberRef::from_session_id(session_id()),
+            peer_id: None,
             labels: {
                 let mut m = BTreeMap::new();
                 m.insert("faction".to_string(), "north".to_string());

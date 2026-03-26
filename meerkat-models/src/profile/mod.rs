@@ -10,7 +10,12 @@ pub mod openai;
 
 use serde::{Deserialize, Serialize};
 
-/// Runtime profile for a model, describing its capabilities and accepted parameters.
+/// Runtime profile for a model, describing its capabilities and operational defaults.
+///
+/// This is a **capability-plus-operational-defaults catalog**: it owns both model
+/// capability flags (vision, thinking, temperature) and authoritative model-specific
+/// operational defaults (call timeout) that the factory composes into effective
+/// runtime policy. This ownership expansion is deliberate — see dogma rule §11.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelProfile {
     /// Canonical provider string.
@@ -30,6 +35,13 @@ pub struct ModelProfile {
     pub image_tool_results: bool,
     /// JSON Schema describing accepted provider-specific parameters.
     pub params_schema: serde_json::Value,
+    /// Authoritative default call timeout in seconds for this model family.
+    ///
+    /// `None` means the model family has no profiled default timeout.
+    /// This is the canonical source for model-specific call timeout defaults,
+    /// consumed by the factory/agent-loop resolver trait at call time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_timeout_secs: Option<u64>,
 }
 
 /// Look up the profile for a model by provider string and model ID.
@@ -118,5 +130,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn call_timeout_secs_populated_for_known_models() {
+        // Verify all catalog models have a call_timeout_secs value
+        for entry in crate::catalog::catalog() {
+            let profile = profile_for(entry.provider, entry.id);
+            if let Some(p) = profile {
+                assert!(
+                    p.call_timeout_secs.is_some(),
+                    "catalog model '{}' (provider '{}', family '{}') must have call_timeout_secs",
+                    entry.id,
+                    entry.provider,
+                    p.model_family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_opus_has_longer_timeout_than_haiku() {
+        let opus = profile_for("anthropic", "claude-opus-4-6").unwrap();
+        let haiku = profile_for("anthropic", "claude-haiku-4-5-20251001").unwrap();
+        assert!(
+            opus.call_timeout_secs.unwrap() > haiku.call_timeout_secs.unwrap(),
+            "Opus should have a longer default timeout than Haiku"
+        );
+    }
+
+    #[test]
+    fn openai_pro_has_longer_timeout_than_standard_gpt5() {
+        let pro = profile_for("openai", "gpt-5.4-pro").unwrap();
+        let standard = profile_for("openai", "gpt-5.4").unwrap();
+        assert!(
+            pro.call_timeout_secs.unwrap() > standard.call_timeout_secs.unwrap(),
+            "gpt-5.4-pro ({}) should have a much longer timeout than gpt-5.4 ({})",
+            pro.call_timeout_secs.unwrap(),
+            standard.call_timeout_secs.unwrap(),
+        );
+    }
+
+    #[test]
+    fn gemini_flash_has_shorter_timeout_than_pro() {
+        let flash = profile_for("gemini", "gemini-3.1-flash-lite").unwrap();
+        let pro = profile_for("gemini", "gemini-3.1-pro-preview").unwrap();
+        assert!(
+            flash.call_timeout_secs.unwrap() < pro.call_timeout_secs.unwrap(),
+            "gemini flash ({}) should have shorter timeout than gemini pro ({})",
+            flash.call_timeout_secs.unwrap(),
+            pro.call_timeout_secs.unwrap(),
+        );
+    }
+
+    #[test]
+    fn unknown_provider_call_timeout_is_none() {
+        // Unknown provider returns None, so no call_timeout_secs
+        assert!(profile_for("unknown", "model").is_none());
     }
 }

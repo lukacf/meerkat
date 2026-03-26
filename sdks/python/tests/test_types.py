@@ -1,7 +1,14 @@
 import asyncio
 """Conformance tests for Meerkat Python SDK types and events."""
 
+from pathlib import Path
+
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 from meerkat import (
     CONTRACT_VERSION,
@@ -56,6 +63,12 @@ def test_contract_version():
     assert len(parts) == 3
     for part in parts:
         int(part)
+
+
+def test_contract_version_matches_package_version():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text())
+    assert CONTRACT_VERSION == data["project"]["version"]
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +271,34 @@ async def test_session_history_convenience_method_uses_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_session_returns_runtime_backed_session_wrapper() -> None:
+    client = MeerkatClient()
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append((method, params))
+        return {
+            "session_id": "sess-1",
+            "session_ref": "team/runtime",
+            "text": "ready",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 12, "output_tokens": 4},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    session = await client.create_session("Summarise the runtime path")
+
+    assert isinstance(session, Session)
+    assert session.id == "sess-1"
+    assert session.ref == "team/runtime"
+    assert session.text == "ready"
+    assert session.last_result.session_id == "sess-1"
+    assert seen == [("session/create", {"prompt": "Summarise the runtime path"})]
+
+
+@pytest.mark.asyncio
 async def test_deferred_session_history_convenience_method_uses_client() -> None:
     expected = SessionHistory(
         session_id="def",
@@ -279,6 +320,33 @@ async def test_deferred_session_history_convenience_method_uses_client() -> None
     session = DeferredSession(StubClient(), "def")  # type: ignore[arg-type]
     history = await session.history(offset=1)
     assert history is expected
+
+
+@pytest.mark.asyncio
+async def test_create_deferred_session_returns_runtime_backed_deferred_wrapper() -> None:
+    client = MeerkatClient()
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append((method, params))
+        return {
+            "session_id": "sess-2",
+            "session_ref": "team/deferred",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    deferred = await client.create_deferred_session("Hold until first turn")
+
+    assert isinstance(deferred, DeferredSession)
+    assert deferred.id == "sess-2"
+    assert deferred.ref == "team/deferred"
+    assert seen == [
+        (
+            "session/create",
+            {"prompt": "Hold until first turn", "initial_turn": "deferred"},
+        )
+    ]
 
 
 def test_live_mcp_contract_types_exported():
@@ -727,6 +795,19 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             return {"run_id": "run-1"}
         if method == "mob/flow_status":
             return {"run": {"status": "running"}}
+        if method == "mob/send":
+            return {"session_id": "session-1", "member_id": "agent-a"}
+        if method == "mob/wait_kickoff":
+            return {
+                "members": [
+                    {
+                        "meerkat_id": "agent-a",
+                        "status": "active",
+                        "tokens_used": 3,
+                        "is_final": False,
+                    }
+                ]
+            }
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -741,9 +822,27 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     await client.retire_mob_member("mob-1", "agent-a")
     await client.respawn_mob_member("mob-1", "agent-a", "hello")
     await client.wire_mob_members("mob-1", "a", "b")
-    await client.unwire_mob_members("mob-1", "a", "b")
+    await client.unwire_mob_members(
+        "mob-1",
+        "a",
+        {"external": {"name": "remote", "peer_id": "ed25519:remote", "address": "inproc://remote"}},
+    )
     await client.mob_lifecycle("mob-1", "start")
-    await client.send_mob_message("mob-1", "agent-a", "hello")
+    send_receipt = await client.send_mob_member_content("mob-1", "agent-a", "hello")
+    assert send_receipt["session_id"] == "session-1"
+    assert send_receipt["member_id"] == "agent-a"
+    wait_members = await client.wait_mob_kickoff(
+        "mob-1",
+        member_ids=["agent-a"],
+        timeout_ms=1234,
+    )
+    assert wait_members[0]["meerkat_id"] == "agent-a"
+    assert wait_members[0]["status"] == "active"
+
+    mob_handle = client.mob("mob-1")
+    scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)
+    assert scoped_wait_members[0]["meerkat_id"] == "agent-a"
+
     await client.append_mob_system_context("mob-1", "agent-a", "context")
     assert await client.list_mob_flows("mob-1") == ["incident"]
     assert await client.run_mob_flow("mob-1", "incident") == "run-1"
@@ -762,9 +861,29 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/unwire",
         "mob/lifecycle",
         "mob/send",
+        "mob/wait_kickoff",
+        "mob/wait_kickoff",
         "mob/append_system_context",
         "mob/flows",
         "mob/flow_run",
         "mob/flow_status",
         "mob/flow_cancel",
     ]
+    assert calls[7][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
+    assert calls[8][1] == {
+        "mob_id": "mob-1",
+        "member": "a",
+        "peer": {
+            "external": {
+                "name": "remote",
+                "peer_id": "ed25519:remote",
+                "address": "inproc://remote",
+            }
+        },
+    }
+    assert calls[11][1] == {
+        "mob_id": "mob-1",
+        "member_ids": ["agent-a"],
+        "timeout_ms": 1234,
+    }
+    assert calls[12][1] == {"mob_id": "mob-1", "timeout_ms": 99}

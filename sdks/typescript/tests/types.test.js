@@ -4,6 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import packageJson from "../package.json" with { type: "json" };
 import {
   CONTRACT_VERSION,
   MeerkatError,
@@ -15,6 +16,7 @@ import {
   isRunCompleted,
   isTurnCompleted,
   MeerkatClient,
+  Mob,
   Session,
   DeferredSession,
 } from "../dist/index.js";
@@ -30,6 +32,10 @@ describe("Contract Version", () => {
     for (const part of parts) {
       assert.ok(!isNaN(Number(part)));
     }
+  });
+
+  it("matches the published package version", () => {
+    assert.equal(CONTRACT_VERSION, packageJson.version);
   });
 });
 
@@ -217,16 +223,15 @@ describe("Typed Events", () => {
 
   it("should parse scoped wrapper events", () => {
     const event = parseEvent({
-      scope_id: "primary/sub:op-1",
+      scope_id: "mob:writer",
       scope_path: [
-        { scope: "primary", session_id: "s1" },
-        { scope: "sub_agent", agent_id: "op-1", label: "spawn" },
+        { scope: "mob_member", flow_run_id: "run_1", member_ref: "writer", session_id: "s1" },
       ],
       event: { type: "text_delta", delta: "hello" },
     });
     assert.equal(event.type, "scoped_agent_event");
     if (event.type === "scoped_agent_event") {
-      assert.equal(event.scopeId, "primary/sub:op-1");
+      assert.equal(event.scopeId, "mob:writer");
       assert.equal(event.event.type, "text_delta");
     }
   });
@@ -391,6 +396,55 @@ describe("Typed Events", () => {
     if (event.type === "tool_config_changed") {
       assert.equal(event.payload.persisted, false);
     }
+  });
+});
+
+describe("Session wrappers", () => {
+  it("createSession returns a runtime-backed Session wrapper", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push([method, params]);
+      return {
+        session_id: "sess-1",
+        session_ref: "team/runtime",
+        text: "ready",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: 12, output_tokens: 4 },
+      };
+    };
+
+    const session = await client.createSession("Summarise the runtime path");
+
+    assert.ok(session instanceof Session);
+    assert.equal(session.id, "sess-1");
+    assert.equal(session.ref, "team/runtime");
+    assert.equal(session.text, "ready");
+    assert.equal(session.lastResult.sessionId, "sess-1");
+    assert.deepEqual(seen, [["session/create", { prompt: "Summarise the runtime path" }]]);
+  });
+
+  it("createDeferredSession returns a runtime-backed DeferredSession wrapper", async () => {
+    const client = new MeerkatClient();
+    const seen = [];
+    client.request = async (method, params) => {
+      seen.push([method, params]);
+      return {
+        session_id: "sess-2",
+        session_ref: "team/deferred",
+      };
+    };
+
+    const deferred = await client.createDeferredSession("Hold until first turn");
+
+    assert.ok(deferred instanceof DeferredSession);
+    assert.equal(deferred.id, "sess-2");
+    assert.equal(deferred.ref, "team/deferred");
+    assert.deepEqual(seen, [[
+      "session/create",
+      { prompt: "Hold until first turn", initial_turn: "deferred" },
+    ]]);
   });
 });
 
@@ -677,5 +731,60 @@ describe("Mob prefab methods", () => {
 
     await assert.rejects(() => client.listMobPrefabs(), /boom/);
     await assert.rejects(() => client.list_mob_prefabs(), /boom/);
+  });
+});
+
+describe("Mob kickoff wait wrappers", () => {
+  it("waitMobKickoff/wait_mob_kickoff/mob.waitForKickoffComplete preserve canonical call shape", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        members: [
+          {
+            meerkat_id: "lead",
+            status: "active",
+            tokens_used: 42,
+            is_final: false,
+          },
+        ],
+      };
+    };
+
+    const direct = await client.waitMobKickoff("mob-1", {
+      memberIds: ["lead", "writer"],
+      timeoutMs: 1234,
+    });
+    const legacy = await client.wait_mob_kickoff("mob-1", {
+      memberIds: ["lead"],
+    });
+    const mob = new Mob(client, "mob-1");
+    const fromHandle = await mob.waitForKickoffComplete({ timeoutMs: 99 });
+
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls.map((call) => call.method), [
+      "mob/wait_kickoff",
+      "mob/wait_kickoff",
+      "mob/wait_kickoff",
+    ]);
+    assert.deepEqual(calls[0].params, {
+      mob_id: "mob-1",
+      member_ids: ["lead", "writer"],
+      timeout_ms: 1234,
+    });
+    assert.deepEqual(calls[1].params, {
+      mob_id: "mob-1",
+      member_ids: ["lead"],
+    });
+    assert.deepEqual(calls[2].params, {
+      mob_id: "mob-1",
+      timeout_ms: 99,
+    });
+    assert.equal(direct[0].meerkatId, "lead");
+    assert.equal(direct[0].tokensUsed, 42);
+    assert.equal(direct[0].status, "active");
+    assert.equal(legacy[0].meerkatId, "lead");
+    assert.equal(fromHandle[0].meerkatId, "lead");
   });
 });

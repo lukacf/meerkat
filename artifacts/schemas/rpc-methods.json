@@ -25,21 +25,28 @@
       "name": "session/archive"
     },
     {
+      "description": "Queue a runtime-backed external event",
+      "name": "session/external_event"
+    },
+    {
+      "description": "Stage runtime system context for application at the next LLM boundary",
+      "name": "session/inject_context"
+    },
+    {
+      "description": "Open a session event stream",
+      "name": "session/stream_open"
+    },
+    {
+      "description": "Close a session event stream",
+      "name": "session/stream_close"
+    },
+    {
       "description": "Start a new turn on existing session",
       "name": "turn/start"
     },
     {
       "description": "Cancel in-flight turn",
       "name": "turn/interrupt"
-    },
-    {
-      "description": "Get runtime capabilities",
-      "name": "capabilities/get"
-    },
-    {
-      "description": "Get the compiled-in model catalog",
-      "name": "models/catalog",
-      "result_type": "ModelsCatalogResponse"
     },
     {
       "description": "Read config",
@@ -52,6 +59,177 @@
     {
       "description": "Merge-patch config",
       "name": "config/patch"
+    },
+    {
+      "description": "Get runtime capabilities",
+      "name": "capabilities/get"
+    },
+    {
+      "description": "Get the compiled-in model catalog",
+      "name": "models/catalog",
+      "result_type": "ModelsCatalogResponse"
+    },
+    {
+      "description": "List available skills",
+      "name": "skills/list"
+    },
+    {
+      "description": "Inspect one skill",
+      "name": "skills/inspect"
+    },
+    {
+      "description": "Register an external tool",
+      "name": "tools/register"
+    },
+    {
+      "description": "Get a session runtime's current state",
+      "name": "runtime/state",
+      "params_type": "RuntimeStateParams",
+      "result_type": "RuntimeStateResult"
+    },
+    {
+      "description": "Accept a runtime input for a session",
+      "name": "runtime/accept",
+      "params_type": "RuntimeAcceptParams",
+      "result_type": "RuntimeAcceptResult"
+    },
+    {
+      "description": "Retire a session runtime",
+      "name": "runtime/retire",
+      "params_type": "RuntimeRetireParams",
+      "result_type": "RuntimeRetireResult"
+    },
+    {
+      "description": "Reset a session runtime",
+      "name": "runtime/reset",
+      "params_type": "RuntimeResetParams",
+      "result_type": "RuntimeResetResult"
+    },
+    {
+      "description": "Get the state of a specific runtime input",
+      "name": "input/state",
+      "params_type": "InputStateParams",
+      "result_type": "InputStateResult"
+    },
+    {
+      "description": "List active runtime inputs for a session",
+      "name": "input/list",
+      "params_type": "InputListParams",
+      "result_type": "InputListResult"
+    },
+    {
+      "description": "List available mob prefabs",
+      "name": "mob/prefabs"
+    },
+    {
+      "description": "Create a mob from a prefab or definition",
+      "name": "mob/create"
+    },
+    {
+      "description": "List active mobs",
+      "name": "mob/list"
+    },
+    {
+      "description": "Get mob lifecycle status",
+      "name": "mob/status"
+    },
+    {
+      "description": "Apply a mob lifecycle action",
+      "name": "mob/lifecycle"
+    },
+    {
+      "description": "Spawn a new mob member",
+      "name": "mob/spawn"
+    },
+    {
+      "description": "Spawn multiple new mob members",
+      "name": "mob/spawn_many"
+    },
+    {
+      "description": "Retire a mob member",
+      "name": "mob/retire"
+    },
+    {
+      "description": "Respawn a mob member with topology restore",
+      "name": "mob/respawn"
+    },
+    {
+      "description": "Wire a local mob member to a local or external peer",
+      "name": "mob/wire",
+      "params_type": "MobWireParams",
+      "result_type": "MobWireResult"
+    },
+    {
+      "description": "Unwire a local mob member from a local or external peer",
+      "name": "mob/unwire",
+      "params_type": "MobUnwireParams",
+      "result_type": "MobUnwireResult"
+    },
+    {
+      "description": "List members in a mob roster",
+      "name": "mob/members"
+    },
+    {
+      "description": "Deliver content to a mob member",
+      "name": "mob/send",
+      "params_type": "MobSendParams",
+      "result_type": "MobSendResult"
+    },
+    {
+      "description": "Read mob event history",
+      "name": "mob/events"
+    },
+    {
+      "description": "Append system context for a mob member",
+      "name": "mob/append_system_context"
+    },
+    {
+      "description": "List flows defined for a mob",
+      "name": "mob/flows"
+    },
+    {
+      "description": "Start a mob flow run",
+      "name": "mob/flow_run"
+    },
+    {
+      "description": "Get status for a mob flow run",
+      "name": "mob/flow_status"
+    },
+    {
+      "description": "Cancel a mob flow run",
+      "name": "mob/flow_cancel"
+    },
+    {
+      "description": "Spawn a helper member and wait for completion",
+      "name": "mob/spawn_helper"
+    },
+    {
+      "description": "Fork a helper member and wait for completion",
+      "name": "mob/fork_helper"
+    },
+    {
+      "description": "Force-cancel a mob member",
+      "name": "mob/force_cancel"
+    },
+    {
+      "description": "Get live status for a mob member",
+      "name": "mob/member_status"
+    },
+    {
+      "description": "List available mob tools",
+      "name": "mob/tools"
+    },
+    {
+      "description": "Call a mob tool",
+      "name": "mob/call"
+    },
+    {
+      "description": "Open a mob event stream",
+      "name": "mob/stream_open"
+    },
+    {
+      "description": "Close a mob event stream",
+      "name": "mob/stream_close"
     },
     {
       "description": "Stage live MCP server add for a session",
@@ -70,6 +248,14 @@
       "name": "mcp/reload",
       "params_type": "McpReloadParams",
       "result_type": "McpLiveOpResponse"
+    },
+    {
+      "description": "Send a comms command from a session",
+      "name": "comms/send"
+    },
+    {
+      "description": "List peers visible to a session",
+      "name": "comms/peers"
     }
   ],
   "notifications": [
@@ -78,8 +264,28 @@
       "name": "initialized"
     },
     {
+      "description": "Cancel an in-flight JSON-RPC request by request id",
+      "name": "cancel"
+    },
+    {
       "description": "AgentEvent payload during turns",
       "name": "session/event"
+    },
+    {
+      "description": "Standalone session stream event notification",
+      "name": "session/stream_event"
+    },
+    {
+      "description": "Standalone session stream terminal notification",
+      "name": "session/stream_end"
+    },
+    {
+      "description": "Mob stream event notification",
+      "name": "mob/stream_event"
+    },
+    {
+      "description": "Mob stream terminal notification",
+      "name": "mob/stream_end"
     }
   ]
 }

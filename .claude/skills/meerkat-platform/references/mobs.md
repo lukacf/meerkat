@@ -97,7 +97,7 @@ Primary crates:
 - inspection: `status()`, `definition()`, `mob_id()`, `roster()`, `list_members()`, `list_all_members()`, `get_member()`, `events()`, `mcp_server_states()`
 - membership: `spawn()`, `spawn_with_backend()`, `spawn_with_options()`, `spawn_spec()`, `spawn_many()`, `retire()`, `respawn()`, `retire_all()`, `set_spawn_policy()`
 - graph: `wire()`, `unwire()`
-- turns: `send_message()`, `internal_turn()`
+- turns: `member(id).send(...)`, `internal_turn()`
 - lifecycle: `stop()`, `resume()`, `complete()`, `reset()`, `destroy()`, `shutdown()`
 - flows: `list_flows()`, `run_flow()`, `run_flow_with_stream()`, `flow_status()`, `cancel_flow()`
 - subscriptions: `subscribe_agent_events()`, `subscribe_all_agent_events()`, `subscribe_mob_events()`, `subscribe_mob_events_with_config()`
@@ -133,10 +133,8 @@ async fn run_mob(
         .wire(MeerkatId::from("lead-1"), MeerkatId::from("worker-1"))
         .await?;
     handle
-        .send_message(
-            MeerkatId::from("lead-1"),
-            "Coordinate a short execution plan.".to_string(),
-        )
+        .member(MeerkatId::from("lead-1"))
+        .send("Coordinate a short execution plan.".to_string())
         .await?;
 
     let run_id = handle

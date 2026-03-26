@@ -11,7 +11,7 @@ use meerkat_core::Session;
 use meerkat_core::comms::{CommsCommand, PeerDirectoryEntry, SendError, SendReceipt};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
-use meerkat_core::types::{RunResult, SessionId};
+use meerkat_core::types::{HandlingMode, RenderMetadata, RunResult, SessionId};
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
@@ -76,11 +76,29 @@ impl SessionAgent for FactoryAgent {
         self.agent.run_with_events(prompt, event_tx).await
     }
 
-    async fn run_host_mode(
+    async fn run_turn_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<RenderMetadata>,
+        event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_host_mode(prompt).await
+        // handling_mode and render_metadata are runtime-owned semantics.
+        // The runtime routes Queue/Steer BEFORE calling the executor, so by
+        // the time this method runs the routing decision is already made.
+        // Reject if a non-runtime caller attempts to use these — they cannot
+        // be honored on the direct path and silent flattening violates §5.
+        if handling_mode != HandlingMode::Queue {
+            return Err(meerkat_core::error::AgentError::ConfigError(format!(
+                "handling_mode {handling_mode:?} requires a runtime-backed surface; direct session-service path supports Queue only",
+            )));
+        }
+        if render_metadata.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "render_metadata requires a runtime-backed surface; direct session-service path does not support it".to_string(),
+            ));
+        }
+        self.agent.run_with_events(prompt, event_tx).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -98,6 +116,46 @@ impl SessionAgent for FactoryAgent {
 
     fn replace_client(&mut self, client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {
         self.agent.replace_client(client);
+    }
+
+    fn update_keep_alive(&mut self, keep_alive: bool) {
+        if let Some(mut metadata) = self.agent.session().session_metadata() {
+            metadata.keep_alive = keep_alive;
+            if let Err(e) = self.agent.session_mut().set_session_metadata(metadata) {
+                tracing::warn!(error = %e, "failed to update keep_alive in session metadata");
+            }
+        }
+    }
+
+    fn update_system_prompt(
+        &mut self,
+        system_prompt: String,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.session_mut().set_system_prompt(system_prompt);
+        Ok(())
+    }
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        let Some(mut metadata) = self.agent.session().session_metadata() else {
+            return Err(meerkat_core::error::AgentError::InternalError(
+                "session metadata missing during llm identity hot-swap".to_string(),
+            ));
+        };
+        metadata.apply_llm_identity(&identity);
+        self.agent
+            .session_mut()
+            .set_session_metadata(metadata)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update session metadata during llm identity hot-swap: {err}"
+                ))
+            })?;
+        self.agent.replace_client(client);
+        Ok(())
     }
 
     fn stage_external_tool_filter(
@@ -278,9 +336,7 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .build_agent(build_config, &config)
             .await
             .map_err(|e| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    e.to_string(),
-                ))
+                SessionError::Agent(meerkat_core::error::AgentError::BuildError(e.to_string()))
             })?;
 
         Ok(FactoryAgent { agent })
@@ -305,12 +361,22 @@ pub fn build_persistent_service(
     max_sessions: usize,
     persistence: PersistenceBundle,
 ) -> meerkat_session::PersistentSessionService<FactoryAgentBuilder> {
-    let builder = FactoryAgentBuilder::new(factory, config);
-    let (store, runtime_store) = persistence.into_parts();
-    meerkat_session::PersistentSessionService::new(builder, max_sessions, store, runtime_store)
+    let mut builder = FactoryAgentBuilder::new(factory, config);
+    let (store, runtime_store, blob_store) = persistence.into_parts();
+    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
+        &store,
+    ))));
+    meerkat_session::PersistentSessionService::new(
+        builder,
+        max_sessions,
+        store,
+        runtime_store,
+        blob_store,
+    )
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -318,9 +384,14 @@ mod tests {
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
     use meerkat_core::Config;
     use meerkat_core::comms::{InputSource, InputStreamMode};
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::service::SessionBuildOptions;
+    use meerkat_core::{ToolCallView, ToolDef, ToolDispatchOutcome, ToolError, ToolResult};
+    use meerkat_runtime::RuntimeSessionAdapter;
     use meerkat_session::ephemeral::SessionAgent;
     use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
     struct MockLlmClient {
@@ -364,6 +435,43 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RegistryBindingProbe {
+        bound: AtomicBool,
+        seen_registry: Mutex<Option<Arc<dyn OpsLifecycleRegistry>>>,
+        seen_session_id: Mutex<Option<SessionId>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentToolDispatcher for RegistryBindingProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(call.id.to_string(), "noop".to_string(), false).into())
+        }
+
+        fn bind_ops_lifecycle(
+            self: Arc<Self>,
+            registry: Arc<dyn OpsLifecycleRegistry>,
+            owner_session_id: SessionId,
+        ) -> Result<
+            Arc<dyn meerkat_core::AgentToolDispatcher>,
+            meerkat_core::agent::OpsLifecycleBindError,
+        > {
+            self.bound.store(true, Ordering::SeqCst);
+            *self.seen_registry.lock().expect("probe lock") = Some(registry);
+            *self.seen_session_id.lock().expect("probe lock") = Some(owner_session_id);
+            Ok(self)
+        }
+
+        fn supports_ops_lifecycle_binding(&self) -> bool {
+            true
+        }
+    }
+
     async fn build_factory_agent_with_mock(
         temp: &TempDir,
         mut build_config: AgentBuildConfig,
@@ -377,12 +485,85 @@ mod tests {
         Ok(FactoryAgent { agent })
     }
 
+    #[tokio::test]
+    async fn factory_builder_uses_runtime_session_registry_override() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "ok" }));
+
+        let probe = Arc::new(RegistryBindingProbe::default());
+        let probe_dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = probe.clone();
+        builder.default_tool_dispatcher = Some(probe_dispatcher);
+
+        let runtime_adapter = RuntimeSessionAdapter::ephemeral();
+        let session = Session::new();
+        let session_id = session.id().clone();
+        runtime_adapter.register_session(session_id.clone()).await;
+        let expected_registry = runtime_adapter
+            .ops_lifecycle_registry(&session_id)
+            .await
+            .ok_or_else(|| "missing runtime registry".to_string())?
+            as Arc<dyn OpsLifecycleRegistry>;
+
+        let req = CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "hello".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            build: Some(SessionBuildOptions {
+                resume_session: Some(session),
+                ops_lifecycle_override: Some(expected_registry.clone()),
+                ..SessionBuildOptions::default()
+            }),
+            labels: None,
+        };
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let agent = builder
+            .build_agent(&req, event_tx)
+            .await
+            .map_err(|err| err.to_string())?;
+        drop(agent);
+
+        assert!(
+            probe.bound.load(Ordering::SeqCst),
+            "dispatcher should receive ops lifecycle binding"
+        );
+        let seen_registry = probe
+            .seen_registry
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "dispatcher did not record registry".to_string())?;
+        let seen_session_id = probe
+            .seen_session_id
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .ok_or_else(|| "dispatcher did not record session id".to_string())?;
+
+        assert!(
+            Arc::ptr_eq(&seen_registry, &expected_registry),
+            "factory should use runtime adapter's canonical registry, not a fresh fallback"
+        );
+        assert_eq!(seen_session_id, session_id);
+
+        Ok(())
+    }
+
     fn mock_input_cmd(session_id: &SessionId, stream: InputStreamMode) -> CommsCommand {
         CommsCommand::Input {
             session_id: session_id.clone(),
             body: "hello".to_string(),
             blocks: None,
             source: InputSource::Rpc,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream,
             allow_self_session: true,
         }
@@ -423,10 +604,11 @@ mod tests {
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "ignored".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            host_mode: false,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -459,10 +641,11 @@ mod tests {
         CreateSessionRequest {
             model: model.to_string(),
             prompt: "test".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            host_mode: false,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: None,

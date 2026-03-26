@@ -1,5 +1,5 @@
 /**
- * Stream renderer — shared by main agent column and sub-agent panels.
+ * Stream renderer — shared by the main agent column and specialist panels.
  *
  * Renders agent events as TUI-style lines: user prompts, markdown text,
  * collapsible tool cards, status indicators, and errors.

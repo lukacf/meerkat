@@ -26,6 +26,10 @@ export type { ConnectOptions } from "./client.js";
 export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
 export { Mob } from "./mob.js";
+export type {
+  MobKickoffMemberSnapshot,
+  MobKickoffWaitOptions,
+} from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
 
@@ -33,7 +37,9 @@ export type {
   AgentEventEnvelope,
   AttributedEvent,
   AttributedMobEvent,
+  BlobPayload,
   Capability,
+  ContentInput,
   EventEnvelope,
   MobCreateOptions,
   MobDefinition,
@@ -69,10 +75,21 @@ export {
 
 export { CONTRACT_VERSION } from "./generated/types.js";
 export type {
+  InputListParams,
+  InputListResult,
   McpAddParams,
   McpRemoveParams,
   McpReloadParams,
   McpLiveOpResponse,
+  RuntimeAcceptParams,
+  RuntimeAcceptResult,
+  RuntimeResetParams,
+  RuntimeResetResult,
+  RuntimeRetireParams,
+  RuntimeRetireResult,
+  RuntimeStateParams,
+  RuntimeStateResult,
+  WireInputState,
 } from "./generated/types.js";
 
 export type {

@@ -64,11 +64,11 @@ Meerkat ships with tool categories you enable per-agent. Nothing is on by defaul
 |----------|-------|-------------|
 | Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch`, `view_image` | `enable_builtins` |
 | Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` | `enable_shell` |
-| Sub-agents | `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list` | `enable_subagents` |
 | Memory | `memory_search` | `enable_memory` |
 | Comms | `send`, `peers` | `enable_comms` |
+| Mob orchestration | `mob_*`, `meerkat_*` | `enable_mob` |
 
-Shell tools support allow/deny list security policies. Sub-agent tools enforce concurrency limits and prevent recursive spawning. See the [built-in tools reference](/reference/builtin-tools) for parameter details.
+Shell tools support allow/deny list security policies. Runtime tool visibility can also be shaped with mob overlays and turn-boundary tool-scope updates. See the [built-in tools reference](/reference/builtin-tools) for parameter details.
 
 ## Tool scoping
 

@@ -31,9 +31,12 @@
           "null"
         ]
       },
-      "host_mode": {
-        "default": false,
-        "type": "boolean"
+      "keep_alive": {
+        "description": "None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.",
+        "type": [
+          "boolean",
+          "null"
+        ]
       },
       "peer_meta": {
         "anyOf": [
@@ -135,6 +138,38 @@
     "title": "CoreCreateParams",
     "type": "object"
   },
+  "InputListParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `input/list`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "InputListParams",
+    "type": "object"
+  },
+  "InputStateParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `input/state`.",
+    "properties": {
+      "input_id": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "input_id"
+    ],
+    "title": "InputStateParams",
+    "type": "object"
+  },
   "McpAddParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `mcp/add`.",
@@ -203,6 +238,381 @@
       "server_name"
     ],
     "title": "McpRemoveParams",
+    "type": "object"
+  },
+  "MobSendParams": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      },
+      "WireRenderClass": {
+        "description": "Public render class contract for mob member delivery.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "WireRenderMetadata": {
+        "description": "Public render metadata contract for mob member delivery.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/WireRenderClass"
+          },
+          "salience": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireRenderSalience"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "WireRenderSalience": {
+        "description": "Public render salience contract for mob member delivery.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/send`.",
+    "properties": {
+      "content": {
+        "$ref": "#/$defs/WireContentInput"
+      },
+      "handling_mode": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireHandlingMode"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "meerkat_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "render_metadata": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireRenderMetadata"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "mob_id",
+      "meerkat_id",
+      "content"
+    ],
+    "title": "MobSendParams",
+    "type": "object"
+  },
+  "MobUnwireParams": {
+    "$defs": {
+      "MobPeerTarget": {
+        "description": "Target for a mob wire/unwire call.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "local"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "external": {
+                "$ref": "#/$defs/WireTrustedPeerSpec"
+              }
+            },
+            "required": [
+              "external"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerSpec": {
+        "description": "Minimal trusted peer spec for public mob wiring surfaces.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/unwire`.",
+    "properties": {
+      "member": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "peer": {
+        "$ref": "#/$defs/MobPeerTarget"
+      }
+    },
+    "required": [
+      "mob_id",
+      "member",
+      "peer"
+    ],
+    "title": "MobUnwireParams",
+    "type": "object"
+  },
+  "MobWireParams": {
+    "$defs": {
+      "MobPeerTarget": {
+        "description": "Target for a mob wire/unwire call.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "local": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "local"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "external": {
+                "$ref": "#/$defs/WireTrustedPeerSpec"
+              }
+            },
+            "required": [
+              "external"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerSpec": {
+        "description": "Minimal trusted peer spec for public mob wiring surfaces.",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/wire`.",
+    "properties": {
+      "member": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "peer": {
+        "$ref": "#/$defs/MobPeerTarget"
+      }
+    },
+    "required": [
+      "mob_id",
+      "member",
+      "peer"
+    ],
+    "title": "MobWireParams",
+    "type": "object"
+  },
+  "RuntimeAcceptParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `runtime/accept`.",
+    "properties": {
+      "input": true,
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "input"
+    ],
+    "title": "RuntimeAcceptParams",
+    "type": "object"
+  },
+  "RuntimeResetParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `runtime/reset`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "RuntimeResetParams",
+    "type": "object"
+  },
+  "RuntimeRetireParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `runtime/retire`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "RuntimeRetireParams",
+    "type": "object"
+  },
+  "RuntimeStateParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `runtime/state`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "RuntimeStateParams",
     "type": "object"
   },
   "SkillsParams": {

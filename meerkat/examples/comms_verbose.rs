@@ -8,7 +8,7 @@ use meerkat_comms::agent::{
     CommsAgent, CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
 use meerkat_comms::{Keypair, TrustedPeer, TrustedPeers};
-use meerkat_core::{ToolCallView, ToolResult};
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -203,6 +203,10 @@ impl AgentLlmClient for LoggingLlmAdapter {
     fn provider(&self) -> &'static str {
         "anthropic"
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 /// Wrapper to log tool dispatches
@@ -217,7 +221,7 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
         self.inner.tools()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let call_num = TOOL_CALL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         let args_value: serde_json::Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| serde_json::Value::String(call.args.get().to_string()));
@@ -237,7 +241,7 @@ impl AgentToolDispatcher for LoggingToolDispatcher {
 
         match &result {
             Ok(r) => {
-                println!("┃ SUCCESS: {}", r.text_content());
+                println!("┃ SUCCESS: {}", r.result.text_content());
             }
             Err(e) => {
                 println!("┃ ERROR: {e}");

@@ -6,7 +6,7 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 
 ## Features
 
-- **TUI-style UI**: Claude Code-inspired layout with main agent stream + three sub-agent panels
+- **TUI-style UI**: Claude Code-inspired layout with main agent stream + three specialist panels
 - **Multi-provider mob**: Anthropic (orchestrator), OpenAI (planner + coder), Gemini (reviewer)
 - **Comms-driven orchestration**: Agents communicate via `send`/`peers` tools — no polling, no custom delegation
 - **Real-time streaming**: Reasoning traces, tool calls, and text stream incrementally in all panels
@@ -16,7 +16,7 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 
 - **Node.js** (v18+) and npm
 - **curl** (for downloading the WebCM bundle)
-- **wasm-pack** (builds `meerkat-web-runtime` WASM bundle)
+- **wasm-pack** (used by the repo-local `sdks/web` WASM build step)
 - At least one API key: **Anthropic**, **OpenAI**, or **Gemini** (all three for full multi-provider demo)
 
 ## Quick start
@@ -28,8 +28,9 @@ implement, and review code in a sandboxed Linux VM — no backend required.
 # Click "Boot VM & Start"
 ```
 
-The script downloads the WebCM RISC-V emulator (~30 MB), builds the Meerkat
-WASM runtime, installs npm dependencies, and starts the Vite dev server.
+The script downloads the WebCM RISC-V emulator (~30 MB), rebuilds the current
+repo-local Meerkat WASM runtime, syncs it into `web/public/meerkat-pkg/`,
+installs npm dependencies, and starts the Vite dev server.
 
 Use `./examples.sh --clean` to force a fresh download/rebuild.
 
@@ -51,7 +52,7 @@ Browser Tab
 │   └── xterm-pty bridge for serialized command I/O
 └── TUI
     ├── Main stream (left 70%): orchestrator events + user input
-    └── Sub-agent panels (right 30%): planner / coder / reviewer
+    └── Specialist panels (right 30%): planner / coder / reviewer
 ```
 
 ## Agent flow
@@ -69,7 +70,7 @@ User message
 ```
 
 Each step is a separate turn — agents end their turn after sending a message.
-The autonomous host loop wakes them when replies arrive. No polling.
+Runtime-backed keep-alive sessions are re-admitted when replies arrive. No polling.
 
 ## What's in the VM
 

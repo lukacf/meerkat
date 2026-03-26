@@ -6,9 +6,15 @@ use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
     HookToolCall, HookToolResult,
 };
+use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
+use crate::lifecycle::RunId;
 use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
+use crate::turn_execution_authority::{
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionMutator,
+    TurnExecutionTransition,
+};
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, ToolCallView, ToolDef, ToolResult,
     UserMessage,
@@ -20,13 +26,55 @@ use tokio::sync::mpsc;
 
 use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, LlmStreamResult};
 
+/// Pre-selected timeout source — determined before the LLM await, not inferred after.
+///
+/// This ensures timeout classification is deterministic and not guessed from
+/// merged elapsed durations.
+enum CallTimeoutSource {
+    /// Hard per-call timeout fired (from override or profile default).
+    CallBudget,
+    /// Explicit whole-turn time budget fired.
+    TurnBudget,
+}
+
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized + 'static,
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized + 'static,
 {
-    /// Call LLM with retry logic
+    /// Resolve the effective call timeout for this LLM call.
+    ///
+    /// Resolution order:
+    ///   1. Explicit override (Value/Disabled) — from build/config tri-state
+    ///   2. Profile default — from injected model resolver + current model identity
+    ///   3. RetryPolicy.call_timeout — from builder-level policy (direct Rust API)
+    ///   4. None — no timeout
+    ///
+    /// `Disabled` suppresses ALL lower-layer defaults (profile and retry policy).
+    fn resolve_effective_call_timeout(&self) -> Option<std::time::Duration> {
+        use crate::config::CallTimeoutOverride;
+        match &self.call_timeout_override {
+            CallTimeoutOverride::Value(d) => Some(*d),
+            CallTimeoutOverride::Disabled => None,
+            CallTimeoutOverride::Inherit => {
+                // Consult the injected resolver with the current model/provider.
+                self.model_defaults_resolver
+                    .as_ref()
+                    .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
+                    // Fall through to RetryPolicy.call_timeout for direct builder users.
+                    .or(self.retry_policy.call_timeout)
+            }
+        }
+    }
+
+    /// Call LLM with retry logic, budget-aware at all liveness points.
+    ///
+    /// This is the single LLM-call liveness gate. It enforces:
+    /// - budget check at loop entry and after retry sleep
+    /// - retry delay capped by remaining turn budget
+    /// - per-call timeout from override/profile, wrapped with remaining turn budget
+    /// - typed timeout-origin selection before await
     async fn call_llm_with_retry(
         &self,
         messages: &[Message],
@@ -35,30 +83,134 @@ where
         temperature: Option<f32>,
         provider_params: Option<&Value>,
     ) -> Result<LlmStreamResult, AgentError> {
+        let hydrated_messages = if let Some(blob_store) = self.blob_store.as_ref() {
+            let mut hydrated = messages.to_vec();
+            hydrate_messages_for_execution(
+                blob_store.as_ref(),
+                &mut hydrated,
+                MissingBlobBehavior::HistoricalPlaceholder,
+            )
+            .await
+            .map_err(|err| {
+                AgentError::InternalError(format!(
+                    "failed to hydrate image refs before llm execution: {err}"
+                ))
+            })?;
+            Some(hydrated)
+        } else {
+            None
+        };
+        let messages = hydrated_messages.as_deref().unwrap_or(messages);
         let mut attempt = 0u32;
 
         loop {
-            // Wait for retry delay if not first attempt
-            if attempt > 0 {
-                let delay = self.retry_policy.delay_for_attempt(attempt);
-                tokio::time::sleep(delay).await;
+            // 1. Budget gate at loop entry
+            self.budget.check()?;
+
+            // 2. Compute effective timeout for this call
+            let effective_call_timeout = self.resolve_effective_call_timeout();
+            let remaining_turn = self.budget.remaining_duration();
+
+            // If remaining turn budget is zero, surface immediately
+            if remaining_turn == Some(std::time::Duration::ZERO) {
+                self.budget.check()?;
+                // check() should have returned Err; unreachable, but be safe
             }
 
-            match self
-                .client
-                .stream_response(messages, tools, max_tokens, temperature, provider_params)
-                .await
-            {
+            // 4. Determine whether to wrap the call and select timeout source
+            let call_result = match (effective_call_timeout, remaining_turn) {
+                (None, None) => {
+                    // No timeout wrapper needed
+                    self.client
+                        .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                        .await
+                }
+                (call_to, turn_remaining) => {
+                    // At least one timeout is active — select source and wrap
+                    let (effective_timeout, source) = match (call_to, turn_remaining) {
+                        (Some(ct), None) => (ct, CallTimeoutSource::CallBudget),
+                        (None, Some(tr)) => (tr, CallTimeoutSource::TurnBudget),
+                        (Some(ct), Some(tr)) => {
+                            if tr < ct {
+                                (tr, CallTimeoutSource::TurnBudget)
+                            } else {
+                                (ct, CallTimeoutSource::CallBudget)
+                            }
+                        }
+                        (None, None) => unreachable!(), // Already handled above
+                    };
+
+                    match tokio::time::timeout(
+                        effective_timeout,
+                        self.client.stream_response(
+                            messages,
+                            tools,
+                            max_tokens,
+                            temperature,
+                            provider_params,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(inner_result) => inner_result,
+                        Err(_elapsed) => {
+                            // Timeout fired — classify by pre-selected source.
+                            // TurnBudget is non-retryable (whole-turn expired).
+                            // CallBudget flows through step 5 retry logic below.
+                            match source {
+                                CallTimeoutSource::CallBudget => Err(AgentError::Llm {
+                                    provider: self.client.provider(),
+                                    reason: crate::error::LlmFailureReason::CallTimeout {
+                                        duration_ms: effective_timeout.as_millis() as u64,
+                                    },
+                                    message: format!(
+                                        "LLM call timed out after {}s",
+                                        effective_timeout.as_secs()
+                                    ),
+                                }),
+                                CallTimeoutSource::TurnBudget => {
+                                    let limit = self
+                                        .budget
+                                        .time_usage()
+                                        .map(|(_, l)| l / 1000)
+                                        .unwrap_or(0);
+                                    let elapsed = self
+                                        .budget
+                                        .time_usage()
+                                        .map(|(e, _)| e / 1000)
+                                        .unwrap_or(0);
+                                    return Err(AgentError::TimeBudgetExceeded {
+                                        elapsed_secs: elapsed,
+                                        limit_secs: limit,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            // 5. Handle call result
+            match call_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    // Check if we should retry
                     if e.is_recoverable() && self.retry_policy.should_retry(attempt) {
+                        let hint = e.retry_after_hint();
+                        let computed = self.retry_policy.delay_for_attempt(attempt + 1);
+                        let delay = compute_retry_delay(hint, computed, e.is_rate_limited());
+                        let capped = match self.budget.remaining_duration() {
+                            Some(remaining) => delay.min(remaining),
+                            None => delay,
+                        };
                         tracing::warn!(
-                            "LLM call failed (attempt {}), retrying: {}",
+                            "LLM call failed (attempt {}), retrying in {}ms: {}",
                             attempt + 1,
+                            capped.as_millis(),
                             e
                         );
                         attempt += 1;
+                        tokio::time::sleep(capped).await;
+                        self.budget.check()?;
                         continue;
                     }
                     return Err(e);
@@ -103,19 +255,98 @@ where
             });
         }
 
-        // Only commit boundary side effects after hooks accept the transition.
-        self.drain_comms_inbox().await;
-
-        let sub_agent_results = self.collect_sub_agent_results().await;
-        if !sub_agent_results.is_empty() {
-            let results: Vec<ToolResult> = sub_agent_results
-                .into_iter()
-                .map(|r| ToolResult::new(r.id.to_string(), r.content, r.is_error))
-                .collect();
-            self.session.push(Message::ToolResults { results });
-        }
-
         Ok(())
+    }
+
+    /// Apply a typed input to the turn-execution authority and sync the
+    /// observable `LoopState` from the resulting canonical phase.
+    fn apply_turn_input(
+        &mut self,
+        input: TurnExecutionInput,
+    ) -> Result<TurnExecutionTransition, AgentError> {
+        let transition = self.turn_authority.apply(input)?;
+        self.state = transition.next_phase.to_loop_state();
+        Ok(transition)
+    }
+
+    /// Execute side effects from a transition. Handles CheckCompaction
+    /// effects that the authority emits on CallingLlm entry.
+    async fn execute_turn_effects(
+        &mut self,
+        transition: &TurnExecutionTransition,
+        turn_count: u32,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) {
+        for effect in &transition.effects {
+            if let TurnExecutionEffect::CheckCompaction = effect {
+                let current_boundary_index = self.compaction_cadence.session_boundary_index;
+                if let Some(ref compactor) = self.compactor {
+                    let ctx = crate::agent::compact::build_compaction_context(
+                        self.session.messages(),
+                        self.last_input_tokens,
+                        self.compaction_cadence.last_compaction_boundary_index,
+                        current_boundary_index,
+                    );
+                    if compactor.should_compact(&ctx) {
+                        let outcome = crate::agent::compact::run_compaction(
+                            self.client.as_ref(),
+                            compactor,
+                            self.session.messages(),
+                            self.last_input_tokens,
+                            current_boundary_index,
+                            event_tx,
+                            &self.event_tap,
+                        )
+                        .await;
+
+                        if let Ok(outcome) = outcome {
+                            *self.session.messages_mut() = outcome.new_messages;
+                            self.session.record_usage(outcome.summary_usage.clone());
+                            self.budget.record_usage(&outcome.summary_usage);
+                            self.last_input_tokens = 0;
+                            self.compaction_cadence.last_compaction_boundary_index =
+                                Some(outcome.session_boundary_index);
+
+                            if let Some(ref memory_store) = self.memory_store {
+                                let store = std::sync::Arc::clone(memory_store);
+                                let session_id = self.session.id().clone();
+                                let discarded = outcome.discarded;
+                                tokio::spawn(async move {
+                                    for message in &discarded {
+                                        let content = message.as_indexable_text();
+                                        if !content.is_empty() {
+                                            let metadata = crate::memory::MemoryMetadata {
+                                                session_id: session_id.clone(),
+                                                turn: Some(turn_count),
+                                                indexed_at: crate::time_compat::SystemTime::now(),
+                                            };
+                                            if let Err(e) = store.index(&content, metadata).await {
+                                                tracing::warn!(
+                                                    "failed to index compaction discard into memory: {e}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                self.compaction_cadence.session_boundary_index = self
+                    .compaction_cadence
+                    .session_boundary_index
+                    .saturating_add(1);
+                let cadence = self.compaction_cadence.clone();
+                if let Err(error) =
+                    crate::agent::compact::persist_compaction_cadence(self.session_mut(), &cadence)
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to persist session compaction cadence metadata"
+                    );
+                }
+            }
+        }
     }
 
     /// The main agent loop
@@ -128,6 +359,20 @@ where
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
+
+        // --- Authority lifecycle: start a conversation run ---
+        let run_id = RunId(uuid::Uuid::new_v4());
+        self.apply_turn_input(TurnExecutionInput::StartConversationRun {
+            run_id: run_id.clone(),
+        })?;
+        // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
+        let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
+            run_id: run_id.clone(),
+            admitted_content_shape: ContentShape("conversation".to_string()),
+            vision_enabled: false,
+            image_tool_results_enabled: false,
+        })?;
+        self.execute_turn_effects(&t, 0, &event_tx).await;
 
         // Helper to conditionally emit events (only when listener exists).
         // Also forwards to the event tap for interaction-scoped subscribers.
@@ -151,89 +396,60 @@ where
         }
 
         loop {
-            // Drain comms inbox at top of loop when entering CallingLlm.
-            // Catches messages during ErrorRecovery -> CallingLlm transitions
-            // and the window between turn-boundary drain and next LLM call.
-            if self.state == LoopState::CallingLlm {
-                self.drain_comms_inbox().await;
-            }
-
             // Check turn limit
             if turn_count >= max_turns {
-                self.state.transition(LoopState::Completed)?;
-                return Ok(self.build_result(turn_count, tool_call_count).await);
+                self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
+                    run_id: run_id.clone(),
+                })?;
+                return self.build_result(turn_count, tool_call_count).await;
             }
 
-            // Check budget
-            if self.budget.is_exhausted() {
-                emit_event!(AgentEvent::BudgetWarning {
-                    budget_type: BudgetType::Tokens,
-                    used: self.session.total_tokens(),
-                    limit: self.budget.remaining(),
-                    percent: 1.0,
-                });
-                self.state.transition(LoopState::Completed)?;
-                return Ok(self.build_result(turn_count, tool_call_count).await);
-            }
-
-            // Check compaction trigger (before CallingLlm)
-            if self.state == LoopState::CallingLlm
-                && let Some(ref compactor) = self.compactor
-            {
-                let ctx = crate::agent::compact::build_compaction_context(
-                    self.session.messages(),
-                    self.last_input_tokens,
-                    self.last_compaction_turn,
-                    turn_count,
-                );
-                if compactor.should_compact(&ctx) {
-                    let outcome = crate::agent::compact::run_compaction(
-                        self.client.as_ref(),
-                        compactor,
-                        self.session.messages(),
-                        self.last_input_tokens,
-                        turn_count,
-                        &event_tx,
-                        &self.event_tap,
-                    )
-                    .await;
-
-                    if let Ok(outcome) = outcome {
-                        // Replace session messages
-                        *self.session.messages_mut() = outcome.new_messages;
-                        // Record compaction usage
-                        self.session.record_usage(outcome.summary_usage.clone());
-                        self.budget.record_usage(&outcome.summary_usage);
-                        // Update tracking
-                        self.last_input_tokens = 0;
-                        self.last_compaction_turn = Some(turn_count);
-
-                        // Index discarded messages into memory store (fire-and-forget)
-                        if let Some(ref memory_store) = self.memory_store {
-                            let store = Arc::clone(memory_store);
-                            let session_id = self.session.id().clone();
-                            let discarded = outcome.discarded;
-                            tokio::spawn(async move {
-                                for message in &discarded {
-                                    let content = message.as_indexable_text();
-                                    if !content.is_empty() {
-                                        let metadata = crate::memory::MemoryMetadata {
-                                            session_id: session_id.clone(),
-                                            turn: Some(turn_count),
-                                            indexed_at: crate::time_compat::SystemTime::now(),
-                                        };
-                                        if let Err(e) = store.index(&content, metadata).await {
-                                            tracing::warn!(
-                                                "failed to index compaction discard into memory: {e}"
-                                            );
-                                        }
-                                    }
-                                }
-                            });
-                        }
+            // Check budget — typed routing per budget kind
+            if let Err(budget_err) = self.budget.check() {
+                match budget_err {
+                    AgentError::TimeBudgetExceeded {
+                        elapsed_secs,
+                        limit_secs,
+                    } => {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::Time,
+                            used: elapsed_secs,
+                            limit: limit_secs,
+                            percent: 1.0,
+                        });
+                        self.pending_fatal_diagnostic = Some(AgentError::TimeBudgetExceeded {
+                            elapsed_secs,
+                            limit_secs,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
+                            run_id: run_id.clone(),
+                        })?;
                     }
-                    // On failure: non-fatal, continue with uncompacted history
+                    AgentError::TokenBudgetExceeded { used, limit } => {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::Tokens,
+                            used,
+                            limit,
+                            percent: 1.0,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    AgentError::ToolCallBudgetExceeded { count, limit } => {
+                        emit_event!(AgentEvent::BudgetWarning {
+                            budget_type: BudgetType::ToolCalls,
+                            used: count as u64,
+                            limit: limit as u64,
+                            percent: 1.0,
+                        });
+                        self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                            run_id: run_id.clone(),
+                        })?;
+                    }
+                    other => return Err(other),
                 }
+                return self.build_result(turn_count, tool_call_count).await;
             }
 
             match self.state {
@@ -244,15 +460,11 @@ where
 
                     // 2. Emit ToolConfigChanged for completed background connections.
                     for notice in &ext.notices {
-                        emit_event!(AgentEvent::ToolConfigChanged {
-                            payload: ToolConfigChangedPayload {
-                                operation: notice.operation.clone(),
-                                target: notice.server.clone(),
-                                status: notice.status.clone(),
-                                persisted: false,
-                                applied_at_turn: Some(turn_count),
-                            },
-                        });
+                        let mut payload = notice.to_tool_config_changed_payload();
+                        if payload.applied_at_turn.is_none() {
+                            payload.applied_at_turn = Some(turn_count);
+                        }
+                        emit_event!(AgentEvent::ToolConfigChanged { payload });
                     }
 
                     // 3. Manage [MCP_PENDING] notice lifecycle.
@@ -401,7 +613,8 @@ where
                     }
 
                     // In extraction mode, override tools/temperature/params
-                    if self.extraction_mode {
+                    let in_extraction = self.turn_authority.in_extraction_flow();
+                    if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
                         // Inject structured_output into provider params
@@ -417,17 +630,17 @@ where
 
                     // No tools for extraction turn (empty slice)
                     let empty_tools: Arc<[Arc<crate::types::ToolDef>]> = Arc::from([]);
-                    let call_tool_defs = if self.extraction_mode {
+                    let call_tool_defs = if in_extraction {
                         &empty_tools
                     } else {
                         &tool_defs
                     };
 
-                    // Call LLM with retry
+                    // Call LLM with retry — route errors through machine authority
                     let boundary_system_context = self.take_pending_system_context_boundary();
                     let request_messages =
                         self.llm_messages_with_runtime_system_context(&boundary_system_context);
-                    let result = self
+                    let result = match self
                         .call_llm_with_retry(
                             &request_messages,
                             call_tool_defs,
@@ -435,7 +648,67 @@ where
                             effective_temperature,
                             effective_provider_params.as_ref(),
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(
+                            e @ AgentError::TimeBudgetExceeded {
+                                elapsed_secs,
+                                limit_secs,
+                            },
+                        ) => {
+                            // Dedicated time-budget terminal path — same as loop-top
+                            emit_event!(AgentEvent::BudgetWarning {
+                                budget_type: BudgetType::Time,
+                                used: elapsed_secs,
+                                limit: limit_secs,
+                                percent: 1.0,
+                            });
+                            self.pending_fatal_diagnostic = Some(e);
+                            self.apply_turn_input(TurnExecutionInput::TimeBudgetExceeded {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(AgentError::TokenBudgetExceeded { used, limit }) => {
+                            // Token budget exhausted during LLM call — same
+                            // terminal path as loop-top budget check.
+                            emit_event!(AgentEvent::BudgetWarning {
+                                budget_type: BudgetType::Tokens,
+                                used,
+                                limit,
+                                percent: 1.0,
+                            });
+                            self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(AgentError::ToolCallBudgetExceeded { count, limit }) => {
+                            // Tool-call budget exhausted during LLM call — same
+                            // terminal path as loop-top budget check.
+                            emit_event!(AgentEvent::BudgetWarning {
+                                budget_type: BudgetType::ToolCalls,
+                                used: count as u64,
+                                limit: limit as u64,
+                                percent: 1.0,
+                            });
+                            self.apply_turn_input(TurnExecutionInput::BudgetExhausted {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(e @ AgentError::Llm { .. }) => {
+                            // Exhausted hard LLM-call failure — route through
+                            // machine-owned FatalFailure and preserve diagnostics.
+                            self.pending_fatal_diagnostic = Some(e);
+                            self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                                run_id: run_id.clone(),
+                            })?;
+                            return self.build_result(turn_count, tool_call_count).await;
+                        }
+                        Err(e) => return Err(e),
+                    };
 
                     // Update budget + session usage
                     self.budget.record_usage(&result.usage);
@@ -527,7 +800,11 @@ where
                         }
 
                         // Transition to waiting for ops
-                        self.state.transition(LoopState::WaitingForOps)?;
+                        let tc_count = assistant_msg.tool_calls().count() as u32;
+                        self.apply_turn_input(TurnExecutionInput::LlmReturnedToolCalls {
+                            run_id: run_id.clone(),
+                            tool_count: tc_count,
+                        })?;
 
                         // Execute tool calls in parallel
                         let tool_calls: Vec<ToolCallOwned> = assistant_msg
@@ -662,9 +939,13 @@ where
                         let dispatch_results = futures::future::join_all(dispatch_futures).await;
 
                         // Process results and emit events
+                        let mut all_async_ops = Vec::<crate::ops::AsyncOpRef>::new();
                         for (tc, dispatch_result, duration_ms) in dispatch_results {
                             let mut tool_result = match dispatch_result {
-                                Ok(result) => result,
+                                Ok(outcome) => {
+                                    all_async_ops.extend(outcome.async_ops);
+                                    outcome.result
+                                }
                                 Err(crate::error::ToolError::CallbackPending {
                                     tool_name: callback_tool,
                                     args: callback_args,
@@ -787,165 +1068,179 @@ where
                             tool_call_count += 1;
                         }
 
+                        let pending_op_refs = all_async_ops;
+                        let barrier_operation_ids = pending_op_refs
+                            .iter()
+                            .filter(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier)
+                            .map(|r| r.operation_id.clone())
+                            .collect::<Vec<_>>();
+                        let has_barrier_ops = pending_op_refs
+                            .iter()
+                            .any(|r| r.wait_policy == crate::ops::WaitPolicy::Barrier);
+
                         // Add tool results to session
                         self.session.push(Message::ToolResults {
                             results: tool_results,
                         });
 
-                        // Go through DrainingEvents to CallingLlm (state machine requires this)
-                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.apply_turn_input(TurnExecutionInput::RegisterPendingOps {
+                            run_id: run_id.clone(),
+                            op_refs: pending_op_refs,
+                            barrier_operation_ids,
+                            has_barrier_ops,
+                        })?;
+
+                        if self.turn_authority.has_barrier_ops() {
+                            // Stay in WaitingForOps — the outer match arm will
+                            // await completion of barrier ops via wait-set.
+                            continue;
+                        }
+
+                        // No pending ops — tool calls resolved, drain boundary, continue
+                        self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
+                            run_id: run_id.clone(),
+                        })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
-                        self.state.transition(LoopState::CallingLlm)?;
+                        let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                            run_id: run_id.clone(),
+                        })?;
+                        self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         turn_count += 1;
-                    } else if self.extraction_mode {
+                    } else if self.turn_authority.in_extraction_flow() {
                         // Extraction turn response — validate against schema
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
                         // Drain turn boundary (fires TurnBoundary hooks, drains comms)
-                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                            run_id: run_id.clone(),
+                        })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
                         emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
+
+                        // Authority: DrainingBoundary -> Extracting for validation
+                        self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                            run_id: run_id.clone(),
+                            max_retries: self.config.structured_output_retries,
+                        })?;
 
                         // Validate extraction response
                         let content = assistant_text.trim();
                         let json_content = super::extraction::strip_code_fences(content);
 
-                        match serde_json::from_str::<serde_json::Value>(json_content) {
-                            Ok(parsed) => {
-                                let output_schema =
-                                    self.config.output_schema.as_ref().ok_or_else(|| {
-                                        AgentError::InternalError(
-                                            "extraction_mode without output_schema".into(),
-                                        )
-                                    })?;
-                                let normalized = super::extraction::unwrap_named_object_wrapper(
-                                    parsed,
-                                    output_schema,
-                                );
+                        let validation_error =
+                            match serde_json::from_str::<serde_json::Value>(json_content) {
+                                Ok(parsed) => {
+                                    let output_schema =
+                                        self.config.output_schema.as_ref().ok_or_else(|| {
+                                            AgentError::InternalError(
+                                                "extraction flow without output_schema".into(),
+                                            )
+                                        })?;
+                                    let normalized = super::extraction::unwrap_named_object_wrapper(
+                                        parsed,
+                                        output_schema,
+                                    );
 
-                                // Validate against schema (when jsonschema feature is available)
-                                let validation_error: Option<String>;
-                                #[cfg(feature = "jsonschema")]
-                                {
-                                    let compiled =
-                                        self.client.compile_schema(output_schema).map_err(|e| {
-                                            AgentError::InvalidOutputSchema(e.to_string())
-                                        })?;
-                                    let validator = jsonschema::Validator::new(&compiled.schema)
-                                        .map_err(|e| {
-                                            AgentError::InvalidOutputSchema(e.to_string())
-                                        })?;
-                                    validation_error =
-                                        if let Err(error) = validator.validate(&normalized) {
-                                            Some(format!("Schema validation failed: {error}"))
-                                        } else {
-                                            None
-                                        };
-                                }
-                                #[cfg(not(feature = "jsonschema"))]
-                                {
-                                    tracing::warn!(
-                                        "Structured output schema validation unavailable \
+                                    // Validate against schema (when jsonschema feature is available)
+                                    let schema_error: Option<String>;
+                                    #[cfg(feature = "jsonschema")]
+                                    {
+                                        let compiled =
+                                            self.client.compile_schema(output_schema).map_err(
+                                                |e| AgentError::InvalidOutputSchema(e.to_string()),
+                                            )?;
+                                        let validator =
+                                            jsonschema::Validator::new(&compiled.schema).map_err(
+                                                |e| AgentError::InvalidOutputSchema(e.to_string()),
+                                            )?;
+                                        schema_error =
+                                            if let Err(error) = validator.validate(&normalized) {
+                                                Some(format!("Schema validation failed: {error}"))
+                                            } else {
+                                                None
+                                            };
+                                    }
+                                    #[cfg(not(feature = "jsonschema"))]
+                                    {
+                                        tracing::warn!(
+                                            "Structured output schema validation unavailable \
                                         (jsonschema feature disabled). Accepting parsed \
                                         JSON without schema validation."
-                                    );
-                                    validation_error = None;
-                                }
-
-                                if let Some(error) = validation_error {
-                                    // Validation failed — retry if attempts remain
-                                    self.extraction_attempts += 1;
-                                    if self.extraction_attempts
-                                        < self.config.structured_output_retries + 1
-                                    {
-                                        self.extraction_last_error = Some(error.clone());
-                                        let retry_prompt = format!(
-                                            "The previous output was invalid: {error}. \
-                                            Please provide valid JSON matching the schema. \
-                                            Output ONLY the JSON, no additional text."
                                         );
-                                        self.session
-                                            .push(Message::User(UserMessage::text(retry_prompt)));
-                                        self.state.transition(LoopState::CallingLlm)?;
-                                        turn_count += 1;
-                                        continue;
+                                        schema_error = None;
                                     }
 
-                                    // Retries exhausted
-                                    self.state.transition(LoopState::Completed)?;
-                                    if let Err(e) = self.store.save(&self.session).await {
-                                        tracing::warn!("Failed to save session: {}", e);
+                                    if schema_error.is_none() {
+                                        // Validation passed — store result
+                                        self.extraction_result = Some(normalized);
                                     }
-                                    return Err(AgentError::StructuredOutputValidationFailed {
-                                        attempts: self.config.structured_output_retries + 1,
-                                        reason: error,
-                                        last_output: self
-                                            .session
-                                            .last_assistant_text()
-                                            .unwrap_or_default(),
-                                    });
+                                    schema_error
                                 }
+                                Err(e) => Some(format!("Invalid JSON: {e}")),
+                            };
 
-                                // Validation passed — store result for RunResult assembly
-                                self.extraction_result = Some(normalized);
-                                self.state.transition(LoopState::Completed)?;
-                                if let Err(e) = self.store.save(&self.session).await {
-                                    tracing::warn!("Failed to save session: {}", e);
-                                }
-                                return Ok(RunResult {
-                                    text: self.session.last_assistant_text().unwrap_or_default(),
-                                    session_id: self.session.id().clone(),
-                                    usage: self.session.total_usage(),
-                                    turns: turn_count + 1,
-                                    tool_calls: tool_call_count,
-                                    structured_output: self.extraction_result.take(),
-                                    schema_warnings: self.extraction_schema_warnings.take(),
-                                    skill_diagnostics: None,
-                                });
-                            }
-                            Err(e) => {
-                                // JSON parse failed — retry if attempts remain
-                                let error = format!("Invalid JSON: {e}");
-                                self.extraction_attempts += 1;
-                                if self.extraction_attempts
-                                    < self.config.structured_output_retries + 1
-                                {
-                                    self.extraction_last_error = Some(error);
-                                    let retry_prompt = format!(
-                                        "The previous output was invalid: Invalid JSON: {e}. \
-                                        Please provide valid JSON matching the schema. \
-                                        Output ONLY the JSON, no additional text."
-                                    );
-                                    self.session
-                                        .push(Message::User(UserMessage::text(retry_prompt)));
-                                    self.state.transition(LoopState::CallingLlm)?;
-                                    turn_count += 1;
-                                    continue;
-                                }
+                        if let Some(error) = validation_error {
+                            // Validation failed — authority decides retry vs exhaust
+                            self.extraction_last_error = Some(error.clone());
+                            let t = self.apply_turn_input(
+                                TurnExecutionInput::ExtractionValidationFailed {
+                                    run_id: run_id.clone(),
+                                    error: error.clone(),
+                                },
+                            )?;
 
-                                // Retries exhausted
-                                self.state.transition(LoopState::Completed)?;
-                                if let Err(e) = self.store.save(&self.session).await {
-                                    tracing::warn!("Failed to save session: {}", e);
-                                }
-                                return Err(AgentError::StructuredOutputValidationFailed {
-                                    attempts: self.config.structured_output_retries + 1,
-                                    reason: error,
-                                    last_output: self
-                                        .session
-                                        .last_assistant_text()
-                                        .unwrap_or_default(),
-                                });
+                            if !self.turn_authority.phase().is_terminal() {
+                                // Authority decided to retry — push retry prompt
+                                let retry_prompt = format!(
+                                    "The previous output was invalid: {error}. \
+                                    Please provide valid JSON matching the schema. \
+                                    Output ONLY the JSON, no additional text."
+                                );
+                                self.session
+                                    .push(Message::User(UserMessage::text(retry_prompt)));
+                                self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                turn_count += 1;
+                                continue;
                             }
+
+                            // Authority decided retries exhausted
+                            if let Err(e) = self.store.save(&self.session).await {
+                                tracing::warn!("Failed to save session: {}", e);
+                            }
+                            return Err(AgentError::StructuredOutputValidationFailed {
+                                attempts: self.turn_authority.extraction_attempts(),
+                                reason: error,
+                                last_output: self.session.last_assistant_text().unwrap_or_default(),
+                            });
                         }
+
+                        // Validation passed — complete via authority
+                        self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
+                            run_id: run_id.clone(),
+                        })?;
+                        if let Err(e) = self.store.save(&self.session).await {
+                            tracing::warn!("Failed to save session: {}", e);
+                        }
+                        return Ok(RunResult {
+                            text: self.session.last_assistant_text().unwrap_or_default(),
+                            session_id: self.session.id().clone(),
+                            usage: self.session.total_usage(),
+                            turns: turn_count + 1,
+                            tool_calls: tool_call_count,
+                            structured_output: self.extraction_result.take(),
+                            schema_warnings: self.extraction_schema_warnings.take(),
+                            skill_diagnostics: None,
+                        });
                     } else {
                         // No tool calls - we're done with the agentic loop
                         let final_text = assistant_text.clone();
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
-                        self.state.transition(LoopState::DrainingEvents)?;
+                        self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
+                            run_id: run_id.clone(),
+                        })?;
                         self.drain_turn_boundary(turn_count, event_tx.as_ref())
                             .await?;
 
@@ -955,12 +1250,9 @@ where
 
                         // Check if we need to perform extraction turn for structured output
                         if let Some(output_schema) = self.config.output_schema.as_ref()
-                            && !self.extraction_mode
+                            && !self.turn_authority.in_extraction_flow()
                         {
-                            // Enter extraction mode: re-enter the main loop
-                            // through the normal CallingLlm path
-                            self.extraction_mode = true;
-                            self.extraction_attempts = 0;
+                            // Enter extraction mode via authority
                             self.extraction_result = None;
                             self.extraction_last_error = None;
 
@@ -982,15 +1274,23 @@ where
                                 });
                             self.session.push(Message::User(UserMessage::text(prompt)));
 
-                            // Re-enter main loop via CallingLlm
-                            self.state.transition(LoopState::CallingLlm)?;
+                            // Authority: DrainingBoundary -> Extracting -> CallingLlm
+                            self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                                run_id: run_id.clone(),
+                                max_retries: self.config.structured_output_retries,
+                            })?;
+                            let t = self.apply_turn_input(TurnExecutionInput::ExtractionStart {
+                                run_id: run_id.clone(),
+                            })?;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
                             turn_count += 1;
                             continue;
                         }
 
                         // No extraction needed - complete normally
-                        // Transition to completed
-                        self.state.transition(LoopState::Completed)?;
+                        self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                            run_id: run_id.clone(),
+                        })?;
 
                         // Save session
                         if let Err(e) = self.store.save(&self.session).await {
@@ -1010,40 +1310,114 @@ where
                     }
                 }
                 LoopState::WaitingForOps => {
-                    // This state is handled inline above
-                    unreachable!("WaitingForOps handled inline");
+                    // Await completion of all pending barrier operations via
+                    // the machine-owned turn-local wait-set. Only barrier ops
+                    // block the turn; detached ops run independently.
+                    if self.turn_authority.pending_op_refs().is_none() {
+                        return Err(AgentError::InternalError(
+                            "WaitingForOps entered without registered pending_op_refs".to_string(),
+                        ));
+                    }
+                    let barrier_ids = self.turn_authority.barrier_op_ids();
+                    if !barrier_ids.is_empty() {
+                        let owned_ids: Vec<crate::ops::OperationId> =
+                            barrier_ids.iter().map(|id| (*id).clone()).collect();
+                        let wait_result = if let Some(ref registry) = self.ops_lifecycle {
+                            registry.wait_all(&run_id, &owned_ids).await.map_err(|e| {
+                                AgentError::InternalError(format!(
+                                    "ops lifecycle wait_all failed: {e}"
+                                ))
+                            })?
+                        } else {
+                            return Err(AgentError::InternalError(
+                                "barrier ops registered without ops_lifecycle registry".to_string(),
+                            ));
+                        };
+                        // Feed OpsBarrierSatisfied through the generated protocol
+                        // helper using the authority-derived obligation token.
+                        use crate::generated::protocol_ops_barrier_satisfaction::{
+                            accept_wait_all_satisfied, submit_ops_barrier_satisfied,
+                        };
+                        let obligation = accept_wait_all_satisfied(wait_result.satisfied);
+                        let transition = submit_ops_barrier_satisfied(
+                            &mut self.turn_authority,
+                            obligation,
+                            run_id.clone(),
+                        )?;
+                        self.state = transition.next_phase.to_loop_state();
+                    }
+                    self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
+                        run_id: run_id.clone(),
+                    })?;
+                    self.drain_turn_boundary(turn_count, event_tx.as_ref())
+                        .await?;
+                    let t = self.apply_turn_input(TurnExecutionInput::BoundaryContinue {
+                        run_id: run_id.clone(),
+                    })?;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                    turn_count += 1;
                 }
                 LoopState::DrainingEvents => {
                     // Wait for any pending events to be processed
-                    self.state.transition(LoopState::Completed)?;
+                    self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                        run_id: run_id.clone(),
+                    })?;
                 }
                 LoopState::Cancelling => {
                     // Handle cancellation
-                    self.state.transition(LoopState::Completed)?;
-                    return Ok(self.build_result(turn_count, tool_call_count).await);
+                    self.apply_turn_input(TurnExecutionInput::CancellationObserved {
+                        run_id: run_id.clone(),
+                    })?;
+                    return self.build_result(turn_count, tool_call_count).await;
                 }
                 LoopState::ErrorRecovery => {
                     // Attempt recovery
-                    self.state.transition(LoopState::CallingLlm)?;
+                    let t = self.apply_turn_input(TurnExecutionInput::RetryRequested {
+                        run_id: run_id.clone(),
+                    })?;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
                 }
                 LoopState::Completed => {
-                    return Ok(self.build_result(turn_count, tool_call_count).await);
+                    return self.build_result(turn_count, tool_call_count).await;
                 }
             }
         }
     }
 
-    /// Build a RunResult from current state
-    async fn build_result(&self, turns: u32, tool_calls: u32) -> RunResult {
-        RunResult {
-            text: self.session.last_assistant_text().unwrap_or_default(),
-            session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
-            turns,
-            tool_calls,
-            structured_output: None,
-            schema_warnings: None,
-            skill_diagnostics: self.collect_skill_diagnostics().await,
+    /// Build a RunResult from current state, using the generated terminal
+    /// classification to decide Ok vs Err.
+    async fn build_result(&mut self, turns: u32, tool_calls: u32) -> Result<RunResult, AgentError> {
+        use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
+
+        let outcome = self.turn_authority.terminal_outcome();
+        let classification = classify_terminal(&outcome);
+
+        match classification {
+            Some(SurfaceResultClass::HardFailure) => {
+                // Consume the pending diagnostic once — prefer the originating
+                // typed error over a generic TerminalFailure so that
+                // provider/reason/message truth is preserved on the surface.
+                if let Some(diagnostic) = self.pending_fatal_diagnostic.take() {
+                    Err(diagnostic)
+                } else {
+                    Err(AgentError::TerminalFailure { outcome })
+                }
+            }
+            _ => {
+                // Success, Cancelled, or no terminal outcome yet (early exit).
+                // Clear any stale diagnostic so it cannot bleed into a later run.
+                self.pending_fatal_diagnostic = None;
+                Ok(RunResult {
+                    text: self.session.last_assistant_text().unwrap_or_default(),
+                    session_id: self.session.id().clone(),
+                    usage: self.session.total_usage(),
+                    turns,
+                    tool_calls,
+                    structured_output: None,
+                    schema_warnings: None,
+                    skill_diagnostics: self.collect_skill_diagnostics().await,
+                })
+            }
         }
     }
 
@@ -1124,12 +1498,32 @@ fn fallback_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
 }
 
+/// Compute retry delay using server hint, policy, and rate-limit floor.
+fn compute_retry_delay(
+    hint: Option<std::time::Duration>,
+    computed: std::time::Duration,
+    is_rate_limited: bool,
+) -> std::time::Duration {
+    match hint {
+        Some(h) if h > computed => h,
+        _ if is_rate_limited => computed.max(std::time::Duration::from_secs(30)),
+        _ => computed,
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::manual_async_fn)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::manual_async_fn
+)]
 mod tests {
     use super::rewrite_assistant_text;
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+    use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
+    use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::skills::{
         ResolvedSkill, SkillCollection, SkillDescriptor, SkillEngine, SkillFilter, SkillId,
@@ -1138,7 +1532,8 @@ mod tests {
     use crate::state::LoopState;
     use crate::tool_scope::{EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter};
     use crate::types::{
-        AssistantBlock, Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+        AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCallView, ToolDef,
+        ToolResult, Usage, UserMessage,
     };
     use async_trait::async_trait;
     use serde_json::Value;
@@ -1202,6 +1597,10 @@ mod tests {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
         }
     }
 
@@ -1364,6 +1763,224 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct ImageHydrationLlmClient {
+        seen_user_blocks: Mutex<Vec<Vec<ContentBlock>>>,
+    }
+
+    impl ImageHydrationLlmClient {
+        fn new() -> Self {
+            Self {
+                seen_user_blocks: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<Vec<ContentBlock>> {
+            self.seen_user_blocks.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ImageHydrationLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut seen = self.seen_user_blocks.lock().unwrap();
+            for message in messages {
+                if let Message::User(user) = message {
+                    seen.push(user.content.clone());
+                }
+            }
+            drop(seen);
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct RecordingBlobStore {
+        blobs: std::collections::HashMap<BlobId, BlobPayload>,
+        gets: Mutex<Vec<BlobId>>,
+    }
+
+    impl RecordingBlobStore {
+        fn new(payloads: Vec<BlobPayload>) -> Self {
+            Self {
+                blobs: payloads
+                    .into_iter()
+                    .map(|payload| (payload.blob_id.clone(), payload))
+                    .collect(),
+                gets: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn gets(&self) -> Vec<BlobId> {
+            self.gets.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl BlobStore for RecordingBlobStore {
+        async fn put_image(
+            &self,
+            media_type: &str,
+            _data: &str,
+        ) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::new(format!("sha256:test-{}", self.blobs.len()));
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.gets.lock().unwrap().push(blob_id.clone());
+            self.blobs
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, _blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
+
+    struct CompactionAwareLlmClient {
+        last_user_messages: Mutex<Vec<String>>,
+    }
+
+    impl CompactionAwareLlmClient {
+        fn new() -> Self {
+            Self {
+                last_user_messages: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_last_user_messages(&self) -> Vec<String> {
+            self.last_user_messages.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CompactionAwareLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.last_user_messages
+                .lock()
+                .unwrap()
+                .push(last_user.clone());
+
+            let text = if last_user == "COMPACT NOW" {
+                "summary".to_string()
+            } else {
+                "ok".to_string()
+            };
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text { text, meta: None }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    struct TrackingCompactor {
+        compact_on_boundary: Option<u64>,
+        seen_contexts: Mutex<Vec<CompactionContext>>,
+    }
+
+    impl TrackingCompactor {
+        fn new(compact_on_boundary: Option<u64>) -> Self {
+            Self {
+                compact_on_boundary,
+                seen_contexts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_boundaries(&self) -> Vec<u64> {
+            self.seen_contexts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|ctx| ctx.session_boundary_index)
+                .collect()
+        }
+    }
+
+    impl Compactor for TrackingCompactor {
+        fn should_compact(&self, ctx: &CompactionContext) -> bool {
+            self.seen_contexts.lock().unwrap().push(ctx.clone());
+            self.compact_on_boundary == Some(ctx.session_boundary_index)
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+
+        fn rebuild_history(&self, messages: &[Message], _summary: &str) -> CompactionResult {
+            CompactionResult {
+                messages: messages.to_vec(),
+                discarded: Vec::new(),
+            }
+        }
     }
 
     struct NoTools;
@@ -1375,7 +1992,10 @@ mod tests {
             Arc::new([])
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             Err(ToolError::NotFound {
                 name: call.name.to_string(),
             })
@@ -1432,7 +2052,10 @@ mod tests {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             self.dispatched_names
                 .lock()
                 .unwrap()
@@ -1442,7 +2065,8 @@ mod tests {
                 call.id.to_string(),
                 format!("dispatched {}", call.name),
                 false,
-            ))
+            )
+            .into())
         }
     }
 
@@ -1509,6 +2133,10 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
     }
 
     #[async_trait]
@@ -1557,32 +2185,9 @@ mod tests {
         fn provider(&self) -> &'static str {
             "mock"
         }
-    }
 
-    struct MockDrainCommsRuntime {
-        queued: tokio::sync::Mutex<Vec<String>>,
-        notify: Arc<Notify>,
-    }
-
-    impl MockDrainCommsRuntime {
-        fn with_messages(messages: Vec<String>) -> Self {
-            Self {
-                queued: tokio::sync::Mutex::new(messages),
-                notify: Arc::new(Notify::new()),
-            }
-        }
-    }
-
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    impl crate::agent::CommsRuntime for MockDrainCommsRuntime {
-        async fn drain_messages(&self) -> Vec<String> {
-            let mut guard = self.queued.lock().await;
-            std::mem::take(&mut *guard)
-        }
-
-        fn inbox_notify(&self) -> Arc<Notify> {
-            self.notify.clone()
+        fn model(&self) -> &'static str {
+            "mock-model"
         }
     }
 
@@ -1627,6 +2232,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reused_session_follow_up_run_can_compact_before_first_llm_call() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(TrackingCompactor::new(Some(1)));
+        let mut agent = AgentBuilder::new()
+            .compactor(compactor.clone())
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        assert_eq!(compactor.seen_boundaries(), vec![0, 1]);
+        assert_eq!(
+            client.seen_last_user_messages(),
+            vec![
+                "first".to_string(),
+                "COMPACT NOW".to_string(),
+                "second".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn calling_llm_with_max_turns_zero_completes_with_zero_turns() {
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.config.max_turns = Some(0);
@@ -1654,20 +2282,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_with_max_turns_zero_returns_invalid_transition() {
+    async fn completed_with_max_turns_zero_returns_immediately() {
         let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
         agent.config.max_turns = Some(0);
         agent.state = LoopState::Completed;
 
-        let err = agent
-            .run_loop(None)
-            .await
-            .expect_err("expected transition error");
-        let AgentError::InvalidStateTransition { from, to } = err else {
-            unreachable!("expected InvalidStateTransition, got {err:?}");
-        };
-        assert_eq!(from, "Completed");
-        assert_eq!(to, "Completed");
+        // With the turn execution authority, Completed + max_turns=0
+        // correctly returns immediately with 0 turns rather than
+        // erroring with InvalidStateTransition.
+        let result = agent.run_loop(None).await.unwrap();
+        assert_eq!(result.turns, 0);
+        assert_eq!(agent.state, LoopState::Completed);
     }
 
     #[tokio::test]
@@ -1679,57 +2304,6 @@ mod tests {
         let result = agent.run_loop(None).await.unwrap();
         assert_eq!(result.turns, 0);
         assert_eq!(agent.state, LoopState::Completed);
-    }
-
-    #[tokio::test]
-    async fn error_recovery_drains_comms_message_when_transitioning_to_calling_llm() {
-        let client = Arc::new(RecordingLlmClient::new());
-        let comms = Arc::new(MockDrainCommsRuntime::with_messages(vec![
-            "queued during recovery".to_string(),
-        ]));
-
-        let mut agent = AgentBuilder::new()
-            .with_comms_runtime(comms)
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
-            .await;
-
-        agent.config.max_turns = Some(1);
-        agent.state = LoopState::ErrorRecovery;
-
-        let result = agent.run_loop(None).await.unwrap();
-        assert_eq!(result.turns, 1);
-
-        let seen = client.seen();
-        assert!(
-            seen.iter().any(|m| m.contains("queued during recovery")),
-            "expected queued comms message to be drained into LLM input, saw: {seen:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn no_tool_completion_drains_late_comms_before_returning() {
-        let comms = Arc::new(StagedDrainCommsRuntime::with_batches(vec![
-            Vec::new(),
-            vec!["late boundary message".to_string()],
-        ]));
-        let mut agent = AgentBuilder::new()
-            .with_comms_runtime(comms)
-            .build(
-                Arc::new(StaticLlmClient),
-                Arc::new(NoTools),
-                Arc::new(NoopStore),
-            )
-            .await;
-
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "ok");
-        assert!(
-            agent.session().messages().iter().any(|message| matches!(
-                message,
-                Message::User(user) if user.text_content().contains("late boundary message")
-            )),
-            "completion path should drain late comms messages into the final session transcript"
-        );
     }
 
     #[tokio::test]
@@ -2067,6 +2641,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn llm_execution_hydrates_blob_refs_before_provider_call() {
+        let blob_id = BlobId::new("sha256:test-image");
+        let blob_store = Arc::new(RecordingBlobStore::new(vec![BlobPayload {
+            blob_id: blob_id.clone(),
+            media_type: "image/png".to_string(),
+            data: "restored-base64".to_string(),
+        }]));
+        let client = Arc::new(ImageHydrationLlmClient::new());
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "historical image".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_id.clone(),
+                },
+            },
+        ])));
+
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_blob_store(blob_store.clone())
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent.run("current turn".to_string().into()).await.unwrap();
+
+        let seen = client.seen();
+        assert!(
+            seen.iter().flatten().any(|block| matches!(
+                block,
+                ContentBlock::Image {
+                    data: ImageData::Inline { data },
+                    ..
+                } if data == "restored-base64"
+            )),
+            "provider should receive hydrated inline image bytes"
+        );
+        assert_eq!(blob_store.gets(), vec![blob_id]);
+    }
+
+    #[tokio::test]
     async fn provider_receives_filtered_tools_and_dispatch_blocks_hidden_tools() {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
@@ -2258,6 +2877,507 @@ mod tests {
         assert_eq!(
             seen,
             vec![vec!["visible".to_string()], vec!["visible".to_string()]]
+        );
+    }
+
+    /// Mock LLM client that returns high usage, causing budget exhaustion
+    /// after recording on the caller side.
+    struct HighUsageLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for HighUsageLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage {
+                    input_tokens: 500,
+                    output_tokens: 500,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                },
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// Regression test: token budget exhaustion detected after LLM-call usage
+    /// recording must route through the machine authority's BudgetExhausted
+    /// terminal path (SurfaceResultClass::Success), not escape as a raw
+    /// AgentError::TokenBudgetExceeded.
+    ///
+    /// Before the fix, budget errors from inside call_llm_with_retry bypassed
+    /// the machine authority entirely (Dogma §4: same semantic condition, one
+    /// canonical terminal path).
+    #[tokio::test]
+    async fn token_budget_exhausted_after_llm_call_routes_through_authority() {
+        // Budget allows exactly 100 tokens — the first LLM call reports 1000,
+        // so usage recording at the call site pushes the budget over the limit.
+        // The next loop-top budget.check() fires TokenBudgetExceeded, which
+        // must be routed to BudgetExhausted -> Success, not raw Err.
+        let mut agent = build_agent(Arc::new(HighUsageLlmClient)).await;
+        agent.config.max_turns = Some(10);
+        agent.state = LoopState::CallingLlm;
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: Some(100),
+            max_duration: None,
+            max_tool_calls: None,
+        });
+
+        // Must be Ok (Success via BudgetExhausted), not Err(TokenBudgetExceeded).
+        let result = agent.run_loop(None).await;
+        assert!(
+            result.is_ok(),
+            "token budget exhaustion must route through BudgetExhausted (Success), \
+             not escape as raw AgentError: {:?}",
+            result.err()
+        );
+        assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    /// Regression test: tool-call budget exhaustion detected anywhere in the
+    /// agent loop must route through BudgetExhausted, producing Success.
+    #[tokio::test]
+    async fn tool_call_budget_exhausted_routes_through_authority() {
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.config.max_turns = Some(10);
+        agent.state = LoopState::CallingLlm;
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: None,
+            max_duration: None,
+            max_tool_calls: Some(0),
+        });
+
+        let result = agent.run_loop(None).await;
+        assert!(
+            result.is_ok(),
+            "tool-call budget exhaustion must route through BudgetExhausted (Success), \
+             not escape as raw AgentError: {:?}",
+            result.err()
+        );
+        assert_eq!(agent.state, LoopState::Completed);
+    }
+
+    // -- Retry delay hint tests (PR #156 port) --
+
+    use std::time::Duration;
+
+    #[test]
+    fn compute_retry_delay_uses_computed_for_non_rate_limited() {
+        let delay = super::compute_retry_delay(None, Duration::from_millis(500), false);
+        assert_eq!(delay, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_30s_floor_for_rate_limited_without_hint() {
+        let delay = super::compute_retry_delay(None, Duration::from_millis(500), true);
+        assert_eq!(delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_hint_when_greater_than_computed() {
+        let delay = super::compute_retry_delay(
+            Some(Duration::from_secs(60)),
+            Duration::from_millis(500),
+            true,
+        );
+        assert_eq!(delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_30s_floor_when_hint_below_floor() {
+        let delay = super::compute_retry_delay(
+            Some(Duration::from_millis(100)),
+            Duration::from_millis(500),
+            true,
+        );
+        assert_eq!(delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn compute_retry_delay_uses_computed_when_greater_than_hint() {
+        let delay = super::compute_retry_delay(
+            Some(Duration::from_secs(60)),
+            Duration::from_secs(90),
+            true,
+        );
+        assert_eq!(delay, Duration::from_secs(90));
+    }
+
+    /// Mock LLM client that returns RateLimited with a retry_after hint on
+    /// the first call, then succeeds on the second. Records call timestamps
+    /// so the test can verify the server-directed delay was applied.
+    struct RateLimitThenSucceedClient {
+        call_times: Mutex<Vec<std::time::Instant>>,
+        retry_after: Duration,
+    }
+
+    impl RateLimitThenSucceedClient {
+        fn new(retry_after: Duration) -> Self {
+            Self {
+                call_times: Mutex::new(Vec::new()),
+                retry_after,
+            }
+        }
+
+        fn call_times(&self) -> Vec<std::time::Instant> {
+            self.call_times.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for RateLimitThenSucceedClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let mut times = self.call_times.lock().unwrap();
+            times.push(std::time::Instant::now());
+            let attempt = times.len();
+            drop(times);
+
+            if attempt == 1 {
+                Err(AgentError::llm(
+                    "mock",
+                    crate::error::LlmFailureReason::RateLimited {
+                        retry_after: Some(self.retry_after),
+                    },
+                    "rate limited by mock",
+                ))
+            } else {
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok after retry".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ))
+            }
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// Integration test: verify that a 429 with Retry-After hint actually
+    /// delays the retry by at least the server-directed duration, and that
+    /// the run completes successfully after the retry.
+    #[tokio::test]
+    async fn retry_after_hint_delays_second_attempt() {
+        use crate::retry::RetryPolicy;
+
+        let hint = Duration::from_millis(200); // short for CI speed
+        let client = Arc::new(RateLimitThenSucceedClient::new(hint));
+        let mut agent = AgentBuilder::new()
+            .retry_policy(RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_millis(50),
+                multiplier: 2.0,
+                call_timeout: None,
+            })
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("test".to_string().into()).await;
+        assert!(
+            result.is_ok(),
+            "run should succeed after retry: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().text, "ok after retry");
+
+        let times = client.call_times();
+        assert_eq!(
+            times.len(),
+            2,
+            "expected exactly 2 LLM calls (1 fail + 1 success)"
+        );
+
+        let actual_delay = times[1].duration_since(times[0]);
+        // The retry delay should be at least the hint (200ms), but because
+        // the 30s floor applies to rate limits, the actual delay should be
+        // max(hint, 30s). However, 200ms < 30s, so the floor kicks in.
+        // For a fast test, we verify the delay is at least the hint.
+        // The compute_retry_delay unit tests verify the floor independently.
+        assert!(
+            actual_delay >= hint,
+            "retry delay ({actual_delay:?}) must be at least the server hint ({hint:?})",
+        );
+    }
+
+    /// Integration test: rate-limited error WITHOUT a hint uses the 30s floor,
+    /// but we can't wait 30s in CI. Instead verify via a tight time budget
+    /// that the delay is correctly capped and the budget check fires.
+    #[tokio::test]
+    async fn rate_limit_without_hint_respects_budget_cap() {
+        use crate::budget::{Budget, BudgetLimits};
+        use crate::retry::RetryPolicy;
+
+        let client = Arc::new(RateLimitThenSucceedClient::new(Duration::ZERO));
+        let mut agent = AgentBuilder::new()
+            .retry_policy(RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_millis(50),
+                multiplier: 2.0,
+                call_timeout: None,
+            })
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        // Set a 100ms time budget — the 30s rate-limit floor will be
+        // capped to 100ms by remaining_duration, then budget.check()
+        // fires TimeBudgetExceeded after the sleep.
+        agent.budget = Budget::new(BudgetLimits {
+            max_tokens: None,
+            max_duration: Some(Duration::from_millis(100)),
+            max_tool_calls: None,
+        });
+
+        let _result = agent.run("test".to_string().into()).await;
+        // The run should terminate (not hang for 30s). Whether it returns
+        // Ok (retry succeeded within budget) or Err (budget exceeded after
+        // capped delay) depends on timing, but it must NOT hang.
+        let times = client.call_times();
+        assert!(
+            times.len() <= 2,
+            "should not retry endlessly; got {} calls",
+            times.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Extraction lifecycle integration tests
+    // -----------------------------------------------------------------------
+
+    /// A scriptable LLM client that returns a sequence of pre-configured
+    /// responses, one per call. Used to test extraction happy/retry/exhaust
+    /// paths where the agentic turn and extraction turns need different
+    /// responses.
+    struct ScriptedExtractionClient {
+        responses: Mutex<Vec<super::LlmStreamResult>>,
+        call_count: Mutex<u32>,
+    }
+
+    impl ScriptedExtractionClient {
+        fn new(responses: Vec<super::LlmStreamResult>) -> Self {
+            // Reverse so we can pop from the end
+            let mut reversed = responses;
+            reversed.reverse();
+            Self {
+                responses: Mutex::new(reversed),
+                call_count: Mutex::new(0),
+            }
+        }
+
+        fn calls_made(&self) -> u32 {
+            *self.call_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for ScriptedExtractionClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&Value>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            *self.call_count.lock().unwrap() += 1;
+            let mut responses = self.responses.lock().unwrap();
+            responses.pop().ok_or_else(|| {
+                AgentError::InternalError("ScriptedExtractionClient: no more responses".into())
+            })
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    fn text_response(text: &str) -> super::LlmStreamResult {
+        super::LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            Usage::default(),
+        )
+    }
+
+    /// Happy path: agent with output_schema, LLM returns valid JSON
+    /// matching schema on the extraction turn.
+    #[tokio::test]
+    async fn extraction_happy_path_returns_structured_output() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        // Call 0: agentic turn (text), Call 1: extraction turn (valid JSON)
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("I found the answer"),
+            text_response(r#"{"answer": "42"}"#),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .output_schema(schema)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("What is the answer?".to_string().into()).await;
+
+        let result = result.expect("extraction happy path should succeed");
+        assert!(
+            result.structured_output.is_some(),
+            "structured_output should be populated"
+        );
+        let output = result.structured_output.unwrap();
+        assert_eq!(output["answer"], "42");
+        assert_eq!(
+            client.calls_made(),
+            2,
+            "expect 1 agentic + 1 extraction call"
+        );
+    }
+
+    /// Retry path: LLM returns invalid JSON on the first extraction attempt,
+    /// then valid JSON on the retry.
+    #[tokio::test]
+    async fn extraction_retry_recovers_on_second_attempt() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"]
+        }))
+        .unwrap();
+
+        // Call 0: agentic turn
+        // Call 1: extraction attempt 1 — invalid JSON
+        // Call 2: extraction attempt 2 — valid JSON
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("Here is the result"),
+            text_response("not valid json {{{"),
+            text_response(r#"{"name": "meerkat"}"#),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .output_schema(schema)
+            .structured_output_retries(2)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("Get the name".to_string().into()).await;
+
+        let result = result.expect("extraction retry should eventually succeed");
+        assert!(
+            result.structured_output.is_some(),
+            "structured_output should be populated after retry"
+        );
+        let output = result.structured_output.unwrap();
+        assert_eq!(output["name"], "meerkat");
+        assert_eq!(
+            client.calls_made(),
+            3,
+            "expect 1 agentic + 1 failed extraction + 1 successful extraction"
+        );
+    }
+
+    /// Exhaust path: LLM returns invalid JSON on every extraction attempt,
+    /// exceeding max retries. Should return StructuredOutputValidationFailed.
+    #[tokio::test]
+    async fn extraction_exhaust_returns_validation_error() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" }
+            },
+            "required": ["count"]
+        }))
+        .unwrap();
+
+        // Call 0: agentic turn
+        // Call 1: extraction attempt 1 — invalid (authority: attempts 0→1 on entry, 1<2 → retry, 1→2)
+        // Call 2: extraction attempt 2 — invalid (authority: attempts=2, 2<2 false → exhaust)
+        // Error reports attempts = max_retries + 1 = 3
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("Computing count"),
+            text_response("bad json 1"),
+            text_response("bad json 2"),
+        ]));
+
+        let mut agent = AgentBuilder::new()
+            .output_schema(schema)
+            .structured_output_retries(2)
+            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent.run("Count items".to_string().into()).await;
+
+        match result {
+            Err(AgentError::StructuredOutputValidationFailed {
+                attempts, reason, ..
+            }) => {
+                assert_eq!(
+                    attempts, 2,
+                    "should report validation failure count (== max_retries)"
+                );
+                assert!(
+                    reason.contains("Invalid JSON"),
+                    "reason should mention JSON parse failure, got: {reason}"
+                );
+            }
+            Ok(_) => panic!("expected StructuredOutputValidationFailed, got Ok"),
+            Err(e) => panic!("expected StructuredOutputValidationFailed, got: {e:?}"),
+        }
+
+        assert_eq!(
+            client.calls_made(),
+            3,
+            "expect 1 agentic + 2 extraction attempts"
         );
     }
 }

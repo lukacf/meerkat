@@ -53,10 +53,37 @@ export interface SkillKey {
 /** A skill reference — either a {@link SkillKey} or a legacy string. */
 export type SkillRef = SkillKey | string;
 
+/** Inline image content accepted by input-bearing APIs. */
+export interface InlineImageBlock {
+  readonly type: "image";
+  readonly media_type: string;
+  readonly source?: "inline";
+  readonly data: string;
+}
+
+/** Blob-backed image content accepted by input-bearing APIs and emitted by history surfaces. */
+export interface BlobImageBlock {
+  readonly type: "image";
+  readonly media_type: string;
+  readonly source: "blob";
+  readonly blob_id: string;
+}
+
 /** A content block in a multimodal prompt. */
 export type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; media_type: string; data: string };
+  | InlineImageBlock
+  | BlobImageBlock;
+
+/** Canonical content input returned by history surfaces and accepted by input-bearing APIs. */
+export type ContentInput = string | readonly ContentBlock[];
+
+/** Raw blob bytes fetched by blob id. */
+export interface BlobPayload {
+  readonly blobId: string;
+  readonly mediaType: string;
+  readonly dataBase64: string;
+}
 
 /** Ephemeral per-turn tool visibility overlay. */
 export interface TurnToolOverlay {
@@ -96,7 +123,7 @@ export interface SessionToolCall {
 
 export interface SessionToolResult {
   readonly toolUseId: string;
-  readonly content: string;
+  readonly content: ContentInput;
   readonly isError: boolean;
 }
 
@@ -111,7 +138,7 @@ export interface SessionAssistantBlock {
 
 export interface SessionMessage {
   readonly role: string;
-  readonly content?: string;
+  readonly content?: ContentInput;
   readonly toolCalls: readonly SessionToolCall[];
   readonly stopReason?: string;
   readonly blocks: readonly SessionAssistantBlock[];
@@ -161,7 +188,7 @@ export interface SpawnSpec {
   readonly meerkatId: string;
   readonly initialMessage?: string | ContentBlock[];
   readonly runtimeMode?: "turn_driven" | "autonomous_host";
-  readonly backend?: "subagent" | "external";
+  readonly backend?: "session" | "external";
   readonly labels?: Record<string, string>;
   readonly context?: Record<string, unknown>;
   readonly resumeSessionId?: string;
@@ -172,10 +199,16 @@ export interface MobMember {
   readonly meerkatId: string;
   readonly profile: string;
   readonly memberRef?: Record<string, unknown>;
+  readonly peerId?: string;
+  readonly externalPeerSpecs?: Readonly<Record<string, Record<string, unknown>>>;
   readonly runtimeMode?: string;
   readonly state?: string;
   readonly wiredTo?: readonly string[];
   readonly labels?: Record<string, string>;
+  readonly status?: string;
+  readonly error?: string;
+  readonly isFinal?: boolean;
+  readonly currentSessionId?: string;
   readonly sessionId?: string;
 }
 
@@ -211,10 +244,9 @@ export interface SessionOptions {
   hooksOverride?: Record<string, unknown>;
   enableBuiltins?: boolean;
   enableShell?: boolean;
-  enableSubagents?: boolean;
   enableMemory?: boolean;
   enableMob?: boolean;
-  hostMode?: boolean;
+  keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;

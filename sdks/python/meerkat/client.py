@@ -28,20 +28,31 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict
 from urllib.error import URLError
 import urllib.request
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
-from .mob import Mob
+from .generated.types import (
+    RuntimeAcceptResult,
+    RuntimeResetResult,
+    RuntimeRetireResult,
+    RuntimeStateResult,
+    WireInputState,
+    WireInputStateHistoryEntry,
+)
+from .mob import Mob, MobHelperResult, MobKickoffMemberSnapshot, MobMemberSnapshot, MobSpawnSpec
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
 from .tools import ToolRegistry
 from .types import (
     AttributedEvent,
+    BlobPayload,
     Capability,
+    ContentBlock,
+    ContentInput,
     EventEnvelope,
     McpLiveOpResponse,
     RunResult,
@@ -62,6 +73,24 @@ from .types import (
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
 _MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+
+RenderClass = Literal[
+    "user_prompt",
+    "peer_message",
+    "peer_request",
+    "peer_response",
+    "external_event",
+    "flow_step",
+    "continuation",
+    "system_notice",
+    "tool_scope_notice",
+    "ops_progress",
+]
+RenderSalience = Literal["background", "normal", "important", "urgent"]
+RenderMetadata = TypedDict(
+    "RenderMetadata",
+    {"class": RenderClass, "salience": NotRequired[RenderSalience]},
+)
 
 
 def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -258,21 +287,20 @@ class MeerkatClient:
 
     async def create_session(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_subagents: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
-        host_mode: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
+        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -280,6 +308,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> Session:
         """Create a new session, run the first turn, and return a :class:`Session`.
 
@@ -296,13 +325,14 @@ class MeerkatClient:
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
-            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
+            labels=labels,
         )
         raw = await self._request("session/create", params)
         result = self._parse_run_result(raw)
@@ -310,21 +340,20 @@ class MeerkatClient:
 
     def create_session_streaming(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_subagents: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
-        host_mode: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
+        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -332,6 +361,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> EventStream:
         """Create a new session and stream typed events from the first turn.
 
@@ -352,13 +382,14 @@ class MeerkatClient:
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
-            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
+            labels=labels,
         )
         self._request_id += 1
         request_id = self._request_id
@@ -377,21 +408,20 @@ class MeerkatClient:
 
     async def create_deferred_session(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_subagents: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
-        host_mode: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
+        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -399,6 +429,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> DeferredSession:
         """Create a new session without running the first turn.
 
@@ -419,13 +450,14 @@ class MeerkatClient:
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
-            enable_shell=enable_shell, enable_subagents=enable_subagents,
+            enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
             preload_skills=preload_skills,
             skill_refs=skill_refs, skill_references=skill_references,
+            labels=labels,
         )
         params["initial_turn"] = "deferred"
         raw = await self._request("session/create", params)
@@ -441,21 +473,34 @@ class MeerkatClient:
         """List active sessions."""
         result = await self._request("session/list", {})
         return [
-            SessionInfo(
-                session_id=s.get("session_id", ""),
-                session_ref=s.get("session_ref"),
-                created_at=s.get("created_at", ""),
-                updated_at=s.get("updated_at", ""),
-                message_count=s.get("message_count", 0),
-                total_tokens=s.get("total_tokens", 0),
-                is_active=s.get("is_active", False),
-            )
+            self._parse_session_info(s)
             for s in result.get("sessions", [])
         ]
 
-    async def read_session(self, session_id: str) -> dict[str, Any]:
+    async def read_session(self, session_id: str) -> SessionInfo:
         """Read detailed session state."""
-        return await self._request("session/read", {"session_id": session_id})
+        result = await self._request("session/read", {"session_id": session_id})
+        return self._parse_session_info(result)
+
+
+    async def inject_context(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject system context into a session."""
+        params = {
+            "session_id": session_id,
+            "text": text,
+        }
+        if source:
+            params["source"] = source
+        if idempotency_key:
+            params["idempotency_key"] = idempotency_key
+        return await self._request("session/inject_context", params)
 
     async def read_session_history(
         self,
@@ -470,6 +515,14 @@ class MeerkatClient:
             params["limit"] = limit
         raw = await self._request("session/history", params)
         return self._parse_session_history(raw)
+
+    async def get_blob(self, blob_id: str) -> BlobPayload:
+        raw = await self._request("blob/get", {"blob_id": blob_id})
+        return BlobPayload(
+            blob_id=str(raw.get("blob_id", blob_id)),
+            media_type=str(raw.get("media_type", "")),
+            data_base64=str(raw.get("data", "")),
+        )
 
     # -- Capabilities ------------------------------------------------------
 
@@ -693,23 +746,137 @@ class MeerkatClient:
             "additional_instructions": additional_instructions,
         })
 
+
+    async def spawn_mob_members(
+        self,
+        mob_id: str,
+        specs: list[MobSpawnSpec],
+    ) -> list[dict[str, Any]]:
+        return await self._request("mob/spawn_many", {
+            "mob_id": mob_id,
+            "specs": specs,
+        })
+
     async def retire_mob_member(self, mob_id: str, meerkat_id: str) -> None:
         await self._request("mob/retire", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
-    async def respawn_mob_member(self, mob_id: str, meerkat_id: str, initial_message: str | list[dict] | None = None) -> None:
-        await self._request("mob/respawn", {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message})
+    async def respawn_mob_member(
+        self,
+        mob_id: str,
+        meerkat_id: str,
+        initial_message: str | list[dict] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "mob/respawn",
+            {"mob_id": mob_id, "meerkat_id": meerkat_id, "initial_message": initial_message},
+        )
 
-    async def wire_mob_members(self, mob_id: str, a: str, b: str) -> None:
-        await self._request("mob/wire", {"mob_id": mob_id, "a": a, "b": b})
+    async def force_cancel_mob_member(self, mob_id: str, meerkat_id: str) -> None:
+        await self._request("mob/force_cancel", {"mob_id": mob_id, "meerkat_id": meerkat_id})
 
-    async def unwire_mob_members(self, mob_id: str, a: str, b: str) -> None:
-        await self._request("mob/unwire", {"mob_id": mob_id, "a": a, "b": b})
+    async def mob_member_status(self, mob_id: str, meerkat_id: str) -> MobMemberSnapshot:
+        return await self._request("mob/member_status", {"mob_id": mob_id, "meerkat_id": meerkat_id})
+
+    async def wait_mob_kickoff(
+        self,
+        mob_id: str,
+        *,
+        member_ids: list[str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[MobKickoffMemberSnapshot]:
+        params: dict[str, Any] = {"mob_id": mob_id}
+        if member_ids is not None:
+            params["member_ids"] = member_ids
+        if timeout_ms is not None:
+            params["timeout_ms"] = timeout_ms
+        result = await self._request("mob/wait_kickoff", params)
+        members = result.get("members", [])
+        return members if isinstance(members, list) else []
+
+    async def spawn_mob_helper(
+        self,
+        mob_id: str,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+        runtime_mode: str | None = None,
+        backend: str | None = None,
+    ) -> MobHelperResult:
+        return await self._request("mob/spawn_helper", {
+            "mob_id": mob_id,
+            "prompt": prompt,
+            "meerkat_id": meerkat_id,
+            "profile_name": profile_name,
+            "runtime_mode": runtime_mode,
+            "backend": backend,
+        })
+
+    async def fork_mob_helper(
+        self,
+        mob_id: str,
+        source_member_id: str,
+        prompt: str,
+        *,
+        meerkat_id: str | None = None,
+        profile_name: str | None = None,
+        fork_context: dict[str, Any] | None = None,
+        runtime_mode: str | None = None,
+        backend: str | None = None,
+    ) -> MobHelperResult:
+        return await self._request("mob/fork_helper", {
+            "mob_id": mob_id,
+            "source_member_id": source_member_id,
+            "prompt": prompt,
+            "meerkat_id": meerkat_id,
+            "profile_name": profile_name,
+            "fork_context": fork_context,
+            "runtime_mode": runtime_mode,
+            "backend": backend,
+        })
+
+    async def wire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
+        payload = (
+            {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
+            if isinstance(peer, str)
+            else {"mob_id": mob_id, "member": member, "peer": peer}
+        )
+        await self._request("mob/wire", payload)
+
+    async def unwire_mob_members(self, mob_id: str, member: str, peer: str | dict[str, Any]) -> None:
+        payload = (
+            {"mob_id": mob_id, "member": member, "peer": {"local": peer}}
+            if isinstance(peer, str)
+            else {"mob_id": mob_id, "member": member, "peer": peer}
+        )
+        await self._request("mob/unwire", payload)
 
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
 
-    async def send_mob_message(self, mob_id: str, meerkat_id: str, message: str | list[dict]) -> None:
-        await self._request("mob/send", {"mob_id": mob_id, "meerkat_id": meerkat_id, "message": message})
+    async def send_mob_member_content(
+        self,
+        mob_id: str,
+        meerkat_id: str,
+        content: str | list[dict[str, Any]],
+        *,
+        handling_mode: Literal["queue", "steer"] = "queue",
+        render_metadata: RenderMetadata | None = None,
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "mob/send",
+            {
+                "mob_id": mob_id,
+                "meerkat_id": meerkat_id,
+                "content": content,
+                "handling_mode": handling_mode,
+                "render_metadata": render_metadata,
+            },
+        )
+        session_id = result.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/send response: missing session_id")
+        return result
 
     async def append_mob_system_context(
         self,
@@ -811,12 +978,12 @@ class MeerkatClient:
     async def _start_turn(
         self,
         session_id: str,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
-        host_mode: bool | None = None,
+        keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
         max_tokens: int | None = None,
@@ -833,8 +1000,8 @@ class MeerkatClient:
             params["skill_references"] = skill_references
         if flow_tool_overlay is not None:
             params["flow_tool_overlay"] = flow_tool_overlay
-        if host_mode is not None:
-            params["host_mode"] = host_mode
+        if keep_alive is not None:
+            params["keep_alive"] = keep_alive
         if model is not None:
             params["model"] = model
         if provider is not None:
@@ -855,7 +1022,7 @@ class MeerkatClient:
     def _start_turn_streaming(
         self,
         session_id: str,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -907,6 +1074,41 @@ class MeerkatClient:
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})
 
+    async def runtime_state(self, session_id: str) -> RuntimeStateResult:
+        raw = await self._request("runtime/state", {"session_id": session_id})
+        return RuntimeStateResult(**raw)
+
+    async def runtime_accept(
+        self,
+        session_id: str,
+        input: dict[str, Any],
+    ) -> RuntimeAcceptResult:
+        raw = await self._request("runtime/accept", {"session_id": session_id, "input": input})
+        state = raw.get("state")
+        if isinstance(state, dict):
+            raw = dict(raw)
+            raw["state"] = self._parse_wire_input_state(state)
+        return RuntimeAcceptResult(**raw)
+
+    async def runtime_retire(self, session_id: str) -> RuntimeRetireResult:
+        raw = await self._request("runtime/retire", {"session_id": session_id})
+        return RuntimeRetireResult(**raw)
+
+    async def runtime_reset(self, session_id: str) -> RuntimeResetResult:
+        raw = await self._request("runtime/reset", {"session_id": session_id})
+        return RuntimeResetResult(**raw)
+
+    async def input_state(self, session_id: str, input_id: str) -> WireInputState | None:
+        raw = await self._request("input/state", {"session_id": session_id, "input_id": input_id})
+        if raw is None:
+            return None
+        return self._parse_wire_input_state(raw)
+
+    async def input_list(self, session_id: str) -> list[str]:
+        result = await self._request("input/list", {"session_id": session_id})
+        input_ids = result.get("input_ids", [])
+        return [str(input_id) for input_id in input_ids]
+
     # -- Transport ---------------------------------------------------------
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -919,6 +1121,31 @@ class MeerkatClient:
         self._process.stdin.write((json.dumps(request) + "\n").encode())
         await self._process.stdin.drain()
         return await response_future
+
+    @staticmethod
+    def _parse_wire_input_state(raw: dict[str, Any]) -> WireInputState:
+        history_raw = raw.get("history", [])
+        history: list[WireInputStateHistoryEntry] = []
+        if isinstance(history_raw, list):
+            for entry in history_raw:
+                if not isinstance(entry, dict):
+                    continue
+                history.append(
+                    WireInputStateHistoryEntry(
+                        from_=str(entry.get("from", "")),
+                        reason=(
+                            str(entry["reason"])
+                            if entry.get("reason") is not None
+                            else None
+                        ),
+                        timestamp=str(entry.get("timestamp", "")),
+                        to=str(entry.get("to", "")),
+                    )
+                )
+
+        payload = dict(raw)
+        payload["history"] = history
+        return WireInputState(**payload)
 
     # -- Binary resolution (unchanged from original) -----------------------
 
@@ -1083,21 +1310,20 @@ class MeerkatClient:
 
     @staticmethod
     def _build_create_params(
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         model: str | None = None,
         provider: str | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int = 2,
+        structured_output_retries: int | None = None,
         hooks_override: dict[str, Any] | None = None,
-        enable_builtins: bool = False,
-        enable_shell: bool = False,
-        enable_subagents: bool = False,
-        enable_memory: bool = False,
-        enable_mob: bool = False,
-        host_mode: bool = False,
+        enable_builtins: bool | None = None,
+        enable_shell: bool | None = None,
+        enable_memory: bool | None = None,
+        enable_mob: bool | None = None,
+        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
@@ -1105,6 +1331,7 @@ class MeerkatClient:
         preload_skills: list[str] | None = None,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
         if model:
@@ -1115,31 +1342,29 @@ class MeerkatClient:
             params["system_prompt"] = system_prompt
         if max_tokens:
             params["max_tokens"] = max_tokens
-        if output_schema:
+        if output_schema is not None:
             params["output_schema"] = output_schema
-        if structured_output_retries != 2:
+        if structured_output_retries is not None:
             params["structured_output_retries"] = structured_output_retries
-        if hooks_override:
+        if hooks_override is not None:
             params["hooks_override"] = hooks_override
-        if enable_builtins:
-            params["enable_builtins"] = True
-        if enable_shell:
-            params["enable_shell"] = True
-        if enable_subagents:
-            params["enable_subagents"] = True
-        if enable_memory:
-            params["enable_memory"] = True
-        if enable_mob:
-            params["enable_mob"] = True
-        if host_mode:
-            params["host_mode"] = True
+        if enable_builtins is not None:
+            params["enable_builtins"] = enable_builtins
+        if enable_shell is not None:
+            params["enable_shell"] = enable_shell
+        if enable_memory is not None:
+            params["enable_memory"] = enable_memory
+        if enable_mob is not None:
+            params["enable_mob"] = enable_mob
+        if keep_alive is not None:
+            params["keep_alive"] = keep_alive
         if comms_name:
             params["comms_name"] = comms_name
         if peer_meta is not None:
             params["peer_meta"] = peer_meta
         if budget_limits is not None:
             params["budget_limits"] = budget_limits
-        if provider_params:
+        if provider_params is not None:
             params["provider_params"] = provider_params
         if preload_skills is not None:
             params["preload_skills"] = preload_skills
@@ -1148,6 +1373,8 @@ class MeerkatClient:
             params["skill_refs"] = wire_refs
         if skill_references is not None:
             params["skill_references"] = skill_references
+        if labels is not None:
+            params["labels"] = labels
         return params
 
     @staticmethod
@@ -1266,7 +1493,7 @@ class MeerkatClient:
         role = data.get("role", "")
         return SessionMessage(
             role=role,
-            content=data.get("content"),
+            content=MeerkatClient._parse_content_input(data["content"]) if "content" in data else None,
             tool_calls=[
                 SessionToolCall(
                     id=tool_call.get("id", ""),
@@ -1283,12 +1510,44 @@ class MeerkatClient:
             results=[
                 SessionToolResult(
                     tool_use_id=result.get("tool_use_id", ""),
-                    content=result.get("content", ""),
+                    content=MeerkatClient._parse_content_input(result.get("content", "")),
                     is_error=bool(result.get("is_error", False)),
                 )
                 for result in data.get("results", [])
             ],
         )
+
+    @staticmethod
+    def _parse_content_input(value: Any) -> ContentInput:
+        if isinstance(value, list):
+            return [
+                MeerkatClient._parse_content_block(block)
+                for block in value
+                if isinstance(block, dict)
+            ]
+        return "" if value is None else str(value)
+
+    @staticmethod
+    def _parse_content_block(data: dict[str, Any]) -> ContentBlock:
+        if data.get("type") == "image":
+            source = data.get("source", "inline")
+            if source == "blob":
+                return {
+                    "type": "image",
+                    "media_type": str(data.get("media_type", "")),
+                    "source": "blob",
+                    "blob_id": str(data.get("blob_id", "")),
+                }
+            return {
+                "type": "image",
+                "media_type": str(data.get("media_type", "")),
+                "source": "inline",
+                "data": str(data.get("data", "")),
+            }
+        return {
+            "type": "text",
+            "text": str(data.get("text", "")),
+        }
 
     @staticmethod
     def _parse_session_assistant_block(data: dict[str, Any]) -> SessionAssistantBlock:
@@ -1300,4 +1559,20 @@ class MeerkatClient:
             name=block_data.get("name"),
             args=block_data.get("args"),
             meta=block_data.get("meta"),
+        )
+
+    @staticmethod
+    def _parse_session_info(s: dict[str, Any]) -> SessionInfo:
+        return SessionInfo(
+            session_id=s.get("session_id", ""),
+            session_ref=s.get("session_ref"),
+            created_at=s.get("created_at", ""),
+            updated_at=s.get("updated_at", ""),
+            message_count=s.get("message_count", 0),
+            total_tokens=s.get("total_tokens", 0),
+            labels=s.get("labels", {}),
+            is_active=s.get("is_active", False),
+            model=s.get("model", ""),
+            provider=s.get("provider", ""),
+            last_assistant_text=s.get("last_assistant_text"),
         )

@@ -1,8 +1,8 @@
 # Meerkat Python SDK
 
-Python SDK for the [Meerkat](https://github.com/lukacf/raik) agent runtime. Communicates with the `rkat-rpc` JSON-RPC server over stdio to manage sessions, run agent turns, stream events, and query capabilities.
+Python SDK for the [Meerkat](https://github.com/lukacf/meerkat) runtime. The SDK is a thin session-first wrapper over the same runtime-backed contracts used by the CLI, REST, JSON-RPC, and MCP surfaces. It spawns the `rkat-rpc` server over stdio, then exposes those settled semantics as Python objects.
 
-- **Contract version:** `0.3.2`
+- **Contract version:** `0.4.11`
 - **Python:** `>=3.10`
 - **License:** MIT OR Apache-2.0
 
@@ -20,7 +20,7 @@ Or in editable/development mode:
 pip install -e "sdks/python[dev]"
 ```
 
-The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero runtime dependencies -- only `pytest` and `pytest-asyncio` are needed for development.
+The package is named `meerkat-sdk` (defined in `pyproject.toml`). It has zero runtime dependencies. Development extras install `pytest`, `pytest-asyncio`, and `tomli` automatically on Python 3.10.
 
 ## Prerequisites
 
@@ -48,22 +48,21 @@ import asyncio
 from meerkat import MeerkatClient
 
 async def main():
-    # Connect to rkat-rpc
-    client = MeerkatClient()
-    await client.connect()
+    async with MeerkatClient() as client:
+        # Create a runtime-backed session and run the first turn immediately.
+        session = await client.create_session("What is the capital of France?")
+        print(session.text)
+        print(session.id)
 
-    # Create a session and run the first turn
-    result = await client.create_session("What is the capital of France?")
-    print(result.text)           # "The capital of France is Paris."
-    print(result.session_id)     # UUID of the created session
+        # Multi-turn: continue through the same session handle.
+        result = await session.turn("And of Germany?")
+        print(result.text)
 
-    # Multi-turn: continue the conversation
-    result2 = await client.start_turn(result.session_id, "And of Germany?")
-    print(result2.text)
+        # Read canonical transcript history if needed.
+        history = await session.history(limit=10)
+        print(history.message_count)
 
-    # Clean up
-    await client.archive_session(result.session_id)
-    await client.close()
+        await session.archive()
 
 asyncio.run(main())
 ```
@@ -76,7 +75,7 @@ asyncio.run(main())
 from meerkat import MeerkatClient
 ```
 
-The primary class. Spawns `rkat-rpc` as a child process and speaks JSON-RPC over its stdin/stdout.
+The primary class. Spawns `rkat-rpc` as a child process and speaks JSON-RPC over its stdin/stdout. It owns the subprocess lifecycle; `Session` and `DeferredSession` are the runtime-backed handles returned from session creation.
 
 #### Constructor
 
@@ -98,7 +97,7 @@ async def connect(self) -> MeerkatClient
 
 Starts the `rkat-rpc` subprocess and performs the initialization handshake:
 
-1. Sends `initialize` and checks the server's `contract_version` against the SDK's `CONTRACT_VERSION` (`"0.3.2"`). Raises `MeerkatError` (code `"VERSION_MISMATCH"`) on incompatibility.
+1. Sends `initialize` and checks the server's `contract_version` against the SDK's `CONTRACT_VERSION` (`"0.4.11"`). Raises `MeerkatError` (code `"VERSION_MISMATCH"`) on incompatibility.
 2. Fetches capabilities via `capabilities/get` and caches them internally.
 
 Returns `self` for chaining.
@@ -126,15 +125,20 @@ async def create_session(
     hooks_override: Optional[dict] = None,
     enable_builtins: bool = False,
     enable_shell: bool = False,
-    enable_subagents: bool = False,
     enable_memory: bool = False,
-    host_mode: bool = False,
+    enable_mob: bool = False,
+    keep_alive: Optional[bool] = None,
     comms_name: Optional[str] = None,
+    peer_meta: Optional[dict] = None,
+    budget_limits: Optional[dict] = None,
     provider_params: Optional[dict] = None,
-) -> WireRunResult
+    preload_skills: Optional[list[str]] = None,
+    skill_refs: Optional[list[SkillRef]] = None,
+    skill_references: Optional[list[str]] = None,
+) -> Session
 ```
 
-Creates a new session and runs the first turn. Maps to the `session/create` JSON-RPC method.
+Creates a new session, runs the first turn, and returns a runtime-backed `Session` wrapper. The wrapper caches the most recent `RunResult` and exposes `session.turn()`, `session.stream()`, `session.history()`, `session.archive()`, `session.invoke_skill()`, and comms helpers without adding wrapper-local execution behavior.
 
 | Parameter                    | Type            | Default | Description |
 |------------------------------|-----------------|---------|-------------|
@@ -148,40 +152,45 @@ Creates a new session and runs the first turn. Maps to the `session/create` JSON
 | `hooks_override`             | `Optional[dict]`| `None`  | Run-scoped hook overrides. |
 | `enable_builtins`            | `bool`          | `False` | Enable built-in tools (task management, etc.). |
 | `enable_shell`               | `bool`          | `False` | Enable shell tool (requires `enable_builtins`). |
-| `enable_subagents`           | `bool`          | `False` | Enable sub-agent tools (fork, spawn). |
 | `enable_memory`              | `bool`          | `False` | Enable semantic memory (`memory_search` tool). |
-| `host_mode`                  | `bool`          | `False` | Run in host mode for inter-agent comms. |
-| `comms_name`                 | `Optional[str]` | `None`  | Agent name for comms (required when `host_mode` is `True`). |
+| `enable_mob`                 | `bool`          | `False` | Enable mob orchestration helpers. |
+| `keep_alive`                 | `Optional[bool]`| `None`  | Keep session alive for comms. `None` inherits persisted intent. |
+| `comms_name`                 | `Optional[str]` | `None`  | Agent name for comms (required when `keep_alive` is `True`). |
+| `peer_meta`                  | `Optional[dict]`| `None`  | Metadata advertised to peer comms surfaces. |
+| `budget_limits`              | `Optional[dict]`| `None`  | Runtime budget limits for the session. |
 | `provider_params`            | `Optional[dict]`| `None`  | Provider-specific parameters (e.g. thinking config). |
+| `preload_skills`             | `Optional[list[str]]` | `None` | Skill source UUIDs to load before the run. |
+| `skill_refs`                 | `Optional[list[SkillRef]]` | `None` | Structured skill references in canonical `{source_uuid, skill_name}` form. |
+| `skill_references`           | `Optional[list[str]]` | `None` | Legacy skill-reference strings; prefer `skill_refs`. |
 
-Returns a `WireRunResult`.
+Returns a `Session`.
 
-#### `start_turn()`
+#### `create_deferred_session()`
 
 ```python
-async def start_turn(
+async def create_deferred_session(
+    self,
+    prompt: str | list[dict],
+    *,
+    ...
+) -> DeferredSession
+```
+
+Creates a session without executing the first turn. Use `await deferred.start_turn(...)` when you want to set up the session now and begin the run later through the canonical runtime path.
+
+#### `read_session_history()`
+
+```python
+async def read_session_history(
     self,
     session_id: str,
-    prompt: str,
-) -> WireRunResult
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+) -> SessionHistory
 ```
 
-Starts a new turn on an existing session. Maps to the `turn/start` JSON-RPC method.
-
-| Parameter    | Type  | Description |
-|-------------|-------|-------------|
-| `session_id` | `str` | Session UUID from a prior `create_session()`. |
-| `prompt`     | `str` | User prompt for this turn. |
-
-Returns a `WireRunResult`.
-
-#### `interrupt()`
-
-```python
-async def interrupt(self, session_id: str) -> None
-```
-
-Interrupts a running turn. Maps to `turn/interrupt`.
+Reads the committed transcript page for a session. `Session.history()` is the convenience wrapper for the same runtime-backed call.
 
 #### `list_sessions()`
 
@@ -189,7 +198,7 @@ Interrupts a running turn. Maps to `turn/interrupt`.
 async def list_sessions(self) -> list
 ```
 
-Lists active sessions. Maps to `session/list`. Returns a list of dicts, each with `session_id` and `state` keys.
+Lists active sessions. Maps to `session/list`. Returns `list[SessionInfo]`.
 
 #### `read_session()`
 
@@ -197,23 +206,15 @@ Lists active sessions. Maps to `session/list`. Returns a list of dicts, each wit
 async def read_session(self, session_id: str) -> dict
 ```
 
-Reads session state. Maps to `session/read`. Returns a dict with `session_id` and `state`.
+Reads session state. Maps to `session/read`. Returns a dict with `session_id`, session metadata, and state payload.
 
-#### `archive_session()`
-
-```python
-async def archive_session(self, session_id: str) -> None
-```
-
-Archives (removes) a session. Maps to `session/archive`.
-
-#### `get_capabilities()`
+#### `capabilities`
 
 ```python
-async def get_capabilities(self) -> CapabilitiesResponse
+client.capabilities
 ```
 
-Returns the cached `CapabilitiesResponse` from the initial handshake. If capabilities were not fetched during `connect()`, re-fetches via `capabilities/get`.
+Returns the cached `list[Capability]` from the initial handshake.
 
 #### `has_capability()`
 
@@ -223,8 +224,18 @@ def has_capability(self, capability_id: str) -> bool
 
 Returns `True` if the given capability is available (status is `"Available"`). Checks the cached capabilities; returns `False` if capabilities have not been fetched.
 
-Known capability IDs (from the Rust `CapabilityId` enum):
-`sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `session_store`, `session_compaction`, `skills`.
+#### Session lifecycle on wrappers
+
+Archive, interrupt, history, and event-subscription operations live on the runtime-backed session wrappers:
+
+```python
+await session.interrupt()
+await session.archive()
+history = await session.history(limit=20)
+subscription = await session.subscribe_events()
+```
+
+Known capability IDs include `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `memory_store`, `session_store`, `session_compaction`, `skills`, and other optional runtime modules compiled into the backend.
 
 #### `require_capability()`
 
@@ -260,160 +271,27 @@ Merge-patches the runtime configuration. Maps to `config/patch`. The `patch` dic
 
 ---
 
-### WireRunResult
+## Public types
+
+The Python SDK exposes Python-native domain types from the `meerkat` package. The JSON-RPC wire dataclasses remain internal.
+
+- `RunResult` is available through `session.last_result`, `await session.turn(...)`, `await deferred.start_turn(...)`, and `events.result`.
+- `Usage`, `SessionInfo`, `Capability`, and `SchemaWarning` mirror the runtime response shapes directly.
+- `Session` and `DeferredSession` are the canonical runtime-backed wrappers for session lifecycle.
+- `EventStream` yields typed event dataclasses such as `TextDelta`, `TurnCompleted`, and `ToolExecutionCompleted`.
+
+Use the client and session helpers directly for capability and skill flows:
 
 ```python
-from meerkat import WireRunResult
+async with MeerkatClient() as client:
+    if client.has_capability("skills"):
+        session = await client.create_session("Review this function")
+        result = await session.invoke_skill(
+            SkillKey(source_uuid="source-123", skill_name="code-review"),
+            "Focus on performance regressions.",
+        )
+        print(result.text)
 ```
-
-Dataclass returned by `create_session()` and `start_turn()`.
-
-| Field               | Type               | Default | Description |
-|---------------------|--------------------|---------|-------------|
-| `session_id`        | `str`              | `""`    | Session UUID. |
-| `text`              | `str`              | `""`    | Agent response text. |
-| `turns`             | `int`              | `0`     | Number of turns completed. |
-| `tool_calls`        | `int`              | `0`     | Number of tool calls made. |
-| `usage`             | `Optional[WireUsage]` | `None` | Token usage breakdown. |
-| `structured_output` | `Optional[Any]`    | `None`  | Parsed structured output (when `output_schema` was provided). |
-| `schema_warnings`   | `Optional[list]`   | `None`  | Schema validation warnings, if any. |
-
-### WireUsage
-
-```python
-from meerkat import WireUsage
-```
-
-Dataclass for token usage.
-
-| Field                    | Type            | Default | Description |
-|--------------------------|-----------------|---------|-------------|
-| `input_tokens`           | `int`           | `0`     | Input tokens consumed. |
-| `output_tokens`          | `int`           | `0`     | Output tokens generated. |
-| `total_tokens`           | `int`           | `0`     | Total tokens (input + output). |
-| `cache_creation_tokens`  | `Optional[int]` | `None`  | Tokens used for cache creation (provider-specific). |
-| `cache_read_tokens`      | `Optional[int]` | `None`  | Tokens read from cache (provider-specific). |
-
-### WireEvent
-
-```python
-from meerkat import WireEvent
-```
-
-Dataclass for streaming events.
-
-| Field              | Type            | Default | Description |
-|--------------------|-----------------|---------|-------------|
-| `session_id`       | `str`           | `""`    | Session this event belongs to. |
-| `sequence`         | `int`           | `0`     | Monotonic sequence number. |
-| `event`            | `Optional[dict]`| `None`  | The agent event payload. |
-| `contract_version` | `str`           | `""`    | Contract version of the server. |
-
-### CapabilitiesResponse
-
-```python
-from meerkat import CapabilitiesResponse
-```
-
-Dataclass returned by `get_capabilities()`.
-
-| Field              | Type                   | Default | Description |
-|--------------------|------------------------|---------|-------------|
-| `contract_version` | `str`                  | `""`    | Server contract version. |
-| `capabilities`     | `list[CapabilityEntry]`| `[]`    | List of capability entries. |
-
-### CapabilityEntry
-
-```python
-from meerkat import CapabilityEntry
-```
-
-Dataclass for a single capability.
-
-| Field         | Type  | Default       | Description |
-|---------------|-------|---------------|-------------|
-| `id`          | `str` | `""`          | Capability identifier (e.g. `"sessions"`, `"shell"`). |
-| `description` | `str` | `""`          | Human-readable description. |
-| `status`      | `str` | `"available"` | Status string: `"Available"`, `"DisabledByPolicy"`, `"NotCompiled"`, or `"NotSupportedByProtocol"`. |
-
----
-
-## CapabilityChecker
-
-```python
-from meerkat import CapabilityChecker
-```
-
-Standalone capability-checking helper. Wraps a `CapabilitiesResponse` for convenient querying.
-
-```python
-caps = await client.get_capabilities()
-checker = CapabilityChecker(caps)
-
-# Check availability
-if checker.has("shell"):
-    print("Shell tool is available")
-
-# Guard a code path
-checker.require("comms")  # raises CapabilityUnavailableError if unavailable
-
-# List all available capabilities
-print(checker.available)  # e.g. ["sessions", "streaming", "builtins"]
-```
-
-### Methods
-
-| Method     | Signature                           | Description |
-|------------|-------------------------------------|-------------|
-| `has`      | `has(capability_id: str) -> bool`   | Returns `True` if the capability status is `"Available"`. |
-| `require`  | `require(capability_id: str) -> None` | Raises `CapabilityUnavailableError` if not available. |
-| `available`| `@property -> list[str]`            | List of all capability IDs with status `"Available"`. |
-
----
-
-## SkillHelper
-
-```python
-from meerkat import SkillHelper
-```
-
-Helpers for invoking Meerkat skills. Skills are loaded by the agent from filesystem and embedded sources. To invoke a skill, include its reference (e.g. `/shell-patterns`) in the user prompt. The `SkillHelper` handles this automatically.
-
-```python
-helper = SkillHelper(client)
-
-# Check skill support
-if helper.is_available():
-    # Invoke within an existing session
-    result = await helper.invoke(
-        session_id, "/shell-patterns", "How do I run a background job?"
-    )
-    print(result.text)
-
-    # Or create a new session with a skill invocation
-    result = await helper.invoke_new_session(
-        "/code-review", "Review this function", model="claude-sonnet-4-5"
-    )
-```
-
-### Constructor
-
-```python
-SkillHelper(client)
-```
-
-| Parameter | Type            | Description |
-|-----------|-----------------|-------------|
-| `client`  | `MeerkatClient` | A connected `MeerkatClient` instance. |
-
-### Methods
-
-| Method               | Signature | Description |
-|----------------------|-----------|-------------|
-| `is_available`       | `is_available() -> bool` | Returns `True` if the `"skills"` capability is available. |
-| `require_skills`     | `require_skills() -> None` | Raises `CapabilityUnavailableError` if skills are not available. |
-| `invoke`             | `async invoke(session_id: str, skill_reference: str, prompt: str) -> WireRunResult` | Invokes a skill within an existing session by prepending the skill reference to the prompt. |
-| `invoke_new_session` | `async invoke_new_session(skill_reference: str, prompt: str, model: Optional[str] = None) -> WireRunResult` | Creates a new session and invokes a skill in the first turn. |
 
 ---
 
@@ -502,7 +380,7 @@ SDK-specific codes raised by the client itself:
 | `"NOT_CONNECTED"`       | Client    | Operation attempted before `connect()`. |
 | `"CONNECTION_CLOSED"`   | Client    | The `rkat-rpc` process closed unexpectedly. |
 | `"VERSION_MISMATCH"`    | Client    | Server contract version incompatible with SDK. |
-| `"CAPABILITY_UNAVAILABLE"` | Client | Capability check failed via `require_capability()` or `SkillHelper.require_skills()`. |
+| `"CAPABILITY_UNAVAILABLE"` | Client | Capability check failed via `require_capability()`. |
 
 Server-side error codes (from `meerkat-contracts`):
 
@@ -530,7 +408,7 @@ client = MeerkatClient()
 await client.connect()
 
 try:
-    result = await client.start_turn("nonexistent-session-id", "hello")
+    result = await client.read_session("nonexistent-session-id")
 except MeerkatError as e:
     print(f"Error code: {e.code}")
     print(f"Message: {e.message}")
@@ -544,14 +422,14 @@ except MeerkatError as e:
 
 The SDK negotiates version compatibility during `connect()`. The contract version follows semver conventions:
 
-- **0.x:** The SDK requires an exact minor version match (e.g., SDK `0.3.2` is compatible with server `0.2.x` but not `0.3.0`).
+- **0.x:** The SDK requires an exact minor version match (e.g., SDK `0.4.11` is compatible with server `0.4.x` but not `0.5.0`).
 - **1.0+:** The SDK requires the same major version (e.g., SDK `1.0.0` is compatible with server `1.x.x` but not `2.0.0`).
 
-The current contract version is `0.3.2`, defined as the `CONTRACT_VERSION` constant:
+The current contract version is `0.4.11`, defined as the `CONTRACT_VERSION` constant:
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.3.2"
+print(CONTRACT_VERSION)  # "0.4.11"
 ```
 
 ---
@@ -569,22 +447,19 @@ async def multi_turn():
     await client.connect()
 
     # First turn
-    result = await client.create_session(
+    session = await client.create_session(
         "You are a helpful math tutor. What is 12 * 15?",
         model="claude-sonnet-4-5",
     )
-    print(f"Turn 1: {result.text}")
-    print(f"Tokens used: {result.usage.total_tokens}")
+    print(f"Turn 1: {session.text}")
+    print(f"Tokens used: {session.usage.total_tokens}")
 
     # Follow-up turn in the same session
-    result2 = await client.start_turn(
-        result.session_id,
-        "Now divide that result by 3.",
-    )
+    result2 = await session.turn("Now divide that result by 3.")
     print(f"Turn 2: {result2.text}")
 
     # Clean up
-    await client.archive_session(result.session_id)
+    await session.archive()
     await client.close()
 
 asyncio.run(multi_turn())
@@ -610,17 +485,17 @@ async def structured():
         "required": ["city", "country", "population"],
     }
 
-    result = await client.create_session(
+    session = await client.create_session(
         "Give me information about Tokyo.",
         output_schema=schema,
         structured_output_retries=3,
     )
-    print(f"Text: {result.text}")
-    print(f"Structured: {result.structured_output}")
-    if result.schema_warnings:
-        print(f"Warnings: {result.schema_warnings}")
+    print(f"Text: {session.text}")
+    print(f"Structured: {session.structured_output}")
+    if session.last_result.schema_warnings:
+        print(f"Warnings: {session.last_result.schema_warnings}")
 
-    await client.archive_session(result.session_id)
+    await session.archive()
     await client.close()
 
 asyncio.run(structured())
@@ -630,28 +505,23 @@ asyncio.run(structured())
 
 ```python
 import asyncio
-from meerkat import MeerkatClient, CapabilityChecker, CapabilityUnavailableError
+from meerkat import MeerkatClient, CapabilityUnavailableError
 
 async def check_caps():
     client = MeerkatClient()
     await client.connect()
 
-    # Via MeerkatClient directly
+    # Capability checks live on MeerkatClient directly.
     if client.has_capability("shell"):
-        result = await client.create_session(
+        session = await client.create_session(
             "List files in /tmp",
             enable_builtins=True,
             enable_shell=True,
         )
-
-    # Via CapabilityChecker
-    caps = await client.get_capabilities()
-    checker = CapabilityChecker(caps)
-
-    print(f"Available: {checker.available}")
+        print(session.text)
 
     try:
-        checker.require("comms")
+        client.require_capability("comms")
         # comms is available, proceed
     except CapabilityUnavailableError:
         print("Comms capability is not available")
@@ -678,15 +548,15 @@ async def manage_sessions():
     # List all active sessions
     sessions = await client.list_sessions()
     for s in sessions:
-        print(f"  {s['session_id']}: {s['state']}")
+        print(f"  {s.session_id}: {s.message_count} messages")
 
     # Read a specific session
-    info = await client.read_session(s1.session_id)
+    info = await client.read_session(s1.id)
     print(f"Session {info['session_id']} state: {info['state']}")
 
     # Archive sessions
-    await client.archive_session(s1.session_id)
-    await client.archive_session(s2.session_id)
+    await s1.archive()
+    await s2.archive()
 
     await client.close()
 
@@ -703,15 +573,15 @@ async def with_tools():
     client = MeerkatClient()
     await client.connect()
 
-    result = await client.create_session(
+    session = await client.create_session(
         "Create a file called hello.txt with 'Hello World' in it",
         enable_builtins=True,
         enable_shell=True,
     )
-    print(f"Response: {result.text}")
-    print(f"Tool calls made: {result.tool_calls}")
+    print(f"Response: {session.text}")
+    print(f"Tool calls made: {session.tool_calls}")
 
-    await client.archive_session(result.session_id)
+    await session.archive()
     await client.close()
 
 asyncio.run(with_tools())
@@ -719,12 +589,7 @@ asyncio.run(with_tools())
 
 ## Generated Types
 
-The `meerkat.generated` subpackage contains wire types and error classes generated from the Meerkat contract definitions. These are re-exported from the top-level `meerkat` package for convenience. The generated types include:
-
-- `meerkat.generated.types`: `CONTRACT_VERSION`, `WireUsage`, `WireRunResult`, `WireEvent`, `CapabilityEntry`, `CapabilitiesResponse`, `CommsParams`, `SkillsParams`
-- `meerkat.generated.errors`: `MeerkatError`, `CapabilityUnavailableError`, `SessionNotFoundError`, `SkillNotFoundError`
-
-The top-level `meerkat.errors` module defines identical error classes that are used by the SDK itself. The `meerkat.types` module re-exports all types from `meerkat.generated.types`.
+The `meerkat.generated` subpackage still exists for generated contract material such as `CONTRACT_VERSION`, MCP parameter types, and internal wire compatibility helpers. The public SDK surface re-exports Python-native domain types from `meerkat.types` and session-first wrappers from the top-level `meerkat` package.
 
 ## Running Tests
 

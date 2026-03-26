@@ -15,7 +15,7 @@ pub(super) enum TerminalizationTarget {
 }
 
 impl TerminalizationTarget {
-    fn status(&self) -> MobRunStatus {
+    pub(super) fn status(&self) -> MobRunStatus {
         match self {
             Self::Completed => MobRunStatus::Completed,
             Self::Failed { .. } => MobRunStatus::Failed,
@@ -45,7 +45,7 @@ impl TerminalizationTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TerminalizationOutcome {
+pub enum TerminalizationOutcome {
     Transitioned,
     Noop,
 }
@@ -70,20 +70,12 @@ impl FlowTerminalizationAuthority {
         }
     }
 
-    pub(super) async fn terminalize(
+    pub(super) async fn record_persisted_terminalization(
         &self,
         run_id: RunId,
         flow_id: FlowId,
         target: TerminalizationTarget,
     ) -> Result<TerminalizationOutcome, MobError> {
-        let next = target.status();
-        if !self
-            .cas_pending_or_running_to_terminal(&run_id, next)
-            .await?
-        {
-            return Ok(TerminalizationOutcome::Noop);
-        }
-
         let event_name = target.event_name();
         let event_kind = target.into_event_kind(run_id.clone(), flow_id);
         if let Err(append_error) = self
@@ -101,32 +93,6 @@ impl FlowTerminalizationAuthority {
         }
 
         Ok(TerminalizationOutcome::Transitioned)
-    }
-
-    async fn cas_pending_or_running_to_terminal(
-        &self,
-        run_id: &RunId,
-        next: MobRunStatus,
-    ) -> Result<bool, MobError> {
-        // Retry twice to close the race where a concurrent actor flips Pending->Running
-        // between our direct CAS attempts.
-        for _ in 0..2 {
-            if self
-                .run_store
-                .cas_run_status(run_id, MobRunStatus::Pending, next.clone())
-                .await?
-            {
-                return Ok(true);
-            }
-            if self
-                .run_store
-                .cas_run_status(run_id, MobRunStatus::Running, next.clone())
-                .await?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     async fn record_terminal_event_append_failure(
@@ -186,19 +152,13 @@ mod tests {
 
     struct RecordingRunStore {
         inner: InMemoryMobRunStore,
-        cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
     }
 
     impl RecordingRunStore {
         fn new() -> Self {
             Self {
                 inner: InMemoryMobRunStore::new(),
-                cas_history: RwLock::new(Vec::new()),
             }
-        }
-
-        async fn cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
-            self.cas_history.read().await.clone()
         }
     }
 
@@ -226,11 +186,35 @@ mod tests {
             expected: MobRunStatus,
             next: MobRunStatus,
         ) -> Result<bool, crate::error::MobError> {
-            self.cas_history
-                .write()
-                .await
-                .push((run_id.clone(), expected.clone(), next.clone()));
             self.inner.cas_run_status(run_id, expected, next).await
+        }
+
+        async fn cas_flow_state(
+            &self,
+            run_id: &RunId,
+            expected: &meerkat_machine_kernels::KernelState,
+            next: &meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner.cas_flow_state(run_id, expected, next).await
+        }
+
+        async fn cas_run_snapshot(
+            &self,
+            run_id: &RunId,
+            expected_status: MobRunStatus,
+            expected_flow_state: &meerkat_machine_kernels::KernelState,
+            next_status: MobRunStatus,
+            next_flow_state: &meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_run_snapshot(
+                    run_id,
+                    expected_status,
+                    expected_flow_state,
+                    next_status,
+                    next_flow_state,
+                )
+                .await
         }
 
         async fn append_step_entry(
@@ -349,6 +333,7 @@ mod tests {
             mob_id: MobId::from("mob"),
             flow_id: FlowId::from("flow"),
             status,
+            flow_state: MobRun::flow_state_for_steps([crate::ids::StepId::from("step-1")]).unwrap(),
             activation_params: serde_json::json!({}),
             created_at: Utc::now(),
             completed_at: None,
@@ -358,7 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_terminalization_uses_direct_pending_to_terminal_cas() {
+    async fn test_terminalization_records_persisted_terminal_event() {
         let run_store = Arc::new(RecordingRunStore::new());
         let events = Arc::new(FaultInjectedEventStore::default());
         let authority =
@@ -371,7 +356,7 @@ mod tests {
             .expect("create run");
 
         let outcome = authority
-            .terminalize(
+            .record_persisted_terminalization(
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Canceled,
@@ -379,22 +364,6 @@ mod tests {
             .await
             .expect("terminalize");
         assert_eq!(outcome, TerminalizationOutcome::Transitioned);
-
-        let history = run_store.cas_history().await;
-        assert!(
-            history
-                .iter()
-                .any(|(_, expected, next)| *expected == MobRunStatus::Pending
-                    && *next == MobRunStatus::Canceled),
-            "terminalization must include a direct Pending->Canceled CAS attempt"
-        );
-        assert!(
-            !history
-                .iter()
-                .any(|(_, expected, next)| *expected == MobRunStatus::Pending
-                    && *next == MobRunStatus::Running),
-            "terminalization authority must never force Pending->Running promotion"
-        );
     }
 
     #[tokio::test]
@@ -407,12 +376,12 @@ mod tests {
 
         let run_id = RunId::new();
         run_store
-            .create_run(sample_run(run_id.clone(), MobRunStatus::Running))
+            .create_run(sample_run(run_id.clone(), MobRunStatus::Failed))
             .await
             .expect("create run");
 
         let error = authority
-            .terminalize(
+            .record_persisted_terminalization(
                 run_id.clone(),
                 FlowId::from("flow"),
                 TerminalizationTarget::Failed {

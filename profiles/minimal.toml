@@ -5,7 +5,7 @@ name = "meerkat-minimal"
 
 [features]
 include = []
-exclude = ["comms", "sub-agents", "session-store", "session-compaction", "memory-store", "skills", "mcp"]
+exclude = ["comms", "session-store", "session-compaction", "memory-store", "skills", "mcp"]
 
 [sdk]
 languages = ["python", "typescript"]

@@ -94,6 +94,10 @@ impl AgentLlmClient for ScenarioClient {
     fn provider(&self) -> &'static str {
         "mock"
     }
+
+    fn model(&self) -> &'static str {
+        "mock-model"
+    }
 }
 
 struct RecordingToolDispatcher {
@@ -119,7 +123,7 @@ impl AgentToolDispatcher for RecordingToolDispatcher {
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
-    ) -> Result<ToolResult, meerkat_core::ToolError> {
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         let value: Value = serde_json::from_str(call.args.get())
             .map_err(|e| meerkat_core::ToolError::execution_failed(e.to_string()))?;
         self.seen_args.lock().await.push(value.clone());
@@ -127,7 +131,8 @@ impl AgentToolDispatcher for RecordingToolDispatcher {
             call.id.to_string(),
             serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
             false,
-        ))
+        )
+        .into())
     }
 }
 

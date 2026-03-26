@@ -12,6 +12,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
 use crate::{Router, Status, TrustedPeers};
+use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
@@ -71,6 +72,7 @@ pub struct PeersInput {}
 pub struct ToolContext {
     pub router: Arc<Router>,
     pub trusted_peers: Arc<RwLock<TrustedPeers>>,
+    pub runtime: Option<Arc<dyn CoreCommsRuntime>>,
 }
 
 /// Returns the list of comms tools: exactly `send` and `peers`.
@@ -124,12 +126,35 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
         source: None,
         stream: None,
         allow_self_session: None,
+        handling_mode: None,
     };
     let command = request
         .parse(&meerkat_core::SessionId::new())
         .map_err(format_comms_command_error)?;
 
     let kind = command.command_kind().to_string();
+    if let Some(runtime) = &ctx.runtime {
+        runtime.send(command).await.map_err(|error| match error {
+            meerkat_core::comms::SendError::PeerNotFound(peer_name) => {
+                format!(
+                    "peer_not_found_or_not_trusted: peer '{peer_name}' is not found or not trusted"
+                )
+            }
+            meerkat_core::comms::SendError::PeerOffline => format!(
+                "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
+                request.to.as_deref().unwrap_or("<unknown>")
+            ),
+            meerkat_core::comms::SendError::Internal(inner) if is_transport_internal(&inner) => {
+                format!(
+                    "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
+                    request.to.as_deref().unwrap_or("<unknown>")
+                )
+            }
+            other => other.to_string(),
+        })?;
+        return Ok(json!({ "status": "sent", "kind": kind }));
+    }
+
     match command {
         meerkat_core::comms::CommsCommand::Input { .. } => {
             Err("input command is not supported by MCP send".to_string())
@@ -141,7 +166,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
                     crate::types::MessageKind::Message { body, blocks },
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format_router_send_error(to.as_str(), e))?;
             Ok(json!({ "status": "sent", "kind": kind }))
         }
         meerkat_core::comms::CommsCommand::PeerRequest {
@@ -153,7 +178,7 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
                     crate::types::MessageKind::Request { intent, params },
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format_router_send_error(to.as_str(), e))?;
             Ok(json!({ "status": "sent", "kind": kind }))
         }
         meerkat_core::comms::CommsCommand::PeerResponse {
@@ -177,10 +202,35 @@ async fn handle_send(ctx: &ToolContext, input: SendInput) -> Result<Value, Strin
                     },
                 )
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format_router_send_error(to.as_str(), e))?;
             Ok(json!({ "status": "sent", "kind": kind }))
         }
     }
+}
+
+fn format_router_send_error(peer_name: &str, error: crate::router::SendError) -> String {
+    match error {
+        crate::router::SendError::PeerNotFound(_) => {
+            format!("peer_not_found_or_not_trusted: peer '{peer_name}' is not found or not trusted")
+        }
+        crate::router::SendError::PeerOffline => {
+            format!("peer_unreachable: peer '{peer_name}' is unreachable: offline_or_no_ack")
+        }
+        crate::router::SendError::Transport(inner) => {
+            format!(
+                "peer_unreachable: peer '{peer_name}' is unreachable: transport_error ({inner})"
+            )
+        }
+        crate::router::SendError::Io(inner) => {
+            format!(
+                "peer_unreachable: peer '{peer_name}' is unreachable: transport_error ({inner})"
+            )
+        }
+    }
+}
+
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 fn format_comms_command_error(
@@ -228,6 +278,28 @@ fn format_comms_command_error(
 }
 
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
+    if let Some(runtime) = &ctx.runtime {
+        let peer_list: Vec<Value> = runtime
+            .peers()
+            .await
+            .into_iter()
+            .map(|peer| {
+                json!({
+                    "name": peer.name.to_string(),
+                    "peer_id": peer.peer_id,
+                    "address": peer.address,
+                    "source": format!("{:?}", peer.source),
+                    "sendable_kinds": peer.sendable_kinds,
+                    "capabilities": peer.capabilities,
+                    "reachability": peer.reachability,
+                    "last_unreachable_reason": peer.last_unreachable_reason,
+                    "meta": peer.meta,
+                })
+            })
+            .collect();
+        return Ok(json!({ "peers": peer_list }));
+    }
+
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read();
     let peer_map: BTreeMap<String, Value> = peers
@@ -301,6 +373,7 @@ mod tests {
         let ctx = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
         };
 
         let result = handle_tools_call(&ctx, "peers", &json!({})).await;
@@ -329,6 +402,7 @@ mod tests {
         let ctx = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
         };
 
         let result = handle_tools_call(
@@ -342,7 +416,15 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let error = result.expect_err("send should fail for an unreachable peer");
+        assert!(
+            error.starts_with("peer_not_found_or_not_trusted:"),
+            "expected stable sender-facing code, got: {error}"
+        );
+        assert!(
+            error.contains("not found or not trusted"),
+            "expected sender-facing reason, got: {error}"
+        );
     }
 
     #[tokio::test]
@@ -360,6 +442,7 @@ mod tests {
         let ctx = ToolContext {
             router,
             trusted_peers,
+            runtime: None,
         };
 
         // Non-canonical tool names should not be recognized.

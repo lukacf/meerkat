@@ -37,16 +37,15 @@ impl DefaultCompactor {
 }
 
 /// Replace image blocks with text placeholders for compaction.
-/// Includes source_path when available so agents can re-read via view_image.
 fn strip_images_for_compaction(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
     blocks
         .iter()
         .map(|block| match block {
             ContentBlock::Image { media_type, .. } => {
-                // NOTE: source_path is intentionally NOT included in the placeholder.
-                // It is internal metadata and must not leak through transcript history
-                // into wire/API surfaces. The agent can re-read images via view_image
-                // if the source_path was set on the original ContentBlock.
+                // Image bytes/refs are intentionally collapsed to a text placeholder during
+                // compaction. In v1 this is the whole "GC" contract: compacted sessions keep
+                // the conversational cue, but no longer retain image payload refs in active
+                // history.
                 ContentBlock::Text {
                     text: format!("[image: {media_type}]"),
                 }
@@ -89,16 +88,16 @@ fn strip_images_from_messages(messages: &[Message]) -> Vec<Message> {
 
 impl Compactor for DefaultCompactor {
     fn should_compact(&self, ctx: &CompactionContext) -> bool {
-        // Never compact on the first turn
-        if ctx.current_turn == 0 {
+        // Never compact on the first-ever session LLM boundary.
+        if ctx.session_boundary_index == 0 {
             return false;
         }
 
-        // Loop guard: enforce minimum turns between compactions.
-        // Use saturating_sub to prevent underflow when last_compaction_turn
-        // comes from an earlier run and current_turn has reset.
-        if let Some(last) = ctx.last_compaction_turn
-            && ctx.current_turn.saturating_sub(last) < self.config.min_turns_between_compactions
+        // Loop guard: enforce minimum session-scoped boundaries between
+        // compactions. Session boundary indices do not reset across runs.
+        if let Some(last) = ctx.last_compaction_boundary_index
+            && ctx.session_boundary_index.saturating_sub(last)
+                < u64::from(self.config.min_turns_between_compactions)
         {
             return false;
         }
@@ -167,10 +166,11 @@ impl Compactor for DefaultCompactor {
             discarded.push(msg.clone());
         }
 
-        // Everything from retain_from goes to rebuilt
-        for msg in &history[retain_from..] {
-            rebuilt.push(msg.clone());
-        }
+        // Everything from retain_from goes to rebuilt, but image-bearing content
+        // is stripped to placeholders as part of compaction. This is the v1
+        // "logical GC" contract: compacted sessions do not keep image payload
+        // references in active history after compaction.
+        rebuilt.extend(strip_images_from_messages(&history[retain_from..]));
 
         CompactionResult {
             messages: rebuilt,
@@ -201,8 +201,8 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
-            last_compaction_turn: None,
-            current_turn: 0,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 0,
         };
         assert!(!c.should_compact(&ctx));
     }
@@ -214,10 +214,23 @@ mod tests {
             last_input_tokens: 200_000,
             message_count: 100,
             estimated_history_tokens: 200_000,
-            last_compaction_turn: Some(5),
-            current_turn: 7, // Only 2 turns since last compaction, threshold is 3
+            last_compaction_boundary_index: Some(5),
+            session_boundary_index: 7, // Only 2 boundaries since last compaction, threshold is 3
         };
         assert!(!c.should_compact(&ctx));
+    }
+
+    #[test]
+    fn test_should_compact_follow_up_run_boundary_zero_no_longer_special() {
+        let c = DefaultCompactor::new(make_config());
+        let ctx = CompactionContext {
+            last_input_tokens: 200_000,
+            message_count: 100,
+            estimated_history_tokens: 200_000,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 1,
+        };
+        assert!(c.should_compact(&ctx));
     }
 
     #[test]
@@ -229,8 +242,8 @@ mod tests {
             last_input_tokens: 100_000,
             message_count: 50,
             estimated_history_tokens: 50_000,
-            last_compaction_turn: None,
-            current_turn: 5,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
         };
         assert!(c.should_compact(&ctx));
 
@@ -239,8 +252,8 @@ mod tests {
             last_input_tokens: 50_000,
             message_count: 50,
             estimated_history_tokens: 100_000,
-            last_compaction_turn: None,
-            current_turn: 5,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
         };
         assert!(c.should_compact(&ctx2));
     }
@@ -425,8 +438,7 @@ mod tests {
             },
             ContentBlock::Image {
                 media_type: "image/png".to_string(),
-                data: "base64data".to_string(),
-                source_path: None,
+                data: "base64data".into(),
             },
             ContentBlock::Text {
                 text: "world".to_string(),
@@ -445,8 +457,7 @@ mod tests {
         // that would leak filesystem paths through transcript history APIs.
         let blocks = vec![ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "base64data".to_string(),
-            source_path: Some("/tmp/x.png".to_string()),
+            data: "base64data".into(),
         }];
         let result = strip_images_for_compaction(&blocks);
         assert_eq!(result.len(), 1);
@@ -489,8 +500,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/jpeg".to_string(),
-                    data: "bigdata".to_string(),
-                    source_path: Some("/tmp/photo.jpg".to_string()),
+                    data: "bigdata".into(),
                 },
             ])),
             Message::ToolResults {
@@ -502,8 +512,7 @@ mod tests {
                         },
                         ContentBlock::Image {
                             media_type: "image/png".to_string(),
-                            data: "screenshotdata".to_string(),
-                            source_path: None,
+                            data: "screenshotdata".into(),
                         },
                     ],
                     false,
@@ -537,6 +546,96 @@ mod tests {
             );
         } else {
             panic!("expected ToolResults message");
+        }
+    }
+
+    #[test]
+    fn rebuild_history_nukes_images_from_retained_turns() {
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+
+        let messages = vec![
+            Message::User(UserMessage::text("old text turn")),
+            Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "latest with image".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: meerkat_core::types::ImageData::Blob {
+                        blob_id: meerkat_core::BlobId::new("sha256:test"),
+                    },
+                },
+            ])),
+        ];
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        assert_eq!(result.messages.len(), 2, "summary + retained turn");
+        let retained = result.messages.last().expect("retained turn");
+        match retained {
+            Message::User(user) => {
+                assert_eq!(user.content.len(), 2);
+                assert!(matches!(
+                    &user.content[0],
+                    ContentBlock::Text { text } if text == "latest with image"
+                ));
+                assert!(matches!(
+                    &user.content[1],
+                    ContentBlock::Text { text } if text == "[image: image/png]"
+                ));
+            }
+            other => panic!("expected retained user turn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuild_history_nukes_tool_result_images_from_retained_turns() {
+        use meerkat_core::types::ToolResult;
+
+        let c = DefaultCompactor::new(CompactionConfig {
+            recent_turn_budget: 1,
+            ..make_config()
+        });
+
+        let messages = vec![
+            Message::User(UserMessage::text("old turn")),
+            Message::User(UserMessage::text("latest turn")),
+            Message::ToolResults {
+                results: vec![ToolResult::with_blocks(
+                    "tool_1".to_string(),
+                    vec![
+                        ContentBlock::Text {
+                            text: "saw this".to_string(),
+                        },
+                        ContentBlock::Image {
+                            media_type: "image/jpeg".to_string(),
+                            data: "abc".into(),
+                        },
+                    ],
+                    false,
+                )],
+            },
+        ];
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        assert_eq!(
+            result.messages.len(),
+            3,
+            "summary + retained user + tool results"
+        );
+        match &result.messages[2] {
+            Message::ToolResults { results } => {
+                assert_eq!(results.len(), 1);
+                assert!(matches!(
+                    &results[0].content[1],
+                    ContentBlock::Text { text } if text == "[image: image/jpeg]"
+                ));
+            }
+            other => panic!("expected retained tool results, got {other:?}"),
         }
     }
 }

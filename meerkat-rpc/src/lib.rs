@@ -3,6 +3,9 @@
 //! Provides a JSON-RPC 2.0 stdio interface for IDE integration,
 //! desktop apps, and automation tools.
 
+// Keep the lib-unit harness focused on the protocol/error contract tests that
+// Phase 0 smokes directly. The heavier router/runtime behavior suites still run
+// through integration-test targets and the phase verification commands.
 pub mod callback_dispatcher;
 pub mod error;
 pub mod handlers;

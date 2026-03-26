@@ -7,6 +7,175 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - Unreleased
+
+Meerkat 0.5 is a large architecture and surface cutover. It formalizes runtime ownership around generated authorities and runtime-backed session services, removes a wide set of legacy public-surface residue, brings persistent session and mob recovery much closer to truthful replay, and adds a realm blob store for image content.
+
+### Added
+
+#### Formal runtime authorities, machine schema, and seam enforcement
+- New machine-authority toolchain:
+  - `meerkat-machine-schema`
+  - `meerkat-machine-codegen`
+  - `meerkat-machine-kernels`
+- New generated authority / protocol artifacts across runtime, mob, comms, external tools, and ops lifecycles.
+- New formal specs and compositions under `specs/machines` and `specs/compositions`, plus `xtask` support for machine/codegen/audit workflows.
+- New architecture doctrine and audit material:
+  - `docs/architecture/meerkat-runtime-dogma.md`
+  - `docs/architecture/formal-seam-closure.md`
+  - `docs/architecture/RMAT.md`
+  - `docs/architecture/finite-ownership-ledger.md`
+- New CI / pre-push enforcement around schema freshness, generated artifacts, clippy cleanliness, and seam-audit drift.
+
+#### Runtime-backed request execution and cancellation
+- Shared cancellable surface request execution helpers in `meerkat::surface`.
+- Runtime-backed request lifecycle and cancellation support added across:
+  - JSON-RPC
+  - REST
+  - MCP stdio hosting
+  - `examples/034-codemob-mcp`
+- JSON-RPC now supports explicit request cancellation notifications.
+- MCP stdio hosting now supports long-running cancellable tool execution without serially blocking the read loop.
+- Successful state-advancing operations now publish committed success correctly instead of being rewritten to cancellation by late races.
+
+#### Realm blob storage for image content
+- New `BlobId`, `BlobRef`, `BlobPayload`, and `BlobStore` contracts in core.
+- New built-in blob store implementations:
+  - `MemoryBlobStore`
+  - `FsBlobStore`
+- `PersistenceBundle` now owns a matched set of:
+  - `SessionStore`
+  - `RuntimeStore`
+  - `BlobStore`
+  - `RuntimeSessionAdapter`
+- New blob fetch surfaces:
+  - REST `GET /blobs/{blob_id}`
+  - RPC `blob/get`
+  - MCP `meerkat_blob_get`
+  - CLI `rkat blob get`
+  - SDK blob-get helpers
+
+#### New and expanded contracts on public surfaces
+- Public session history is now fully runtime-backed and aligned across REST/RPC/MCP/SDK surfaces.
+- REST external-event ingress is now canonical at `POST /sessions/{id}/external-events`.
+- JSON-RPC external-event ingress is now canonical at `session/external_event`.
+- REST/RPC/MCP contracts were regenerated and expanded:
+  - richer RPC and REST catalogs
+  - refreshed wire types and schema artifacts
+  - generated web event types from contracts
+- New `ErrorCode::RequestCancelled` / request-cancelled semantics in contracts.
+
+#### Mob runtime and orchestration improvements
+- New runtime-owned Broken-member projection for partial persistent resume.
+- Persistent mob resume now restores missing member sessions from durable state with:
+  - same `session_id`
+  - preserved transcript/history
+  - preserved durable LLM identity
+  - preserved native inproc comms identity / `peer_id`
+- New stronger mob lifecycle/orchestrator/runtime authorities and kernels.
+- New real-API mob smoke coverage, including collaborative-resume and multimodal pictionary scenarios.
+
+### Changed
+
+#### Runtime architecture and ownership
+- Runtime, comms, mob, and surface semantics now route through explicit authorities instead of shell-side lifecycle decisions.
+- Input lifecycle, runtime ingress, runtime control, comms drain lifecycle, peer comms, peer reachability, ops lifecycle, turn execution, mob lifecycle, mob orchestrator, and flow-run semantics were all formalized and tightened.
+- Surface code is now more explicitly “skin/mechanics only,” with semantic truth moved into authorities, protocols, and typed control seams.
+
+#### Session service and public surface defaults
+- Runtime-backed `SessionService` embedding is now the documented and tested default across Rust docs, examples, CLI, REST, RPC, MCP, and SDK guides.
+- Direct `AgentBuilder` construction is now treated as an expert/internal escape hatch rather than the primary integration path.
+- Session create/continue/resume behavior is more explicitly split between:
+  - live/runtime-backed mutation
+  - rebuild-required paths
+  - committed-create vs pre-commit failure behavior
+
+#### `host_mode` → `keep_alive`
+- `host_mode` was renamed to `keep_alive` across:
+  - core/session metadata
+  - RPC/REST/MCP/CLI surfaces
+  - SDKs
+  - docs/examples/skills
+  - schema/codegen artifacts
+- Keep-alive now follows stricter tri-state and validation rules:
+  - explicit overrides are preserved across resumed/rebuilt sessions
+  - invalid keep-alive requests are rejected before stateful execution
+  - disabling keep-alive now actually stops existing drain ownership
+
+#### Image content storage and history semantics
+- Durable session/runtime state no longer treats inline base64 image bytes as canonical truth.
+- Durable session history and durable runtime inputs now store blob-backed image data instead of inline-only image payloads.
+- Compaction now strips session images from active history, replacing them with textual placeholders, so compacted sessions do not keep paying context cost for image-bearing turns.
+- History/read surfaces now align with the new blob-backed image model instead of implying old inline-image durability.
+
+#### Mobs and comms behavior
+- `AutonomousHost` behavior was tightened so active autonomous members remain live for peer ingress instead of depending on a one-shot loop handle.
+- Mob runtime now uses one canonical runtime adapter per runtime instance instead of splitting turn execution and comms ingress across different adapters.
+- Persistent resume no longer silently fresh-creates missing session-backed members on persistent services.
+- Broken members are now consistently excluded from wiring/selection/host-loop startup paths while remaining inspectable and repairable.
+
+#### SDKs and generated types
+- Python, TypeScript, and Web SDKs were realigned with the runtime-backed/session-first API.
+- Generated SDK types and helpers were updated to reflect:
+  - deferred sessions
+  - richer session history contracts
+  - blob-backed image content
+  - regenerated event/catalog artifacts
+- Python and TypeScript history parsing now preserve structured text/image content instead of flattening it back to plain strings.
+
+### Removed
+
+- Legacy `host_mode` terminology from public docs/examples/SDKs/contracts.
+- Removed old `docs/architecture/0.5/*` planning dump in favor of the new normative architecture docs plus `.rct` material.
+- Removed / scrubbed legacy delegated/helper-agent and sub-agent public-surface residue that no longer matched the settled 0.5 surface model.
+- Removed a variety of dead or obsolete runtime shell helpers, stale driver entry methods, and old host-mode ownership residue that no longer matched authority-owned semantics.
+
+### Fixed
+
+#### Persistent resume, recovery, and identity continuity
+- Fixed persistent mob resume so session-backed members preserve durable identity instead of silently coming back as fresh sessions.
+- Fixed idle-live session detection during mob resume; persisted-only summaries no longer masquerade as live sessions, and live idle sessions are no longer misclassified as missing.
+- Fixed session-scoped native comms identity so resumed sessions preserve `peer_id` across runtime roots.
+- Fixed autonomous member runtime ownership so comms drains and runtime turns use the same canonical adapter.
+
+#### Keep-alive / continue / resume correctness
+- Fixed keep-alive ordering so validation happens before stateful execution and rejected requests are side-effect free.
+- Fixed keep-alive propagation across RPC/REST/MCP/CLI resume and turn paths.
+- Fixed drain survival / cleanup semantics for committed keep-alive sessions on error paths.
+- Fixed late-cancel races so successful committed `turn/start` / `meerkat_resume` / similar operations are not rewritten to `REQUEST_CANCELLED`.
+
+#### Multimodal comms and image handling
+- Fixed multimodal peer ingress for autonomous mob members after kickoff completion.
+- Fixed comms/runtime paths that flattened or dropped multimodal image blocks.
+- Fixed multimodal body-vs-rendered-text handling so raw peer message bodies are preserved instead of replaced by lossy projections.
+- Fixed provider-specific image serialization regressions (including Gemini user messages and Anthropic tool-result images).
+
+#### Surface and contract regressions
+- Fixed CLI runtime-backed teardown/output pipeline regressions.
+- Fixed RPC/REST/MCP runtime-backed ingress, resume, and external-event regressions.
+- Fixed REST request cancellation races and cleanup paths.
+- Fixed MCP cancellability and responsiveness in `034-codemob-mcp`.
+- Fixed runtime batch staging, metadata merge, UTF-8 panic, callback timeout, and retry-hint propagation regressions.
+
+#### Compaction and budget correctness
+- Fixed compaction cadence fallback across reused / legacy sessions.
+- Fixed compaction token estimation so base64 image data and tiny text blocks are not miscounted.
+- Fixed timeout / time-budget terminalization so structured timeout conditions retain their typed meaning.
+
+#### Clippy, WASM, CI, and publishability
+- Brought the workspace to clean `clippy -D warnings` status across a very large legacy warning backlog.
+- Fixed multiple WASM compilation and gating issues across `meerkat-web-runtime`, web bindings, and example paths.
+- Fixed publish / path-dependency / workspace packaging issues across crates.
+- Hardened pre-push and CI gates for feature branches and generated artifact freshness.
+
+### Breaking changes
+
+- `host_mode` has been renamed to `keep_alive` across public surfaces and generated SDK/contracts.
+- Runtime-backed session services, not direct builder execution, are now the intended public integration path.
+- Durable image/history semantics changed to the new blob-backed model; old inline-image durable formats are not preserved.
+- Python/TypeScript/Web SDK content and history models changed to preserve structured content instead of flattening it.
+- A significant amount of stale legacy/internal surface residue was removed or renamed to match the settled 0.5 contracts.
+
 ## [0.4.13] - 2026-03-16
 
 ### Fixed
@@ -86,7 +255,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`meerkat-core` reads model defaults from catalog** — `ModelDefaults` no longer reads from `config_template.toml`; all model defaults come from `meerkat-models` catalog.
 - **OpenAI adapter delegates detection to shared profiles** — capability detection logic moved from `meerkat-client` to `meerkat-models` profile rules.
-- **Sub-agent validation uses catalog for fallback resolution** — `meerkat-tools` sub-agent spawn now resolves fallback models via catalog instead of hardcoded strings.
+- **Legacy delegated-agent validation uses catalog for fallback resolution** — the remaining `sub-agents` compatibility path in `meerkat-tools` now resolves fallback models via catalog instead of hardcoded strings.
 - **Stale template defaults updated** — `gpt-4.1` → `gpt-5.2`, `gemini-1.5-pro` → `gemini-3-flash-preview`.
 - **`SessionError::Unsupported` variant** — new error variant for capability negotiation across session service implementations.
 
@@ -137,7 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Per-turn overrides**: `model`, `provider`, `max_tokens` overrides on `turn/start` for pending sessions.
 - **Rich session responses**: `session/list` returns `WireSessionSummary` (timestamps, message counts, token totals) with pagination (`limit`/`offset`). `session/read` returns `WireSessionInfo` (timestamps, message counts, last assistant text).
 - **Batch mob spawning**: `mob/spawn_many` with per-spec error reporting.
-- **Scoped event streaming**: `scope_id`/`scope_path` preserved on `session/stream_event` notifications for sub-agent/flow scope forwarding.
+- **Scoped event streaming**: `scope_id`/`scope_path` preserved on `session/stream_event` notifications for delegated child-scope / flow-scope forwarding.
 - **Persistent session recovery**: `turn/start` recovers persisted sessions after runtime restart, mirroring the REST recovery path. Archived sessions are rejected.
 - **Callback tool protocol**: bidirectional JSON-RPC request/response for SDK-provided tool implementations. `ToolCallbackHandler` helpers in Python and TypeScript SDKs.
 - 6 new RPC handler methods with legacy-mode guard.
@@ -539,7 +708,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 #### Skills System
 - `meerkat-skills` crate with skill sources (filesystem, embedded, in-memory, composite), parser, resolver, renderer, and engine
 - Core skill contracts in `meerkat-core/src/skills/`: `SkillId`, `SkillScope`, `SkillDescriptor`, `SkillDocument`, `SkillError`, `SkillSource` and `SkillEngine` traits
-- 8 embedded skills: `task-workflow`, `shell-patterns`, `sub-agent-orchestration`, `multi-agent-comms`, `mcp-server-setup`, `hook-authoring`, `memory-retrieval`, `session-management`
+- 8 embedded skills: `task-workflow`, `shell-patterns`, `sub-agent-orchestration` (legacy name), `multi-agent-comms`, `mcp-server-setup`, `hook-authoring`, `memory-retrieval`, `session-management`
 - Skill inventory section injected into system prompt via `extra_sections` slot
 - Per-turn skill injection via `<skill>` tagged blocks prepended to user messages
 - `SkillsResolved` and `SkillResolutionFailed` agent events
@@ -568,14 +737,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Failure policies: observe defaults to fail-open, guardrail/rewrite default to fail-closed
 - Per-run hook overrides via `HookRunOverrides` (add entries, disable hooks)
 
-#### Sub-Agents
-- `agent_spawn` and `agent_fork` tools for parallel sub-agent work
+#### Legacy Sub-Agent Surface (pre-0.5)
+- `agent_spawn` and `agent_fork` tools for parallel delegated child work
 - `agent_status`, `agent_cancel`, `agent_list` management tools
 - `SubAgentManager` with concurrency limits, nesting depth control, and budget allocation
 - `ContextStrategy` for spawn context: `FullHistory`, `LastTurns(n)`, `Summary`, `Custom`
-- `ToolAccessPolicy`: `Inherit`, `AllowList`, `DenyList` for sub-agent tool filtering
+- `ToolAccessPolicy`: `Inherit`, `AllowList`, `DenyList` for delegated child-agent tool filtering
 - `ForkBudgetPolicy`: `EqualSplit`, `Proportional`, `Fixed` for budget allocation
-- Model allowlists per provider for sub-agent spawns
+- Model allowlists per provider for delegated child-agent spawns
 
 #### Comms (Inter-Agent Communication)
 - `meerkat-comms` crate with `Router`, `Inbox`, `InprocRegistry`
@@ -651,12 +820,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Test infrastructure stabilized: fast test target isolation, real E2E gating, pre-commit hook fixes for bin-only crates
 
 ### Changed - Feature defaults
-- `meerkat-tools`: comms, mcp, and sub-agents are now optional features (default: on)
+- `meerkat-tools`: comms, mcp, and the legacy `sub-agents` compatibility feature are now optional features (default: on)
   - `--no-default-features` builds tools with zero optional deps
   - Features: `comms`, `mcp`, `sub-agents`
-- `meerkat` facade: comms, mcp, and sub-agents are now optional features (default: on)
+- `meerkat` facade: comms, mcp, and the legacy `sub-agents` compatibility feature are now optional features (default: on)
   - Features: `comms`, `mcp`, `sub-agents`
-- `meerkat-rpc`: comms, mcp, mob, and sub-agents are optional features (default: on)
+- `meerkat-rpc`: comms, mcp, mob, and the legacy `sub-agents` compatibility feature are optional features (default: on)
   - `--no-default-features` builds the minimal server surface
   - Features: `comms`, `mcp`, `mob`, `sub-agents`
 - `meerkat-rest`: comms is opt-in (default: on), no comms code when disabled
@@ -675,8 +844,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - RPC `session/create` expanded to full `AgentBuildConfig` parity
 - Provider schema lowering moved from core to adapters, removing provider leakage
 - `thought_signature` removed from generic `ToolCall`/`ToolResult` (provider-specific only)
-- Config-driven sub-agent model policy with fail-closed validation
-- Sub-agents, comms, and memory enabled through RPC/SDK surfaces
+- Config-driven delegated child-agent compatibility policy with fail-closed validation
+- Legacy `sub-agents` compatibility, comms, and memory enabled through RPC/SDK surfaces
 
 ### Removed
 - Dead files in meerkat-core: `comms_runtime.rs`, `comms_bootstrap.rs`, `comms_config.rs`, `agent/comms.rs`

@@ -1,0 +1,13 @@
+{
+  "name": "meerkat-examples",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@rkat/sdk": "file:../sdks/typescript"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}

@@ -1,400 +1,641 @@
 # TurnExecutionMachine
 
-Status: normative `0.5` machine contract, first formal-spec draft
-
-## Purpose
-
-`TurnExecutionMachine` owns the execution of one runtime-admitted run at a
-time.
-
-It is the machine inside runtime control that turns one `RunPrimitive` plus the
-current session value into `RunEvent` effects and an updated session.
-
-It owns:
-
-- application of one admitted `RunPrimitive`
-- the internal loop over LLM/tool/boundary execution
-- cooperative suspension while waiting for tool completions
-- retry/cancel execution transitions inside the run
-- terminal completion/failure/cancel for one active run
-
-It is **not** the owner of:
-
-- ordinary runtime admission
-- queue ordering
-- host idle waiting
-- control-plane precedence
-- peer comms inbox draining as a separate outer loop
-
-Important structural rule:
-
-- the host-mode idle/wake/drain loop is not part of `TurnExecutionMachine`
-- `0.5` narrows `Agent` toward the execution core inside this machine and moves
-  idle/runtime coordination upward into `RuntimeControlMachine`
-
-## Scope Boundary
-
-This machine begins when runtime has:
-
-- selected a `RunId`
-- selected one `RunPrimitive`
-- decided that this run should execute now
-
-It ends when the run reaches one terminal execution outcome:
-
-- completed
-- failed
-- cancelled
-
-The machine may require multiple inner LLM/boundary cycles before it reaches
-that terminal outcome, but it still owns exactly one active run at a time.
-
-## Authoritative State Model
-
-For one runtime instance, the machine state is the tuple:
-
-- `execution_state: TurnExecutionState`
-- `active_run: Option<RunId>`
-- `primitive_kind: TurnPrimitiveKind`
-- `tool_calls_pending: u32`
-- `boundary_count: u32`
-- `terminal_outcome: TurnTerminalOutcome`
-
-`TurnExecutionState` is the closed state set:
-
-- `Ready`
-- `ApplyingPrimitive`
-- `CallingLlm`
-- `WaitingForOps`
-- `DrainingBoundary`
-- `ErrorRecovery`
-- `Cancelling`
-- `Completed`
-- `Failed`
-- `Cancelled`
-
-Terminal states:
-
-- `Completed`
-- `Failed`
-- `Cancelled`
-
-`TurnPrimitiveKind` is:
-
-- `None`
-- `ConversationTurn`
-- `ImmediateAppend`
-- `ImmediateContextAppend`
-
-`TurnTerminalOutcome` is:
-
-- `None`
-- `Completed`
-- `Failed`
-- `Cancelled`
-
-## Input Alphabet
-
-The closed external input/command alphabet for this machine is:
-
-- `StartConversationRun(run_id)`
-- `StartImmediateAppend(run_id)`
-- `StartImmediateContext(run_id)`
-- `PrimitiveApplied(run_id)`
-- `LlmReturnedToolCalls(run_id, tool_count)`
-- `LlmReturnedTerminal(run_id)`
-- `ToolCallsResolved(run_id)`
-- `BoundaryContinue(run_id)`
-- `BoundaryComplete(run_id)`
-- `RecoverableFailure(run_id)`
-- `FatalFailure(run_id)`
-- `RetryRequested(run_id)`
-- `CancelRequested(run_id)`
-- `CancellationObserved(run_id)`
-- `AcknowledgeTerminal(run_id)`
-
-Notes:
-
-- the `Start*` family is the normalized runtime-to-turn-execution handoff
-- immediate append/context primitives are modeled explicitly because they do
-  not require an LLM/tool cycle
-- `BoundaryContinue` covers cases where boundary application is complete but
-  execution must re-enter another LLM cycle within the same run
-  (for example tool-loop continuation or structured-output retry)
-
-## Effect Family
-
-The closed machine-boundary effect family is the canonical `RunEvent` family:
-
-- `RunStarted(run_id)`
-- `BoundaryApplied(run_id)`
-- `RunCompleted(run_id)`
-- `RunFailed(run_id)`
-- `RunCancelled(run_id)`
-
-Implementation note:
-
-- the current Rust implementation realizes these through `RunEvent`,
-  `RunBoundaryReceipt`, `RunResult`, session mutation, checkpoint/save logic,
-  and typed control calls
-- `0.5` treats `RunEvent` as the authoritative cross-machine effect family
-
-## Transition Relation
-
-### Run start
-
-1. `StartConversationRun`
-
-Preconditions:
-
-- `execution_state = Ready`
-- `active_run = None`
-
-State updates:
-
-- `execution_state := ApplyingPrimitive`
-- `active_run := run_id`
-- `primitive_kind := ConversationTurn`
-- `tool_calls_pending := 0`
-- `boundary_count := 0`
-- `terminal_outcome := None`
-
-Effect:
-
-- `RunStarted(run_id)`
-
-2. `StartImmediateAppend`
-
-Same as above, except:
-
-- `primitive_kind := ImmediateAppend`
-
-3. `StartImmediateContext`
-
-Same as above, except:
-
-- `primitive_kind := ImmediateContextAppend`
-
-### Primitive application
-
-4. `PrimitiveApplied` for `ConversationTurn`
-
-Preconditions:
-
-- `execution_state = ApplyingPrimitive`
-- `primitive_kind = ConversationTurn`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := CallingLlm`
-
-5. `PrimitiveApplied` for immediate primitives
-
-Preconditions:
-
-- `execution_state = ApplyingPrimitive`
-- `primitive_kind ∈ {ImmediateAppend, ImmediateContextAppend}`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := Completed`
-- `boundary_count := boundary_count + 1`
-- `terminal_outcome := Completed`
-
-Effects:
-
-- `BoundaryApplied(run_id)`
-- `RunCompleted(run_id)`
-
-### LLM/tool loop
-
-6. `LlmReturnedToolCalls`
-
-Preconditions:
-
-- `execution_state = CallingLlm`
-- `active_run = run_id`
-- `tool_count > 0`
-
-State updates:
-
-- `execution_state := WaitingForOps`
-- `tool_calls_pending := tool_count`
-
-7. `ToolCallsResolved`
-
-Preconditions:
-
-- `execution_state = WaitingForOps`
-- `active_run = run_id`
-- `tool_calls_pending > 0`
-
-State updates:
-
-- `execution_state := DrainingBoundary`
-- `tool_calls_pending := 0`
-- `boundary_count := boundary_count + 1`
-
-Effect:
-
-- `BoundaryApplied(run_id)`
-
-8. `LlmReturnedTerminal`
-
-Preconditions:
-
-- `execution_state = CallingLlm`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := DrainingBoundary`
-- `boundary_count := boundary_count + 1`
-
-Effect:
-
-- `BoundaryApplied(run_id)`
-
-9. `BoundaryContinue`
-
-Preconditions:
-
-- `execution_state = DrainingBoundary`
-- `active_run = run_id`
-- `primitive_kind = ConversationTurn`
-
-State updates:
-
-- `execution_state := CallingLlm`
-
-10. `BoundaryComplete`
-
-Preconditions:
-
-- `execution_state = DrainingBoundary`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := Completed`
-- `terminal_outcome := Completed`
-
-Effect:
-
-- `RunCompleted(run_id)`
-
-### Failure and recovery
-
-11. `RecoverableFailure`
-
-Preconditions:
-
-- `execution_state ∈ {CallingLlm, WaitingForOps, DrainingBoundary}`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := ErrorRecovery`
-
-12. `RetryRequested`
-
-Preconditions:
-
-- `execution_state = ErrorRecovery`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := CallingLlm`
-
-13. `FatalFailure`
-
-Preconditions:
-
-- `execution_state ∈ {ApplyingPrimitive, CallingLlm, WaitingForOps, DrainingBoundary, ErrorRecovery}`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := Failed`
-- `terminal_outcome := Failed`
-
-Effect:
-
-- `RunFailed(run_id)`
-
-### Cancellation
-
-14. `CancelRequested`
-
-Preconditions:
-
-- `execution_state ∈ {ApplyingPrimitive, CallingLlm, WaitingForOps, DrainingBoundary, ErrorRecovery}`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := Cancelling`
-
-15. `CancellationObserved`
-
-Preconditions:
-
-- `execution_state = Cancelling`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := Cancelled`
-- `terminal_outcome := Cancelled`
-
-Effect:
-
-- `RunCancelled(run_id)`
-
-### Return to ready
-
-16. `AcknowledgeTerminal`
-
-Preconditions:
-
-- `execution_state ∈ {Completed, Failed, Cancelled}`
-- `active_run = run_id`
-
-State updates:
-
-- `execution_state := Ready`
-- `active_run := None`
-- `primitive_kind := None`
-- `tool_calls_pending := 0`
-- `boundary_count := 0`
-- `terminal_outcome := None`
+_Generated from the Rust machine catalog. Do not edit by hand._
+
+- Version: `1`
+- Rust owner: `meerkat-core` / `generated::turn_execution`
+
+## State
+- Phase enum: `Ready | ApplyingPrimitive | CallingLlm | WaitingForOps | DrainingBoundary | Extracting | ErrorRecovery | Cancelling | Completed | Failed | Cancelled`
+- `active_run`: `Option<RunId>`
+- `primitive_kind`: `TurnPrimitiveKind`
+- `admitted_content_shape`: `Option<ContentShape>`
+- `vision_enabled`: `Bool`
+- `image_tool_results_enabled`: `Bool`
+- `tool_calls_pending`: `u32`
+- `pending_op_refs`: `Option<Seq<AsyncOpRef>>`
+- `barrier_operation_ids`: `Seq<OperationId>`
+- `has_barrier_ops`: `Bool`
+- `barrier_satisfied`: `Bool`
+- `boundary_count`: `u32`
+- `cancel_after_boundary`: `Bool`
+- `terminal_outcome`: `TurnTerminalOutcome`
+- `extraction_attempts`: `u32`
+- `max_extraction_retries`: `u32`
+
+## Inputs
+- `StartConversationRun`(run_id: RunId)
+- `StartImmediateAppend`(run_id: RunId)
+- `StartImmediateContext`(run_id: RunId)
+- `PrimitiveApplied`(run_id: RunId, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool)
+- `LlmReturnedToolCalls`(run_id: RunId, tool_count: u32)
+- `LlmReturnedTerminal`(run_id: RunId)
+- `RegisterPendingOps`(run_id: RunId, op_refs: Seq<AsyncOpRef>, barrier_operation_ids: Seq<OperationId>, has_barrier_ops: Bool)
+- `ToolCallsResolved`(run_id: RunId)
+- `OpsBarrierSatisfied`(run_id: RunId, operation_ids: Seq<OperationId>)
+- `BoundaryContinue`(run_id: RunId)
+- `BoundaryComplete`(run_id: RunId)
+- `RecoverableFailure`(run_id: RunId)
+- `FatalFailure`(run_id: RunId)
+- `RetryRequested`(run_id: RunId)
+- `CancelNow`(run_id: RunId)
+- `CancelAfterBoundary`(run_id: RunId)
+- `CancellationObserved`(run_id: RunId)
+- `AcknowledgeTerminal`(run_id: RunId)
+- `TurnLimitReached`(run_id: RunId)
+- `BudgetExhausted`(run_id: RunId)
+- `TimeBudgetExceeded`(run_id: RunId)
+- `EnterExtraction`(run_id: RunId, max_retries: u32)
+- `ExtractionValidationPassed`(run_id: RunId)
+- `ExtractionValidationFailed`(run_id: RunId, error: String)
+- `ExtractionStart`(run_id: RunId)
+- `ForceCancelNoRun`
+- `RunCompleted`(run_id: RunId)
+- `RunFailed`(run_id: RunId)
+- `RunCancelled`(run_id: RunId)
+
+## Effects
+- `RunStarted`(run_id: RunId)
+- `BoundaryApplied`(run_id: RunId, boundary_sequence: u64)
+- `RunCompleted`(run_id: RunId)
+- `RunFailed`(run_id: RunId)
+- `RunCancelled`(run_id: RunId)
+- `CheckCompaction`
 
 ## Invariants
+- `ready_has_no_active_run`
+- `ready_has_no_admitted_content`
+- `non_ready_has_active_run`
+- `waiting_for_ops_implies_pending_tools`
+- `pending_op_refs_only_used_while_waiting`
+- `ready_has_no_boundary_cancel_request`
+- `immediate_primitives_skip_llm_and_recovery`
+- `terminal_states_match_terminal_outcome`
+- `completed_runs_have_seen_a_boundary`
 
-The machine must preserve:
+## Transitions
+### `StartConversationRun`
+- From: `Ready`
+- On: `StartConversationRun`(run_id)
+- Emits: `RunStarted`
+- To: `ApplyingPrimitive`
 
-1. `Ready` iff no run is active.
-2. every non-`Ready` state has exactly one active run.
-3. `WaitingForOps` implies `tool_calls_pending > 0`.
-4. immediate primitives never enter `CallingLlm`, `WaitingForOps`, or
-   `ErrorRecovery`.
-5. terminal states have matching `terminal_outcome`.
-6. a run cannot complete without at least one boundary application.
-7. cancellation and failure are terminal for the active run until runtime
-   acknowledges them.
+### `StartImmediateAppend`
+- From: `Ready`
+- On: `StartImmediateAppend`(run_id)
+- Emits: `RunStarted`
+- To: `ApplyingPrimitive`
 
-## Implementation Anchors
+### `StartImmediateContext`
+- From: `Ready`
+- On: `StartImmediateContext`(run_id)
+- Emits: `RunStarted`
+- To: `ApplyingPrimitive`
 
-Current `0.4` anchors include:
+### `PrimitiveAppliedConversationTurn`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `conversation_turn`
+- Emits: `CheckCompaction`
+- To: `CallingLlm`
 
-- `meerkat-core/src/state.rs`
-- `meerkat-core/src/agent/state.rs`
-- `meerkat-core/src/lifecycle/*.rs`
-- `meerkat-runtime/src/runtime_loop.rs`
+### `PrimitiveAppliedImmediateAppend`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `immediate_append`
+  - `cancel_after_boundary_not_requested`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
 
-The biggest `0.5` work here is not inventing a new loop from nothing. It is
-making runtime-driven execution universal and removing the legacy host-loop
-coordination path from `Agent`.
+### `PrimitiveAppliedImmediateAppendCancelsAfterBoundary`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `immediate_append`
+  - `boundary_cancel_requested`
+- Emits: `BoundaryApplied`, `RunCancelled`
+- To: `Cancelled`
+
+### `PrimitiveAppliedImmediateContext`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `immediate_context`
+  - `cancel_after_boundary_not_requested`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `PrimitiveAppliedImmediateContextCancelsAfterBoundary`
+- From: `ApplyingPrimitive`
+- On: `PrimitiveApplied`(run_id, admitted_content_shape, vision_enabled, image_tool_results_enabled)
+- Guards:
+  - `run_matches_active`
+  - `immediate_context`
+  - `boundary_cancel_requested`
+- Emits: `BoundaryApplied`, `RunCancelled`
+- To: `Cancelled`
+
+### `LlmReturnedToolCalls`
+- From: `CallingLlm`
+- On: `LlmReturnedToolCalls`(run_id, tool_count)
+- Guards:
+  - `run_matches_active`
+  - `tool_count_positive`
+- To: `WaitingForOps`
+
+### `RegisterPendingOps`
+- From: `WaitingForOps`
+- On: `RegisterPendingOps`(run_id, op_refs, barrier_operation_ids, has_barrier_ops)
+- Guards:
+  - `run_matches_active`
+  - `tool_calls_pending_positive`
+- To: `WaitingForOps`
+
+### `OpsBarrierSatisfied`
+- From: `WaitingForOps`
+- On: `OpsBarrierSatisfied`(run_id, operation_ids)
+- Guards:
+  - `run_matches_active`
+  - `barrier_not_yet_satisfied`
+  - `operation_ids_match_current_barrier_set`
+- To: `WaitingForOps`
+
+### `ToolCallsResolved`
+- From: `WaitingForOps`
+- On: `ToolCallsResolved`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `tool_calls_pending_positive`
+  - `pending_op_refs_registered`
+  - `barrier_satisfied`
+- Emits: `BoundaryApplied`
+- To: `DrainingBoundary`
+
+### `LlmReturnedTerminal`
+- From: `CallingLlm`
+- On: `LlmReturnedTerminal`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`
+- To: `DrainingBoundary`
+
+### `BoundaryContinue`
+- From: `DrainingBoundary`
+- On: `BoundaryContinue`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `conversation_turn`
+  - `cancel_after_boundary_not_requested`
+- Emits: `CheckCompaction`
+- To: `CallingLlm`
+
+### `BoundaryContinueCancelsAfterBoundary`
+- From: `DrainingBoundary`
+- On: `BoundaryContinue`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `conversation_turn`
+  - `boundary_cancel_requested`
+- Emits: `RunCancelled`
+- To: `Cancelled`
+
+### `BoundaryComplete`
+- From: `DrainingBoundary`
+- On: `BoundaryComplete`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `cancel_after_boundary_not_requested`
+- Emits: `RunCompleted`
+- To: `Completed`
+
+### `BoundaryCompleteCancelsAfterBoundary`
+- From: `DrainingBoundary`
+- On: `BoundaryComplete`(run_id)
+- Guards:
+  - `run_matches_active`
+  - `boundary_cancel_requested`
+- Emits: `RunCancelled`
+- To: `Cancelled`
+
+### `EnterExtraction`
+- From: `DrainingBoundary`
+- On: `EnterExtraction`(run_id, max_retries)
+- Guards:
+  - `run_matches_active`
+- To: `Extracting`
+
+### `ExtractionValidationPassed`
+- From: `Extracting`
+- On: `ExtractionValidationPassed`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunCompleted`
+- To: `Completed`
+
+### `ExtractionStart`
+- From: `Extracting`
+- On: `ExtractionStart`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `CheckCompaction`
+- To: `CallingLlm`
+
+### `ExtractionValidationFailed`
+- From: `Extracting`
+- On: `ExtractionValidationFailed`(run_id, error)
+- Guards:
+  - `run_matches_active`
+- Emits: `CheckCompaction`
+- To: `CallingLlm`
+
+### `RecoverableFailureFromCallingLlm`
+- From: `CallingLlm`
+- On: `RecoverableFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ErrorRecovery`
+
+### `RecoverableFailureFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `RecoverableFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ErrorRecovery`
+
+### `RecoverableFailureFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `RecoverableFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ErrorRecovery`
+
+### `RetryRequested`
+- From: `ErrorRecovery`
+- On: `RetryRequested`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `CheckCompaction`
+- To: `CallingLlm`
+
+### `FatalFailureFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `FatalFailureFromCallingLlm`
+- From: `CallingLlm`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `FatalFailureFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `FatalFailureFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `FatalFailureFromExtracting`
+- From: `Extracting`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `FatalFailureFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `FatalFailure`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunFailed`
+- To: `Failed`
+
+### `CancelNowFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
+### `CancelNowFromCallingLlm`
+- From: `CallingLlm`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
+### `CancelNowFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
+### `CancelNowFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
+### `CancelNowFromExtracting`
+- From: `Extracting`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
+### `CancelNowFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `CancelNow`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Cancelling`
+
+### `CancelAfterBoundaryFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ApplyingPrimitive`
+
+### `CancelAfterBoundaryFromCallingLlm`
+- From: `CallingLlm`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `CallingLlm`
+
+### `CancelAfterBoundaryFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `WaitingForOps`
+
+### `CancelAfterBoundaryFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `DrainingBoundary`
+
+### `CancelAfterBoundaryFromExtracting`
+- From: `Extracting`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Extracting`
+
+### `CancelAfterBoundaryFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `CancelAfterBoundary`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `ErrorRecovery`
+
+### `CancellationObserved`
+- From: `Cancelling`
+- On: `CancellationObserved`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `RunCancelled`
+- To: `Cancelled`
+
+### `TurnLimitReachedFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromCallingLlm`
+- From: `CallingLlm`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromExtracting`
+- From: `Extracting`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TurnLimitReachedFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `TurnLimitReached`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromCallingLlm`
+- From: `CallingLlm`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromExtracting`
+- From: `Extracting`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `BudgetExhaustedFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `BudgetExhausted`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromCallingLlm`
+- From: `CallingLlm`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromExtracting`
+- From: `Extracting`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `TimeBudgetExceededFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `TimeBudgetExceeded`(run_id)
+- Guards:
+  - `run_matches_active`
+- Emits: `BoundaryApplied`, `RunCompleted`
+- To: `Completed`
+
+### `ForceCancelNoRunFromReady`
+- From: `Ready`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromApplyingPrimitive`
+- From: `ApplyingPrimitive`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromCallingLlm`
+- From: `CallingLlm`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromWaitingForOps`
+- From: `WaitingForOps`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromDrainingBoundary`
+- From: `DrainingBoundary`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromExtracting`
+- From: `Extracting`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromErrorRecovery`
+- From: `ErrorRecovery`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `ForceCancelNoRunFromCancelling`
+- From: `Cancelling`
+- On: `ForceCancelNoRun`()
+- To: `Cancelled`
+
+### `AcknowledgeTerminalFromCompleted`
+- From: `Completed`
+- On: `AcknowledgeTerminal`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Ready`
+
+### `AcknowledgeTerminalFromFailed`
+- From: `Failed`
+- On: `AcknowledgeTerminal`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Ready`
+
+### `AcknowledgeTerminalFromCancelled`
+- From: `Cancelled`
+- On: `AcknowledgeTerminal`(run_id)
+- Guards:
+  - `run_matches_active`
+- To: `Ready`
+
+## Coverage
+### Code Anchors
+- `meerkat-core/src/agent/state.rs` — core turn loop state precursor
+- `meerkat-core/src/agent/runner.rs` — turn runner precursor
+- `meerkat-core/src/lifecycle/run_primitive.rs` — canonical run primitive input precursor
+- `meerkat-core/src/lifecycle/run_event.rs` — canonical run event/effect precursor
+
+### Scenarios
+- `conversation-run` — conversation run starts, applies boundaries, and completes cleanly
+- `tool-and-retry-loop` — tool calls and retry/yield semantics stay inside the turn owner
+- `cancel-and-fail` — cancelled and failed runs produce explicit terminal outcomes

@@ -82,7 +82,7 @@ This gives users a true one-command install path for Python.
 
 ### 3) TypeScript SDK distribution
 
-- `npm install @meerkat/sdk`
+- `npm install @rkat/sdk`
 - The SDK package remains JS-only; no native modules.
 - `MeerkatClient` resolves server binary with the same strategy:
   - env override path first
@@ -122,7 +122,7 @@ For MCP-style tooling (`claude mcp add`, `npx`), provide a CLI entrypoint packag
 ### Job 5 — Publish language packages
 
 - Publish Python wheel (`meerkat-sdk`) from same version
-- Publish TypeScript package (`@meerkat/sdk`, optional MCP wrapper package)
+- Publish TypeScript package (`@rkat/sdk`, optional MCP wrapper package)
 - Both packages support dry-run behavior in registry publish mode so you can validate metadata/build without actually uploading.
 
 ### Job 6 — Post-release smoke

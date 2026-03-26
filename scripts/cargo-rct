@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_cargo="${script_dir}/repo-cargo"
+
+# Cargo passes the subcommand name through to external cargo-* commands.
+if [[ "${1-}" == "rct" ]]; then
+  shift
+fi
+
+exec "${repo_cargo}" nextest run --workspace --show-progress none --status-level none --final-status-level fail "$@"

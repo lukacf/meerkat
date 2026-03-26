@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, Message, OutputSchema, ProviderMeta, StopReason, Usage,
+    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, ProviderMeta, StopReason, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -189,12 +189,16 @@ impl OpenAiClient {
                                     "type": "input_text",
                                     "text": text
                                 }),
-                                ContentBlock::Image {
-                                    media_type, data, ..
-                                } => serde_json::json!({
-                                    "type": "input_image",
-                                    "image_url": format!("data:{media_type};base64,{data}")
-                                }),
+                                ContentBlock::Image { media_type, data } => match data {
+                                    ImageData::Inline { data } => serde_json::json!({
+                                        "type": "input_image",
+                                        "image_url": format!("data:{media_type};base64,{data}")
+                                    }),
+                                    ImageData::Blob { .. } => serde_json::json!({
+                                        "type": "input_text",
+                                        "text": block.text_projection()
+                                    }),
+                                },
                                 _ => serde_json::json!({
                                     "type": "input_text",
                                     "text": block.text_projection()
@@ -349,8 +353,9 @@ impl LlmClient for OpenAiClient {
             let stream_result = if (200..=299).contains(&status_code) {
                 Ok(response.bytes_stream())
             } else {
+                let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
+                Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(512);
@@ -2268,8 +2273,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "iVBOR...".to_string(),
-                    source_path: Some("/tmp/img.png".to_string()),
+                    data: "iVBOR...".into(),
                 },
             ]))],
         );
@@ -2343,8 +2347,7 @@ mod tests {
                             },
                             ContentBlock::Image {
                                 media_type: "image/png".to_string(),
-                                data: "iVBOR...".to_string(),
-                                source_path: None,
+                                data: "iVBOR...".into(),
                             },
                         ],
                         false,

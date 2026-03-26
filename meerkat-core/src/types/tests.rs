@@ -1138,57 +1138,48 @@ mod content_block_tests {
     fn content_block_image_roundtrip() {
         let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "iVBOR".to_string(),
-            source_path: None,
+            data: "iVBOR".into(),
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "image");
         assert_eq!(json["media_type"], "image/png");
+        assert_eq!(json["source"], "inline");
         let parsed: ContentBlock = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, block);
     }
 
     #[test]
-    fn image_block_never_serializes_source_path() {
+    fn image_block_serializes_inline_source_discriminator() {
         let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "abc".to_string(),
-            source_path: Some("/secret/path".to_string()),
+            data: "abc".into(),
         };
         let json = serde_json::to_string(&block).unwrap();
         assert!(
-            !json.contains("source_path"),
-            "source_path key leaked: {json}"
-        );
-        assert!(
-            !json.contains("/secret/path"),
-            "source_path value leaked: {json}"
+            json.contains("\"source\":\"inline\""),
+            "inline discriminator missing: {json}"
         );
     }
 
     #[test]
-    fn image_block_deserializes_legacy_source_path() {
-        // Old persisted data that has source_path should still deserialize
-        let json =
-            r#"{"type":"image","media_type":"image/png","data":"abc","source_path":"/old/path"}"#;
-        let block: ContentBlock = serde_json::from_str(json).unwrap();
-        match block {
-            ContentBlock::Image { source_path, .. } => {
-                assert_eq!(source_path.as_deref(), Some("/old/path"));
-            }
-            other => panic!("expected Image block, got {other:?}"),
-        }
+    fn image_block_requires_source_discriminator() {
+        let json = r#"{"type":"image","media_type":"image/png","data":"abc"}"#;
+        assert!(serde_json::from_str::<ContentBlock>(json).is_err());
     }
 
     #[test]
-    fn content_block_image_omits_null_source_path() {
+    fn content_block_image_roundtrips_blob_source() {
         let block = ContentBlock::Image {
             media_type: "image/jpeg".to_string(),
-            data: "data".to_string(),
-            source_path: None,
+            data: crate::types::ImageData::Blob {
+                blob_id: crate::BlobId::new("sha256:abc"),
+            },
         };
         let json = serde_json::to_value(&block).unwrap();
-        assert!(json.get("source_path").is_none());
+        assert_eq!(json["source"], "blob");
+        assert_eq!(json["blob_id"], "sha256:abc");
+        let parsed: ContentBlock = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, block);
     }
 
     #[test]
@@ -1203,8 +1194,7 @@ mod content_block_tests {
     fn text_projection_image_excludes_source_path() {
         let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "d".to_string(),
-            source_path: Some("/tmp/x.png".to_string()),
+            data: "d".into(),
         };
         assert_eq!(block.text_projection().as_ref(), "[image: image/png]");
     }
@@ -1221,7 +1211,7 @@ mod content_block_tests {
     fn tool_result_deserialize_array() {
         let json = json!({
             "tool_use_id": "tc_1",
-            "content": [{"type": "text", "text": "desc"}, {"type": "image", "media_type": "image/png", "data": "abc"}],
+            "content": [{"type": "text", "text": "desc"}, {"type": "image", "media_type": "image/png", "source": "inline", "data": "abc"}],
             "is_error": false
         });
         let result: ToolResult = serde_json::from_value(json).unwrap();
@@ -1245,8 +1235,7 @@ mod content_block_tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "abc".to_string(),
-                    source_path: None,
+                    data: "abc".into(),
                 },
             ],
             false,
@@ -1265,8 +1254,7 @@ mod content_block_tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "d".to_string(),
-                    source_path: None,
+                    data: "d".into(),
                 },
                 ContentBlock::Text {
                     text: "line2".to_string(),
@@ -1284,7 +1272,6 @@ mod content_block_tests {
             vec![ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "d".into(),
-                source_path: None,
             }],
             false,
         );
@@ -1319,7 +1306,6 @@ mod content_block_tests {
             ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "d".into(),
-                source_path: None,
             },
         ]);
         let json = serde_json::to_value(&msg).unwrap();
@@ -1335,7 +1321,6 @@ mod content_block_tests {
             ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "d".into(),
-                source_path: None,
             },
         ]));
         let text = msg.as_indexable_text();
@@ -1360,7 +1345,6 @@ mod content_block_tests {
             ContentBlock::Image {
                 media_type: "image/png".into(),
                 data: "d".into(),
-                source_path: None,
             },
         ]);
         assert!(input.has_images());
@@ -1377,7 +1361,7 @@ mod content_block_tests {
     fn content_input_deserialize_array() {
         let input: ContentInput = serde_json::from_value(json!([
             {"type": "text", "text": "look"},
-            {"type": "image", "media_type": "image/png", "data": "abc"}
+            {"type": "image", "media_type": "image/png", "source": "inline", "data": "abc"}
         ]))
         .unwrap();
         assert!(input.has_images());
@@ -1428,8 +1412,7 @@ mod content_block_tests {
     fn content_block_display_image() {
         let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "abc".to_string(),
-            source_path: None,
+            data: "abc".into(),
         };
         assert_eq!(format!("{block}"), "[image: image/png]");
     }

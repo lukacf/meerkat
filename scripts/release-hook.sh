@@ -14,6 +14,7 @@ set -euo pipefail
 
 VERSION="${1:?Usage: release-hook.sh <version>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 
 # cargo-release runs this hook per-crate. Only execute once.
 SENTINEL="$ROOT/.release-hook-done"
@@ -43,7 +44,7 @@ echo "  Updated ContractVersion::CURRENT to $VERSION"
 
 # 3. Regenerate schemas + SDK types
 echo "==> Emitting schemas..."
-cargo run -p meerkat-contracts --features schema --bin emit-schemas
+"$CARGO" run -p meerkat-contracts --features schema --bin emit-schemas
 
 echo "==> Running SDK codegen..."
 python3 "$ROOT/tools/sdk-codegen/generate.py"

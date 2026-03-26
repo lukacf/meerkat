@@ -42,6 +42,7 @@ impl AsRef<str> for TaskId {
 }
 
 /// Status of a task in its lifecycle
+// RMAT-ALLOW(LifecycleSuspicionReport): tool-level task tracking, not a machine boundary
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")] // for Serialize
 pub enum TaskStatus {

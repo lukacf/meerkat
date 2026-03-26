@@ -173,8 +173,7 @@ impl BuiltinTool for ViewImageTool {
 
         Ok(ToolOutput::Blocks(vec![ContentBlock::Image {
             media_type: media_type.to_string(),
-            data,
-            source_path: Some(resolved.to_string_lossy().into_owned()),
+            data: meerkat_core::ImageData::Inline { data },
         }]))
     }
 }
@@ -260,8 +259,12 @@ mod tests {
                     } => {
                         assert_eq!(media_type, "image/png");
                         // Verify base64 round-trips
+                        let encoded = match data {
+                            meerkat_core::ImageData::Inline { data } => data,
+                            other => panic!("expected inline image data, got {other:?}"),
+                        };
                         let decoded = base64::engine::general_purpose::STANDARD
-                            .decode(data)
+                            .decode(encoded)
                             .unwrap();
                         assert_eq!(decoded, minimal_png());
                     }
@@ -362,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn view_image_includes_source_path() {
+    async fn view_image_returns_inline_image_data() {
         let dir = tempdir().unwrap();
         let img_path = dir.path().join("icon.png");
         std::fs::write(&img_path, minimal_png()).unwrap();
@@ -375,16 +378,8 @@ mod tests {
 
         match output {
             ToolOutput::Blocks(blocks) => match &blocks[0] {
-                ContentBlock::Image { source_path, .. } => {
-                    let sp = source_path.as_deref().expect("source_path should be set");
-                    assert!(
-                        sp.ends_with("icon.png"),
-                        "source_path should end with icon.png, got: {sp}"
-                    );
-                    assert!(
-                        PathBuf::from(sp).is_absolute(),
-                        "source_path should be absolute, got: {sp}"
-                    );
+                ContentBlock::Image { data, .. } => {
+                    assert!(matches!(data, meerkat_core::ImageData::Inline { .. }));
                 }
                 other => panic!("expected Image block, got {other:?}"),
             },

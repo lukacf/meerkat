@@ -3,44 +3,69 @@
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::{
-    ExternalToolUpdate, ToolCallView, ToolDef, ToolResult, agent::AgentToolDispatcher,
+    ExternalToolDelta, ExternalToolUpdate, ToolCallView, ToolDef, ToolResult,
+    agent::AgentToolDispatcher,
 };
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::RwLock as AsyncRwLock;
 
-use crate::{McpApplyResult, McpReloadTarget, McpRouter, McpServerConfig};
+use crate::{McpApplyResult, McpReloadTarget, McpRouter};
+use meerkat_core::McpServerConfig;
 
 /// Adapter that wraps an [`McpRouter`] to implement [`AgentToolDispatcher`].
 ///
-/// Caches tools from the router for synchronous access via `tools()`.
-/// Call [`refresh_tools()`](Self::refresh_tools) after router initialization
-/// to populate the cache.
+/// Tool visibility and routing come from the router's atomically published
+/// projection snapshot. The adapter keeps a best-effort fallback copy so
+/// `tools()` can stay non-blocking under lock contention.
 pub struct McpRouterAdapter {
-    router: RwLock<Option<McpRouter>>,
-    cached_tools: RwLock<Arc<[Arc<ToolDef>]>>,
+    router: AsyncRwLock<Option<McpRouter>>,
     has_pending: AtomicBool,
+    tools_cache: StdRwLock<Arc<[Arc<ToolDef>]>>,
 }
 
 impl McpRouterAdapter {
     pub fn new(router: McpRouter) -> Self {
         let has_pending = router.has_pending_or_notices();
+        let tools = AgentToolDispatcher::tools(&router);
         Self {
-            router: RwLock::new(Some(router)),
-            cached_tools: RwLock::new(Arc::from([])),
+            router: AsyncRwLock::new(Some(router)),
             has_pending: AtomicBool::new(has_pending),
+            tools_cache: StdRwLock::new(tools),
         }
     }
 
-    /// Refresh the cached tool list from the router.
+    fn set_tools_cache(&self, tools: Arc<[Arc<ToolDef>]>) {
+        match self.tools_cache.write() {
+            Ok(mut guard) => *guard = tools,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = tools;
+            }
+        }
+    }
+
+    fn cached_tools(&self) -> Arc<[Arc<ToolDef>]> {
+        match self.tools_cache.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn sync_router_projection(&self, router: &McpRouter) {
+        self.set_tools_cache(AgentToolDispatcher::tools(router));
+        self.has_pending
+            .store(router.has_pending_or_notices(), Ordering::Release);
+    }
+
+    /// Refresh projection state from the router.
     pub async fn refresh_tools(&self) -> Result<(), String> {
         let router = self.router.read().await;
         if let Some(router) = router.as_ref() {
-            let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
-            let mut cached = self.cached_tools.write().await;
-            *cached = tools;
+            self.sync_router_projection(router);
         }
         Ok(())
     }
@@ -55,6 +80,7 @@ impl McpRouterAdapter {
             router.shutdown().await;
         }
         self.has_pending.store(false, Ordering::Release);
+        self.set_tools_cache(Arc::from([]));
     }
 
     /// Stage an MCP server add operation.
@@ -64,6 +90,7 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         router.stage_add(config);
+        self.sync_router_projection(router);
         Ok(())
     }
 
@@ -74,6 +101,7 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         router.stage_remove(server_name);
+        self.sync_router_projection(router);
         Ok(())
     }
 
@@ -93,10 +121,11 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         router.stage_reload(target);
+        self.sync_router_projection(router);
         Ok(())
     }
 
-    /// Apply staged MCP operations and refresh the visible tool cache.
+    /// Apply staged MCP operations.
     pub async fn apply_staged(&self) -> Result<McpApplyResult, String> {
         let mut router = self.router.write().await;
         let router = router
@@ -106,14 +135,19 @@ impl McpRouterAdapter {
             .apply_staged()
             .await
             .map_err(|error| error.to_string())?;
-        let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
-        let mut cached = self.cached_tools.write().await;
-        *cached = tools;
-        self.has_pending.store(
-            result.pending_count > 0 || router.has_pending_or_notices(),
-            Ordering::Release,
-        );
+        self.sync_router_projection(router);
         Ok(result)
+    }
+
+    /// Drain background lifecycle completions as canonical MCP lifecycle actions.
+    pub async fn poll_lifecycle_actions(&self) -> Result<Vec<crate::McpLifecycleAction>, String> {
+        let mut router = self.router.write().await;
+        let router = router
+            .as_mut()
+            .ok_or_else(|| "MCP router has been shut down".to_string())?;
+        let actions = router.take_lifecycle_actions();
+        self.sync_router_projection(router);
+        Ok(actions)
     }
 
     /// Progress only Removing server finalization (drain/timeout) without applying staged ops.
@@ -123,9 +157,7 @@ impl McpRouterAdapter {
             .as_mut()
             .ok_or_else(|| "MCP router has been shut down".to_string())?;
         let delta = router.progress_removals().await;
-        let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
-        let mut cached = self.cached_tools.write().await;
-        *cached = tools;
+        self.sync_router_projection(router);
         Ok(delta)
     }
 
@@ -143,10 +175,7 @@ impl McpRouterAdapter {
     /// Returns notices for completed/failed servers. Useful for CLI `--wait-for-mcp`
     /// and SDK `wait_for_mcp` workflows where the caller needs tools to be available
     /// before the first agent turn.
-    pub async fn wait_until_ready(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Vec<meerkat_core::ExternalToolNotice> {
+    pub async fn wait_until_ready(&self, timeout: std::time::Duration) -> Vec<ExternalToolDelta> {
         let mut all_notices = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -198,13 +227,23 @@ impl McpRouterAdapter {
 #[async_trait]
 impl AgentToolDispatcher for McpRouterAdapter {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        match self.cached_tools.try_read() {
-            Ok(tools) => Arc::clone(&tools),
-            Err(_) => Arc::from([]),
+        match self.router.try_read() {
+            Ok(router) => match router.as_ref() {
+                Some(router) => {
+                    let tools = AgentToolDispatcher::tools(router);
+                    self.set_tools_cache(tools.clone());
+                    tools
+                }
+                None => self.cached_tools(),
+            },
+            Err(_) => self.cached_tools(),
         }
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let guard = self.router.read().await;
         match &*guard {
             Some(router) => {
@@ -214,7 +253,7 @@ impl AgentToolDispatcher for McpRouterAdapter {
                     .call_tool(call.name, &args)
                     .await
                     .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-                Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false))
+                Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
         }
@@ -233,17 +272,7 @@ impl AgentToolDispatcher for McpRouterAdapter {
 
         let update = router.take_external_updates();
 
-        // Refresh tool cache since new tools may have become visible.
-        if !update.notices.is_empty() {
-            let tools: Arc<[Arc<ToolDef>]> = router.list_tools().to_vec().into();
-            let mut cached = self.cached_tools.write().await;
-            *cached = tools;
-        }
-
-        self.has_pending.store(
-            !update.pending.is_empty() || router.has_pending_or_notices(),
-            Ordering::Release,
-        );
+        self.sync_router_projection(router);
         update
     }
 }
@@ -263,6 +292,10 @@ mod tests {
     }
 
     fn test_server_path() -> PathBuf {
+        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+            return PathBuf::from(target_dir).join("debug/mcp-test-server");
+        }
+
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace_root = manifest_dir.parent().expect("workspace root");
         workspace_root.join("target/debug/mcp-test-server")
@@ -281,8 +314,8 @@ mod tests {
         }
     }
 
-    fn test_server_config(name: &str, path: &Path) -> crate::McpServerConfig {
-        crate::McpServerConfig::stdio(
+    fn test_server_config(name: &str, path: &Path) -> meerkat_core::McpServerConfig {
+        meerkat_core::McpServerConfig::stdio(
             name,
             path.to_string_lossy().to_string(),
             vec![],
@@ -310,7 +343,7 @@ mod tests {
             "expected at least one notice from the connecting server"
         );
         assert!(
-            notices.iter().any(|n| n.server == "test-srv"),
+            notices.iter().any(|n| n.target == "test-srv"),
             "notice should reference the staged server"
         );
 

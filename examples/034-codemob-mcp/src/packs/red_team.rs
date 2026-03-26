@@ -35,12 +35,12 @@ impl Pack for RedTeamPack {
         skills.insert("judge-skill".into(),     SkillSource::Inline { content: include_str!("../../skills/judge.md").into() });
 
         let mut steps = IndexMap::new();
-        steps.insert(StepId::from("advocate_case"),  flow_step("advocate",  format!("Argue IN FAVOR:\n\n{task}{ctx}"), &[], 120_000));
-        steps.insert(StepId::from("adversary_case"), flow_step("adversary", format!("Argue AGAINST:\n\n{task}{ctx}"), &[], 120_000));
+        steps.insert(StepId::from("advocate_case"),  flow_step("advocate",  format!("Argue IN FAVOR:\n\n{task}{ctx}"), &[], 300_000));
+        steps.insert(StepId::from("adversary_case"), flow_step("adversary", format!("Argue AGAINST:\n\n{task}{ctx}"), &[], 300_000));
         steps.insert(StepId::from("judgment"), flow_step("judge",
             "Weigh both arguments and produce a balanced risk assessment with a clear recommendation.\n\n\
              ## Advocate (Pro)\n{{ steps.advocate_case }}\n\n## Adversary (Con)\n{{ steps.adversary_case }}".into(),
-            &["advocate_case", "adversary_case"], 120_000));
+            &["advocate_case", "adversary_case"], 300_000));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Adversarial risk assessment".into()), steps });

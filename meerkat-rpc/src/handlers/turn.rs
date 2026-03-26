@@ -15,11 +15,11 @@ use meerkat_core::skills::{SkillKey, SkillRef};
 
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
-#[cfg(feature = "mob")]
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::{RequestContext, request_action};
 use meerkat_runtime::SessionServiceRuntimeExt;
 
 // ---------------------------------------------------------------------------
@@ -43,9 +43,9 @@ pub struct StartTurnParams {
     /// Additional instruction sections prepended as system notices for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    /// Override host mode for this turn. Only applies to pending (deferred) sessions.
+    /// Override keep-alive mode for this turn. Only applies to pending (deferred) sessions.
     #[serde(default)]
-    pub host_mode: Option<bool>,
+    pub keep_alive: Option<bool>,
     // -- Per-turn overrides ---------------------------------------------------
     /// Override model. On pending sessions, sets the model before materialization.
     /// On materialized sessions, hot-swaps the LLM client for the remainder of the session.
@@ -104,7 +104,7 @@ fn canonical_skill_ids(
 /// Collect per-turn override fields into a struct for `SessionRuntime::start_turn`.
 #[derive(Debug, Default)]
 pub struct TurnOverrides {
-    pub host_mode: Option<bool>,
+    pub keep_alive: Option<bool>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub max_tokens: Option<u32>,
@@ -116,7 +116,7 @@ pub struct TurnOverrides {
 
 impl TurnOverrides {
     fn is_empty(&self) -> bool {
-        self.host_mode.is_none()
+        self.keep_alive.is_none()
             && self.model.is_none()
             && self.provider.is_none()
             && self.max_tokens.is_none()
@@ -134,6 +134,7 @@ pub async fn handle_start(
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
     runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
+    request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let params: StartTurnParams = match parse_params(params) {
         Ok(p) => p,
@@ -144,6 +145,25 @@ pub async fn handle_start(
         Ok(sid) => sid,
         Err(resp) => return resp,
     };
+
+    if let Some(context) = request_context.as_ref() {
+        let runtime = Arc::clone(&runtime);
+        let session_id = session_id.clone();
+        context.replace_cancel_action(request_action(move || {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move {
+                let _ = runtime.interrupt(&session_id).await;
+            }
+        }));
+        if context.run_cancel_if_requested().await {
+            return RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            );
+        }
+    }
 
     // Set up event forwarding. The spawned task exits naturally when `event_tx`
     // is dropped at the end of the turn (the session task holds the only sender).
@@ -170,7 +190,7 @@ pub async fn handle_start(
     };
 
     let overrides = TurnOverrides {
-        host_mode: params.host_mode,
+        keep_alive: params.keep_alive,
         model: params.model,
         provider: params.provider,
         max_tokens: params.max_tokens,

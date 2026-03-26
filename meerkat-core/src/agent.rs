@@ -11,27 +11,26 @@ mod runner;
 pub mod skills;
 mod state;
 
-pub use runner::RuntimeInputSink;
-
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
     StreamError, StreamScope, TrustedPeerSpec,
 };
+use crate::compact::SessionCompactionCadence;
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
+use crate::event::ExternalToolDelta;
 use crate::hooks::HookEngine;
 use crate::retry::RetryPolicy;
 use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
 use crate::state::LoopState;
-use crate::sub_agent::SubAgentManager;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_scope::ToolScope;
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, ToolCallView,
-    ToolDef, ToolResult, Usage,
+    ToolDef, Usage,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -67,6 +66,13 @@ pub trait AgentLlmClient: Send + Sync {
 
     /// Get the provider name
     fn provider(&self) -> &'static str;
+
+    /// Get the current effective model identifier.
+    ///
+    /// Used by the agent loop for profile-default resolution (e.g., call timeout
+    /// defaults that vary per model family). Must reflect the current model even
+    /// after hot-swap.
+    fn model(&self) -> &str;
 
     /// Compile an output schema for this provider.
     ///
@@ -120,28 +126,13 @@ impl LlmStreamResult {
     }
 }
 
-/// A notice about an externally-completed tool configuration change.
-///
-/// Produced by background MCP connection tasks and consumed by the agent loop.
-#[derive(Debug, Clone)]
-pub struct ExternalToolNotice {
-    /// Server or source name.
-    pub server: String,
-    /// What kind of operation completed.
-    pub operation: crate::event::ToolConfigChangeOperation,
-    /// Human-readable status (e.g. "activated", "failed").
-    pub status: String,
-    /// Number of tools provided (on success).
-    pub tool_count: Option<usize>,
-}
-
 /// Result of polling for external tool updates.
 ///
 /// Returned by [`AgentToolDispatcher::poll_external_updates`].
 #[derive(Debug, Clone, Default)]
 pub struct ExternalToolUpdate {
     /// Notices about completed background operations since last poll.
-    pub notices: Vec<ExternalToolNotice>,
+    pub notices: Vec<ExternalToolDelta>,
     /// Names of servers still connecting in the background.
     pub pending: Vec<String>,
 }
@@ -152,9 +143,15 @@ pub struct ExternalToolUpdate {
 pub trait AgentToolDispatcher: Send + Sync {
     /// Get available tool definitions
     fn tools(&self) -> Arc<[Arc<ToolDef>]>;
-    /// Execute a tool call
-    async fn dispatch(&self, call: ToolCallView<'_>)
-    -> Result<ToolResult, crate::error::ToolError>;
+    /// Execute a tool call, returning the transcript result and any async operations.
+    ///
+    /// The `ToolDispatchOutcome` separates transcript data (`result`) from
+    /// execution metadata (`async_ops`). Most tools return no async ops;
+    /// use `ToolDispatchOutcome::from(result)` for synchronous tools.
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError>;
 
     /// Poll for external tool updates from background operations (e.g. async MCP loading).
     ///
@@ -190,6 +187,32 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn supports_wait_interrupt(&self) -> bool {
         false
     }
+
+    /// Bind a session-canonical ops registry into this dispatcher.
+    ///
+    /// Dispatchers that emit session-visible `AsyncOpRef`s must route those
+    /// operation IDs into the bound registry. Default returns Unsupported.
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        _registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        _owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        Err(OpsLifecycleBindError::Unsupported)
+    }
+
+    /// Whether this dispatcher supports ops lifecycle binding.
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        false
+    }
+}
+
+/// Error from [`AgentToolDispatcher::bind_ops_lifecycle`].
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum OpsLifecycleBindError {
+    #[error("ops lifecycle binding is unsupported")]
+    Unsupported,
+    #[error("dispatcher has shared ownership and cannot be rebound")]
+    SharedOwnership,
 }
 
 /// A tool dispatcher that filters tools based on a policy
@@ -234,7 +257,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
-    ) -> Result<ToolResult, crate::error::ToolError> {
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         if !self.allowed_tools.contains(call.name) {
             return Err(crate::error::ToolError::access_denied(call.name));
         }
@@ -261,6 +284,24 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 
     fn supports_wait_interrupt(&self) -> bool {
         self.inner.supports_wait_interrupt()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let rebound_inner = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+        Ok(Arc::new(FilteredToolDispatcher {
+            inner: rebound_inner,
+            allowed_tools: owned.allowed_tools,
+            filtered_tools: owned.filtered_tools,
+        }))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.inner.supports_ops_lifecycle_binding()
     }
 }
 
@@ -422,6 +463,8 @@ pub trait CommsRuntime: Send + Sync {
                     blocks: None,
                 },
                 rendered_text: text,
+                handling_mode: crate::types::HandlingMode::Queue,
+                render_metadata: None,
             })
             .collect()
     }
@@ -448,7 +491,7 @@ pub trait CommsRuntime: Send + Sync {
     /// Signal that an interaction has reached a terminal state (complete or failed).
     ///
     /// Implementations should transition the reservation FSM to `Completed` and
-    /// clean up registry entries. Called from the host-mode loop after sending
+    /// clean up registry entries. Called from the keep-alive loop after sending
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
 
@@ -494,7 +537,6 @@ where
     budget: Budget,
     retry_policy: RetryPolicy,
     state: LoopState,
-    sub_agent_manager: Arc<SubAgentManager>,
     depth: u32,
     pub(super) comms_runtime: Option<Arc<dyn CommsRuntime>>,
     pub(super) hook_engine: Option<Arc<dyn HookEngine>>,
@@ -503,8 +545,8 @@ where
     pub(crate) compactor: Option<Arc<dyn crate::compact::Compactor>>,
     /// Input tokens from the last LLM response (for compaction trigger).
     pub(crate) last_input_tokens: u64,
-    /// Turn number when compaction last occurred.
-    pub(crate) last_compaction_turn: Option<u32>,
+    /// Session-scoped compaction cadence tracked across runs.
+    pub(crate) compaction_cadence: SessionCompactionCadence,
     /// Optional memory store for indexing compaction discards.
     pub(crate) memory_store: Option<Arc<dyn crate::memory::MemoryStore>>,
     /// Optional skill engine for per-turn `/skill-ref` activation.
@@ -521,36 +563,36 @@ where
     /// Used by run methods when no per-call event channel is provided.
     pub(crate) default_event_tx: Option<tokio::sync::mpsc::Sender<crate::event::AgentEvent>>,
     /// Optional session checkpointer for host-mode persistence.
+    #[allow(dead_code)] // Used by persistent session service; Phase 9-10 wiring pending
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
-    /// Optional default scoped event channel configured at build time.
-    /// Used by nested sub-agent forwarding to emit attributed events.
-    pub(crate) default_scoped_event_tx:
-        Option<tokio::sync::mpsc::Sender<crate::event::ScopedAgentEvent>>,
-    /// Base scope path for nested scoped event forwarding.
-    pub(crate) default_scope_path: Vec<crate::event::StreamScopeFrame>,
+    /// Optional blob store used to hydrate image refs at execution seams.
+    pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
+    /// Run-scoped diagnostic stash for originating hard-failure errors.
+    ///
+    /// When an exhausted hard LLM-call failure (e.g., CallTimeout, NetworkTimeout)
+    /// routes through machine-owned FatalFailure, the originating `AgentError` is
+    /// stashed here so `build_result()` can surface it instead of a generic
+    /// `TerminalFailure`. This is ephemeral, consumed once, and non-authoritative
+    /// for terminal phase/classification.
+    pub(crate) pending_fatal_diagnostic: Option<AgentError>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled
     pub(crate) silent_comms_intents: Vec<String>,
-    /// Runtime policy for inline peer lifecycle context injection.
-    pub(crate) inline_peer_notification_policy: InlinePeerNotificationPolicy,
-    /// Whether peer lifecycle updates are currently suppressed due to threshold policy.
-    /// Used to inject suppression notice only on transition into suppressed mode.
-    pub(crate) peer_notification_suppression_active: bool,
-    /// When true, the host loop owns the inbox drain cycle.
-    /// `drain_comms_inbox()` becomes a no-op to avoid stealing
-    /// interaction-scoped messages through the legacy path.
-    pub(crate) host_drain_active: bool,
-    /// Optional sink for routing host-mode new-run work through the runtime.
-    /// When set, passthrough interactions and continuation runs use the sink
-    /// instead of calling `self.run()` directly.
-    pub(crate) runtime_input_sink: Option<Arc<dyn RuntimeInputSink>>,
-    /// True after the agentic loop completes when `output_schema` is set.
-    /// Causes the next `CallingLlm` iteration to use extraction parameters
-    /// (no tools, temperature 0.0, structured_output provider params).
-    pub(crate) extraction_mode: bool,
-    /// Number of extraction attempts so far (for retry logic).
-    pub(crate) extraction_attempts: u32,
+    /// Optional shared lifecycle registry for async operations.
+    ///
+    /// When set, the agent loop waits on the exact turn-local operation IDs
+    /// registered in `turn_authority.pending_op_refs()`.
+    pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
+    /// Machine authority for turn-execution state transitions (RMAT).
+    pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
+    /// Optional resolver for model-specific operational defaults (e.g., call timeout).
+    /// Consulted at each LLM call for hot-swap-aware profile default resolution.
+    pub(crate) model_defaults_resolver:
+        Option<Arc<dyn crate::model_defaults::ModelOperationalDefaultsResolver>>,
+    /// Explicit call-timeout override from the build/config composition seam.
+    /// Takes precedence over profile-derived defaults.
+    pub(crate) call_timeout_override: crate::config::CallTimeoutOverride,
     /// Populated on successful extraction validation — carried into RunResult.
     pub(crate) extraction_result: Option<serde_json::Value>,
     /// Schema warnings from compilation — carried into RunResult.
@@ -640,7 +682,8 @@ mod tests {
     fn test_filtered_dispatcher_bind_wait_interrupt_forwards() {
         use super::{AgentToolDispatcher, FilteredToolDispatcher};
         use crate::error::ToolError;
-        use crate::types::{ToolCallView, ToolDef, ToolResult};
+        use crate::ops::ToolDispatchOutcome;
+        use crate::types::{ToolCallView, ToolDef};
         use serde_json::json;
 
         struct MockTool;
@@ -656,7 +699,10 @@ mod tests {
                 })]
                 .into()
             }
-            async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
                 Err(ToolError::not_found("test"))
             }
         }
@@ -680,7 +726,8 @@ mod tests {
     fn test_filtered_dispatcher_bind_wait_interrupt_shared_ownership() {
         use super::{AgentToolDispatcher, FilteredToolDispatcher};
         use crate::error::ToolError;
-        use crate::types::{ToolCallView, ToolDef, ToolResult};
+        use crate::ops::ToolDispatchOutcome;
+        use crate::types::{ToolCallView, ToolDef};
         use serde_json::json;
 
         struct MockTool;
@@ -696,7 +743,10 @@ mod tests {
                 })]
                 .into()
             }
-            async fn dispatch(&self, _call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            async fn dispatch(
+                &self,
+                _call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
                 Err(ToolError::not_found("test"))
             }
         }

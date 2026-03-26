@@ -5,6 +5,8 @@ mod mcp;
 mod stdin_events;
 mod stream_renderer;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
@@ -12,11 +14,11 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
-    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, ResumeOverrideMask, SessionBuildOptions, SessionError, SessionQuery,
+    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
+    AgentEvent, BlobId, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
     StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
@@ -34,7 +36,7 @@ use meerkat_mob_pack::pack::{
 use meerkat_mob_pack::targz::extract_targz_safe;
 use meerkat_mob_pack::trust::{TrustPolicy, load_trusted_signers, verify_pack_trust};
 use meerkat_tools::find_project_root;
-use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -123,11 +125,189 @@ fn spawn_scoped_event_handler(
     })
 }
 
+struct CliOutputPipeline {
+    event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
+    scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
+    verbose_task: Option<tokio::task::JoinHandle<()>>,
+    stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>>,
+    primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CliOutputPipeline {
+    fn new(
+        stream: bool,
+        verbose: bool,
+        stream_policy: Option<stream_renderer::StreamRenderPolicy>,
+        primary_scope_path: Vec<StreamScopeFrame>,
+    ) -> anyhow::Result<Self> {
+        let mut pipeline = Self {
+            event_tx: None,
+            scoped_event_tx: None,
+            verbose_task: None,
+            stream_task: None,
+            primary_to_scoped_bridge_task: None,
+        };
+
+        if stream {
+            let policy =
+                stream_policy.ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
+            let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
+            let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
+            let bridge_scoped_tx = scoped_tx.clone();
+            pipeline.primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
+                while let Some(event) = primary_rx.recv().await {
+                    let scoped = ScopedAgentEvent::new(primary_scope_path.clone(), event.payload);
+                    if bridge_scoped_tx.send(scoped).await.is_err() {
+                        break;
+                    }
+                }
+            }));
+
+            pipeline.event_tx = Some(primary_tx);
+            pipeline.scoped_event_tx = Some(scoped_tx);
+            pipeline.stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
+        } else if verbose {
+            let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
+            pipeline.event_tx = Some(tx);
+            pipeline.verbose_task = Some(spawn_verbose_event_handler(rx, verbose));
+        }
+
+        Ok(pipeline)
+    }
+
+    fn event_sender(&self) -> Option<mpsc::Sender<EventEnvelope<AgentEvent>>> {
+        self.event_tx.clone()
+    }
+
+    async fn shutdown_after<F>(self, after_sender_drop: F) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let Self {
+            event_tx,
+            scoped_event_tx,
+            verbose_task,
+            stream_task,
+            primary_to_scoped_bridge_task,
+        } = self;
+
+        drop(event_tx);
+        drop(scoped_event_tx);
+
+        let mut shutdown_err = after_sender_drop.await.err();
+
+        if let Some(task) = primary_to_scoped_bridge_task
+            && let Err(err) = task.await
+        {
+            accumulate_anyhow_error(
+                &mut shutdown_err,
+                anyhow::anyhow!("primary stream bridge task failed: {err}"),
+            );
+        }
+
+        if let Some(task) = verbose_task
+            && let Err(err) = task.await
+        {
+            accumulate_anyhow_error(
+                &mut shutdown_err,
+                anyhow::anyhow!("verbose event task failed: {err}"),
+            );
+        }
+
+        if let Some(task) = stream_task {
+            match task.await {
+                Ok(summary) => {
+                    println!();
+                    if let Err(err) = validate_stream_render_summary(&summary) {
+                        accumulate_anyhow_error(&mut shutdown_err, err);
+                    }
+                }
+                Err(err) => accumulate_anyhow_error(
+                    &mut shutdown_err,
+                    anyhow::anyhow!("stream renderer task failed: {err}"),
+                ),
+            }
+        }
+
+        if let Some(err) = shutdown_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn accumulate_anyhow_error(slot: &mut Option<anyhow::Error>, err: anyhow::Error) {
+    match slot.take() {
+        Some(existing) => {
+            *slot = Some(anyhow::anyhow!(
+                "{existing}; additionally failed during shutdown: {err}"
+            ));
+        }
+        None => {
+            *slot = Some(err);
+        }
+    }
+}
+
+fn completion_outcome_to_result(
+    outcome: meerkat_runtime::completion::CompletionOutcome,
+) -> anyhow::Result<meerkat_core::types::RunResult> {
+    match outcome {
+        meerkat_runtime::completion::CompletionOutcome::Completed(result) => Ok(result),
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+            Err(anyhow::anyhow!("turn completed without result"))
+        }
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+            Err(anyhow::anyhow!("turn abandoned: {reason}"))
+        }
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            Err(anyhow::anyhow!("runtime terminated: {reason}"))
+        }
+    }
+}
+
+async fn finalize_cli_runtime_backed_turn<T, F>(
+    output_pipeline: CliOutputPipeline,
+    turn_result: anyhow::Result<T>,
+    after_sender_drop: F,
+) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let shutdown_result = output_pipeline.shutdown_after(after_sender_drop).await;
+    match (turn_result, shutdown_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Ok(_), Err(shutdown_err)) => Err(shutdown_err),
+        (Err(turn_err), Ok(())) => Err(turn_err),
+        (Err(turn_err), Err(shutdown_err)) => Err(anyhow::anyhow!(
+            "{turn_err}; additionally failed during CLI shutdown: {shutdown_err}"
+        )),
+    }
+}
+
+fn validate_stream_render_summary(
+    summary: &stream_renderer::StreamRenderSummary,
+) -> anyhow::Result<()> {
+    if let Some(focus) = &summary.focus_requested
+        && !summary.focus_seen
+    {
+        let discovered = if summary.discovered_scopes.is_empty() {
+            "<none>".to_string()
+        } else {
+            summary.discovered_scopes.join(", ")
+        };
+        anyhow::bail!(
+            "stream focus '{focus}' did not match any emitted scope (discovered scopes: {discovered})"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ToolPresetResolution {
     builtins: bool,
     shell: bool,
-    subagents: bool,
     memory: bool,
     mob: bool,
 }
@@ -138,28 +318,24 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
         ToolPreset::Safe => ToolPresetResolution {
             builtins: true,
             shell: false,
-            subagents: true,
             memory: false,
             mob: false,
         },
         ToolPreset::Workspace => ToolPresetResolution {
             builtins: true,
             shell: true,
-            subagents: true,
             memory: false,
             mob: false,
         },
         ToolPreset::Full => ToolPresetResolution {
             builtins: true,
             shell: true,
-            subagents: true,
             memory: true,
             mob: true,
         },
         ToolPreset::None => ToolPresetResolution {
             builtins: false,
             shell: false,
-            subagents: false,
             memory: false,
             mob: false,
         },
@@ -315,7 +491,7 @@ async fn init_project_config() -> anyhow::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "rkat")]
+#[command(name = "rkat", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
 #[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
 #[command(
@@ -632,6 +808,12 @@ enum Commands {
         command: SessionCommands,
     },
 
+    /// Blob management
+    Blob {
+        #[command(subcommand)]
+        command: BlobCommands,
+    },
+
     /// Realm lifecycle management
     Realms {
         #[command(subcommand)]
@@ -773,6 +955,21 @@ enum SessionCommands {
     Interrupt {
         /// Session ID to interrupt
         session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlobCommands {
+    /// Fetch raw blob bytes or blob payload JSON.
+    Get {
+        /// Blob ID to fetch.
+        blob_id: String,
+        /// Write raw bytes to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Print the blob payload as JSON instead of raw bytes.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -969,6 +1166,87 @@ enum MobCommands {
     },
     /// Show JSON status for a flow run.
     FlowStatus { mob_id: String, run_id: String },
+    /// Spawn a short-lived helper member, wait for it to finish, and print the result.
+    SpawnHelper {
+        /// Mob ID to spawn into
+        mob_id: String,
+        /// Task prompt for the helper
+        prompt: String,
+        /// Meerkat ID for the helper (auto-generated if omitted)
+        #[arg(long)]
+        meerkat_id: Option<String>,
+        /// Profile to use
+        #[arg(long)]
+        profile: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fork from an existing member's context, wait for completion, and print the result.
+    ForkHelper {
+        /// Mob ID
+        mob_id: String,
+        /// Source member to fork from
+        source_member: String,
+        /// Task prompt for the forked helper
+        prompt: String,
+        /// Meerkat ID for the helper (auto-generated if omitted)
+        #[arg(long)]
+        meerkat_id: Option<String>,
+        /// Profile to use
+        #[arg(long)]
+        profile: Option<String>,
+        /// Fork context type (full-history or last-messages)
+        #[arg(long, default_value = "full-history")]
+        fork_context: String,
+        /// Number of last messages (when fork-context is last-messages)
+        #[arg(long)]
+        last_messages: Option<u32>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Get execution status snapshot for a mob member.
+    MemberStatus {
+        /// Mob ID
+        mob_id: String,
+        /// Meerkat ID of the member
+        meerkat_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Force-cancel a member's in-flight turn.
+    ForceCancel {
+        /// Mob ID
+        mob_id: String,
+        /// Meerkat ID of the member to cancel
+        meerkat_id: String,
+    },
+    /// Retire and respawn a mob member with the same profile.
+    Respawn {
+        /// Mob ID
+        mob_id: String,
+        /// Meerkat ID to respawn
+        meerkat_id: String,
+        /// Initial message for the respawned member
+        #[arg(long)]
+        initial_message: Option<String>,
+    },
+    /// Wait for autonomous kickoff turns to complete.
+    WaitKickoff {
+        /// Mob ID
+        mob_id: String,
+        /// Restrict wait to specific members (repeatable)
+        #[arg(long = "member")]
+        member_ids: Vec<String>,
+        /// Timeout in milliseconds (defaults to 10 minutes)
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Web deployment commands.
     Web {
         #[command(subcommand)]
@@ -1028,6 +1306,7 @@ impl From<CliMcpScope> for Option<McpScope> {
 }
 
 #[tokio::main]
+#[allow(clippy::large_futures)]
 async fn main() -> anyhow::Result<ExitCode> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
@@ -1068,7 +1347,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             stdin,
             line_format,
         } => {
-            handle_run_command(
+            Box::pin(handle_run_command(
                 prompt,
                 system_prompt,
                 model,
@@ -1098,7 +1377,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 stdin,
                 line_format,
                 &cli_scope,
-            )
+            ))
             .await
         }
         Commands::Resume {
@@ -1193,6 +1472,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 interrupt_session(&session_id, &cli_scope).await
             }
         },
+        Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
         Commands::Mcp { command } => handle_mcp_command(command).await,
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
@@ -1230,6 +1510,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::large_futures)]
 async fn handle_run_command(
     mut prompt: String,
     system_prompt: Option<String>,
@@ -1317,7 +1598,6 @@ async fn handle_run_command(
                 CommsOverrides::default(),
                 tooling.builtins,
                 tooling.shell,
-                tooling.subagents,
                 tooling.memory,
                 tooling.mob,
                 wait_for_mcp,
@@ -2127,10 +2407,11 @@ async fn create_mcp_tools(
 
         let notices = adapter.wait_until_ready(total_timeout).await;
         for notice in &notices {
-            if notice.status.starts_with("failed") {
+            if notice.status_text().starts_with("failed") {
                 eprintln!(
                     "Warning: MCP server '{}' failed: {}",
-                    notice.server, notice.status
+                    notice.target,
+                    notice.status_text()
                 );
             }
         }
@@ -2145,8 +2426,8 @@ async fn create_mcp_tools(
     Ok(Some(adapter))
 }
 
-fn resolve_host_mode(requested: bool) -> anyhow::Result<bool> {
-    meerkat::surface::resolve_host_mode(requested).map_err(|e| anyhow::anyhow!(e))
+fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
+    meerkat::surface::resolve_keep_alive(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Load MCP tools as an external tool dispatcher for session build options.
@@ -2207,6 +2488,7 @@ struct CliRuntimeExecutor {
         Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
     session_id: meerkat_core::types::SessionId,
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
+    event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
 fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
@@ -2255,11 +2537,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         let prompt = extract_cli_prompt(&primitive);
         let turn_req = StartTurnRequest {
             prompt: prompt.into(),
-            event_tx: None,
-            host_mode: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.host_mode)
-                .unwrap_or(false),
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: self.event_tx.clone(),
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),
@@ -2378,11 +2659,10 @@ impl SessionService for RunMobSessionService {
         req: CreateSessionRequest,
     ) -> Result<meerkat_core::types::RunResult, meerkat_core::service::SessionError> {
         let model = req.model.clone();
-        let host_mode = req.host_mode;
         let started = std::time::Instant::now();
         tracing::info!(
             target: "mob_tools",
-            "RunMobSessionService::create_session start model={model} host_mode={host_mode}"
+            "RunMobSessionService::create_session start model={model}"
         );
         let out = self.inner.create_session(req).await;
         match &out {
@@ -2682,7 +2962,6 @@ async fn build_deploy_mob_session_service(
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
-        .subagents(config.tools.subagents_enabled)
         .memory(true);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
@@ -2690,13 +2969,14 @@ async fn build_deploy_mob_session_service(
     if let Some(user_root) = scope.user_config_root.clone() {
         factory = factory.user_config_root(user_root);
     }
-    let (store, runtime_store) = persistence.into_parts();
+    let (store, runtime_store, blob_store) = persistence.into_parts();
     let builder = FactoryAgentBuilder::new(factory, config);
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
         64,
         store,
         runtime_store,
+        blob_store,
     ));
     Ok(Arc::new(MobCliSessionService::new(service)))
 }
@@ -2874,12 +3154,11 @@ async fn run_agent(
     comms_overrides: CommsOverrides,
     enable_builtins: bool,
     enable_shell: bool,
-    enable_subagents: bool,
     enable_memory: bool,
     enable_mob: bool,
     wait_for_mcp: bool,
     verbose: bool,
-    host_mode: bool,
+    keep_alive: bool,
     stdin_events: bool,
     line_format: LineFormat,
     config: &Config,
@@ -2895,7 +3174,7 @@ async fn run_agent(
     hooks_override: HookRunOverrides,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    let host_mode = resolve_host_mode(host_mode)?;
+    let keep_alive = resolve_keep_alive(keep_alive)?;
     let effective_mob = enable_mob || config.tools.mob_enabled;
     let canonical_skill_refs = canonical_skill_keys(config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
@@ -2911,48 +3190,10 @@ async fn run_agent(
         )
     };
     let session = Session::new();
+    let session_id = session.id().clone();
     let primary_scope_path = vec![StreamScopeFrame::Primary {
-        session_id: session.id().to_string(),
+        session_id: session_id.to_string(),
     }];
-
-    // Create event channels:
-    // - primary AgentEvent channel for the running session turn
-    // - optional scoped stream path for mux/focus attribution
-    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
-    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
-    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
-        None;
-    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
-
-    if stream {
-        let policy = stream_policy
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("internal stream policy missing"))?;
-        let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
-        let bridge_scoped_tx = scoped_tx.clone();
-        let scope_path_for_bridge = primary_scope_path.clone();
-        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
-            while let Some(event) = primary_rx.recv().await {
-                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
-                if bridge_scoped_tx.send(scoped).await.is_err() {
-                    break;
-                }
-            }
-        }));
-
-        event_tx = Some(primary_tx);
-        scoped_event_tx = Some(scoped_tx);
-        stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy));
-    } else if verbose {
-        let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        event_tx = Some(tx);
-        verbose_task = Some(spawn_verbose_event_handler(rx, verbose));
-    }
-
-    // Load optional MCP tools; we compose these with CLI-local mob tools below.
-    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
 
     // Resolve comms_name for the factory
     let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
@@ -2976,8 +3217,7 @@ async fn run_agent(
         )
         .project_root(project_root)
         .builtins(enable_builtins)
-        .shell(enable_shell)
-        .subagents(enable_subagents);
+        .shell(enable_shell);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3002,12 +3242,9 @@ async fn run_agent(
     // Build the parent session service.
     let service = build_cli_service(factory, config.clone());
 
-    // Create ephemeral runtime adapter for single-authority execution.
-    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-
-    if host_mode {
+    if keep_alive {
         eprintln!(
-            "Running in host mode{} (Ctrl+C to exit)...",
+            "Running in keep-alive mode{} (Ctrl+C to exit)...",
             if verbose { " with verbose output" } else { "" }
         );
     }
@@ -3023,8 +3260,39 @@ async fn run_agent(
     } else {
         None
     };
+    // Load optional MCP tools immediately before external tool composition so
+    // later early-return windows cannot skip adapter shutdown.
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
+    let external_tools =
+        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
+            Ok(tools) => tools,
+            Err(err) => {
+                shutdown_mcp(&mcp_adapter).await;
+                return Err(err);
+            }
+        };
+
+    let parsed_app_context = app_context
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?;
+
+    let output_pipeline =
+        CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
+
+    // Create ephemeral runtime adapter for single-authority execution.
+    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    // Pre-register session so we can obtain the canonical ops lifecycle registry
+    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
+    runtime_adapter.register_session(session_id.clone()).await;
+    let ops_lifecycle: Option<
+        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    > = runtime_adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
 
     let build = SessionBuildOptions {
         provider: Some(provider.as_core()),
@@ -3038,11 +3306,8 @@ async fn run_agent(
         provider_params,
         external_tools,
         llm_client_override: None,
-        scoped_event_tx: scoped_event_tx.clone(),
-        scoped_event_path: scoped_event_tx.as_ref().map(|_| primary_scope_path.clone()),
         override_builtins: None,
         override_shell: None,
-        override_subagents: None,
         override_memory: if enable_memory { Some(true) } else { None },
         override_mob: Some(effective_mob),
         preload_skills,
@@ -3050,21 +3315,21 @@ async fn run_agent(
         instance_id: scope.instance_id.clone(),
         backend: Some(manifest.backend.as_str().to_string()),
         config_generation: None,
+        keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
-        app_context: app_context
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?,
+        app_context: parsed_app_context,
         additional_instructions: if instructions.is_empty() {
             None
         } else {
             Some(instructions)
         },
         shell_env: None,
-        runtime_adapter_for_sink: Some(runtime_adapter.clone()),
+        ops_lifecycle_override: ops_lifecycle,
+        resume_override_mask: Default::default(),
+        call_timeout_override: Default::default(),
+        blob_store_override: None,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3073,14 +3338,19 @@ async fn run_agent(
         Some(std::collections::BTreeMap::from_iter(labels))
     };
 
+    // Reject reserved mob labels.
+    meerkat::surface::validate_raw_labels(parsed_labels.as_ref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     // Route through SessionService::create_session()
     let create_req = CreateSessionRequest {
         model: model.to_string(),
         prompt: prompt.to_string().into(),
+        render_metadata: None,
         system_prompt,
         max_tokens: Some(max_tokens),
-        event_tx: event_tx.clone(),
-        host_mode,
+        event_tx: output_pipeline.event_sender(),
+
         skill_references: if run_initial_turn_during_create {
             canonical_skill_refs.clone()
         } else {
@@ -3092,185 +3362,124 @@ async fn run_agent(
         labels: parsed_labels,
     };
 
-    // Warn if --stdin is used without --host (it has no effect)
+    // Warn if --stdin is used without keep-alive (it has no effect)
     #[cfg(feature = "comms")]
-    if stdin_events && !host_mode {
-        eprintln!("Warning: --stdin has no effect without --host");
+    if stdin_events && !keep_alive {
+        eprintln!("Warning: --stdin has no effect without keep-alive mode");
     }
 
-    // If --stdin is enabled with --host, spawn create_session in the background
-    // so we can start the stdin reader concurrently. The session is registered
-    // (and the EventInjector is available) before the first turn blocks.
+    // `create_session` always defers the initial turn in this path, so we can
+    // register the runtime executor and start stdin admission before the first
+    // prompt enters the runtime.
     #[cfg(feature = "comms")]
     let mut stdin_reader_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-    #[cfg(feature = "comms")]
-    let create_result = if stdin_events && host_mode && run_initial_turn_during_create {
-        // Register for notification BEFORE spawning create_session to avoid
-        // a race where the session registers before we start waiting.
-        let notified = service.wait_session_registered();
-
-        let svc = service.clone();
-        let session_task = tokio::spawn(async move { svc.create_session(create_req).await });
-
-        // Wait for the session handle to be stored (no polling, no timeout).
-        // The notification fires when EphemeralSessionService inserts the handle,
-        // which happens before the first turn command is sent.
-        notified.await;
-
-        // Now grab the event injector from the registered session.
-        let sessions = service
-            .list(meerkat_core::service::SessionQuery::default())
-            .await
-            .unwrap_or_default();
-        stdin_reader_handle = if let Some(info) = sessions.first() {
-            service
-                .event_injector(&info.session_id)
-                .await
-                .map(|injector| {
-                    stdin_events::spawn_stdin_reader(
-                        injector,
-                        match line_format {
-                            LineFormat::Text => stdin_events::StdinLineFormat::Text,
-                            LineFormat::Json => stdin_events::StdinLineFormat::Json,
-                        },
-                    )
-                })
-        } else {
-            tracing::warn!("--stdin: session registered but not found in list");
-            None
-        };
-
-        session_task
-            .await
-            .map_err(|e| anyhow::anyhow!("Session task panicked: {e}"))?
-            .map_err(session_err_to_anyhow)?
-    } else {
-        let created = service
+    let turn_result = async {
+        #[cfg(feature = "comms")]
+        let create_result = service
             .create_session(create_req)
             .await
             .map_err(session_err_to_anyhow)?;
-        if stdin_events && host_mode && !run_initial_turn_during_create {
-            stdin_reader_handle =
-                service
-                    .event_injector(&created.session_id)
-                    .await
-                    .map(|injector| {
-                        stdin_events::spawn_stdin_reader(
-                            injector,
-                            match line_format {
-                                LineFormat::Text => stdin_events::StdinLineFormat::Text,
-                                LineFormat::Json => stdin_events::StdinLineFormat::Json,
-                            },
-                        )
-                    });
-        }
-        created
-    };
 
-    #[cfg(not(feature = "comms"))]
-    let create_result = {
-        let _ = stdin_events;
-        service
-            .create_session(create_req)
-            .await
-            .map_err(session_err_to_anyhow)?
-    };
+        #[cfg(not(feature = "comms"))]
+        let create_result = {
+            let _ = stdin_events;
+            service
+                .create_session(create_req)
+                .await
+                .map_err(session_err_to_anyhow)?
+        };
 
-    // Register executor and route turn through runtime adapter.
-    let session_id = create_result.session_id.clone();
-    let executor = Box::new(CliRuntimeExecutor {
-        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-        persistent_service: None,
-        session_id: session_id.clone(),
-        runtime_adapter: runtime_adapter.clone(),
-    });
-    runtime_adapter
-        .register_session_with_executor(session_id.clone(), executor)
-        .await;
+        // Register executor and route turn through runtime adapter.
+        let session_id = create_result.session_id.clone();
+        let executor = Box::new(CliRuntimeExecutor {
+            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            event_tx: output_pipeline.event_sender(),
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await;
 
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
-        prompt.to_string(),
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: if host_mode { Some(true) } else { None },
-                skill_references: canonical_skill_refs,
-                flow_tool_overlay,
-                additional_instructions: None,
-                ..Default::default()
-            },
-        ),
-    ));
-    let (_outcome, handle) = runtime_adapter
-        .accept_input_with_completion(&session_id, input)
-        .await
-        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
-    let result = match handle {
-        Some(handle) => match handle.wait().await {
-            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
-                anyhow::bail!("turn completed without result")
-            }
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                anyhow::bail!("turn abandoned: {reason}")
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                anyhow::bail!("runtime terminated: {reason}")
-            }
-        },
-        None => {
-            // Dedup — shouldn't happen on first turn but handle gracefully
-            eprintln!("Warning: duplicate input — already processed");
-            create_result
-        }
-    };
-
-    // Abort stdin reader if it was running
-    #[cfg(feature = "comms")]
-    if let Some(h) = stdin_reader_handle {
-        h.abort();
-    }
-
-    // Drop CLI-held sender clones; remaining senders are owned by session/runtime state.
-    drop(event_tx);
-    drop(scoped_event_tx);
-
-    // Shutdown the session service and MCP connections gracefully.
-    // This drops runtime-held event senders so the receiver can close cleanly.
-    service.shutdown().await;
-    shutdown_mcp(&mcp_adapter).await;
-    if let Some(ref mut mob_ctx) = run_mob_tools {
-        mob_ctx.persist(scope).await?;
-    }
-
-    // Ensure the primary->scoped bridge is drained before final stream completion checks.
-    if let Some(task) = primary_to_scoped_bridge_task {
-        let _ = task.await;
-    }
-
-    if let Some(task) = verbose_task {
-        let _ = task.await;
-    }
-
-    // Wait for scoped stream task (it ends when all scoped senders are dropped).
-    if let Some(task) = stream_task {
-        let summary = task
-            .await
-            .map_err(|e| anyhow::anyhow!("stream renderer task failed: {e}"))?;
-        println!();
-        if let Some(focus) = summary.focus_requested
-            && !summary.focus_seen
-        {
-            let discovered = if summary.discovered_scopes.is_empty() {
-                "<none>".to_string()
-            } else {
-                summary.discovered_scopes.join(", ")
-            };
-            return Err(anyhow::anyhow!(
-                "stream focus '{focus}' did not match any emitted scope (discovered scopes: {discovered})"
+        #[cfg(feature = "comms")]
+        if stdin_events && keep_alive {
+            stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
+                runtime_adapter.clone(),
+                session_id.clone(),
+                match line_format {
+                    LineFormat::Text => stdin_events::StdinLineFormat::Text,
+                    LineFormat::Json => stdin_events::StdinLineFormat::Json,
+                },
             ));
         }
+
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            prompt.to_string(),
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: if keep_alive { Some(true) } else { None },
+                    skill_references: canonical_skill_refs,
+                    flow_tool_overlay,
+                    additional_instructions: None,
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_outcome, handle) = runtime_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+
+        // Spawn the comms drain in keep-alive mode so inbound peer interactions are
+        // routed through the runtime adapter and automatically trigger new turns.
+        #[cfg(feature = "comms")]
+        {
+            let comms_rt = service.comms_runtime(&session_id).await;
+            runtime_adapter
+                .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
+                .await;
+        }
+
+        match handle {
+            Some(handle) => completion_outcome_to_result(handle.wait().await),
+            None => {
+                eprintln!("Warning: duplicate input — already processed");
+                Ok(create_result)
+            }
+        }
     }
+    .await;
+
+    let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
+        // The initial turn is complete — abort the comms drain so the CLI can
+        // return. run_agent is a one-shot command; persistent keep-alive draining
+        // is only appropriate for interactive sessions (chat).
+        #[cfg(feature = "comms")]
+        {
+            runtime_adapter.abort_comms_drain(&session_id).await;
+        }
+
+        // Abort stdin reader if it was running.
+        #[cfg(feature = "comms")]
+        if let Some(h) = stdin_reader_handle {
+            h.abort();
+        }
+
+        // Shutdown the session service and MCP connections gracefully.
+        // Unregister the runtime-backed executor before awaiting stream tasks.
+        // The adapter owns the boxed executor, and the executor now holds the
+        // caller stream sender for runtime-backed turns.
+        runtime_adapter.unregister_session(&session_id).await;
+        service.shutdown().await;
+        shutdown_mcp(&mcp_adapter).await;
+        if let Some(ref mut mob_ctx) = run_mob_tools {
+            mob_ctx.persist(scope).await?;
+        }
+        Ok(())
+    })
+    .await?;
 
     // Output the result
     match output {
@@ -3331,7 +3540,7 @@ async fn run_agent(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::large_futures)]
 async fn resume_session(
     session_id: &str,
     mut prompt: String,
@@ -3422,6 +3631,7 @@ async fn resume_session_with_llm_override(
     let parsed_params = parse_provider_params(&params)?;
     let parsed_params_json = parse_provider_params_json(provider_params_json)?;
     let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+    let provider_params_override = merged_provider_params.is_some();
     let mut limits = config.budget_limits();
     if let Some(dur) = duration {
         limits.max_duration = Some(dur);
@@ -3458,13 +3668,12 @@ async fn resume_session_with_llm_override(
             builtins: config.tools.builtins_enabled,
             shell: config.tools.shell_enabled,
             comms: config.tools.comms_enabled,
-            subagents: config.tools.subagents_enabled,
             mob: config.tools.mob_enabled,
             memory: false,
             active_skills: None,
         });
-    let host_mode_requested = stored_metadata.as_ref().is_some_and(|meta| meta.host_mode);
-    let host_mode = resolve_host_mode(host_mode_requested)?;
+    let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
+    let keep_alive = resolve_keep_alive(keep_alive_requested)?;
     let comms_name = stored_metadata
         .as_ref()
         .and_then(|meta| meta.comms_name.clone());
@@ -3494,9 +3703,6 @@ async fn resume_session_with_llm_override(
     );
     log_stage("load_mcp_external_tools");
 
-    // Load optional MCP tools; compose with CLI-local mob tools after service setup.
-    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
-
     // Build factory with flags restored from stored session metadata
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3514,8 +3720,7 @@ async fn resume_session_with_llm_override(
         )
         .project_root(project_root)
         .builtins(tooling.builtins)
-        .shell(tooling.shell)
-        .subagents(tooling.subagents);
+        .shell(tooling.shell);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3524,18 +3729,20 @@ async fn resume_session_with_llm_override(
     }
 
     #[cfg(feature = "comms")]
-    let factory = factory.comms(tooling.comms || host_mode);
+    let factory = factory.comms(tooling.comms || keep_alive);
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
     let resume_adapter = persistence.runtime_adapter();
     let runtime_store = persistence.runtime_store();
+    let blob_store = persistence.blob_store();
     let builder = FactoryAgentBuilder::new(factory, config.clone());
     let service = Arc::new(meerkat::PersistentSessionService::new(
         builder,
         64,
         store.clone(),
         runtime_store,
+        blob_store,
     ));
 
     log_stage("compose_external_tool_dispatchers");
@@ -3548,42 +3755,41 @@ async fn resume_session_with_llm_override(
     } else {
         None
     };
+    // Load optional MCP tools immediately before external tool composition so
+    // later early-return windows cannot skip adapter shutdown.
+    let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
     let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools = compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools)?;
-
-    let mut event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>> = None;
-    let mut scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>> = None;
-    let mut verbose_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut stream_task: Option<tokio::task::JoinHandle<stream_renderer::StreamRenderSummary>> =
-        None;
-    let mut primary_to_scoped_bridge_task: Option<tokio::task::JoinHandle<()>> = None;
-
-    if stream {
-        let (primary_tx, mut primary_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        let (scoped_tx, scoped_rx) = mpsc::channel::<ScopedAgentEvent>(200);
-        let scope_path_for_bridge = vec![StreamScopeFrame::Primary {
-            session_id: session_id.to_string(),
-        }];
-        let bridge_scoped_tx = scoped_tx.clone();
-        primary_to_scoped_bridge_task = Some(tokio::spawn(async move {
-            while let Some(event) = primary_rx.recv().await {
-                let scoped = ScopedAgentEvent::new(scope_path_for_bridge.clone(), event.payload);
-                if bridge_scoped_tx.send(scoped).await.is_err() {
-                    break;
-                }
+    let external_tools =
+        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
+            Ok(tools) => tools,
+            Err(err) => {
+                shutdown_mcp(&mcp_adapter).await;
+                return Err(err);
             }
-        }));
-        event_tx = Some(primary_tx);
-        stream_task = Some(spawn_scoped_event_handler(
-            scoped_rx,
-            stream_renderer::StreamRenderPolicy::PrimaryOnly,
-        ));
-        scoped_event_tx = Some(scoped_tx);
-    } else if verbose {
-        let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
-        event_tx = Some(tx);
-        verbose_task = Some(spawn_verbose_event_handler(rx, true));
-    }
+        };
+
+    let output_pipeline = CliOutputPipeline::new(
+        stream,
+        verbose,
+        if stream {
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
+        } else {
+            None
+        },
+        vec![StreamScopeFrame::Primary {
+            session_id: session_id.to_string(),
+        }],
+    )?;
+
+    // Pre-register session on the adapter so we can obtain the canonical ops
+    // lifecycle registry for the build options.
+    resume_adapter.register_session(session_id.clone()).await;
+    let resume_ops_lifecycle: Option<
+        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+    > = resume_adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
 
     let build = SessionBuildOptions {
         provider: Some(provider_core),
@@ -3596,15 +3802,8 @@ async fn resume_session_with_llm_override(
         provider_params: merged_provider_params,
         external_tools,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        scoped_event_tx: scoped_event_tx.clone(),
-        scoped_event_path: scoped_event_tx.as_ref().map(|_| {
-            vec![StreamScopeFrame::Primary {
-                session_id: session_id.to_string(),
-            }]
-        }),
         override_builtins: None,
         override_shell: None,
-        override_subagents: None,
         override_memory: None,
         override_mob: Some(tooling.mob),
         preload_skills: None,
@@ -3622,112 +3821,128 @@ async fn resume_session_with_llm_override(
             .and_then(|m| m.backend.clone())
             .or_else(|| Some(manifest.backend.as_str().to_string())),
         config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
+        keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        runtime_adapter_for_sink: Some(resume_adapter.clone()),
-    };
-
-    // Route through SessionService::create_session() with the resumed session
-    // staged in the build config. The service builds the agent (which picks up
-    // the resume_session), runs the first turn, and returns RunResult.
-    log_stage("service.create_session(start)");
-    let create_result = service
-        .create_session(CreateSessionRequest {
-            model,
-            prompt: prompt.to_string().into(),
-            system_prompt,
-            max_tokens: Some(max_tokens),
-            event_tx: event_tx.clone(),
-            host_mode,
-            skill_references: if run_initial_turn_during_create {
-                canonical_skill_refs.clone()
-            } else {
-                None
-            },
-            // Always defer — runtime adapter handles execution.
-            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-            build: Some(build),
-            labels: None,
-        })
-        .await
-        .map_err(session_err_to_anyhow)?;
-    let additional_instructions = if instructions.is_empty() {
-        None
-    } else {
-        Some(instructions)
-    };
-
-    // Route through runtime adapter (same pattern as run command)
-    let session_id = create_result.session_id.clone();
-    let executor = Box::new(CliRuntimeExecutor {
-        service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-        persistent_service: Some(service.clone()),
-        session_id: session_id.clone(),
-        runtime_adapter: resume_adapter.clone(),
-    });
-    resume_adapter
-        .register_session_with_executor(session_id.clone(), executor)
-        .await;
-
-    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
-        prompt.to_string(),
-        Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                host_mode: if host_mode { Some(true) } else { None },
-                skill_references: canonical_skill_refs,
-                flow_tool_overlay,
-                additional_instructions,
-                ..Default::default()
-            },
-        ),
-    ));
-    let (_outcome, handle) = resume_adapter
-        .accept_input_with_completion(&session_id, input)
-        .await
-        .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
-    let result = match handle {
-        Some(handle) => match handle.wait().await {
-            meerkat_runtime::completion::CompletionOutcome::Completed(r) => r,
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
-                anyhow::bail!("turn completed without result")
-            }
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                anyhow::bail!("turn abandoned: {reason}")
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                anyhow::bail!("runtime terminated: {reason}")
-            }
+        ops_lifecycle_override: resume_ops_lifecycle,
+        resume_override_mask: ResumeOverrideMask {
+            provider_params: provider_params_override,
+            ..Default::default()
         },
-        None => {
-            eprintln!("Warning: duplicate input — already processed");
-            create_result
-        }
+        call_timeout_override: Default::default(),
+        blob_store_override: None,
     };
-    log_stage("service.create_session(done)");
 
-    // Shutdown the session service and MCP connections gracefully
-    log_stage("service.shutdown");
-    service.shutdown().await;
-    log_stage("shutdown_mcp");
-    shutdown_mcp(&mcp_adapter).await;
-    log_stage("persist_mob_registry");
-    if let Some(ref mut mob_ctx) = run_mob_tools {
-        mob_ctx.persist(scope).await?;
+    let turn_result = async {
+        // Route through SessionService::create_session() with the resumed session
+        // staged in the build config. The service builds the agent (which picks up
+        // the resume_session), runs the first turn, and returns RunResult.
+        log_stage("service.create_session(start)");
+        let create_result = service
+            .create_session(CreateSessionRequest {
+                model,
+                prompt: prompt.to_string().into(),
+                render_metadata: None,
+                system_prompt,
+                max_tokens: Some(max_tokens),
+                event_tx: output_pipeline.event_sender(),
+
+                skill_references: if run_initial_turn_during_create {
+                    canonical_skill_refs.clone()
+                } else {
+                    None
+                },
+                // Always defer — runtime adapter handles execution.
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                build: Some(build),
+                labels: None,
+            })
+            .await
+            .map_err(session_err_to_anyhow)?;
+
+        let additional_instructions = if instructions.is_empty() {
+            None
+        } else {
+            Some(instructions)
+        };
+
+        // Route through runtime adapter (same pattern as run command)
+        let session_id = create_result.session_id.clone();
+        let executor = Box::new(CliRuntimeExecutor {
+            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
+            persistent_service: Some(service.clone()),
+            session_id: session_id.clone(),
+            runtime_adapter: resume_adapter.clone(),
+            event_tx: output_pipeline.event_sender(),
+        });
+        resume_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await;
+
+        let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            prompt.to_string(),
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: if keep_alive { Some(true) } else { None },
+                    skill_references: canonical_skill_refs,
+                    flow_tool_overlay,
+                    additional_instructions,
+                    ..Default::default()
+                },
+            ),
+        ));
+        let (_outcome, handle) = resume_adapter
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .map_err(|err| anyhow::anyhow!("runtime accept failed: {err}"))?;
+
+        // Spawn the comms drain in keep-alive mode so inbound peer interactions are
+        // routed through the runtime adapter and automatically trigger new turns.
+        #[cfg(feature = "comms")]
+        {
+            let comms_rt = service.comms_runtime(&session_id).await;
+            resume_adapter
+                .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
+                .await;
+        }
+
+        match handle {
+            Some(handle) => completion_outcome_to_result(handle.wait().await),
+            None => {
+                eprintln!("Warning: duplicate input — already processed");
+                Ok(create_result)
+            }
+        }
     }
-    drop(scoped_event_tx);
-    if let Some(task) = primary_to_scoped_bridge_task {
-        let _ = task.await;
-    }
-    if let Some(task) = verbose_task {
-        let _ = task.await;
-    }
-    if let Some(task) = stream_task {
-        let _ = task.await;
-    }
+    .await;
+
+    let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
+        // The resume turn is complete — abort the comms drain so the CLI can
+        // return. Same rationale as run_agent: one-shot commands must not block.
+        #[cfg(feature = "comms")]
+        {
+            resume_adapter.abort_comms_drain(&session_id).await;
+        }
+
+        log_stage("service.create_session(done)");
+
+        // Shutdown the session service and MCP connections gracefully.
+        resume_adapter.unregister_session(&session_id).await;
+        log_stage("service.shutdown");
+        service.shutdown().await;
+        log_stage("shutdown_mcp");
+        shutdown_mcp(&mcp_adapter).await;
+        log_stage("persist_mob_registry");
+        if let Some(ref mut mob_ctx) = run_mob_tools {
+            mob_ctx.persist(scope).await?;
+        }
+        Ok(())
+    })
+    .await?;
 
     // Output the result
     log_stage("print_result");
@@ -3772,8 +3987,7 @@ async fn build_cli_persistent_service(
         )
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
-        .shell(config.tools.shell_enabled)
-        .subagents(config.tools.subagents_enabled);
+        .shell(config.tools.shell_enabled);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3783,11 +3997,42 @@ async fn build_cli_persistent_service(
 
     let runtime_adapter = persistence.runtime_adapter();
     let runtime_store = persistence.runtime_store();
+    let blob_store = persistence.blob_store();
     let builder = FactoryAgentBuilder::new(factory, config);
     Ok((
-        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store),
+        meerkat::PersistentSessionService::new(builder, 64, store, runtime_store, blob_store),
         runtime_adapter,
     ))
+}
+
+async fn handle_blob_command(command: BlobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
+    match command {
+        BlobCommands::Get {
+            blob_id,
+            output,
+            json,
+        } => {
+            let (_manifest, persistence) = create_persistence_bundle(scope).await?;
+            let payload = persistence
+                .blob_store()
+                .get(&BlobId::new(blob_id))
+                .await
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            let bytes = BASE64_STANDARD.decode(payload.data.as_bytes())?;
+            if let Some(path) = output {
+                tokio::fs::write(path, bytes).await?;
+            } else {
+                let mut stdout = tokio::io::stdout();
+                stdout.write_all(&bytes).await?;
+                stdout.flush().await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilder>;
@@ -3837,8 +4082,8 @@ async fn get_or_create_mob_persistent_service(
 
 /// Mob-facing session service wrapper for CLI orchestration.
 ///
-/// Mob actor host-mode behavior is defined by runtime/backend decisions.
-/// This wrapper forwards requests without rewriting host-mode flags.
+/// Mob actor keep-alive behavior is defined by runtime/backend decisions.
+/// This wrapper forwards requests without rewriting keep-alive flags.
 struct MobCliSessionService {
     inner: Arc<meerkat::PersistentSessionService<FactoryAgentBuilder>>,
 }
@@ -4258,6 +4503,7 @@ fn parse_comms_send_payload(
         source: req.source,
         stream: req.stream,
         allow_self_session: req.allow_self_session,
+        handling_mode: None,
     };
 
     request.parse(session_id).map_err(|errors| {
@@ -4770,7 +5016,7 @@ async fn refresh_persisted_run_snapshots(
                 refreshed.insert(run.run_id.to_string(), run);
             }
             None => {
-                if cached_run.status.is_terminal() {
+                if cached_run.status().is_terminal() {
                     refreshed.insert(run_id, cached_run);
                 }
             }
@@ -4802,7 +5048,7 @@ fn cached_run_snapshot(
         .mobs
         .get(mob_id)
         .and_then(|mob| mob.runs.get(run_id))
-        .filter(|run| run.status.is_terminal())
+        .filter(|run| run.status().is_terminal())
         .cloned()
 }
 
@@ -4878,7 +5124,7 @@ async fn hydrate_mob_state(
         }
 
         for run in persisted.runs.values() {
-            if !run.status.is_terminal() {
+            if !run.status().is_terminal() {
                 continue;
             }
             storage
@@ -4964,7 +5210,7 @@ async fn wait_for_terminal_flow_run(
                 "run '{run_id}' disappeared before reaching terminal state"
             ));
         };
-        if run.status.is_terminal() {
+        if run.status().is_terminal() {
             return Ok(run);
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -5121,6 +5367,220 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
             save_mob_registry(scope, &registry).await?;
             println!("{}", render_flow_status_json(resolved)?);
+            Ok(())
+        }
+        MobCommands::SpawnHelper {
+            mob_id,
+            prompt,
+            meerkat_id,
+            profile,
+            json,
+        } => {
+            let mid = meerkat_mob::MeerkatId::from(meerkat_id.unwrap_or_else(|| {
+                format!(
+                    "helper-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                )
+            }));
+            let mut options = meerkat_mob::HelperOptions::default();
+            if let Some(p) = profile {
+                options.profile_name = Some(meerkat_mob::ProfileName::from(p));
+            }
+            let result = state
+                .mob_spawn_helper(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    mid,
+                    prompt,
+                    options,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "output": result.output,
+                        "tokens_used": result.tokens_used,
+                        "session_id": result.session_id,
+                    }))?
+                );
+            } else if let Some(output) = &result.output {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        MobCommands::ForkHelper {
+            mob_id,
+            source_member,
+            prompt,
+            meerkat_id,
+            profile,
+            fork_context,
+            last_messages,
+            json,
+        } => {
+            let mid = meerkat_mob::MeerkatId::from(meerkat_id.unwrap_or_else(|| {
+                format!(
+                    "fork-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                )
+            }));
+            let source_id = meerkat_mob::MeerkatId::from(source_member);
+            let ctx = match fork_context.as_str() {
+                "last-messages" => {
+                    let count = last_messages.unwrap_or(10);
+                    meerkat_mob::ForkContext::LastMessages { count }
+                }
+                _ => meerkat_mob::ForkContext::FullHistory,
+            };
+            let mut options = meerkat_mob::HelperOptions::default();
+            if let Some(p) = profile {
+                options.profile_name = Some(meerkat_mob::ProfileName::from(p));
+            }
+            let result = state
+                .mob_fork_helper(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    &source_id,
+                    mid,
+                    prompt,
+                    ctx,
+                    options,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "output": result.output,
+                        "tokens_used": result.tokens_used,
+                        "session_id": result.session_id,
+                    }))?
+                );
+            } else if let Some(output) = &result.output {
+                println!("{output}");
+            }
+            Ok(())
+        }
+        MobCommands::MemberStatus {
+            mob_id,
+            meerkat_id,
+            json,
+        } => {
+            let snapshot = state
+                .mob_member_status(
+                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::MeerkatId::from(meerkat_id),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": format!("{:?}", snapshot.status),
+                        "output_preview": snapshot.output_preview,
+                        "tokens_used": snapshot.tokens_used,
+                        "is_final": snapshot.is_final,
+                        "error": snapshot.error,
+                    }))?
+                );
+            } else {
+                println!("status: {:?}", snapshot.status);
+                println!("tokens_used: {}", snapshot.tokens_used);
+                println!("is_final: {}", snapshot.is_final);
+                if let Some(preview) = &snapshot.output_preview {
+                    println!("output: {preview}");
+                }
+                if let Some(error) = &snapshot.error {
+                    println!("error: {error}");
+                }
+            }
+            Ok(())
+        }
+        MobCommands::ForceCancel { mob_id, meerkat_id } => {
+            state
+                .mob_force_cancel(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            println!("cancelled");
+            Ok(())
+        }
+        MobCommands::Respawn {
+            mob_id,
+            meerkat_id,
+            initial_message,
+        } => {
+            let receipt = state
+                .mob_respawn(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    meerkat_mob::MeerkatId::from(meerkat_id),
+                    initial_message.map(meerkat_core::ContentInput::from),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "completed",
+                    "receipt": receipt,
+                })
+            );
+            Ok(())
+        }
+        MobCommands::WaitKickoff {
+            mob_id,
+            member_ids,
+            timeout_ms,
+            json,
+        } => {
+            let member_ids = (!member_ids.is_empty()).then(|| {
+                member_ids
+                    .into_iter()
+                    .map(|id| meerkat_mob::MeerkatId::from(id.as_str()))
+                    .collect::<Vec<_>>()
+            });
+            let members = state
+                .mob_wait_kickoff(
+                    &meerkat_mob::MobId::from(mob_id.clone()),
+                    member_ids,
+                    timeout_ms,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            sync_mob_events(state.as_ref(), &mut registry, &mob_id).await?;
+            save_mob_registry(scope, &registry).await?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "members": members }))?
+                );
+            } else {
+                for member in members {
+                    println!(
+                        "{}\tstatus={:?}\tis_final={}",
+                        member.meerkat_id, member.snapshot.status, member.snapshot.is_final
+                    );
+                }
+            }
             Ok(())
         }
         MobCommands::Pack { .. }
@@ -5702,7 +6162,10 @@ async fn execute_mob_deploy_internal(
             let roster = handle.roster().await;
             if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
                 handle
-                    .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                    .member(&entry.meerkat_id)
+                    .await
+                    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+                    .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
                     .await
                     .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
             }
@@ -5914,7 +6377,6 @@ where
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
-        .subagents(config.tools.subagents_enabled)
         .memory(true);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
@@ -5961,7 +6423,10 @@ where
         let roster = handle.roster().await;
         if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
             handle
-                .send_message(entry.meerkat_id.clone(), prompt.to_string())
+                .member(&entry.meerkat_id)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+                .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
                 .await
                 .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
         }
@@ -6110,7 +6575,7 @@ mod tests {
         SessionError, SessionInfo, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
     };
     use meerkat_core::types::{RunResult, Usage};
-    use meerkat_core::{ToolCallView, ToolDef, ToolResult};
+    use meerkat_core::{ToolCallView, ToolDef, ToolDispatchOutcome, ToolResult};
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::pin::Pin;
@@ -6134,6 +6599,153 @@ mod tests {
             context_root: None,
             user_config_root: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_drops_stream_sender_before_awaiting_tasks() {
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: "test-session".to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async { Ok(()) }),
+        )
+        .await
+        .expect("stream pipeline shutdown should not deadlock")
+        .expect("stream pipeline shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_handles_verbose_mode() {
+        let pipeline = CliOutputPipeline::new(false, true, None, Vec::new())
+            .expect("verbose pipeline should build");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async { Ok(()) }),
+        )
+        .await
+        .expect("verbose pipeline shutdown should not deadlock")
+        .expect("verbose pipeline shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_releases_runtime_executor_sender_clones() {
+        let session_id = SessionId::new();
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: session_id.to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let service: Arc<dyn meerkat_core::service::SessionService> =
+            Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let executor = Box::new(CliRuntimeExecutor {
+            service,
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            event_tx: pipeline.event_sender(),
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await;
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async {
+                runtime_adapter.unregister_session(&session_id).await;
+                Ok(())
+            }),
+        )
+        .await
+        .expect("shutdown should finish once runtime executor is unregistered")
+        .expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_cli_output_pipeline_shutdown_still_joins_stream_tasks_when_cleanup_fails() {
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: "test-session".to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.shutdown_after(async { Err(anyhow::anyhow!("synthetic cleanup failure")) }),
+        )
+        .await
+        .expect("shutdown should not deadlock when cleanup fails")
+        .expect_err("shutdown should preserve the cleanup failure");
+
+        assert!(
+            err.to_string().contains("synthetic cleanup failure"),
+            "shutdown should return the original cleanup failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cli_runtime_turn_failure_still_releases_runtime_executor_sender_clones() {
+        let session_id = SessionId::new();
+        let pipeline = CliOutputPipeline::new(
+            true,
+            false,
+            Some(stream_renderer::StreamRenderPolicy::PrimaryOnly),
+            vec![StreamScopeFrame::Primary {
+                session_id: session_id.to_string(),
+            }],
+        )
+        .expect("stream pipeline should build");
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let service: Arc<dyn meerkat_core::service::SessionService> =
+            Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let executor = Box::new(CliRuntimeExecutor {
+            service,
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter: runtime_adapter.clone(),
+            event_tx: pipeline.event_sender(),
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await;
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            finalize_cli_runtime_backed_turn(
+                pipeline,
+                Err::<(), _>(anyhow::anyhow!("turn abandoned: synthetic failure")),
+                async {
+                    runtime_adapter.unregister_session(&session_id).await;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .expect("failure-path shutdown should not deadlock")
+        .expect_err("finalizer should preserve the original turn failure");
+
+        assert!(
+            err.to_string()
+                .contains("turn abandoned: synthetic failure"),
+            "failure-path finalizer should return the original turn error"
+        );
     }
 
     struct StaticDispatcher {
@@ -6163,7 +6775,7 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
         }
     }
@@ -6197,13 +6809,11 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|tool| tool.name == call.name) {
-                return Ok(ToolResult::new(
-                    call.id.to_string(),
-                    self.content.clone(),
-                    false,
-                ));
+                return Ok(
+                    ToolResult::new(call.id.to_string(), self.content.clone(), false).into(),
+                );
             }
             Err(ToolError::not_found(call.name))
         }
@@ -6399,6 +7009,8 @@ mod tests {
                     updated_at: std::time::SystemTime::now(),
                     message_count: 0,
                     is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
                     last_assistant_text: None,
                     labels: Default::default(),
                 },
@@ -6504,10 +7116,120 @@ mod tests {
         }
     }
 
+    struct CapturingEventTurnService {
+        session_id: SessionId,
+        saw_event_tx: std::sync::atomic::AtomicBool,
+    }
+
+    impl CapturingEventTurnService {
+        fn new(session_id: SessionId) -> Self {
+            Self {
+                session_id,
+                saw_event_tx: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for CapturingEventTurnService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            Ok(RunResult {
+                text: String::new(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 0,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        async fn start_turn(
+            &self,
+            id: &SessionId,
+            req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            if let Some(tx) = req.event_tx {
+                self.saw_event_tx
+                    .store(true, std::sync::atomic::Ordering::Release);
+                let _ = tx
+                    .send(EventEnvelope::new(
+                        "capturing-turn-service",
+                        1,
+                        None,
+                        AgentEvent::TextDelta {
+                            delta: "streamed".to_string(),
+                        },
+                    ))
+                    .await;
+            }
+            Ok(RunResult {
+                text: "streamed".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(SessionView {
+                state: SessionInfo {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::now(),
+                    updated_at: std::time::SystemTime::now(),
+                    message_count: 0,
+                    is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    last_assistant_text: None,
+                    labels: Default::default(),
+                },
+                billing: SessionUsage {
+                    total_tokens: 0,
+                    usage: Usage::default(),
+                },
+            })
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            Ok(vec![SessionSummary {
+                session_id: self.session_id.clone(),
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            }])
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn test_resolve_host_mode_roundtrip() {
-        assert!(resolve_host_mode(true).expect("host mode should be enabled"));
-        assert!(!resolve_host_mode(false).expect("host mode should be disabled"));
+    fn test_resolve_keep_alive_roundtrip() {
+        assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
+        assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
     }
 
     #[test]
@@ -6515,7 +7237,6 @@ mod tests {
         let full = resolve_tool_preset(ToolPreset::Full, false);
         assert!(full.builtins);
         assert!(full.shell);
-        assert!(full.subagents);
         assert!(full.memory);
         assert!(full.mob);
 
@@ -6530,6 +7251,56 @@ mod tests {
         assert!(!resolve_stream_enabled(false, false, false).expect("json default"));
         assert!(resolve_stream_enabled(true, false, false).expect("explicit stream"));
         assert!(!resolve_stream_enabled(false, true, true).expect("explicit no-stream"));
+    }
+
+    #[tokio::test]
+    async fn test_cli_runtime_executor_forwards_stream_events_to_runtime_backed_turns() {
+        let session_id = SessionId::new();
+        let service = Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+        let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
+        let mut executor = CliRuntimeExecutor {
+            service: service.clone(),
+            persistent_service: None,
+            session_id: session_id.clone(),
+            runtime_adapter,
+            event_tx: Some(event_tx),
+        };
+        let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(
+            meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                    text: "hello".to_string(),
+                },
+            },
+        );
+        let run_id = meerkat_core::lifecycle::RunId::new();
+
+        let output = meerkat_core::lifecycle::CoreExecutor::apply(&mut executor, run_id, primitive)
+            .await
+            .expect("runtime-backed CLI turn should succeed");
+        assert_eq!(
+            output
+                .run_result
+                .expect("executor should return run result")
+                .text,
+            "streamed"
+        );
+
+        let envelope = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("stream event should arrive without timing out")
+            .expect("stream event channel should remain open");
+        assert!(matches!(
+            envelope.payload,
+            AgentEvent::TextDelta { ref delta } if delta == "streamed"
+        ));
+        assert!(
+            service
+                .saw_event_tx
+                .load(std::sync::atomic::Ordering::Acquire),
+            "runtime-backed executor must forward the caller event sender"
+        );
     }
 
     #[test]
@@ -6729,6 +7500,7 @@ mod tests {
             stream,
             allow_self_session,
             blocks: _,
+            handling_mode: _,
         } = cmd
         else {
             return Err("unexpected command parsed for input payload".into());
@@ -6986,7 +7758,49 @@ mod tests {
         assert!(mob.contains("flow-status"));
         assert!(!mob.contains("prefabs"));
         assert!(!mob.contains("create"));
-        assert!(!mob.contains("spawn"));
+        // spawn-helper and fork-helper are user-facing; raw "spawn" is not
+        assert!(mob.contains("spawn-helper"));
+        assert!(mob.contains("fork-helper"));
+        assert!(mob.contains("member-status"));
+        assert!(mob.contains("force-cancel"));
+        assert!(mob.contains("respawn"));
+        assert!(mob.contains("wait-kickoff"));
+    }
+
+    #[test]
+    fn test_cli_mob_wait_kickoff_command_parses() {
+        let cli = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "wait-kickoff",
+            "mob-a",
+            "--member",
+            "a-1",
+            "--member",
+            "a-2",
+            "--timeout-ms",
+            "2500",
+            "--json",
+        ])
+        .expect("mob wait-kickoff command should parse");
+
+        match cli.command {
+            Commands::Mob {
+                command:
+                    MobCommands::WaitKickoff {
+                        mob_id,
+                        member_ids,
+                        timeout_ms,
+                        json,
+                    },
+            } => {
+                assert_eq!(mob_id, "mob-a");
+                assert_eq!(member_ids, vec!["a-1".to_string(), "a-2".to_string()]);
+                assert_eq!(timeout_ms, Some(2500));
+                assert!(json);
+            }
+            _ => unreachable!("expected mob wait-kickoff command"),
+        }
     }
 
     #[test]
@@ -8317,15 +9131,13 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             })
             .await
             .expect("dispatch should succeed");
-        assert_eq!(result.text_content(), "primary");
+        assert_eq!(result.result.text_content(), "primary");
     }
 
     #[tokio::test]
     async fn test_run_session_build_wires_mob_tools_into_llm_request() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let factory = AgentFactory::new(temp.path().join("sessions"))
-            .builtins(true)
-            .subagents(true);
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(true);
         let service = Arc::new(build_cli_service(factory, Config::default()));
 
         let external_tools = compose_external_tool_dispatchers(
@@ -8353,10 +9165,11 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "list tools".to_string().into(),
+            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            host_mode: false,
+
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             build: Some(build),
@@ -8404,8 +9217,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             })
             .await
             .expect("tool dispatch should succeed");
-        assert!(!out.is_error, "tool returned error: {}", out.text_content());
-        serde_json::from_str(&out.text_content()).expect("tool content should be valid json")
+        assert!(
+            !out.result.is_error,
+            "tool returned error: {}",
+            out.result.text_content()
+        );
+        serde_json::from_str(&out.result.text_content()).expect("tool content should be valid json")
     }
 
     #[tokio::test]
@@ -8819,227 +9636,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         assert!(tool_names.contains(&"peers"));
     }
 
-    // === Tests for sub-agent flag behavior ===
-
-    /// Test that sub-agents are enabled by default (need_composite should be true)
-    #[test]
-    fn test_subagent_enabled_by_default() {
-        // Simulate default flag values
-        let enable_builtins = false;
-        let no_subagents = false; // default
-        let enable_subagents = !no_subagents;
-
-        // This is the logic from run_agent
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            need_composite,
-            "CompositeDispatcher should be used when subagents are enabled by default"
-        );
-        assert!(enable_subagents, "Sub-agents should be enabled by default");
-    }
-
-    /// Test that --no-subagents disables sub-agent tools
-    #[test]
-    fn test_no_subagents_flag_disables_subagents() {
-        // Simulate --no-subagents flag
-        let enable_builtins = false;
-        let no_subagents = true;
-        let enable_subagents = !no_subagents;
-
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            !enable_subagents,
-            "Sub-agents should be disabled when --no-subagents is passed"
-        );
-        assert!(
-            !need_composite,
-            "CompositeDispatcher should NOT be used when both builtins and subagents are disabled"
-        );
-    }
-
-    /// Test that --enable-builtins alone enables builtins but not subagents (when --no-subagents)
-    #[test]
-    fn test_enable_builtins_with_no_subagents() {
-        let enable_builtins = true;
-        let no_subagents = true;
-        let enable_subagents = !no_subagents;
-
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            need_composite,
-            "CompositeDispatcher should be used when builtins are enabled"
-        );
-        assert!(!enable_subagents, "Sub-agents should be disabled");
-    }
-
-    /// Test that sub-agents work independently of --enable-builtins
-    #[test]
-    fn test_subagents_independent_of_builtins() {
-        // Without --enable-builtins but with default subagents (enabled)
-        let enable_builtins = false;
-        let no_subagents = false;
-        let enable_subagents = !no_subagents;
-
-        let need_composite = enable_builtins || enable_subagents;
-
-        assert!(
-            enable_subagents,
-            "Sub-agents should be enabled regardless of builtins"
-        );
-        assert!(
-            need_composite,
-            "CompositeDispatcher should be used for sub-agents even without builtins"
-        );
-    }
-
-    /// Test the enabled tools set when only subagents are enabled
-    #[test]
-    fn test_enabled_tools_subagents_only() {
-        use std::collections::HashSet;
-
-        let enable_builtins = false;
-        let enable_shell = false;
-        let enable_subagents = true;
-
-        // Replicate the logic from run_agent
-        let mut enabled_tools: HashSet<String> = HashSet::new();
-
-        if enable_builtins {
-            enabled_tools.extend(
-                [
-                    "task_list",
-                    "task_get",
-                    "task_create",
-                    "task_update",
-                    "wait",
-                    "datetime",
-                ]
-                .iter()
-                .map(std::string::ToString::to_string),
-            );
-        }
-
-        if enable_shell {
-            enabled_tools.extend([
-                "shell".to_string(),
-                "job_status".to_string(),
-                "jobs_list".to_string(),
-                "job_cancel".to_string(),
-            ]);
-        }
-
-        if enable_subagents {
-            enabled_tools.extend([
-                "agent_spawn".to_string(),
-                "agent_fork".to_string(),
-                "agent_status".to_string(),
-                "agent_cancel".to_string(),
-                "agent_list".to_string(),
-            ]);
-        }
-
-        // Verify only sub-agent tools are enabled
-        assert!(
-            enabled_tools.contains("agent_spawn"),
-            "agent_spawn should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_fork"),
-            "agent_fork should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_status"),
-            "agent_status should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_cancel"),
-            "agent_cancel should be enabled"
-        );
-        assert!(
-            enabled_tools.contains("agent_list"),
-            "agent_list should be enabled"
-        );
-
-        // Verify task tools are NOT enabled (since builtins is false)
-        assert!(
-            !enabled_tools.contains("task_list"),
-            "task_list should NOT be enabled without --enable-builtins"
-        );
-        assert!(
-            !enabled_tools.contains("wait"),
-            "wait should NOT be enabled without --enable-builtins"
-        );
-
-        // Verify exact count
-        assert_eq!(
-            enabled_tools.len(),
-            5,
-            "Should have exactly 5 sub-agent tools enabled"
-        );
-    }
-
-    /// Test the enabled tools set when both builtins and subagents are enabled
-    #[test]
-    fn test_enabled_tools_builtins_and_subagents() {
-        use std::collections::HashSet;
-
-        let enable_builtins = true;
-        let enable_shell = false;
-        let enable_subagents = true;
-
-        let mut enabled_tools: HashSet<String> = HashSet::new();
-
-        if enable_builtins {
-            enabled_tools.extend(
-                [
-                    "task_list",
-                    "task_get",
-                    "task_create",
-                    "task_update",
-                    "wait",
-                    "datetime",
-                ]
-                .iter()
-                .map(std::string::ToString::to_string),
-            );
-        }
-
-        if enable_shell {
-            enabled_tools.extend([
-                "shell".to_string(),
-                "job_status".to_string(),
-                "jobs_list".to_string(),
-                "job_cancel".to_string(),
-            ]);
-        }
-
-        if enable_subagents {
-            enabled_tools.extend([
-                "agent_spawn".to_string(),
-                "agent_fork".to_string(),
-                "agent_status".to_string(),
-                "agent_cancel".to_string(),
-                "agent_list".to_string(),
-            ]);
-        }
-
-        // Verify both task and sub-agent tools are enabled
-        assert!(enabled_tools.contains("task_list"));
-        assert!(enabled_tools.contains("wait"));
-        assert!(enabled_tools.contains("agent_spawn"));
-        assert!(enabled_tools.contains("agent_list"));
-
-        // 6 task/utility tools + 5 sub-agent tools = 11
-        assert_eq!(
-            enabled_tools.len(),
-            11,
-            "Should have 11 tools (6 task/utility + 5 sub-agent)"
-        );
-    }
-
     #[tokio::test]
     async fn test_prune_inner_skips_legacy_unknown_without_force() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9248,6 +9844,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            flow_state: Default::default(),
         };
 
         let run_json = render_flow_status_json(Some(run)).expect("encode run json");
@@ -9284,6 +9881,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             completed_at: Some(now),
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
+                            flow_state: Default::default(),
                         },
                     ),
                     (
@@ -9298,6 +9896,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             completed_at: None,
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
+                            flow_state: Default::default(),
                         },
                     ),
                 ]),

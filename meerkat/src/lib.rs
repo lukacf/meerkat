@@ -2,34 +2,18 @@
 //!
 //! A minimal, high-performance agent harness for LLM-powered applications.
 //!
-//! # Quick Start
+//! # Architecture
 //!
-//! ```text
-//! use meerkat::prelude::*;
-//! use meerkat::AgentFactory;
-//! use meerkat::AnthropicClient;
-//! use meerkat_store::{JsonlStore, StoreAdapter};
-//! use std::sync::Arc;
+//! All production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path:
+//! `SessionService` (substrate) + `RuntimeSessionAdapter` (control plane).
+//! The runtime owns keep-alive, Queue/Steer routing, comms drain, and ingress.
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let api_key = std::env::var("ANTHROPIC_API_KEY")?;
-//!     let factory = AgentFactory::new(std::path::PathBuf::from(".rkat/sessions"));
+//! `build_ephemeral_service` is available for **testing and embedded use** where
+//! runtime semantics (keep-alive, Steer, comms-driven admission) are not needed.
+//! It supports Queue-only turns and will reject Steer/render_metadata.
 //!
-//!     let client = Arc::new(AnthropicClient::new(api_key));
-//!     let llm = factory.build_llm_adapter(client, "claude-sonnet-4");
-//!     let store = Arc::new(JsonlStore::new(&factory.store_path)?);
-//!     let store = Arc::new(StoreAdapter::new(store));
-//!     let tools = Arc::new(meerkat_tools::EmptyToolDispatcher::default());
-//!
-//!     let mut agent = AgentBuilder::new()
-//!         .model("claude-sonnet-4")
-//!         .build(Arc::new(llm), tools, store);
-//!     let result = agent.run("What is 2 + 2?".to_string()).await?;
-//!     println!("{}", result.text);
-//!     Ok(())
-//! }
-//! ```
+//! For the runtime-backed entry point, see [`meerkat_rpc::SessionRuntime`] or
+//! the REST/MCP server crates.
 
 // On wasm32, provide tokio alias backed by tokio_with_wasm.
 #[cfg(target_arch = "wasm32")]
@@ -95,6 +79,7 @@ pub use meerkat_core::{
     LlmStreamResult,
     // State
     LoopState,
+    McpServerConfig,
     MeerkatSchema,
     // Types
     Message,
@@ -121,15 +106,13 @@ pub use meerkat_core::{
     // Session
     Session,
     SessionId,
+    SessionLlmIdentity,
     SessionMeta,
     SessionMetadata,
     SessionTooling,
     SpawnSpec,
     StopReason,
     StorageConfig,
-    // Sub-agents
-    SubAgentManager,
-    SubAgentState,
     SystemMessage,
     ToolAccessPolicy,
     ToolCall,
@@ -184,7 +167,8 @@ pub use persistence::PersistenceError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistence::open_realm_persistence_in;
 
-// Factory-backed SessionService wiring
+// Factory-backed SessionService wiring (substrate — testing/embedded use).
+// Production surfaces use runtime-backed paths (see meerkat-rpc, meerkat-rest).
 mod service_factory;
 #[cfg(feature = "session-store")]
 pub use service_factory::build_persistent_service;
@@ -199,6 +183,9 @@ pub use meerkat_core::{
 };
 #[cfg(feature = "session-compaction")]
 pub use meerkat_session::DefaultCompactor;
+// PersistentSessionService: used by runtime-backed surfaces (REST, RPC, MCP).
+// EphemeralSessionService: in-memory substrate for testing/embedded use only.
+// Both implement SessionService. Production paths add RuntimeSessionAdapter on top.
 #[cfg(feature = "session-store")]
 pub use meerkat_session::PersistentSessionService;
 pub use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -264,8 +251,8 @@ pub use meerkat_tools::{FileTaskStore, ensure_rkat_dir, find_project_root};
 // Re-export MCP client
 #[cfg(feature = "mcp")]
 pub use meerkat_mcp::{
-    McpApplyDelta, McpApplyResult, McpConnection, McpError, McpLifecycleAction, McpReloadTarget,
-    McpRouter, McpRouterAdapter, McpServerConfig, McpServerLifecycleState,
+    McpApplyDelta, McpApplyResult, McpConnection, McpError, McpLifecycleAction, McpLifecyclePhase,
+    McpReloadTarget, McpRouter, McpRouterAdapter, McpServerLifecycleState,
 };
 
 // Skill types re-exports
@@ -307,7 +294,7 @@ pub use sdk_config::SdkConfigStore;
 pub fn compose_tools_with_comms(
     base_tools: std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
     tool_usage_instructions: String,
-    runtime: &meerkat_comms::CommsRuntime,
+    runtime: std::sync::Arc<meerkat_comms::CommsRuntime>,
 ) -> Result<
     (
         std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
@@ -320,7 +307,11 @@ pub fn compose_tools_with_comms(
     let router = runtime.router_arc();
     let trusted_peers = runtime.trusted_peers_shared();
     let self_pubkey = router.keypair_arc().public_key();
-    let comms_surface = CommsToolSurface::new(router, trusted_peers.clone());
+    let comms_surface = CommsToolSurface::new_with_runtime(
+        router,
+        trusted_peers.clone(),
+        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
+    );
     let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
     let gateway = meerkat_core::ToolGatewayBuilder::new()
         .add_dispatcher(base_tools)

@@ -18,6 +18,18 @@ fn rkat_binary_path() -> Option<PathBuf> {
         }
     }
 
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let debug = target_dir.join("debug/rkat");
+        if debug.exists() {
+            return Some(debug);
+        }
+        let release = target_dir.join("release/rkat");
+        if release.exists() {
+            return Some(release);
+        }
+    }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent()?;
     let debug = workspace_root.join("target/debug/rkat");
@@ -378,7 +390,11 @@ async fn rpc_read_response(
         if line.trim().is_empty() {
             continue;
         }
-        let parsed: Value = serde_json::from_str(line.trim())?;
+        // Skip non-JSON lines (e.g. deploy status output) gracefully.
+        let parsed: Value = match serde_json::from_str(line.trim()) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
         if parsed.get("id").is_some() {
             return Ok(parsed);
         }
@@ -948,7 +964,8 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         120,
     )
     .await?;
-    assert_eq!(sent["sent"], true);
+    assert_eq!(sent["session_id"], worker_session_id);
+    assert_eq!(sent["member_id"], "worker-1");
 
     let read_after_send = rpc_call(
         &mut surface,
@@ -1030,12 +1047,13 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with RESPAWN_PROBE_29."
+            "content": "Reply with RESPAWN_PROBE_29."
         }),
         120,
     )
     .await?;
-    assert_eq!(sent_after_respawn["sent"], true);
+    assert_eq!(sent_after_respawn["session_id"], respawned_session_id);
+    assert_eq!(sent_after_respawn["member_id"], "worker-1");
 
     let read_after_respawn = rpc_call(
         &mut surface,
@@ -1374,12 +1392,13 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
+            "content": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
         }),
         120,
     )
     .await?;
-    assert_eq!(sent["sent"], true);
+    assert_eq!(sent["session_id"], original_session_id);
+    assert_eq!(sent["member_id"], "worker-1");
 
     let read_after_send = rpc_call(
         &mut surface,
@@ -1432,7 +1451,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
                 json!({
                     "mob_id": mob_id,
                     "meerkat_id": "broken-1",
-                    "message": "This turn must fail because the member model is invalid."
+                    "content": "This turn must fail because the member model is invalid."
                 }),
                 60,
             )
@@ -1494,7 +1513,7 @@ async fn e2e_scenario_29_cli_mob_rpc_member_turn_probe() -> Result<(), Box<dyn s
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with RESPAWN_PROBE_29."
+            "content": "Reply with RESPAWN_PROBE_29."
         }),
         120,
     )

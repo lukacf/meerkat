@@ -26,6 +26,7 @@ pub mod agent;
 pub(crate) mod classify;
 pub mod event_injector;
 pub mod mcp;
+pub(crate) mod peer_directory_reachability_authority;
 pub mod router;
 pub mod runtime;
 
@@ -64,7 +65,7 @@ pub use mcp::tools::{ToolContext, handle_tools_call, tools_list};
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Comms,
-        description: "Inter-agent communication: send, request, response, list peers + host mode",
+        description: "Inter-agent communication: send, request, response, list peers + keep-alive",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: Some("comms"),
         prerequisites: &[],
@@ -77,7 +78,7 @@ inventory::submit! {
     meerkat_skills::SkillRegistration {
         id: "multi-agent-comms",
         name: "Multi-Agent Comms",
-        description: "Setting up host mode, peer trust, send vs request/response patterns",
+        description: "Setting up keep-alive, peer trust, send vs request/response patterns",
         scope: meerkat_core::skills::SkillScope::Builtin,
         requires_capabilities: &["comms"],
         body: include_str!("../skills/multi-agent-comms/SKILL.md"),
@@ -85,17 +86,17 @@ inventory::submit! {
     }
 }
 
-/// Confirm host mode availability when the comms crate is compiled in.
+/// Confirm keep-alive mode availability when the comms crate is compiled in.
 ///
 /// This function is intentionally a passthrough — its existence in the
 /// dependency graph *is* the validation. When `meerkat-comms` is linked,
-/// comms is available and host mode can be enabled. The feature-gate check
-/// lives in `meerkat::surface::resolve_host_mode()`, which calls this
+/// comms is available and keep-alive mode can be enabled. The feature-gate check
+/// lives in `meerkat::surface::resolve_keep_alive()`, which calls this
 /// function under `#[cfg(feature = "comms")]` and returns an error under
 /// `#[cfg(not(feature = "comms"))]`.
 ///
 /// This two-layer design avoids duplicating the `cfg` check in every
 /// surface crate.
-pub fn validate_host_mode(requested: bool) -> Result<bool, String> {
+pub fn validate_keep_alive(requested: bool) -> Result<bool, String> {
     Ok(requested)
 }

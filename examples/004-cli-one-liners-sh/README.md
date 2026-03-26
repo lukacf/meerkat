@@ -4,8 +4,8 @@ Everything you can do with `rkat` from the command line — no code required.
 
 ## Concepts
 - `rkat run` — single-turn agent execution
-- `rkat session` — multi-turn session resumption
-- `rkat list` / `rkat read` / `rkat rm` — session management
+- `rkat resume` — multi-turn session resumption
+- `rkat sessions list/read/archive` — session management
 - `--isolated` / `--realm` — workspace isolation
 - `--verbose` / `--stream` — output modes
 - `rkat config` — runtime configuration

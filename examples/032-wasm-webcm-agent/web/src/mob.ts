@@ -1,5 +1,5 @@
 /**
- * Mob orchestrator — multi-provider sub-agent management.
+ * Mob orchestrator — multi-provider specialist coordination.
  *
  * Creates a 3-agent mob (planner, coder, reviewer) with different LLM
  * providers per role. Manages subscriptions, background polling, and
@@ -37,7 +37,7 @@ export interface MobRuntime {
   mob_spawn(mob_id: string, specs_json: string): Promise<string>;
   mob_wire(mob_id: string, a: string, b: string): Promise<void>;
   mob_member_subscribe(mob_id: string, meerkat_id: string): Promise<number>;
-  mob_send_message(mob_id: string, meerkat_id: string, message: string): Promise<void>;
+  mob_member_send(mob_id: string, meerkat_id: string, request_json: string): Promise<string>;
   poll_subscription(handle: number): string;
 }
 
@@ -215,7 +215,7 @@ WHEN YOU RECEIVE A REVIEW REQUEST via message:
 Tools: shell, write_file, read_file, send.`,
       },
     },
-    backend: { default: "subagent" },
+    backend: { default: "session" },
   };
 }
 
@@ -236,12 +236,18 @@ export class MobOrchestrator {
 
   /**
    * Initialize the mob runtime and create + spawn the dev team.
-   * Must be called after WebCM tools are registered.
+   * The optional hook runs immediately after runtime init so JS tools can be
+   * registered before the mob and its member sessions are created.
    *
    * When `proxyBaseUrl` is set, per-provider base URLs are injected so all
    * LLM traffic routes through the proxy (keys are server-side).
    */
-  async init(keys: ApiKeys, models: ModelAssignments, proxyBaseUrl?: string): Promise<void> {
+  async init(
+    keys: ApiKeys,
+    models: ModelAssignments,
+    proxyBaseUrl?: string,
+    afterRuntimeInit?: () => void | Promise<void>,
+  ): Promise<void> {
     // Build config with all available API keys
     const config: Record<string, any> = { model: models.main, max_sessions: 32 };
     if (keys.anthropic) config.anthropic_api_key = keys.anthropic;
@@ -254,6 +260,9 @@ export class MobOrchestrator {
     }
 
     this.runtime.init_runtime_from_config(JSON.stringify(config));
+    if (afterRuntimeInit) {
+      await afterRuntimeInit();
+    }
 
     // Create mob
     const definition = buildMobDefinition(models);
@@ -295,10 +304,14 @@ export class MobOrchestrator {
 
   /** Send a user message to the orchestrator mob member. */
   async sendToOrchestrator(message: string): Promise<void> {
-    await this.runtime.mob_send_message(this.mobId, "orchestrator", message);
+    await this.runtime.mob_member_send(
+      this.mobId,
+      "orchestrator",
+      JSON.stringify({ content: message, handling_mode: "queue" }),
+    );
   }
 
-  /** Start background polling for sub-agent events. */
+  /** Start background polling for specialist member events. */
   startPolling(): void {
     if (this.pollInterval) return;
     this.pollInterval = setInterval(() => this.pollAll(), 200);
@@ -388,7 +401,7 @@ export class MobOrchestrator {
       case "run_started": {
         // Show the incoming prompt as a collapsed card.
         // Comms messages contain peer addresses (e.g. "dev-team/planner/planner").
-        // User messages (via mob_send_message) are raw text — already shown as ❯ line.
+        // User messages (via member send) are raw text — already shown as ❯ line.
         const isComms = ev.prompt && ev.prompt.includes(`${this.mobId}/`);
         if (ev.prompt && (agent !== "orchestrator" || isComms)) {
           const card = panel.stream.beginToolCall("message received", { text: ev.prompt });

@@ -9,10 +9,12 @@ Meerkat is a library-first, modular agent engine built in Rust. It provides the 
 ## Design philosophy
 
 1. **Library-first** -- the Rust crate is the primary interface; surfaces (CLI, REST, RPC, MCP) are thin wrappers
-2. **Modular** -- twenty crates, all opt-in. Clean trait boundaries let you swap providers, stores, and dispatchers
+2. **Modular** -- twenty-five crates, all opt-in. Clean trait boundaries let you swap providers, stores, and dispatchers
 3. **No I/O in core** -- `meerkat-core` has no network or filesystem dependencies; all I/O is in satellite crates
 4. **Streaming-first** -- all LLM interactions use streaming for responsive user experiences
 5. **Budget-aware** -- built-in resource tracking for tokens, time, and tool calls
+6. **Machine authority** -- canonical state mutations flow through generated sealed mutator traits; handwritten code classifies inputs and executes effects but cannot invent parallel semantic state
+7. **Formal seam closure** -- async owner handoffs, wait barriers, and terminal classifications are under formal protocol ownership with generated helpers and obligation tracking
 
 ## High-level architecture
 
@@ -39,6 +41,12 @@ graph TD
     MODELS["meerkat-models<br/>Model catalog / Provider profiles /<br/>Parameter schemas (leaf crate)"]
 
     CORE["meerkat-core<br/>Traits, agent loop, types<br/>SessionService trait, SessionError"]
+
+    RUNTIME["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver /<br/>RuntimeSessionAdapter"]
+
+    SCHEMA["meerkat-machine-schema<br/>Machine definitions / Compositions /<br/>Handoff protocols"]
+    CODEGEN["meerkat-machine-codegen<br/>Code generation from schemas"]
+    KERNELS["meerkat-machine-kernels<br/>Generated sealed mutators /<br/>Authority implementations"]
 
     FACADE --> CLIENT
     FACADE --> SESSION
@@ -71,12 +79,32 @@ graph TD
     COMMS --> CORE
     CONTRACTS --> CORE
     SKILLS --> CORE
+    RUNTIME --> CORE
+    KERNELS --> SCHEMA
+    CODEGEN --> SCHEMA
+    FACADE --> RUNTIME
+    FACADE --> KERNELS
 ```
 
 <Note>
 **SessionService routing:** All surfaces (CLI, REST, MCP Server, JSON-RPC, SDKs) route through
-`SessionService` for the full session lifecycle. `AgentFactory::build_agent()` centralizes all
-agent construction. Zero `AgentBuilder::new()` calls in surface crates.
+`SessionService` for substrate lifecycle and through `AgentFactory::build_agent()` for agent
+construction. Runtime-backed surfaces remain the canonical owner of `keep_alive`, Queue/Steer,
+comms drain, and commit/cancel semantics.
+</Note>
+
+<Note>
+**Machine authority (RMAT):** All canonical state mutations flow through generated sealed mutator
+traits in `meerkat-machine-kernels`. Handwritten shell code classifies inputs, executes effects,
+and manages I/O -- but cannot mutate semantic state directly. 19 canonical machines cover turn
+execution, runtime control, ops lifecycle, comms drain, mob orchestration, and more. See [RMAT](/docs/architecture/RMAT.md).
+</Note>
+
+<Note>
+**Formal seam closure:** Async owner handoffs (comms drain spawn/abort, ops barrier satisfaction,
+terminal outcome alignment) are under formal protocol ownership with generated helpers, obligation
+tracking, and closure policies. The composition ontology validates handoff protocol coverage at
+schema level, and CI gates enforce zero open findings.
 </Note>
 
 <Note>
@@ -106,11 +134,19 @@ graph TD
     SS --> AF
 
     subgraph core["meerkat-core"]
-        AGENT["Agent<br/>llm_client · tool_dispatcher<br/>session_store · session · budget<br/>retry_policy · state · compactor<br/>sub_agent_manager"]
+        AGENT["Agent<br/>llm_client · tool_dispatcher<br/>session_store · session · budget<br/>retry_policy · state · compactor<br/>TurnExecutionAuthority"]
+    end
+
+    subgraph authority["Machine authority layer"]
+        SCHEMA2["meerkat-machine-schema<br/>18 machine definitions"]
+        KERNELS2["meerkat-machine-kernels<br/>Generated sealed mutators"]
     end
 
     AF --> AGENT
+    AGENT -.->|canonical transitions| KERNELS2
+    KERNELS2 --> SCHEMA2
 
+    RUNT["meerkat-runtime<br/>RuntimeControlPlane / RuntimeDriver<br/>OpsLifecycleAuthority / InputLifecycleAuthority"]
     CLIENT["meerkat-client<br/>Anthropic / OpenAI / Gemini"]
     TOOLS["meerkat-tools<br/>Registry / Dispatch / Validation"]
     STORE["meerkat-store<br/>SQLite / JSONL / redb / Memory"]
@@ -120,6 +156,8 @@ graph TD
     MOB["meerkat-mob<br/>Mob runtime / Flows / Tasks"]
     MOBMCP["meerkat-mob-mcp<br/>MobMcpDispatcher"]
 
+    SS --> RUNT
+    RUNT --> AGENT
     AGENT --> CLIENT
     AGENT --> TOOLS
     AGENT --> STORE
@@ -154,8 +192,52 @@ The heart of Meerkat. Contains:
 - **Retry**: exponential backoff with jitter
 - **State machine**: `LoopState` for agent lifecycle management
 - **Compaction**: `Compactor` trait, `CompactionConfig`, compaction flow wired into agent loop
-- **Sub-agents**: fork and spawn operations
+- **Forked session branches**: lightweight history branching without a standalone child-agent owner
 - **Hook contracts**: typed hook points, decisions, patches, invocation/outcome envelopes
+</Accordion>
+
+<Accordion title="meerkat-runtime">
+Runtime control plane for session-backed agent lifecycle:
+
+- **RuntimeControlPlane**: manages runtime-level state (attached, idle, retiring) and dispatches commands
+- **RuntimeDriver**: per-session driver that owns the `Agent` exclusively in a dedicated tokio task
+- **RuntimeSessionAdapter**: bridges `SessionService` into the runtime's event-driven model
+- **Input taxonomy**: typed `Input` enum (Prompt, Peer, FlowStep, ExternalEvent, Continuation, Operation) with durability, origin, and visibility metadata
+- **InputLifecycleState**: full state machine for input processing (Accepted → Consumed | Superseded | Coalesced | Abandoned)
+
+This crate sits between surfaces and `SessionService`, providing the stateful runtime that owns
+keep-alive, ingress admission, and live routing semantics for the product surfaces.
+</Accordion>
+
+<Accordion title="meerkat-machine-schema">
+Formal machine definitions powering the RMAT authority model:
+
+- **Machine catalog**: 19 canonical machines (turn execution, runtime control, ops lifecycle, comms drain, peer directory reachability, mob orchestrator, peer comms, external tool surface, input lifecycle, and more)
+- **Composition ontology**: `ActorSchema` (Machine/Owner kinds), `EffectHandoffProtocol`, `ClosurePolicy`
+- **Handoff protocols**: obligation tracking, feedback constraints, and terminal classification for async owner seams
+- **Schema validation**: `CompositionSchema::validate()` enforces handoff protocol coverage as a closed-world property
+
+Machine definitions are the single source of truth for canonical state, legal transitions, and terminal outcomes.
+</Accordion>
+
+<Accordion title="meerkat-machine-codegen">
+Code generation from machine schema definitions:
+
+- Reads machine definitions from `meerkat-machine-schema`
+- Generates sealed mutator traits, typed input/effect enums, and transition logic
+- Generates protocol helpers for handoff seams (obligation structs, executor functions, feedback submitters)
+- Generated code is marked with `// @generated` headers for RMAT audit rules
+</Accordion>
+
+<Accordion title="meerkat-machine-kernels">
+Generated sealed mutator implementations:
+
+- One kernel per canonical machine (e.g., `TurnExecutionKernel`, `OpsLifecycleKernel`, `RuntimeControlKernel`)
+- Each kernel implements a sealed mutator trait that is the **only** code path allowed to mutate canonical state
+- Authority modules in satellite crates (e.g., `TurnExecutionAuthority` in `meerkat-core`, `OpsLifecycleAuthority` in `meerkat-runtime`) wrap the generated kernels with effect execution
+- Handwritten shell code calls `authority.apply(input)` and handles the returned effects
+
+The seal is enforced at compile time: no handwritten code can implement the mutator trait.
 </Accordion>
 
 <Accordion title="meerkat-hooks">
@@ -221,6 +303,10 @@ Session service orchestration:
 - **PersistentSessionService**: durable session lifecycle over `SessionStore` backends
 - **DefaultCompactor**: context compaction implementation (feature: `session-compaction`)
 
+Runtime-backed surfaces own keep-alive, Queue/Steer routing, comms drain lifecycle, and
+external-event admission. `SessionService` remains the substrate lifecycle layer underneath those
+semantics.
+
 Feature gates: `session-store`, `session-compaction`.
 </Accordion>
 
@@ -269,9 +355,9 @@ Inter-agent communication system:
 - **Ed25519 identity**: cryptographic signing and verification of messages
 - **Trust model**: `TrustedPeers` with explicit peer verification
 - **Transports**: inproc (in-process), TCP, and UDS
-- **Inbox**: bounded message queue drained at turn boundaries
+- **Inbox**: bounded message queue feeding runtime-backed ingress admission
 - **Message types**: `Message`, `Request`, `Response`, `Ack`
-- **Host mode**: keeps agent alive listening for messages
+- **Keep-alive**: runtime-backed session behavior that keeps a session alive for future admitted work
 
 Feature-gated behind `comms`.
 </Accordion>
@@ -282,7 +368,7 @@ Canonical wire types and capability model shared across all surfaces:
 - **Wire types**: `WireRunResult`, `WireSessionInfo`, `WireEvent`, `WireUsage`, `WireError`, `WireContentBlock`, `WireContentInput`, `WireToolResultContent`
 - **Capabilities**: `CapabilityId`, `CapabilityStatus`, `CapabilityRegistration`, `CapabilitiesResponse`
 - **Error codes**: `ErrorCode` with stable projections to JSON-RPC codes, HTTP status, and CLI exit codes
-- **Contract version**: semver versioning for API compatibility (`0.4.1`)
+- **Contract version**: semver versioning for API compatibility (`0.4.13`)
 - **Parameter types**: `CoreCreateParams`, `StructuredOutputParams`, `HookParams`, `CommsParams`, `SkillsParams`
 </Accordion>
 
@@ -352,7 +438,8 @@ The main entry point. Re-exports types and provides:
 - **AgentFactory**: centralized agent construction pipeline shared across all surfaces
 - **FactoryAgentBuilder**: bridges `AgentFactory` into `SessionAgentBuilder`
 - **FactoryAgent**: wraps `DynAgent` implementing `SessionAgent`
-- **build_ephemeral_service()**: convenience constructor for `EphemeralSessionService<FactoryAgentBuilder>`
+- **build_persistent_service()**: runtime-backed persistent service constructor for the main Rust embedding path
+- **build_ephemeral_service()**: in-memory substrate constructor for testing and embedded Queue-only use
 - **AgentBuildConfig**: per-request configuration (model, system prompt, tool overrides, realm metadata)
 - **SessionBuildOptions**: in-band request build options used by all surfaces
 
@@ -376,7 +463,7 @@ The `FactoryAgentBuilder` pattern works as follows:
 
 ## Agent loop
 
-The agent executes a state machine loop defined by `LoopState` in `meerkat-core/src/state.rs`:
+The agent executes a state machine loop. The user-facing loop shape is `LoopState` in `meerkat-core/src/state.rs`, while canonical transition legality is enforced by `TurnExecutionAuthority` (the sealed mutator for `TurnExecutionMachine`):
 
 ```mermaid
 stateDiagram-v2
@@ -408,7 +495,7 @@ stateDiagram-v2
 | State | Description |
 |-------|-------------|
 | `CallingLlm` | Sending request to LLM, streaming response |
-| `WaitingForOps` | No LLM work, waiting for tool operations to complete |
+| `WaitingForOps` | No LLM work, waiting for machine-owned barrier operations to complete (gated by `barrier_satisfied` in `TurnExecutionMachine`) |
 | `DrainingEvents` | Processing buffered operation events at turn boundary |
 | `Cancelling` | Gracefully stopping after cancel signal or budget exhaustion |
 | `ErrorRecovery` | Attempting recovery from transient LLM error |
@@ -442,8 +529,8 @@ Turn boundaries are critical moments where:
 
 1. Tool results are injected into the session
 2. Steering messages (from parent agents) are applied
-3. Comms inbox is drained and messages injected (for inter-agent communication)
-4. Sub-agent results are collected and injected
+3. Any local projections or staged updates that follow canonical seam truth are applied
+4. Delegated-work projections are collected and injected
 5. Budget is checked
 6. Session is checkpointed
 7. `turn_boundary` hooks run before the next state transition
@@ -498,29 +585,9 @@ Three runtime adapters invoke the actual hook logic:
 Run-scoped overrides (`HookRunOverrides`) allow callers to disable specific hooks or inject additional entries for a single run without mutating the base configuration.
 </Note>
 
-### Sub-agent task management
+### Delegated work and forked branches
 
-Sub-agents are managed through the `SubAgentManager` (in `meerkat-core`) and the spawn/fork tools (in `meerkat-tools/src/builtin/sub_agent/`).
-
-<Tabs>
-  <Tab title="Spawn flow">
-    The `agent_spawn` flow:
-
-    1. The parent agent calls `agent_spawn` with a prompt, optional provider/model, tool access policy, and budget.
-    2. `AgentSpawnTool` validates concurrency limits, nesting depth, provider/model against the allowlist, and prompt non-emptiness.
-    3. A `FilteredDispatcher` wraps the parent's tool dispatcher if the child uses an `AllowList` or `DenyList` policy.
-    4. An LLM client is created via `LlmClientFactory` for the resolved provider.
-    5. A fresh session is created (no history inheritance). If comms is enabled, the child's prompt is enriched with parent communication context.
-    6. `spawn_sub_agent_dyn()` registers the child in `SubAgentManager` and starts execution in a background tokio task.
-    7. The parent receives the child's `OperationId` and name for tracking via `agent_status`.
-  </Tab>
-  <Tab title="Fork flow">
-    The `agent_fork` flow creates branches with full conversation history, splitting the parent's budget according to `ForkBudgetPolicy`.
-  </Tab>
-  <Tab title="Lifecycle">
-    Children run independently. The parent polls `agent_status` to check completion. `agent_cancel` sends a cancellation signal. `SubAgentManager` enforces `ConcurrencyLimits` (max concurrent, max depth, max total).
-  </Tab>
-</Tabs>
+In `0.5`, the standalone child-agent subsystem is gone. Delegated work now routes through mob orchestration plus the canonical runtime/control-plane path, while `Session::fork()` remains as the lightweight history-branching primitive.
 
 ### Comms transport design
 
@@ -536,11 +603,11 @@ The `meerkat-comms` crate provides inter-agent communication with a layered arch
 |---------|----------|
 | **UDS** (Unix Domain Sockets) | Local inter-process, lowest latency |
 | **TCP** | Cross-host communication |
-| **Inproc** (`InprocRegistry`) | In-process channels for sub-agents in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox |
+| **Inproc** (`InprocRegistry`) | In-process channels for peers in the same process. Uses a global registry; the sender looks up the peer by name, verifies the keypair signature, and delivers directly to the peer's inbox |
 
 **Wire format**: `Envelope` containing `{id, from, to, kind, sig}`. `MessageKind` variants: `Message` (fire-and-forget text), `Request`/`Response` (intent + params / in_reply_to + status + result), `Ack` (delivery confirmation). The `Router` handles serialization via `TransportCodec` (length-prefixed framing) and waits for ACK on non-response messages with a configurable timeout.
 
-**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. The `Inbox` is drained at turn boundaries (step 8 in the agent loop), injecting received messages into the session.
+**Agent integration**: `CommsToolDispatcher` wraps the base tool dispatcher via `wrap_with_comms()`, overlaying comms tools (`send`, `peers`) without modifying the `CompositeDispatcher`. Inbox delivery and runtime admission are separate concerns: transport queues work first, then runtime-backed ingress decides when those messages become session input.
 
 ### Data flow through the agent loop
 
@@ -552,10 +619,126 @@ flowchart TD
     STREAM --> CHECK{Tool calls?}
     CHECK -- Yes --> DISPATCH["4. Dispatch tool calls"]
     DISPATCH --> RESULTS["5. Execute and return results"]
-    RESULTS --> POST["6. Add results to session<br/>7. Apply steering messages<br/>8. Drain comms inbox<br/>9. Collect sub-agent results"]
+    RESULTS --> POST["6. Add results to session<br/>7. Apply steering messages<br/>8. Drain comms inbox<br/>9. Apply delegated-work projections"]
     POST --> LLM
     CHECK -- No --> DONE["Complete"]
 ```
+
+## Machine authority (RMAT)
+
+Meerkat enforces a strict authority model for all canonical state: **generated code is the only path allowed to mutate semantic state**. This is not convention -- it is enforced at compile time through sealed traits.
+
+### The core rule
+
+For any canonical domain (turn lifecycle, runtime control, ops lifecycle, mob orchestration, comms drain, etc.), there is exactly one answer to "what state is this in, what transitions are legal, and what happens next?" That answer is:
+
+1. The **machine definition** in `meerkat-machine-schema` -- declares states, inputs, transitions, effects, and terminal outcomes
+2. The **generated kernel** in `meerkat-machine-kernels` -- implements a sealed mutator trait that is the sole mutation path
+3. The **authority wrapper** in the owning crate -- calls `apply(input)` on the kernel and executes returned effects
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Shell code (handwritten)                                   │
+│  • classifies raw inputs → typed machine inputs             │
+│  • calls authority.apply(input)                             │
+│  • executes returned effects (I/O, scheduling, persistence) │
+│  • CANNOT mutate canonical state directly                   │
+├─────────────────────────────────────────────────────────────┤
+│  Authority (handwritten wrapper)                            │
+│  • holds machine state                                      │
+│  • delegates to generated kernel                            │
+│  • maps effects to runtime actions                          │
+├─────────────────────────────────────────────────────────────┤
+│  Generated kernel (sealed mutator trait)                    │
+│  • ONLY code that can mutate canonical state                │
+│  • typed input enum → transition → effects + new state      │
+│  • compile-time seal prevents handwritten implementations   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Machine catalog
+
+19 canonical machines cover the full system:
+
+| Machine | Domain | Owner crate |
+|---------|--------|-------------|
+| `TurnExecutionMachine` | Agent turn lifecycle, LLM calls, tool dispatch | `meerkat-core` |
+| `OpsLifecycleMachine` | Async operation tracking, barrier satisfaction | `meerkat-runtime` |
+| `RuntimeControlMachine` | Runtime attach/detach, retire, reset | `meerkat-runtime` |
+| `RuntimeIngressMachine` | Input acceptance, deduplication, rejection | `meerkat-runtime` |
+| `InputLifecycleMachine` | Input processing state (accepted → consumed/superseded/abandoned) | `meerkat-runtime` |
+| `ExternalToolSurfaceMachine` | MCP and external tool dispatch authority | `meerkat-mcp` |
+| `CommsDrainLifecycleMachine` | Host-mode drain task spawn/abort lifecycle | `meerkat-comms` |
+| `PeerCommsMachine` | Peer-to-peer messaging authority | `meerkat-comms` |
+| `PeerDirectoryReachabilityMachine` | Resolved peer reachability and last-known send-result truth | `meerkat-comms` |
+| `MobLifecycleMachine` | Mob creation, activation, completion, destruction | `meerkat-mob` |
+| `MobOrchestratorMachine` | Member spawning, wiring, turn dispatch | `meerkat-mob` |
+| `MobMemberLifecycleAnchor` | Per-member lifecycle within a mob | `meerkat-mob` |
+| `MobHelperResultAnchor` | Helper result collection and anchoring | `meerkat-mob` |
+| `MobRuntimeBridgeAnchor` | Runtime-to-mob bridge lifecycle | `meerkat-mob` |
+| `MobWiringAnchor` | Peer wiring topology management | `meerkat-mob` |
+| `FlowRunMachine` | DAG flow execution, step dispatch, completion | `meerkat-mob` |
+
+Plus additional anchor machines for cross-cutting concerns.
+
+### What handwritten code may and may not do
+
+**Allowed:**
+- Classify raw inputs into typed machine inputs
+- Route inputs to the correct machine owner
+- Schedule and execute effects (I/O, persistence, channel management)
+- Manage tokio tasks, notifiers, and completion waiters
+
+**Prohibited:**
+- Mutate canonical semantic state directly
+- Decide transition legality outside the machine
+- Implement alternate reducers or shadow state machines
+- Invent duplicate semantic enums that diverge from machine truth
+- Hide transition-relevant truth in side booleans or maps the machine doesn't own
+
+### RMAT audit
+
+The `xtask rmat-audit` CI gate verifies structural compliance:
+
+- Every authority module is declared in the policy
+- Protected fields (`wake_requested`, `process_requested`, `comms_drain_active`) are only written through authority paths
+- Handoff protocol coverage is complete
+- Terminal mapping constraints are satisfied
+- The baseline (`xtask/rmat-baseline.toml`) has zero open findings
+
+## Formal seam closure
+
+Single-machine sealed mutators are necessary but not sufficient. Meerkat also has semantic seams *between* machines -- async owner handoffs where one machine emits an effect and another actor must realize it and feed back the outcome.
+
+### The three closed seams
+
+1. **Comms drain seam**: `TurnExecutionMachine` emits `SpawnDrainTask`/`AbortDrainTask` effects. The comms drain lifecycle must spawn or abort the actual drain task and feed back `TaskSpawned`/`TaskExited`. Generated protocol helpers (`protocol_comms_drain_spawn.rs`, `protocol_comms_drain_abort.rs`) constrain the obligation and feedback to exactly the allowed inputs.
+
+2. **Ops barrier seam**: `TurnExecutionMachine` delegates operation tracking to `OpsLifecycleMachine`. The barrier-satisfaction signal (all pending barrier ops complete) flows through `AsyncOpRef` with typed `WaitPolicy` (Barrier vs Detached). The `barrier_satisfied` guard on `ToolCallsResolved` ensures the turn cannot advance until the barrier is met.
+
+3. **Terminal outcome alignment**: Machine terminal outcomes (`Completed`, `Failed`, `Cancelled`) are the single source of truth for surfaced API results. Generated terminal classification helpers produce exhaustive matches with no default arm, so adding a new terminal outcome is a compile error until all surfaces handle it.
+
+### Handoff protocol anatomy
+
+Each seam is formalized as an `EffectHandoffProtocol` in the composition schema:
+
+- **Obligation**: what must happen (correlation fields, obligation fields)
+- **Allowed feedback inputs**: exactly which machine inputs the owner may submit
+- **Closure policy**: `AckRequired`, `AckOrAbort`, or `TerminalClosure`
+- **Liveness annotation**: fairness assumptions under which feedback eventually occurs
+- **Generated helpers**: obligation struct, executor function, feedback submitters -- all generated, all exhaustive
+
+The composition schema's `validate()` function enforces that every effect crossing an ownership boundary has a declared handoff protocol. This is a closed-world property: unprotocolized handoffs are a CI-blocking error.
+
+### Proof model
+
+Three claim types classify every acceptance criterion:
+
+| Claim type | What it proves | Verified by |
+|------------|----------------|-------------|
+| **Structural coverage** | Protocol exists, realization sites declared, no missing path | Schema validation, RMAT audit, CI gate |
+| **Safety** | No invalid state or transition reachable, machine truth ≠ runtime behavior divergence impossible | Machine-level TLC model checking, composition-level TLC model checking, obligation closure invariants |
+| **Liveness** | Under stated fairness assumptions, required feedback eventually occurs | Scoped liveness claims with explicit fairness conditions |
 
 ## Extension points
 
@@ -573,27 +756,32 @@ Meerkat is extended by implementing three core traits. See the [Rust SDK](/rust/
 1. **API key isolation**: keys are passed explicitly, never stored in config
 2. **Tool sandboxing**: MCP tools execute in separate server processes
 3. **Input validation**: JSON Schema validation for tool arguments
-4. **Sub-agent isolation**: child agents cannot spawn further sub-agents or enable comms by default
+4. **Delegated-work isolation**: forked branches and mob-managed child workflows do not get implicit recursive orchestration powers
 
 ## Crate ownership
 
 | Owner | Owns |
 |-------|------|
 | `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf crate, no meerkat deps) |
-| `meerkat-core` | Trait contracts, `SessionError`, agent loop, types |
+| `meerkat-core` | Trait contracts, `SessionError`, agent loop, types, `TurnExecutionAuthority` |
+| `meerkat-machine-schema` | Machine definitions, composition ontology, handoff protocols |
+| `meerkat-machine-kernels` | Generated sealed mutator implementations |
+| `meerkat-runtime` | Runtime control plane, `RuntimeDriver`, `InputLifecycleAuthority`, `OpsLifecycleAuthority` |
 | `meerkat-store` | `SessionStore` implementations (SQLite, JSONL, redb, in-memory) |
 | `meerkat-session` | Session orchestration, `EventStore`, compactor |
 | `meerkat-memory` | `HnswMemoryStore`, `SimpleMemoryStore` |
-| `meerkat` (facade) | Feature wiring, re-exports, `AgentFactory`, `build_ephemeral_service` |
+| `meerkat` (facade) | Feature wiring, re-exports, `AgentFactory`, persistence helpers, `build_persistent_service`, `build_ephemeral_service` |
 
 ### Dependency rules
 
 1. `meerkat-models` depends on nothing in the workspace (leaf crate)
-2. `meerkat-core` depends on `meerkat-models` for catalog data and defaults
-3. All other crates depend on `meerkat-core` for types and traits
-4. `meerkat-tools` depends on `meerkat-mcp` for MCP routing
-5. `meerkat` (facade) re-exports from all crates
-6. `meerkat-cli` is the top-level binary crate
+2. `meerkat-machine-schema` depends on nothing in the workspace (leaf crate)
+3. `meerkat-core` depends on `meerkat-models` for catalog data and defaults
+4. `meerkat-machine-kernels` depends on `meerkat-machine-schema` for definitions
+5. All runtime crates depend on `meerkat-core` for types and traits
+6. `meerkat-tools` depends on `meerkat-mcp` for MCP routing
+7. `meerkat` (facade) re-exports from all crates
+8. `meerkat-cli` is the top-level binary crate
 
 <Note>
 Canonical runtime state is realm-scoped (`realm_manifest.json`, realm config, and pinned session backend).
@@ -602,6 +790,9 @@ Sharing and isolation are controlled by `realm_id`, not by working directory alo
 
 ## See also
 
+- [RMAT](/docs/architecture/RMAT.md) - Rust Machine Authority Theory foundational document
+- [Formal seam closure](/docs/architecture/formal-seam-closure.md) - ADR for handoff protocol design
+- [Finite ownership ledger](/docs/architecture/finite-ownership-ledger.md) - state cell and semantic operation inventory
 - [Rust SDK reference](/rust/overview) - types, traits, and usage examples
 - [API reference](/reference/api-reference) - quick-lookup type index
 - [Session contracts](/reference/session-contracts) - concurrency, durability, and compaction semantics

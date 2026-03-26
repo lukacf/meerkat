@@ -5,15 +5,19 @@
 
 pub mod transport;
 
+use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{ContentInput, Message, RunResult, SessionId, Usage};
+use crate::types::{
+    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, Usage,
+};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
+    SessionLlmIdentity,
 };
 use crate::{EventStream, StreamError};
 use async_trait::async_trait;
@@ -132,15 +136,14 @@ pub struct CreateSessionRequest {
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
+    /// Optional normalized rendering metadata for the initial prompt.
+    pub render_metadata: Option<RenderMetadata>,
     /// Optional system prompt override.
     pub system_prompt: Option<String>,
     /// Max tokens per LLM turn.
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Run in host mode: process prompt then stay alive for comms messages.
-    /// This is a session-level property applied to all turns.
-    pub host_mode: bool,
     /// Canonical SkillKeys to resolve and inject for the first turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
@@ -164,17 +167,21 @@ pub struct SessionBuildOptions {
     pub budget_limits: Option<BudgetLimits>,
     pub provider_params: Option<serde_json::Value>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Blob store used to externalize durable image content and hydrate refs
+    /// back to bytes at execution seams.
+    pub blob_store_override: Option<Arc<dyn crate::BlobStore>>,
     /// Opaque transport for an optional per-request LLM override.
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// Optional scoped stream sink for attributed multi-agent events.
-    pub scoped_event_tx: Option<mpsc::Sender<ScopedAgentEvent>>,
-    /// Base scope path for attributed events emitted by nested sub-agents.
-    pub scoped_event_path: Option<Vec<StreamScopeFrame>>,
+    /// Canonical async-op registry for the owning session.
+    ///
+    /// Runtime-backed surfaces should provide the real per-session registry
+    /// from the runtime adapter rather than letting deeper layers allocate a
+    /// fresh local registry.
+    pub ops_lifecycle_override: Option<Arc<dyn OpsLifecycleRegistry>>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
-    pub override_subagents: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_mob: Option<bool>,
     pub preload_skills: Option<Vec<crate::skills::SkillId>>,
@@ -182,7 +189,10 @@ pub struct SessionBuildOptions {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
-    /// Optional session checkpointer for host-mode persistence.
+    /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
+    /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
+    pub keep_alive: bool,
+    /// Optional session checkpointer for keep-alive persistence.
     pub checkpointer: Option<std::sync::Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
@@ -209,10 +219,38 @@ pub struct SessionBuildOptions {
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    /// Opaque transport for the runtime adapter used to construct a per-session
-    /// `RuntimeInputSink`. Factory builders downcast this to `Arc<RuntimeSessionAdapter>`.
-    /// Same pattern as `llm_client_override`.
-    pub runtime_adapter_for_sink: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+    /// Explicit call-timeout override at the build seam.
+    ///
+    /// - `Inherit` (default): defer to config override, then profile default
+    /// - `Disabled`: explicitly disable call timeout regardless of profile
+    /// - `Value(d)`: explicitly set call timeout to `d`
+    pub call_timeout_override: crate::CallTimeoutOverride,
+    /// Typed explicit-override intent for resumed-session merges.
+    ///
+    /// Surfaces set bits only for fields they can prove were explicitly
+    /// supplied by the caller. Resumed metadata then fills only the
+    /// non-explicit fields.
+    pub resume_override_mask: ResumeOverrideMask,
+}
+
+/// Typed explicit-override intent for resumed-session metadata merges.
+///
+/// This avoids trying to recover caller intent from flattened build config.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResumeOverrideMask {
+    pub model: bool,
+    pub provider: bool,
+    pub max_tokens: bool,
+    pub structured_output_retries: bool,
+    pub provider_params: bool,
+    pub override_builtins: bool,
+    pub override_shell: bool,
+    pub override_memory: bool,
+    pub override_mob: bool,
+    pub preload_skills: bool,
+    pub keep_alive: bool,
+    pub comms_name: bool,
+    pub peer_meta: bool,
 }
 
 impl Default for SessionBuildOptions {
@@ -228,12 +266,11 @@ impl Default for SessionBuildOptions {
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            blob_store_override: None,
             llm_client_override: None,
-            scoped_event_tx: None,
-            scoped_event_path: None,
+            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
-            override_subagents: None,
             override_memory: None,
             override_mob: None,
             preload_skills: None,
@@ -241,13 +278,15 @@ impl Default for SessionBuildOptions {
             instance_id: None,
             backend: None,
             config_generation: None,
+            keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
             shell_env: None,
-            runtime_adapter_for_sink: None,
+            call_timeout_override: crate::CallTimeoutOverride::Inherit,
+            resume_override_mask: ResumeOverrideMask::default(),
         }
     }
 }
@@ -265,12 +304,14 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("budget_limits", &self.budget_limits)
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
-            .field("scoped_event_tx", &self.scoped_event_tx.is_some())
-            .field("scoped_event_path", &self.scoped_event_path.is_some())
+            .field(
+                "ops_lifecycle_override",
+                &self.ops_lifecycle_override.is_some(),
+            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
-            .field("override_subagents", &self.override_subagents)
             .field("override_memory", &self.override_memory)
             .field("override_mob", &self.override_mob)
             .field("preload_skills", &self.preload_skills)
@@ -278,6 +319,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
             .field("config_generation", &self.config_generation)
+            .field("keep_alive", &self.keep_alive)
             .field("checkpointer", &self.checkpointer.is_some())
             .field("silent_comms_intents", &self.silent_comms_intents)
             .field(
@@ -286,6 +328,8 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
+            .field("call_timeout_override", &self.call_timeout_override)
+            .field("resume_override_mask", &self.resume_override_mask)
             .finish()
     }
 }
@@ -295,10 +339,22 @@ impl std::fmt::Debug for SessionBuildOptions {
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
     pub prompt: ContentInput,
+    /// Optional system prompt override for a deferred session's first turn.
+    ///
+    /// This is only supported before the session has any conversation history.
+    /// Materialized sessions with existing messages must reject it.
+    pub system_prompt: Option<String>,
+    /// Optional normalized rendering metadata for this turn prompt.
+    pub render_metadata: Option<RenderMetadata>,
+    /// Handling mode for this turn's ordinary content-bearing work.
+    ///
+    /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
+    /// before calling the executor. The session service passes this through
+    /// to the `SessionAgent` but does not act on it. Non-Queue handling
+    /// only works correctly on runtime-backed surfaces.
+    pub handling_mode: HandlingMode,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Run this turn in host mode.
-    pub host_mode: bool,
     /// Canonical SkillKeys to resolve and inject for this turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
@@ -383,6 +439,8 @@ pub struct SessionInfo {
     pub updated_at: SystemTime,
     pub message_count: usize,
     pub is_active: bool,
+    pub model: String,
+    pub provider: Provider,
     pub last_assistant_text: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
@@ -490,6 +548,47 @@ pub trait SessionService: Send + Sync {
         _client: std::sync::Arc<dyn crate::AgentLlmClient>,
     ) -> Result<(), SessionError> {
         Err(SessionError::Unsupported("set_session_client".to_string()))
+    }
+
+    /// Atomically replace the live session client and the session's durable
+    /// LLM identity.
+    ///
+    /// This is the canonical seam for materialized-session hot-swap semantics.
+    /// Implementations should apply both updates together so future turns and
+    /// resume/recovery see the same model/provider/provider_params identity.
+    async fn hot_swap_session_llm_identity(
+        &self,
+        _id: &SessionId,
+        _client: std::sync::Arc<dyn crate::AgentLlmClient>,
+        _identity: SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "hot_swap_session_llm_identity".to_string(),
+        ))
+    }
+
+    /// Update the `keep_alive` flag on a live session's durable metadata.
+    ///
+    /// Called by the runtime when an explicit override changes the session's
+    /// keep-alive intent so that subsequent inheriting calls observe the
+    /// updated value. Returns `Unsupported` by default.
+    async fn update_session_keep_alive(
+        &self,
+        _id: &SessionId,
+        _keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "update_session_keep_alive".to_string(),
+        ))
+    }
+
+    /// Whether a live in-memory session bridge currently exists for `id`.
+    ///
+    /// This is intentionally distinct from `list()` / `SessionSummary`:
+    /// persisted-only summaries must not count as live, and idle live sessions
+    /// must still count as live even when no turn is running.
+    async fn has_live_session(&self, _id: &SessionId) -> Result<bool, SessionError> {
+        Err(SessionError::Unsupported("has_live_session".to_string()))
     }
 
     /// Stage an external tool visibility filter on a live session.
@@ -604,5 +703,63 @@ impl dyn SessionService {
     /// Wrap self in an Arc.
     pub fn into_arc(self: Box<Self>) -> Arc<dyn SessionService> {
         Arc::from(self)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unimplemented,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    struct UnsupportedSessionService;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionService for UnsupportedSessionService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            unimplemented!()
+        }
+
+        async fn start_turn(
+            &self,
+            _id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            unimplemented!()
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unimplemented!()
+        }
+
+        async fn read(&self, _id: &SessionId) -> Result<SessionView, SessionError> {
+            unimplemented!()
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            unimplemented!()
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn has_live_session_defaults_to_unsupported() {
+        let service = UnsupportedSessionService;
+        let err = service
+            .has_live_session(&SessionId::new())
+            .await
+            .expect_err("default implementation should fail loudly");
+        assert!(matches!(err, SessionError::Unsupported(name) if name == "has_live_session"));
     }
 }

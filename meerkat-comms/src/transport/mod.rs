@@ -45,7 +45,7 @@ pub enum PeerAddr {
     /// TCP address as "host:port" string (supports both IP addresses and hostnames).
     /// DNS resolution happens at connect time via ToSocketAddrs.
     Tcp(String),
-    /// In-process address for sub-agent communication.
+    /// In-process address for peer communication within one runtime.
     /// Messages are delivered directly via in-memory channels.
     Inproc(String),
 }
@@ -115,21 +115,23 @@ mod tests {
     use crate::transport::codec::{EnvelopeFrame, TransportCodec};
     use crate::types::Envelope;
     use crate::types::MessageKind;
-    use bytes::{Bytes, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut};
+    use std::io;
     use std::sync::Arc;
     use tokio_util::codec::{Decoder, Encoder};
     use uuid::Uuid;
 
     fn make_test_envelope() -> Envelope {
+        make_test_envelope_with_body("hello".to_string())
+    }
+
+    fn make_test_envelope_with_body(body: String) -> Envelope {
         let keypair = Keypair::generate();
         let mut envelope = Envelope {
             id: Uuid::new_v4(),
             from: keypair.public_key(),
             to: PubKey::new([2u8; 32]),
-            kind: MessageKind::Message {
-                blocks: None,
-                body: "hello".to_string(),
-            },
+            kind: MessageKind::Message { blocks: None, body },
             sig: crate::identity::Signature::new([0u8; 64]),
         };
         envelope.sign(&keypair);
@@ -242,18 +244,18 @@ mod tests {
 
     #[test]
     fn test_peer_addr_inproc_variant() {
-        let addr = PeerAddr::Inproc("sub-agent-123".to_string());
+        let addr = PeerAddr::Inproc("peer-123".to_string());
         match addr {
-            PeerAddr::Inproc(name) => assert_eq!(name, "sub-agent-123"),
+            PeerAddr::Inproc(name) => assert_eq!(name, "peer-123"),
             _ => panic!("expected Inproc variant"),
         }
     }
 
     #[test]
     fn test_parse_inproc_addr() {
-        let addr = PeerAddr::parse("inproc://my-sub-agent").unwrap();
+        let addr = PeerAddr::parse("inproc://my-peer").unwrap();
         match addr {
-            PeerAddr::Inproc(name) => assert_eq!(name, "my-sub-agent"),
+            PeerAddr::Inproc(name) => assert_eq!(name, "my-peer"),
             _ => panic!("expected Inproc variant"),
         }
     }
@@ -364,5 +366,54 @@ mod tests {
         assert_eq!(decoded.envelope.to, envelope.to);
         // Verify signature is preserved
         assert!(decoded.envelope.verify());
+    }
+
+    #[test]
+    fn test_rct_contracts_transport_codec_roundtrip() {
+        let envelope = make_test_envelope_with_body("hello".to_string());
+        assert!(envelope.verify());
+
+        let frame = EnvelopeFrame {
+            envelope: envelope.clone(),
+            raw: Arc::new(Bytes::new()),
+        };
+
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let mut dst = BytesMut::new();
+        codec.encode(frame, &mut dst).unwrap();
+
+        let declared_len = u32::from_be_bytes(dst[..4].try_into().unwrap());
+        assert_eq!(declared_len as usize, dst.len() - 4);
+
+        let mut src = dst.clone();
+        let decoded = codec.decode(&mut src).unwrap().expect("frame present");
+        assert_eq!(decoded.envelope, envelope);
+        assert_eq!(decoded.raw.as_ref().as_ref(), &dst[4..]);
+    }
+
+    #[test]
+    fn test_rct_contracts_transport_codec_rejects_oversize_len_prefix_on_decode() {
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let mut src = BytesMut::new();
+        src.put_u32(MAX_PAYLOAD_SIZE + 1);
+
+        let err = codec.decode(&mut src).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_rct_contracts_transport_codec_rejects_oversize_payload_on_encode() {
+        let oversize = "a".repeat(MAX_PAYLOAD_SIZE as usize + 1024);
+        let envelope = make_test_envelope_with_body(oversize);
+
+        let frame = EnvelopeFrame {
+            envelope,
+            raw: Arc::new(Bytes::new()),
+        };
+
+        let mut codec = TransportCodec::new(MAX_PAYLOAD_SIZE);
+        let mut dst = BytesMut::new();
+        let err = codec.encode(frame, &mut dst).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

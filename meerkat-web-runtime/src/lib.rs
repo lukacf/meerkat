@@ -11,7 +11,7 @@
 //! - `init_runtime_from_config(config_json)` — bare-bones bootstrap without mobpack
 //! - `runtime_version()` → crate version string (for JS/WASM version mismatch detection)
 //!
-//! ### Session (direct agent loop, existing per-session approach)
+//! ### Session (runtime-backed session-handle façades)
 //! - `create_session(mobpack_bytes, config_json)` → handle
 //! - `start_turn(handle, prompt, options_json)` → JSON result
 //! - `get_session_state(handle)` → JSON
@@ -23,16 +23,21 @@
 //! - `mob_create(definition_json)` → mob_id
 //! - `mob_status(mob_id)` → JSON
 //! - `mob_list()` → JSON
-//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/destroy
+//! - `mob_lifecycle(mob_id, action)` — stop/resume/complete/reset/destroy
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, meerkat_id)`
-//! - `mob_wire(mob_id, a, b)`
-//! - `mob_unwire(mob_id, a, b)`
+//! - `mob_wire_peer(mob_id, member, peer_json)` / `mob_unwire_peer(mob_id, member, peer_json)` — canonical member/peer wiring
+//! - `mob_wire(mob_id, a, b)` / `mob_unwire(mob_id, a, b)` — low-level local-local wiring
+//! - `mob_wire_target(mob_id, local, target_json)` / `mob_unwire_target(mob_id, local, target_json)` — low-level aliases
 //! - `mob_list_members(mob_id)` → JSON
 //! - `mob_append_system_context(mob_id, meerkat_id, request_json)` → JSON
-//! - `mob_send_message(mob_id, meerkat_id, message)`
-//! - `mob_respawn(mob_id, meerkat_id, initial_message?)` — retire + re-spawn same profile
+//! - `mob_member_send(mob_id, meerkat_id, request_json)` → JSON delivery receipt
+//! - `mob_member_status(mob_id, meerkat_id)` → JSON member snapshot
+//! - `mob_respawn(mob_id, meerkat_id, initial_message?)` → JSON result envelope
+//! - `mob_force_cancel(mob_id, meerkat_id)`
+//! - `mob_spawn_helper(mob_id, request_json)` → JSON helper result
+//! - `mob_fork_helper(mob_id, request_json)` → JSON helper result
 //! - `mob_run_flow(mob_id, flow_id, params_json)` → run_id
 //! - `mob_flow_status(mob_id, run_id)` → JSON
 //! - `mob_cancel_flow(mob_id, run_id)`
@@ -60,10 +65,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
+use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
-use meerkat_core::Config;
+use meerkat_core::{Config, SessionService};
 use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
 
@@ -76,6 +82,9 @@ fn init_tracing() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            tracing::error!("wasm panic: {info}");
+        }));
         tracing_wasm::set_as_global_default();
     });
 }
@@ -187,9 +196,9 @@ struct SessionConfig {
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
-    /// Whether this session runs in host mode (enables comms tools).
+    /// Whether this session stays alive after the initial turn (enables comms drain loop).
     #[serde(default)]
-    host_mode: bool,
+    keep_alive: bool,
     /// Application-defined labels (flow through mob spawn, not used at create_session level).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
@@ -279,47 +288,21 @@ fn default_max_sessions() -> usize {
 // Event Model
 // ═══════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Usage {
-    input_tokens: u64,
-    output_tokens: u64,
-}
-
 // ═══════════════════════════════════════════════════════════
-// Runtime Session (holds factory-built agent state)
+// Runtime-backed browser session-handle façade
 // ═══════════════════════════════════════════════════════════
 
-struct RuntimeSession {
-    handle: u32,
+type WasmSessionEventReceiver = crate::tokio::sync::broadcast::Receiver<
+    meerkat_core::event::EventEnvelope<meerkat_core::event::AgentEvent>,
+>;
+
+struct RuntimeHandleSession {
+    session_id: meerkat_core::SessionId,
     mob_id: String,
     model: String,
-    /// The meerkat Config snapshot for this session's factory.
-    config: Config,
-    /// Pre-built AgentBuildConfig (with overrides set).
-    build_config_template: AgentBuildConfig,
-    /// Preserved session for multi-turn context.
-    meerkat_session: Option<meerkat_core::session::Session>,
-    /// Canonical staged runtime system-context control state for the direct handle.
-    system_context_state: meerkat_core::SessionSystemContextState,
+    keep_alive: bool,
     run_counter: u64,
-    usage: Usage,
-    /// Buffered agent events from the last turn, drained by poll_events.
-    pending_events: Vec<serde_json::Value>,
-}
-
-#[derive(Default)]
-struct RuntimeRegistry {
-    next_handle: u32,
-    sessions: BTreeMap<u32, RuntimeSession>,
-}
-
-thread_local! {
-    static REGISTRY: RefCell<RuntimeRegistry> = const {
-        RefCell::new(RuntimeRegistry {
-            next_handle: 1,
-            sessions: BTreeMap::new(),
-        })
-    };
+    event_rx: WasmSessionEventReceiver,
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -332,8 +315,13 @@ struct RuntimeState {
     mob_state: Arc<MobMcpState>,
     /// Concrete session service — needed for subscribe_session_events_raw.
     session_service: Arc<WasmSessionService>,
+    /// Opaque browser-local handles mapped to runtime-owned sessions.
+    sessions: BTreeMap<u32, RuntimeHandleSession>,
+    next_handle: u32,
     #[allow(dead_code)]
     model: String,
+    #[cfg(target_arch = "wasm32")]
+    js_tools: Vec<JsToolEntry>,
 }
 
 /// Resolve per-provider API keys into a `Config.providers.api_keys` map.
@@ -481,6 +469,34 @@ thread_local! {
     static RUNTIME_STATE: RefCell<Option<RuntimeState>> = const { RefCell::new(None) };
 }
 
+fn clear_subscription_registry() {
+    SUBSCRIPTIONS.with(|cell| {
+        let mut registry = cell.borrow_mut();
+        registry.subscriptions.clear();
+        registry.next_handle = 1;
+    });
+}
+
+fn install_runtime_state(state: RuntimeState) {
+    clear_subscription_registry();
+    RUNTIME_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(state);
+    });
+}
+
+/// Tear down the embedded runtime and release all local handles/subscriptions.
+///
+/// Existing `Session`, `Mob`, and subscription handles become invalid after
+/// this call.
+#[wasm_bindgen]
+pub fn destroy_runtime() -> Result<(), JsValue> {
+    clear_subscription_registry();
+    RUNTIME_STATE.with(|cell| {
+        cell.borrow_mut().take();
+    });
+    Ok(())
+}
+
 fn with_runtime_state<F, R>(f: F) -> Result<R, JsValue>
 where
     F: FnOnce(&RuntimeState) -> Result<R, JsValue>,
@@ -488,6 +504,22 @@ where
     RUNTIME_STATE.with(|cell| {
         let borrow = cell.borrow();
         let state = borrow.as_ref().ok_or_else(|| {
+            err_js(
+                "not_initialized",
+                "runtime not initialized — call init_runtime or init_runtime_from_config first",
+            )
+        })?;
+        f(state)
+    })
+}
+
+fn with_runtime_state_mut<F, R>(f: F) -> Result<R, JsValue>
+where
+    F: FnOnce(&mut RuntimeState) -> Result<R, JsValue>,
+{
+    RUNTIME_STATE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let state = borrow.as_mut().ok_or_else(|| {
             err_js(
                 "not_initialized",
                 "runtime not initialized — call init_runtime or init_runtime_from_config first",
@@ -519,6 +551,29 @@ fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
 
 fn err_mob(e: meerkat_mob::MobError) -> JsValue {
     err_str("mob_error", e)
+}
+
+fn err_session(e: meerkat_core::SessionError) -> JsValue {
+    match e {
+        meerkat_core::SessionError::NotFound { .. } => {
+            err_js("SESSION_NOT_FOUND", "session not found")
+        }
+        meerkat_core::SessionError::Busy { .. } => err_js("SESSION_BUSY", "session is busy"),
+        meerkat_core::SessionError::PersistenceDisabled => err_js(
+            "SESSION_PERSISTENCE_DISABLED",
+            "session persistence is disabled",
+        ),
+        meerkat_core::SessionError::CompactionDisabled => err_js(
+            "SESSION_COMPACTION_DISABLED",
+            "session compaction is disabled",
+        ),
+        meerkat_core::SessionError::NotRunning { .. } => {
+            err_js("SESSION_NOT_RUNNING", "session is not running")
+        }
+        meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
+        meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
+        meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
+    }
 }
 
 fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
@@ -755,13 +810,6 @@ fn create_llm_client(
 // JS Tool Callbacks — register tool implementations from JavaScript
 // ═══════════════════════════════════════════════════════════
 
-// Registry of JS-implemented tools. Populated via `register_tool_callback`
-// or `register_js_tool` before `init_runtime` / `init_runtime_from_config`.
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static JS_TOOLS: RefCell<Vec<JsToolEntry>> = const { RefCell::new(Vec::new()) };
-}
-
 /// How a JS-registered tool is dispatched.
 #[cfg(target_arch = "wasm32")]
 enum JsToolMode {
@@ -780,7 +828,7 @@ struct JsToolEntry {
 
 /// Register a tool implementation from JavaScript.
 ///
-/// Call this BEFORE `init_runtime` or `init_runtime_from_config`.
+/// Requires initialized runtime state.
 /// The `callback` receives a JSON string of tool arguments and must return
 /// a `Promise<string>` resolving to JSON `{"content": "...", "is_error": false}`.
 ///
@@ -810,14 +858,14 @@ pub fn register_tool_callback(
             input_schema: schema,
         });
 
-        JS_TOOLS.with(|cell| {
-            let mut tools = cell.borrow_mut();
-            tools.retain(|e| e.def.name != def.name);
-            tools.push(JsToolEntry {
+        with_runtime_state_mut(|state| {
+            state.js_tools.retain(|e| e.def.name != def.name);
+            state.js_tools.push(JsToolEntry {
                 def,
                 mode: JsToolMode::Callback(func),
             });
-        });
+            Ok(())
+        })?;
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -828,13 +876,13 @@ pub fn register_tool_callback(
 
 /// Register a fire-and-forget tool from JavaScript.
 ///
-/// Call this BEFORE `init_runtime` or `init_runtime_from_config`.
+/// Requires initialized runtime state.
 /// When the agent calls this tool, `dispatch()` returns `"acknowledged"`
 /// immediately and the agent loop continues without waiting.
 ///
 /// The host should watch `ToolCallRequested` events in the event stream to
 /// capture the tool call arguments and act on them asynchronously. Any
-/// response (e.g. human approval) should be sent back via `mob_send_message`.
+/// response (e.g. human approval) should be sent back via `mob_member_send`.
 ///
 /// Example (JS):
 /// ```js
@@ -868,14 +916,14 @@ pub fn register_js_tool(
             input_schema: schema,
         });
 
-        JS_TOOLS.with(|cell| {
-            let mut tools = cell.borrow_mut();
-            tools.retain(|e| e.def.name != def.name);
-            tools.push(JsToolEntry {
+        with_runtime_state_mut(|state| {
+            state.js_tools.retain(|e| e.def.name != def.name);
+            state.js_tools.push(JsToolEntry {
                 def,
                 mode: JsToolMode::FireAndForget,
             });
-        });
+            Ok(())
+        })?;
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -888,7 +936,12 @@ pub fn register_js_tool(
 #[wasm_bindgen]
 pub fn clear_tool_callbacks() {
     #[cfg(target_arch = "wasm32")]
-    JS_TOOLS.with(|cell| cell.borrow_mut().clear());
+    {
+        let _ = with_runtime_state_mut(|state| {
+            state.js_tools.clear();
+            Ok(())
+        });
+    }
 }
 
 /// Return the crate version embedded at compile time.
@@ -902,33 +955,38 @@ pub fn runtime_version() -> String {
 
 /// Tool dispatcher that delegates to JS callbacks stored in the thread-local registry.
 ///
-/// The dispatcher itself only stores tool definitions (Send+Sync).
-/// At dispatch time, it looks up the JS callback from the thread-local `JS_TOOLS`.
-/// This avoids storing `js_sys::Function` (which is `!Send`) in the dispatcher.
+/// The dispatcher itself stores no JS state. It resolves tool definitions and
+/// callbacks from the initialized runtime's tool registry on each access,
+/// avoiding `!Send` callback state inside the dispatcher.
 #[cfg(target_arch = "wasm32")]
-struct JsToolDispatcher {
-    tools: Arc<[Arc<meerkat_core::ToolDef>]>,
-}
+struct JsToolDispatcher;
 
 #[cfg(target_arch = "wasm32")]
 impl JsToolDispatcher {
-    fn from_registry() -> Option<Self> {
-        JS_TOOLS.with(|cell| {
-            let entries = cell.borrow();
-            if entries.is_empty() {
-                return None;
-            }
-            let tools: Arc<[Arc<meerkat_core::ToolDef>]> =
-                entries.iter().map(|e| e.def.clone()).collect();
-            Some(Self { tools })
+    fn tools_from_runtime() -> Arc<[Arc<meerkat_core::ToolDef>]> {
+        RUNTIME_STATE.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(state) = borrow.as_ref() else {
+                return Vec::<Arc<meerkat_core::ToolDef>>::new().into();
+            };
+            let defs: Vec<_> = state
+                .js_tools
+                .iter()
+                .map(|entry| entry.def.clone())
+                .collect();
+            defs.into()
         })
     }
 
     /// Check whether a tool is registered as fire-and-forget.
     fn is_fire_and_forget(name: &str) -> bool {
-        JS_TOOLS.with(|cell| {
-            let entries = cell.borrow();
-            entries
+        RUNTIME_STATE.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(state) = borrow.as_ref() else {
+                return false;
+            };
+            state
+                .js_tools
                 .iter()
                 .find(|e| e.def.name == name)
                 .map(|e| matches!(e.mode, JsToolMode::FireAndForget))
@@ -936,11 +994,12 @@ impl JsToolDispatcher {
         })
     }
 
-    /// Look up the JS callback for a tool by name from the thread-local registry.
+    /// Look up the JS callback for a tool by name from initialized runtime state.
     fn get_callback(name: &str) -> Option<js_sys::Function> {
-        JS_TOOLS.with(|cell| {
-            let entries = cell.borrow();
-            entries.iter().find_map(|e| {
+        RUNTIME_STATE.with(|cell| {
+            let borrow = cell.borrow();
+            let state = borrow.as_ref()?;
+            state.js_tools.iter().find_map(|e| {
                 if e.def.name == name {
                     match &e.mode {
                         JsToolMode::Callback(f) => Some(f.clone()),
@@ -958,13 +1017,13 @@ impl JsToolDispatcher {
 #[async_trait::async_trait(?Send)]
 impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
     fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
-        self.tools.clone()
+        Self::tools_from_runtime()
     }
 
     async fn dispatch(
         &self,
         call: meerkat_core::ToolCallView<'_>,
-    ) -> Result<meerkat_core::ToolResult, meerkat_core::error::ToolError> {
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
         // Fire-and-forget tools return immediately. The host watches
         // ToolCallRequested events in the stream to act on the call.
         if Self::is_fire_and_forget(call.name) {
@@ -972,7 +1031,8 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
                 call.id.to_string(),
                 "acknowledged".to_string(),
                 false,
-            ));
+            )
+            .into());
         }
 
         let callback = Self::get_callback(call.name)
@@ -1006,11 +1066,10 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
             ))
         })?;
 
-        Ok(meerkat_core::ToolResult::new(
-            call.id.to_string(),
-            parsed.content,
-            parsed.is_error,
-        ))
+        Ok(
+            meerkat_core::ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error)
+                .into(),
+        )
     }
 }
 
@@ -1023,8 +1082,7 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
     let task_store: Arc<dyn meerkat_tools::builtin::TaskStore> =
         Arc::new(meerkat_tools::builtin::MemoryTaskStore::new());
     let config = meerkat_tools::builtin::BuiltinToolConfig::default();
-    let external = JsToolDispatcher::from_registry()
-        .map(|d| Arc::new(d) as Arc<dyn meerkat_core::AgentToolDispatcher>);
+    let external = Some(Arc::new(JsToolDispatcher) as Arc<dyn meerkat_core::AgentToolDispatcher>);
     let composite =
         meerkat_tools::builtin::CompositeDispatcher::new_wasm(task_store, &config, external, None)
             .map_err(|e| format!("failed to create tool dispatcher: {e}"))?;
@@ -1082,12 +1140,14 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
     let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
-    RUNTIME_STATE.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeState {
-            mob_state,
-            session_service,
-            model: model.clone(),
-        });
+    install_runtime_state(RuntimeState {
+        mob_state,
+        session_service,
+        sessions: BTreeMap::new(),
+        next_handle: 1,
+        model: model.clone(),
+        #[cfg(target_arch = "wasm32")]
+        js_tools: Vec::new(),
     });
 
     let result = serde_json::json!({
@@ -1140,12 +1200,14 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
-    RUNTIME_STATE.with(|cell| {
-        *cell.borrow_mut() = Some(RuntimeState {
-            mob_state,
-            session_service,
-            model: model.clone(),
-        });
+    install_runtime_state(RuntimeState {
+        mob_state,
+        session_service,
+        sessions: BTreeMap::new(),
+        next_handle: 1,
+        model: model.clone(),
+        #[cfg(target_arch = "wasm32")]
+        js_tools: Vec::new(),
     });
 
     let result = serde_json::json!({
@@ -1158,22 +1220,22 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Exported WASM API — Session (existing per-session approach)
+// Exported WASM API — Session (runtime-backed session-handle façades)
 // ═══════════════════════════════════════════════════════════
 
-/// Create a session from a mobpack + config.
-///
-/// Routes through `AgentFactory::build_agent()` with override-first
-/// resource injection — same pipeline as all other meerkat surfaces.
-///
-/// `config_json`: `{ "model": "...", "api_key": "sk-...", "max_tokens"?: N,
-///                    "comms_name"?: "...", "host_mode"?: true }`
-#[wasm_bindgen]
-pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
-    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
-    let config: SessionConfig =
-        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
+    let handle = state.next_handle.max(1);
+    state.next_handle = handle.wrapping_add(1);
+    while state.next_handle == 0 || state.sessions.contains_key(&state.next_handle) {
+        state.next_handle = state.next_handle.wrapping_add(1);
+    }
+    handle
+}
 
+fn build_direct_session_request(
+    config: &SessionConfig,
+    system_prompt: Option<String>,
+) -> Result<meerkat_core::service::CreateSessionRequest, JsValue> {
     if config.model.trim().is_empty() {
         return Err(err_js("invalid_config", "model must not be empty"));
     }
@@ -1182,160 +1244,111 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
         return Err(err_js("invalid_config", "api_key must not be empty"));
     }
 
-    // Compile system prompt from mobpack skills.
+    // Resolve effective base URL: per-provider fields take precedence over single base_url.
+    let effective_base_url = resolve_session_base_url(
+        config.base_url.as_deref(),
+        config.anthropic_base_url.as_deref(),
+        config.openai_base_url.as_deref(),
+        config.gemini_base_url.as_deref(),
+        &config.model,
+    );
+
+    // Reject reserved mob labels in caller-supplied labels map.
+    meerkat::surface::validate_raw_labels(config.labels.as_ref())
+        .map_err(|e| err_js("invalid_config", &e))?;
+
+    // Create LLM client.
+    let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
+        .map_err(|e| err_str("provider_error", e))?;
+
+    let mut build_config = AgentBuildConfig::new(&config.model);
+    build_config.llm_client_override = Some(llm_client);
+    if let Some(name) = config.comms_name.clone() {
+        build_config.comms_name = Some(name);
+        build_config.keep_alive = config.keep_alive;
+    }
+    build_config.additional_instructions = config.additional_instructions.clone();
+    build_config.app_context = config.app_context.clone();
+
+    Ok(meerkat_core::service::CreateSessionRequest {
+        model: config.model.clone(),
+        prompt: "".into(),
+        render_metadata: None,
+        system_prompt,
+        max_tokens: Some(config.max_tokens),
+        event_tx: None,
+
+        skill_references: None,
+        initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        build: Some(build_config.to_session_build_options()),
+        labels: config.labels.clone(),
+    })
+}
+
+fn create_runtime_backed_session(
+    config: SessionConfig,
+    system_prompt: Option<String>,
+    mob_id: String,
+) -> Result<u32, JsValue> {
+    let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
+    let keep_alive = config.comms_name.is_some() && config.keep_alive;
+    let request = build_direct_session_request(&config, system_prompt)?;
+
+    let created = futures::executor::block_on(session_service.create_session(request))
+        .map_err(err_session)?;
+    let session_id = created.session_id;
+    let event_rx = match futures::executor::block_on(
+        session_service.subscribe_session_events_raw(&session_id),
+    ) {
+        Ok(rx) => rx,
+        Err(err) => {
+            let _ = futures::executor::block_on(session_service.archive(&session_id));
+            return Err(err_str("session_event_stream_error", err));
+        }
+    };
+
+    with_runtime_state_mut(|state| {
+        let handle = next_runtime_handle(state);
+        state.sessions.insert(
+            handle,
+            RuntimeHandleSession {
+                session_id,
+                mob_id,
+                model: config.model,
+                keep_alive,
+                run_counter: 0,
+                event_rx,
+            },
+        );
+        Ok(handle)
+    })
+}
+
+/// Create a session from a mobpack + config.
+///
+/// Allocates a real session through the initialized runtime-backed session
+/// service, then returns a browser-local session handle for convenience.
+#[wasm_bindgen]
+pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
+    let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
+    let config: SessionConfig =
+        serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
     let system_prompt = compile_system_prompt(
         &parsed.definition.id,
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
-
-    // Resolve effective base URL: per-provider fields take precedence over single base_url.
-    let effective_base_url = resolve_session_base_url(
-        config.base_url.as_deref(),
-        config.anthropic_base_url.as_deref(),
-        config.openai_base_url.as_deref(),
-        config.gemini_base_url.as_deref(),
-        &config.model,
-    );
-
-    // Create LLM client.
-    let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-
-    // Build tool dispatcher (in-memory tasks, no shell).
-    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
-
-    // Build session store (in-memory).
-    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
-    );
-
-    // Prepare AgentBuildConfig with all overrides set.
-    let mut build_config = AgentBuildConfig::new(&config.model);
-    build_config.system_prompt = Some(system_prompt);
-    build_config.max_tokens = Some(config.max_tokens);
-    build_config.tool_dispatcher_override = Some(tools);
-    build_config.session_store_override = Some(store);
-    build_config.llm_client_override = Some(llm_client);
-    if let Some(name) = config.comms_name.clone() {
-        build_config.comms_name = Some(name);
-        build_config.host_mode = config.host_mode;
-    }
-    build_config.additional_instructions = config.additional_instructions.clone();
-    build_config.app_context = config.app_context.clone();
-
-    // Create a minimal Config for the factory.
-    let meerkat_config = Config::default();
-
-    let handle = REGISTRY.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let handle = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        // Skip 0 (reserved) and any colliding handle.
-        while registry.next_handle == 0 || registry.sessions.contains_key(&registry.next_handle) {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
-
-        let session = RuntimeSession {
-            handle,
-            mob_id: parsed.definition.id,
-            model: config.model.clone(),
-            config: meerkat_config,
-            build_config_template: build_config,
-            meerkat_session: None,
-            system_context_state: meerkat_core::SessionSystemContextState::default(),
-            run_counter: 0,
-            usage: Usage::default(),
-            pending_events: Vec::new(),
-        };
-
-        registry.sessions.insert(handle, session);
-        handle
-    });
-
-    Ok(handle)
+    create_runtime_backed_session(config, Some(system_prompt), parsed.definition.id)
 }
 
-/// Create a session without a mobpack — for standalone agent use.
-///
-/// `config_json`: `{ "model": "...", "api_key": "sk-...", "system_prompt"?: "...",
-///                    "max_tokens"?: N, "additional_instructions"?: ["..."] }`
-///
-/// Uses `register_tool_callback` tools if any were registered before this call.
+/// Create a standalone session through initialized runtime state.
 #[wasm_bindgen]
 pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
-
-    if config.model.trim().is_empty() {
-        return Err(err_js("invalid_config", "model must not be empty"));
-    }
-    let api_key = config.api_key.as_deref().unwrap_or("");
-    if api_key.is_empty() {
-        return Err(err_js("invalid_config", "api_key must not be empty"));
-    }
-
-    // Resolve effective base URL: per-provider fields take precedence over single base_url.
-    let effective_base_url = resolve_session_base_url(
-        config.base_url.as_deref(),
-        config.anthropic_base_url.as_deref(),
-        config.openai_base_url.as_deref(),
-        config.gemini_base_url.as_deref(),
-        &config.model,
-    );
-
-    // Create LLM client.
-    let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-
-    // Build tool dispatcher (includes JS-registered tools).
-    let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
-
-    // Build session store (in-memory).
-    let store: Arc<dyn meerkat_core::AgentSessionStore> = Arc::new(
-        meerkat_store::StoreAdapter::new(Arc::new(meerkat_store::MemoryStore::new())),
-    );
-
-    // Prepare AgentBuildConfig with all overrides set.
-    let mut build_config = AgentBuildConfig::new(&config.model);
-    build_config.system_prompt = config.system_prompt.clone();
-    build_config.max_tokens = Some(config.max_tokens);
-    build_config.tool_dispatcher_override = Some(tools);
-    build_config.session_store_override = Some(store);
-    build_config.llm_client_override = Some(llm_client);
-    build_config.additional_instructions = config.additional_instructions.clone();
-    build_config.app_context = config.app_context.clone();
-
-    // Create a minimal Config for the factory.
-    let meerkat_config = Config::default();
-
-    let handle = REGISTRY.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let handle = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0 || registry.sessions.contains_key(&registry.next_handle) {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
-
-        let session = RuntimeSession {
-            handle,
-            mob_id: String::new(),
-            model: config.model.clone(),
-            config: meerkat_config,
-            build_config_template: build_config,
-            meerkat_session: None,
-            system_context_state: meerkat_core::SessionSystemContextState::default(),
-            run_counter: 0,
-            usage: Usage::default(),
-            pending_events: Vec::new(),
-        };
-
-        registry.sessions.insert(handle, session);
-        handle
-    });
-
-    Ok(handle)
+    let system_prompt = config.system_prompt.clone();
+    create_runtime_backed_session(config, system_prompt, String::new())
 }
 
 /// Per-turn options parsed from `options_json`.
@@ -1355,6 +1368,7 @@ struct AppendSystemContextOptions {
     idempotency_key: Option<String>,
 }
 
+#[cfg(test)]
 fn merge_runtime_system_context_state(
     mut agent_state: meerkat_core::SessionSystemContextState,
     starting_state: &meerkat_core::SessionSystemContextState,
@@ -1375,55 +1389,46 @@ fn merge_runtime_system_context_state(
     agent_state
 }
 
-/// Append runtime system context to a direct session handle.
+/// Append runtime system context to a browser session handle.
 #[wasm_bindgen]
 pub fn append_system_context(handle: u32, request_json: &str) -> Result<JsValue, JsValue> {
     let req: AppendSystemContextOptions =
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
 
-    let status = REGISTRY.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        let session = registry
+    let (session_service, session_id) = with_runtime_state(|state| {
+        let session = state
             .sessions
-            .get_mut(&handle)
-            .ok_or_else(|| format!("unknown session handle: {handle}"))?;
-        let status = session
-            .system_context_state
-            .stage_append(
-                &meerkat_core::AppendSystemContextRequest {
-                    text: req.text,
-                    source: req.source,
-                    idempotency_key: req.idempotency_key,
-                },
-                meerkat_core::time_compat::SystemTime::now(),
-            )
-            .map_err(|err| match err {
-                meerkat_core::SystemContextStageError::InvalidRequest(message) => {
-                    err_str("INVALID_PARAMS", message)
-                }
-                meerkat_core::SystemContextStageError::Conflict { key, .. } => err_str(
-                    "SESSION_SYSTEM_CONTEXT_CONFLICT",
-                    format!("system-context idempotency conflict for key '{key}'"),
-                ),
-            })?;
-        Ok::<meerkat_core::AppendSystemContextStatus, JsValue>(status)
+            .get(&handle)
+            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+        Ok((state.session_service.clone(), session.session_id.clone()))
     })?;
+    let status = futures::executor::block_on(session_service.append_system_context(
+        &session_id,
+        meerkat_core::AppendSystemContextRequest {
+            text: req.text,
+            source: req.source,
+            idempotency_key: req.idempotency_key,
+        },
+    ))
+    .map_err(err_session_control)?
+    .status;
 
     Ok(JsValue::from_str(
         &serde_json::json!({
             "handle": handle,
+            "session_id": session_id.to_string(),
             "status": status,
         })
         .to_string(),
     ))
 }
 
-/// Run a turn through the real meerkat agent loop via AgentFactory::build_agent().
+/// Run a turn through the runtime-backed session service.
 ///
 /// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
 ///
 /// Convention: always resolves (Ok). Check `status` field for "completed" vs "failed".
-/// Only rejects (Err) for infrastructure errors (session not found, build failure).
+/// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
 /// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
 #[wasm_bindgen]
 pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result<JsValue, JsValue> {
@@ -1432,94 +1437,19 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     } else {
         serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
     };
-    // Extract what we need from the session (release borrow quickly).
-    let (mut build_config, config, run_id, starting_system_context_state) = REGISTRY
-        .with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let session = registry
-                .sessions
-                .get_mut(&handle)
-                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
-            session.run_counter = session.run_counter.saturating_add(1);
-            let run_id = session.run_counter;
-
-            // Clone the template and take the prior session.
-            let mut bc = AgentBuildConfig::new(&session.model);
-            bc.system_prompt = session.build_config_template.system_prompt.clone();
-            bc.max_tokens = session.build_config_template.max_tokens;
-            bc.llm_client_override = session.build_config_template.llm_client_override.clone();
-            bc.comms_name = session.build_config_template.comms_name.clone();
-            bc.host_mode = session.build_config_template.host_mode;
-            bc.additional_instructions = session
-                .build_config_template
-                .additional_instructions
-                .clone();
-            bc.app_context = session.build_config_template.app_context.clone();
-
-            // Rebuild tools + store fresh each turn (they're cheap, avoids ownership issues).
-            bc.tool_dispatcher_override = session
-                .build_config_template
-                .tool_dispatcher_override
-                .clone();
-            bc.session_store_override =
-                session.build_config_template.session_store_override.clone();
-
-            // Resume from prior session if available and sync the canonical staged
-            // system-context control state into the resumed session snapshot.
-            let starting_system_context_state = session.system_context_state.clone();
-            let mut resumed_session = session.meerkat_session.take();
-            if !starting_system_context_state.pending.is_empty()
-                || !starting_system_context_state.seen.is_empty()
-            {
-                let meerkat_session =
-                    resumed_session.get_or_insert_with(meerkat_core::Session::new);
-                meerkat_session
-                    .set_system_context_state(starting_system_context_state.clone())
-                    .map_err(|err| err.to_string())?;
-            }
-            bc.resume_session = resumed_session;
-
-            Ok((
-                bc,
-                session.config.clone(),
-                run_id,
-                starting_system_context_state,
-            ))
-        })
-        .map_err(|e: String| err_str("session_not_found", e))?;
-
-    // Apply per-turn options (override session-level values when present).
-    if options.additional_instructions.is_some() {
-        build_config.additional_instructions = options.additional_instructions;
-    }
-
-    // Set up event channel to capture AgentEvents during the turn.
-    let (event_tx, mut event_rx) =
-        crate::tokio::sync::mpsc::channel::<meerkat_core::event::AgentEvent>(256);
-    build_config.event_tx = Some(event_tx);
-
-    // Build the agent through AgentFactory::build_agent() — same pipeline as all surfaces.
-    let factory = meerkat::AgentFactory::minimal();
-    let mut agent = factory
-        .build_agent(build_config, &config)
-        .await
-        .map_err(|e| err_str("build_agent_error", e))?;
-
-    // Spawn a concurrent task that drains events into pending_events in real-time.
-    // This allows poll_events() to return events DURING the turn, not just after.
-    let drain_handle = handle;
-    let event_drainer = crate::tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            if let Ok(val) = serde_json::to_value(&event) {
-                REGISTRY.with(|cell| {
-                    let mut registry = cell.borrow_mut();
-                    if let Some(session) = registry.sessions.get_mut(&drain_handle) {
-                        session.pending_events.push(val);
-                    }
-                });
-            }
-        }
-    });
+    let (session_service, session_id, run_id, _keep_alive) = with_runtime_state_mut(|state| {
+        let session = state
+            .sessions
+            .get_mut(&handle)
+            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+        session.run_counter = session.run_counter.saturating_add(1);
+        Ok((
+            state.session_service.clone(),
+            session.session_id.clone(),
+            session.run_counter,
+            session.keep_alive,
+        ))
+    })?;
 
     // Parse the prompt as structured ContentInput (supports both plain strings
     // and JSON-serialized content blocks from the Web SDK). Falls back to plain
@@ -1527,45 +1457,22 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     let content_input: meerkat_core::types::ContentInput =
         serde_json::from_str(prompt).unwrap_or_else(|_| prompt.into());
 
-    // Run the turn. Events are drained concurrently into pending_events.
-    let run_result = agent.run(content_input).await;
+    let run_result = session_service
+        .start_turn(
+            &session_id,
+            meerkat_core::service::StartTurnRequest {
+                prompt: content_input,
+                system_prompt: None,
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                event_tx: None,
 
-    // Preserve the session BEFORE dropping the agent.
-    let mut agent_session = agent.session().clone();
-
-    // Drop the agent to release its event_tx sender, which closes the channel
-    // and allows the drainer's recv() loop to terminate.
-    drop(agent);
-    let _ = event_drainer.await;
-
-    let agent_system_context_state = agent_session.system_context_state().unwrap_or_default();
-    REGISTRY.with(|cell| -> Result<(), JsValue> {
-        let mut registry = cell.borrow_mut();
-        if let Some(session) = registry.sessions.get_mut(&handle) {
-            let merged_system_context_state = merge_runtime_system_context_state(
-                agent_system_context_state,
-                &starting_system_context_state,
-                &session.system_context_state,
-            );
-            session.system_context_state = merged_system_context_state.clone();
-            agent_session
-                .set_system_context_state(merged_system_context_state)
-                .map_err(|err| err_str("internal_error", format!("{err}")))?;
-            session.meerkat_session = Some(agent_session.clone());
-            if let Ok(result) = &run_result {
-                session.usage.input_tokens = session
-                    .usage
-                    .input_tokens
-                    .saturating_add(result.usage.input_tokens);
-                session.usage.output_tokens = session
-                    .usage
-                    .output_tokens
-                    .saturating_add(result.usage.output_tokens);
-            }
-            // Events already pushed to pending_events by the concurrent drainer.
-        }
-        Ok(())
-    })?;
+                skill_references: None,
+                flow_tool_overlay: None,
+                additional_instructions: options.additional_instructions,
+            },
+        )
+        .await;
 
     match run_result {
         Ok(result) => {
@@ -1576,48 +1483,59 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
                     "input_tokens": result.usage.input_tokens,
                     "output_tokens": result.usage.output_tokens,
                 },
-                "session_id": handle,
+                "session_id": result.session_id.to_string(),
                 "status": "completed",
                 "turns": result.turns,
                 "tool_calls": result.tool_calls,
             });
             Ok(JsValue::from_str(&result_json.to_string()))
         }
-        Err(err) => {
+        Err(meerkat_core::SessionError::Agent(err)) => {
             let error_msg = format!("{err}");
             let result_json = serde_json::json!({
                 "run_id": run_id,
                 "text": "",
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
-                "session_id": handle,
+                "session_id": session_id.to_string(),
                 "status": "failed",
                 "error": error_msg,
             });
             Ok(JsValue::from_str(&result_json.to_string()))
         }
+        Err(err) => Err(err_session(err)),
     }
 }
 
 /// Get current session state.
 #[wasm_bindgen]
 pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
-    REGISTRY
-        .with(|cell| {
-            let registry = cell.borrow();
-            let session = registry
-                .sessions
-                .get(&handle)
-                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
-            let state = serde_json::json!({
-                "session_id": session.handle,
-                "mob_id": session.mob_id,
-                "model": session.model,
-                "usage": session.usage,
-                "run_counter": session.run_counter,
-            });
-            Ok(state.to_string())
-        })
-        .map_err(|e: String| err_str("session_not_found", e))
+    let (session_service, session_id, mob_id, model, run_counter) = with_runtime_state(|state| {
+        let session = state
+            .sessions
+            .get(&handle)
+            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+        Ok((
+            state.session_service.clone(),
+            session.session_id.clone(),
+            session.mob_id.clone(),
+            session.model.clone(),
+            session.run_counter,
+        ))
+    })?;
+    let view =
+        futures::executor::block_on(session_service.read(&session_id)).map_err(err_session)?;
+    let state = serde_json::json!({
+        "handle": handle,
+        "session_id": session_id.to_string(),
+        "mob_id": mob_id,
+        "model": model,
+        "usage": view.billing.usage,
+        "run_counter": run_counter,
+        "message_count": view.state.message_count,
+        "is_active": view.state.is_active,
+        "last_assistant_text": view.state.last_assistant_text,
+    });
+    Ok(state.to_string())
 }
 
 /// Inspect a mobpack without creating a session.
@@ -1650,12 +1568,16 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 /// Remove a session.
 #[wasm_bindgen]
 pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
-    REGISTRY.with(|cell| {
-        let mut registry = cell.borrow_mut();
-        registry
+    let (session_service, session_id) = with_runtime_state(|state| {
+        let session = state
             .sessions
-            .remove(&handle)
-            .ok_or_else(|| err_js("session_not_found", &format!("unknown handle: {handle}")))?;
+            .get(&handle)
+            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+        Ok((state.session_service.clone(), session.session_id.clone()))
+    })?;
+    futures::executor::block_on(session_service.archive(&session_id)).map_err(err_session)?;
+    with_runtime_state_mut(|state| {
+        state.sessions.remove(&handle);
         Ok(())
     })
 }
@@ -1666,17 +1588,30 @@ pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
 /// subsequent calls return `[]` until the next `start_turn` produces more events.
 #[wasm_bindgen]
 pub fn poll_events(handle: u32) -> Result<String, JsValue> {
-    REGISTRY
-        .with(|cell| {
-            let mut registry = cell.borrow_mut();
-            let session = registry
-                .sessions
-                .get_mut(&handle)
-                .ok_or_else(|| format!("unknown session handle: {handle}"))?;
-            let events = std::mem::take(&mut session.pending_events);
-            serde_json::to_string(&events).map_err(|e| format!("serialize error: {e}"))
-        })
-        .map_err(|e: String| err_str("poll_events_error", e))
+    with_runtime_state_mut(|state| {
+        let session = state
+            .sessions
+            .get_mut(&handle)
+            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+        let mut events = Vec::new();
+        loop {
+            match session.event_rx.try_recv() {
+                Ok(envelope) => events.push(
+                    serde_json::to_value(&envelope.payload)
+                        .map_err(|err| err_str("serialize_error", err))?,
+                ),
+                Err(crate::tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(crate::tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    events.push(serde_json::json!({
+                        "type": "lagged",
+                        "skipped": skipped,
+                    }));
+                }
+            }
+        }
+        serde_json::to_string(&events).map_err(|err| err_str("serialize_error", err))
+    })
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1735,7 +1670,7 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 
 /// Perform a lifecycle action on a mob.
 ///
-/// `action`: one of "stop", "resume", "complete", "destroy".
+/// `action`: one of "stop", "resume", "complete", "reset", "destroy".
 #[wasm_bindgen]
 pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1744,12 +1679,13 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
         "stop" => mob_state.mob_stop(&id).await.map_err(err_mob)?,
         "resume" => mob_state.mob_resume(&id).await.map_err(err_mob)?,
         "complete" => mob_state.mob_complete(&id).await.map_err(err_mob)?,
+        "reset" => mob_state.mob_reset(&id).await.map_err(err_mob)?,
         "destroy" => mob_state.mob_destroy(&id).await.map_err(err_mob)?,
         _ => {
             return Err(err_js(
                 "invalid_action",
                 &format!(
-                    "unknown lifecycle action: {action} (expected stop/resume/complete/destroy)"
+                    "unknown lifecycle action: {action} (expected stop/resume/complete/reset/destroy)"
                 ),
             ));
         }
@@ -1778,7 +1714,7 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
 /// Spawn one or more meerkats in a mob.
 ///
 /// `specs_json`: JSON array of `{ "profile": "...", "meerkat_id": "...", "initial_message"?: "...",
-///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "subagent"|"external" }`
+///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external" }`
 ///
 /// Returns JSON array of results per spec.
 #[wasm_bindgen]
@@ -1790,22 +1726,21 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 
     let mut spawn_specs = Vec::with_capacity(specs.len());
     for s in specs {
-        let resume_session_id = match s.resume_session_id {
-            Some(id) => Some(meerkat_core::SessionId::parse(&id).map_err(|_| {
-                err_js(
-                    "invalid_resume_session_id",
-                    &format!("invalid session ID: {id}"),
-                )
-            })?),
-            None => None,
-        };
         let mut spec = meerkat_mob::SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
         spec.initial_message = s.initial_message;
         spec.runtime_mode = s.runtime_mode;
         spec.backend = s.backend;
         spec.context = s.context;
         spec.labels = s.labels;
-        spec.resume_session_id = resume_session_id;
+        if let Some(id) = s.resume_session_id {
+            let sid = meerkat_core::SessionId::parse(&id).map_err(|_| {
+                err_js(
+                    "invalid_resume_session_id",
+                    &format!("invalid session ID: {id}"),
+                )
+            })?;
+            spec = spec.with_resume_session_id(sid);
+        }
         spec.additional_instructions = s.additional_instructions;
         spawn_specs.push(spec);
     }
@@ -1878,7 +1813,30 @@ pub async fn mob_wire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     mob_state
-        .mob_wire(&id, MeerkatId::from(a), MeerkatId::from(b))
+        .mob_wire(
+            &id,
+            MeerkatId::from(a),
+            meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+        )
+        .await
+        .map_err(err_mob)
+}
+
+/// Wire a local meerkat to a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_wire_target(mob_id: &str, local: &str, target_json: &str) -> Result<(), JsValue> {
+    mob_wire_peer(mob_id, local, target_json).await
+}
+
+/// Wire a local member to a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_wire_peer(mob_id: &str, member: &str, peer_json: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let target: meerkat_mob::PeerTarget =
+        serde_json::from_str(peer_json).map_err(|e| err_str("invalid_peer_target", e))?;
+    mob_state
+        .mob_wire(&id, MeerkatId::from(member), target)
         .await
         .map_err(err_mob)
 }
@@ -1889,7 +1847,34 @@ pub async fn mob_unwire(mob_id: &str, a: &str, b: &str) -> Result<(), JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     mob_state
-        .mob_unwire(&id, MeerkatId::from(a), MeerkatId::from(b))
+        .mob_unwire(
+            &id,
+            MeerkatId::from(a),
+            meerkat_mob::PeerTarget::Local(MeerkatId::from(b)),
+        )
+        .await
+        .map_err(err_mob)
+}
+
+/// Unwire a local meerkat from a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_unwire_target(
+    mob_id: &str,
+    local: &str,
+    target_json: &str,
+) -> Result<(), JsValue> {
+    mob_unwire_peer(mob_id, local, target_json).await
+}
+
+/// Unwire a local member from a local or external peer target.
+#[wasm_bindgen]
+pub async fn mob_unwire_peer(mob_id: &str, member: &str, peer_json: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let target: meerkat_mob::PeerTarget =
+        serde_json::from_str(peer_json).map_err(|e| err_str("invalid_peer_target", e))?;
+    mob_state
+        .mob_unwire(&id, MeerkatId::from(member), target)
         .await
         .map_err(err_mob)
 }
@@ -2038,33 +2023,88 @@ pub async fn wire_cross_mob(
     Ok(())
 }
 
-/// Send an external message to a spawned meerkat.
+#[derive(Debug, serde::Deserialize)]
+struct MobMemberSendOptions {
+    content: meerkat_core::types::ContentInput,
+    #[serde(default)]
+    handling_mode: meerkat_core::types::HandlingMode,
+    #[serde(default)]
+    render_metadata: Option<meerkat_core::types::RenderMetadata>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MobSpawnHelperOptions {
+    prompt: String,
+    #[serde(default)]
+    meerkat_id: Option<String>,
+    #[serde(default)]
+    profile_name: Option<String>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MobForkHelperOptions {
+    source_member_id: String,
+    prompt: String,
+    #[serde(default)]
+    meerkat_id: Option<String>,
+    #[serde(default)]
+    profile_name: Option<String>,
+    #[serde(default)]
+    fork_context: Option<meerkat_mob::ForkContext>,
+    #[serde(default)]
+    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
+    #[serde(default)]
+    backend: Option<meerkat_mob::MobBackendKind>,
+}
+
+/// Send external work to a spawned meerkat through the canonical member path.
 ///
-/// Returns the session ID of the session that handled the turn.
+/// Returns a JSON-encoded delivery receipt.
 #[wasm_bindgen]
-pub async fn mob_send_message(
+pub async fn mob_member_send(
     mob_id: &str,
     meerkat_id: &str,
-    message: &str,
+    request_json: &str,
 ) -> Result<String, JsValue> {
+    let req: MobMemberSendOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
-    let session_id = mob_state
-        .mob_send_message(
+    let receipt = mob_state
+        .mob_member_send(
             &id,
             mid,
-            serde_json::from_str::<meerkat_core::types::ContentInput>(message)
-                .unwrap_or_else(|_| message.into()),
+            req.content,
+            req.handling_mode,
+            req.render_metadata,
         )
         .await
         .map_err(err_mob)?;
-    Ok(session_id.to_string())
+    serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))
+}
+
+/// Read the current execution snapshot for a mob member.
+#[wasm_bindgen]
+pub async fn mob_member_status(mob_id: &str, meerkat_id: &str) -> Result<JsValue, JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    let snapshot = mob_state
+        .mob_member_status(&id, &mid)
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&snapshot).map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Retire and re-spawn a meerkat with the same profile.
 ///
-/// Returns JSON: `{ "meerkat_id", "status": "respawn_enqueued" }`
+/// Returns JSON result envelope with receipt.
 #[wasm_bindgen]
 pub async fn mob_respawn(
     mob_id: &str,
@@ -2074,22 +2114,113 @@ pub async fn mob_respawn(
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = MeerkatId::from(meerkat_id);
-    mob_state
-        .mob_respawn(
+    let initial_message = initial_message.map(|message| {
+        serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
+            .unwrap_or_else(|_| message.into())
+    });
+    match mob_state.mob_respawn(&id, mid, initial_message).await {
+        Ok(receipt) => {
+            let result = serde_json::json!({
+                "status": "completed",
+                "receipt": receipt,
+            });
+            Ok(JsValue::from_str(&result.to_string()))
+        }
+        Err(meerkat_mob::MobRespawnError::TopologyRestoreFailed {
+            receipt,
+            failed_peer_ids,
+        }) => {
+            let result = serde_json::json!({
+                "status": "topology_restore_failed",
+                "receipt": receipt,
+                "failed_peer_ids": failed_peer_ids.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
+            });
+            Ok(JsValue::from_str(&result.to_string()))
+        }
+        Err(e) => Err(JsValue::from_str(&e.to_string())),
+    }
+}
+
+/// Force-cancel an active mob member turn.
+#[wasm_bindgen]
+pub async fn mob_force_cancel(mob_id: &str, meerkat_id: &str) -> Result<(), JsValue> {
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let mid = MeerkatId::from(meerkat_id);
+    mob_state.mob_force_cancel(&id, mid).await.map_err(err_mob)
+}
+
+/// Spawn a short-lived helper and return its terminal result.
+#[wasm_bindgen]
+pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValue, JsValue> {
+    let request: MobSpawnHelperOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let meerkat_id = MeerkatId::from(
+        request
+            .meerkat_id
+            .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
+    );
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile_name) = request.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile_name));
+    }
+    options.runtime_mode = request.runtime_mode;
+    options.backend = request.backend;
+    let result = mob_state
+        .mob_spawn_helper(&id, meerkat_id, request.prompt, options)
+        .await
+        .map_err(err_mob)?;
+    let json = serde_json::to_string(&serde_json::json!({
+        "output": result.output,
+        "tokens_used": result.tokens_used,
+        "session_id": result.session_id,
+    }))
+    .map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
+}
+
+/// Fork a short-lived helper from an existing member and return its terminal result.
+#[wasm_bindgen]
+pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue, JsValue> {
+    let request: MobForkHelperOptions =
+        serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+    let mob_state = with_mob_state(Ok)?;
+    let id = MobId::from(mob_id);
+    let source_member_id = MeerkatId::from(request.source_member_id.as_str());
+    let meerkat_id = MeerkatId::from(
+        request
+            .meerkat_id
+            .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
+    );
+    let fork_context = request
+        .fork_context
+        .unwrap_or(meerkat_mob::ForkContext::FullHistory);
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile_name) = request.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile_name));
+    }
+    options.runtime_mode = request.runtime_mode;
+    options.backend = request.backend;
+    let result = mob_state
+        .mob_fork_helper(
             &id,
-            mid,
-            initial_message.map(|m| {
-                serde_json::from_str::<meerkat_core::types::ContentInput>(&m)
-                    .unwrap_or_else(|_| m.into())
-            }),
+            &source_member_id,
+            meerkat_id,
+            request.prompt,
+            fork_context,
+            options,
         )
         .await
         .map_err(err_mob)?;
-    let result = serde_json::json!({
-        "meerkat_id": meerkat_id,
-        "status": "respawn_enqueued",
-    });
-    Ok(JsValue::from_str(&result.to_string()))
+    let json = serde_json::to_string(&serde_json::json!({
+        "output": result.output,
+        "tokens_used": result.tokens_used,
+        "session_id": result.session_id,
+    }))
+    .map_err(|e| err_str("serialize", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 /// Start a configured flow run.
@@ -2346,22 +2477,43 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::build_service_infrastructure;
     use super::{
-        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, build_service_infrastructure,
-        close_subscription, merge_runtime_system_context_state, poll_subscription,
+        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
+        merge_runtime_system_context_state, poll_subscription,
     };
     #[cfg(target_arch = "wasm32")]
-    use super::{append_system_context, create_session_simple, destroy_session, get_session_state};
+    use super::{
+        append_system_context, create_session_simple, destroy_session, get_session_state,
+        init_runtime_from_config,
+    };
+    #[cfg(not(target_arch = "wasm32"))]
     use meerkat::SessionServiceControlExt;
+    #[cfg(not(target_arch = "wasm32"))]
     use meerkat_core::Config;
+    use meerkat_core::time_compat::{Duration, SystemTime};
     use meerkat_core::{
         PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
         SessionSystemContextState,
     };
+    #[cfg(not(target_arch = "wasm32"))]
     use meerkat_mob::SpawnMemberSpec;
     use serde_json::json;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::collections::HashMap;
-    use std::time::{Duration, SystemTime};
+
+    #[cfg(target_arch = "wasm32")]
+    fn init_test_runtime() {
+        let init = init_runtime_from_config(
+            &json!({
+                "anthropic_api_key": "sk-test",
+                "model": "claude-sonnet-4-5"
+            })
+            .to_string(),
+        );
+        assert!(init.is_ok());
+    }
 
     #[test]
     fn merge_runtime_system_context_state_preserves_concurrent_appends() {
@@ -2441,6 +2593,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::expect_used)]
     #[tokio::test(flavor = "current_thread")]
     async fn mob_append_system_context_targets_member_session() {
@@ -2454,7 +2607,17 @@ mod tests {
 
         let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({
             "id": "mob-system-context",
+            "orchestrator": {
+                "profile": "lead"
+            },
             "profiles": {
+                "lead": {
+                    "model": "claude-opus-4-6",
+                    "tools": {
+                        "comms": true,
+                        "mob": true
+                    }
+                },
                 "worker": {
                     "model": "claude-sonnet-4-5",
                     "tools": {
@@ -2525,6 +2688,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     #[test]
     fn append_system_context_export_stages_context_for_direct_session_handle() {
+        init_test_runtime();
         let handle = create_session_simple(
             &json!({
                 "model": "claude-sonnet-4-5",
@@ -2555,6 +2719,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     #[test]
     fn destroy_session_export_removes_local_handle() {
+        init_test_runtime();
         let handle = create_session_simple(
             &json!({
                 "model": "claude-sonnet-4-5",
@@ -2566,7 +2731,8 @@ mod tests {
 
         let before = get_session_state(handle).expect("session state before destroy");
         let before: serde_json::Value = serde_json::from_str(&before).expect("state json");
-        assert_eq!(before["session_id"], handle);
+        assert_eq!(before["handle"], handle);
+        assert!(before["session_id"].as_str().is_some());
 
         destroy_session(handle).expect("destroy session");
         assert!(get_session_state(handle).is_err());

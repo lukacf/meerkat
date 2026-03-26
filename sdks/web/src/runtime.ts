@@ -44,7 +44,7 @@ function sessionToWasm(config: SessionConfig): Record<string, unknown> {
     openai_base_url: config.openaiBaseUrl,
     gemini_base_url: config.geminiBaseUrl,
     comms_name: config.commsName,
-    host_mode: config.hostMode,
+    keep_alive: config.keepAlive,
     labels: config.labels,
     additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
@@ -75,6 +75,7 @@ export interface WasmModule {
     schemaJson: string,
   ) => void;
   clear_tool_callbacks: () => void;
+  destroy_runtime: () => void;
   create_session_simple: (configJson: string) => number;
   create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
   start_turn: (handle: number, prompt: string, optionsJson: string) => Promise<string>;
@@ -92,14 +93,22 @@ export interface WasmModule {
   mob_retire: (mobId: string, meerkatId: string) => Promise<void>;
   mob_wire: (mobId: string, a: string, b: string) => Promise<void>;
   mob_unwire: (mobId: string, a: string, b: string) => Promise<void>;
+  mob_wire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_unwire_peer?: (mobId: string, member: string, peerJson: string) => Promise<void>;
+  mob_wire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
+  mob_unwire_target: (mobId: string, local: string, targetJson: string) => Promise<void>;
   mob_list_members: (mobId: string) => Promise<string>;
   mob_append_system_context: (
     mobId: string,
     meerkatId: string,
     requestJson: string,
   ) => Promise<string>;
-  mob_send_message: (mobId: string, meerkatId: string, message: string) => Promise<void>;
-  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<void>;
+  mob_member_send: (mobId: string, meerkatId: string, requestJson: string) => Promise<string>;
+  mob_member_status: (mobId: string, meerkatId: string) => Promise<string>;
+  mob_respawn: (mobId: string, meerkatId: string, initialMessage?: string) => Promise<string>;
+  mob_force_cancel: (mobId: string, meerkatId: string) => Promise<void>;
+  mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
+  mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
@@ -120,6 +129,7 @@ export interface WasmModule {
 /** Entry point for the Meerkat WASM runtime in the browser. */
 export class MeerkatRuntime {
   private wasm: WasmModule;
+  private destroyed = false;
 
   private constructor(wasm: WasmModule) {
     this.wasm = wasm;
@@ -205,10 +215,12 @@ export class MeerkatRuntime {
   /**
    * Register a tool callback on the WASM module.
    *
-   * **Must be called before {@link init} or {@link initFromMobpack}** because
-   * the tool dispatcher is built during initialization.
+   * Runtime state must already be initialized.
    *
-   * @param wasm - The WASM module (same one passed to init).
+   * Prefer the instance method when possible so registration is clearly scoped
+   * to the active runtime.
+   *
+   * @param wasm - The WASM module used by the active runtime.
    * @param name - Tool name.
    * @param description - Human-readable tool description.
    * @param schema - JSON Schema for tool input.
@@ -232,12 +244,13 @@ export class MeerkatRuntime {
   /**
    * Register a fire-and-forget tool on the WASM module.
    *
-   * **Must be called before {@link init} or {@link initFromMobpack}.**
+   * Runtime state must already be initialized.
    *
    * When the agent calls this tool, it receives `"acknowledged"` immediately
    * and continues processing. The host should watch `ToolCallRequested` events
    * in the event stream to capture args and act on them. Any response (e.g.
-   * human approval) comes back via {@link Mob.sendMessage}.
+   * human approval) comes back through the normal session or mob member send
+   * APIs.
    *
    * @param wasm - The WASM module (same one passed to init).
    * @param name - Tool name the agent will call.
@@ -253,9 +266,45 @@ export class MeerkatRuntime {
     wasm.register_js_tool(name, description, JSON.stringify(schema));
   }
 
-  /** Clear all registered tool callbacks on the WASM module. */
+  /** Clear all registered tool callbacks on the active WASM runtime. */
   static clearTools(wasm: WasmModule): void {
     wasm.clear_tool_callbacks();
+  }
+
+  /** Tear down the embedded runtime and invalidate browser-side handles. */
+  destroy(): void {
+    if (this.destroyed) return;
+    this.wasm.destroy_runtime();
+    this.destroyed = true;
+  }
+
+  /** Register a tool callback on this initialized runtime instance. */
+  registerTool(
+    name: string,
+    description: string,
+    schema: JsonSchema,
+    callback: ToolCallback,
+  ): void {
+    this.wasm.register_tool_callback(
+      name,
+      description,
+      JSON.stringify(schema),
+      async (args: string) => JSON.stringify(await callback(args)),
+    );
+  }
+
+  /** Register a fire-and-forget tool on this initialized runtime instance. */
+  registerFireAndForgetTool(
+    name: string,
+    description: string,
+    schema: JsonSchema,
+  ): void {
+    this.wasm.register_js_tool(name, description, JSON.stringify(schema));
+  }
+
+  /** Clear all runtime-scoped JS tools from this initialized runtime instance. */
+  clearTools(): void {
+    this.wasm.clear_tool_callbacks();
   }
 
   /** Create a mob from a definition. */
@@ -266,10 +315,16 @@ export class MeerkatRuntime {
       mob_retire: this.wasm.mob_retire,
       mob_wire: this.wasm.mob_wire,
       mob_unwire: this.wasm.mob_unwire,
+      mob_wire_target: this.wasm.mob_wire_target,
+      mob_unwire_target: this.wasm.mob_unwire_target,
       mob_list_members: this.wasm.mob_list_members,
       mob_append_system_context: this.wasm.mob_append_system_context,
-      mob_send_message: this.wasm.mob_send_message,
+      mob_member_send: this.wasm.mob_member_send,
+      mob_member_status: this.wasm.mob_member_status,
       mob_respawn: this.wasm.mob_respawn,
+      mob_force_cancel: this.wasm.mob_force_cancel,
+      mob_spawn_helper: this.wasm.mob_spawn_helper,
+      mob_fork_helper: this.wasm.mob_fork_helper,
       mob_status: this.wasm.mob_status,
       mob_lifecycle: this.wasm.mob_lifecycle,
       mob_events: this.wasm.mob_events,
@@ -299,7 +354,7 @@ export class MeerkatRuntime {
     await this.wasm.wire_cross_mob(mobA, meerkatA, mobB, meerkatB);
   }
 
-  /** Create a direct (non-mob) session. */
+  /** Create a direct session façade backed by a real runtime session identity. */
   createSession(config: SessionConfig): Session {
     const handle = this.wasm.create_session_simple(
       JSON.stringify(sessionToWasm(config)),

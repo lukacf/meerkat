@@ -5,14 +5,15 @@ use crate::builtin::shell::{JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-use crate::builtin::sub_agent::SubAgentToolSet;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
+use meerkat_core::agent::OpsLifecycleBindError;
 use meerkat_core::error::ToolError;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::ops::ToolDispatchOutcome;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+use meerkat_core::types::{SessionId, ToolCallView, ToolDef, ToolResult};
 use serde_json::Value;
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,17 +36,28 @@ pub enum CompositeDispatcherError {
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
-    #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-    sub_agent_tools: Option<SubAgentToolSet>,
     #[cfg(feature = "skills")]
     skill_tools: Option<SkillToolSet>,
     external: Option<Arc<dyn AgentToolDispatcher>>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    builtin_config: BuiltinToolConfig,
     #[allow(dead_code)]
     task_store: Arc<dyn TaskStore>,
+    #[cfg(not(target_arch = "wasm32"))]
+    project_root: Option<PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    shell_config: Option<ShellConfig>,
+    #[allow(dead_code)]
+    session_id: Option<String>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    image_tool_results: bool,
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     allowed_tools: HashSet<String>,
+    /// Stashed interrupt receiver for carry-forward across dispatcher rebuilds.
+    /// Set by `bind_wait_interrupt`, re-applied by `bind_ops_lifecycle`.
+    wait_interrupt_rx: Option<meerkat_core::wait_interrupt::WaitInterruptReceiver>,
 }
 
 impl CompositeDispatcher {
@@ -64,7 +76,33 @@ impl CompositeDispatcher {
         session_id: Option<String>,
         _image_tool_results: bool,
     ) -> Result<Self, CompositeDispatcherError> {
+        Self::new_with_ops_lifecycle(
+            task_store,
+            config,
+            project_root,
+            shell_config,
+            external,
+            session_id,
+            None,
+            _image_tool_results,
+        )
+    }
+
+    /// Create a new composite dispatcher with an optional session-canonical ops registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ops_lifecycle(
+        task_store: Arc<dyn TaskStore>,
+        config: &BuiltinToolConfig,
+        project_root: Option<PathBuf>,
+        shell_config: Option<ShellConfig>,
+        external: Option<Arc<dyn AgentToolDispatcher>>,
+        session_id: Option<String>,
+        ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
+        _image_tool_results: bool,
+    ) -> Result<Self, CompositeDispatcherError> {
         let mut builtin_tools: Vec<Arc<dyn BuiltinTool>> = Vec::new();
+        let shell_session_id = session_id.clone();
         let project_root = project_root
             .or_else(|| shell_config.as_ref().map(|cfg| cfg.project_root.clone()))
             .or_else(|| std::env::current_dir().ok())
@@ -91,19 +129,32 @@ impl CompositeDispatcher {
         builtin_tools.push(Arc::new(WaitTool::new()));
         builtin_tools.push(Arc::new(DateTimeTool::new()));
         builtin_tools.push(Arc::new(ApplyPatchTool::new(project_root.clone())));
-        builtin_tools.push(Arc::new(ViewImageTool::new(project_root)));
+        builtin_tools.push(Arc::new(ViewImageTool::new(project_root.clone())));
 
         // Add shell tools if enabled
-        let job_manager = if let Some(cfg) = shell_config {
+        let job_manager = if let Some(ref cfg) = shell_config {
             if cfg.enabled {
-                let mgr = Arc::new(JobManager::new(cfg.clone()));
+                let mut manager = JobManager::new(cfg.clone());
+                if let Some(session_id) = shell_session_id
+                    .as_deref()
+                    .and_then(|id| meerkat_core::types::SessionId::parse(id).ok())
+                {
+                    manager = manager.with_owner_session_id(session_id);
+                }
+                if let Some(registry) = ops_lifecycle {
+                    manager = manager.with_ops_registry(registry);
+                }
+                let mgr = Arc::new(manager);
                 use crate::builtin::shell::{
                     ShellJobCancelTool, ShellJobStatusTool, ShellJobsListTool, ShellTool,
                 };
                 // Use with_job_manager to share the same JobManager between ShellTool
                 // and job control tools. This ensures background jobs spawned via
                 // ShellTool are visible to shell_jobs/shell_job_status/shell_job_cancel.
-                builtin_tools.push(Arc::new(ShellTool::with_job_manager(cfg, mgr.clone())));
+                builtin_tools.push(Arc::new(ShellTool::with_job_manager(
+                    cfg.clone(),
+                    mgr.clone(),
+                )));
                 builtin_tools.push(Arc::new(ShellJobStatusTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobsListTool::new(mgr.clone())));
                 builtin_tools.push(Arc::new(ShellJobCancelTool::new(mgr.clone())));
@@ -130,14 +181,18 @@ impl CompositeDispatcher {
 
         Ok(Self {
             builtin_tools,
-            #[cfg(feature = "sub-agents")]
-            sub_agent_tools: None,
             #[cfg(feature = "skills")]
             skill_tools: None,
             external,
+            builtin_config: config.clone(),
             task_store,
+            project_root: Some(project_root),
+            shell_config,
+            session_id: shell_session_id,
+            image_tool_results: _image_tool_results,
             job_manager,
             allowed_tools,
+            wait_interrupt_rx: None,
         })
     }
 
@@ -161,7 +216,7 @@ impl CompositeDispatcher {
         )));
         builtin_tools.push(Arc::new(TaskUpdateTool::with_session_opt(
             task_store.clone(),
-            session_id,
+            session_id.clone(),
         )));
 
         // Add utility tools
@@ -183,34 +238,13 @@ impl CompositeDispatcher {
             #[cfg(feature = "skills")]
             skill_tools: None,
             external,
+            builtin_config: config.clone(),
             task_store,
+            session_id,
+            image_tool_results: true,
             allowed_tools,
+            wait_interrupt_rx: None,
         })
-    }
-
-    /// Register sub-agent tools.
-    #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-    pub fn register_sub_agent_tools(
-        &mut self,
-        tool_set: SubAgentToolSet,
-        config: &BuiltinToolConfig,
-    ) -> Result<(), CompositeDispatcherError> {
-        let resolved_policy = config.resolve();
-        let names = [
-            "agent_spawn",
-            "agent_fork",
-            "agent_status",
-            "agent_cancel",
-            "agent_list",
-        ];
-        for name in names {
-            let name_str = name.to_string();
-            if resolved_policy.is_enabled(&name_str, true) {
-                self.allowed_tools.insert(name_str);
-            }
-        }
-        self.sub_agent_tools = Some(tool_set);
-        Ok(())
     }
 
     /// Register skill discovery tools (browse_skills, load_skill).
@@ -235,10 +269,6 @@ impl CompositeDispatcher {
                 }
             }
         }
-        #[cfg(feature = "sub-agents")]
-        if self.sub_agent_tools.is_some() {
-            out.push_str("## Sub-agent tools\nManage hierarchical agents.\n\n");
-        }
         if let Some(ref ext) = self.external {
             let mut wrote_external_header = false;
             for tool in ext.tools().iter() {
@@ -260,6 +290,12 @@ impl CompositeDispatcher {
         }
         out
     }
+
+    /// Return the shared shell job manager when shell tools are enabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn shell_job_manager(&self) -> Option<Arc<JobManager>> {
+        self.job_manager.clone()
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -274,17 +310,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
             if self.allowed_tools.contains(tool.name()) {
                 seen_names.insert(tool.name().to_string());
                 tools.push(Arc::new(tool.def()));
-            }
-        }
-
-        // Add allowed sub-agent tools
-        #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-        if let Some(ref sub) = self.sub_agent_tools {
-            for tool in sub.tools() {
-                if self.allowed_tools.contains(tool.name()) {
-                    seen_names.insert(tool.name().to_string());
-                    tools.push(Arc::new(tool.def()));
-                }
             }
         }
 
@@ -313,7 +338,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
         tools.into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.to_string(),
@@ -345,51 +370,20 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     }
                     BuiltinToolError::TaskError(te) => ToolError::ExecutionFailed { message: te },
                 })?;
-                match output {
+                let async_ops = tool.async_ops_for_output(&output);
+                let result = match output {
                     ToolOutput::Json(value) => {
                         let content = match &value {
                             Value::String(s) => s.clone(),
                             _ => serde_json::to_string(&value).unwrap_or_default(),
                         };
-                        return Ok(ToolResult::new(call.id.to_string(), content, false));
+                        ToolResult::new(call.id.to_string(), content, false)
                     }
                     ToolOutput::Blocks(blocks) => {
-                        return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                        ToolResult::with_blocks(call.id.to_string(), blocks, false)
                     }
-                }
-            }
-        }
-
-        // Check sub-agent tools
-        #[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-        if let Some(ref sub) = self.sub_agent_tools {
-            for tool in sub.tools() {
-                if tool.name() == call.name {
-                    let output = tool.call(args.clone()).await.map_err(|e| match e {
-                        BuiltinToolError::InvalidArgs(msg) => ToolError::InvalidArguments {
-                            name: call.name.to_string(),
-                            reason: msg,
-                        },
-                        BuiltinToolError::ExecutionFailed(msg) => {
-                            ToolError::ExecutionFailed { message: msg }
-                        }
-                        BuiltinToolError::TaskError(te) => {
-                            ToolError::ExecutionFailed { message: te }
-                        }
-                    })?;
-                    match output {
-                        ToolOutput::Json(value) => {
-                            let content = match &value {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(&value).unwrap_or_default(),
-                            };
-                            return Ok(ToolResult::new(call.id.to_string(), content, false));
-                        }
-                        ToolOutput::Blocks(blocks) => {
-                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
-                        }
-                    }
-                }
+                };
+                return Ok(ToolDispatchOutcome { result, async_ops });
             }
         }
 
@@ -410,20 +404,28 @@ impl AgentToolDispatcher for CompositeDispatcher {
                             ToolError::ExecutionFailed { message: te }
                         }
                     })?;
-                    match output {
+                    let async_ops = tool.async_ops_for_output(&output);
+                    let result = match output {
                         ToolOutput::Json(value) => {
                             let content = match &value {
                                 Value::String(s) => s.clone(),
                                 _ => serde_json::to_string(&value).unwrap_or_default(),
                             };
-                            return Ok(ToolResult::new(call.id.to_string(), content, false));
+                            ToolResult::new(call.id.to_string(), content, false)
                         }
                         ToolOutput::Blocks(blocks) => {
-                            return Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false));
+                            ToolResult::with_blocks(call.id.to_string(), blocks, false)
                         }
-                    }
+                    };
+                    return Ok(ToolDispatchOutcome { result, async_ops });
                 }
             }
+        }
+
+        if let Some(ref ext) = self.external
+            && ext.tools().iter().any(|t| t.name == call.name)
+        {
+            return ext.dispatch(call).await;
         }
 
         Err(ToolError::NotFound {
@@ -448,18 +450,102 @@ impl AgentToolDispatcher for CompositeDispatcher {
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
         // Swap the wait tool with an interrupt-aware version
         use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_interrupt(rx));
+        let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
         for tool in &mut owned.builtin_tools {
             if tool.name() == "wait" {
                 *tool = new_wait;
                 break;
             }
         }
+        // Stash the receiver for carry-forward across dispatcher rebuilds
+        // (e.g., bind_ops_lifecycle creates a fresh CompositeDispatcher).
+        owned.wait_interrupt_rx = Some(rx);
         Ok(Arc::new(owned))
     }
 
     fn supports_wait_interrupt(&self) -> bool {
         self.builtin_tools.iter().any(|t| t.name() == "wait")
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        let mut owned =
+            Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        #[allow(clippy::redundant_clone)]
+        // clone needed on non-wasm32 where owner_session_id is reused
+        let rebound_external = match owned.external.take() {
+            Some(external) if external.supports_ops_lifecycle_binding() => {
+                Some(external.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?)
+            }
+            other => other,
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if owned.job_manager.is_none() && rebound_external.is_none() {
+                return Err(OpsLifecycleBindError::Unsupported);
+            }
+
+            // Carry forward interrupt receiver so comms-driven wait interrupts
+            // survive the ops-lifecycle rebuild.
+            let interrupt_rx = owned.wait_interrupt_rx.take();
+
+            #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
+            let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
+                Arc::clone(&owned.task_store),
+                &owned.builtin_config,
+                owned.project_root.clone(),
+                owned.shell_config.clone(),
+                rebound_external,
+                Some(owner_session_id.to_string()),
+                Some(registry),
+                owned.image_tool_results,
+            )
+            .map_err(|_| OpsLifecycleBindError::Unsupported)?;
+
+            // Re-apply the interrupt receiver on the new wait tool and stash
+            // it for any future rebuilds.
+            if let Some(rx) = interrupt_rx {
+                use crate::builtin::utility::WaitTool;
+                let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
+                for tool in &mut rebound.builtin_tools {
+                    if tool.name() == "wait" {
+                        *tool = new_wait;
+                        break;
+                    }
+                }
+                rebound.wait_interrupt_rx = Some(rx);
+            }
+
+            #[cfg(feature = "skills")]
+            if let Some(skill_tools) = owned.skill_tools.take() {
+                rebound.register_skill_tools(skill_tools);
+            }
+
+            Ok(Arc::new(rebound))
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = registry;
+            let _ = owner_session_id;
+            let _ = rebound_external;
+            Err(OpsLifecycleBindError::Unsupported)
+        }
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.job_manager.is_some() {
+            return true;
+        }
+
+        self.external
+            .as_ref()
+            .is_some_and(|ext| ext.supports_ops_lifecycle_binding())
     }
 }
 
@@ -468,7 +554,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+    use meerkat_core::types::SessionId;
     use serde_json::json;
+    use tempfile::TempDir;
 
     struct MockExternalDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -495,13 +584,9 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|tool| tool.name == call.name) {
-                return Ok(ToolResult::new(
-                    call.id.to_string(),
-                    "{}".to_string(),
-                    false,
-                ));
+                return Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into());
             }
             Err(ToolError::not_found(call.name))
         }
@@ -583,7 +668,8 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "wait should be interrupted quickly, took {elapsed:?}"
         );
-        let content: serde_json::Value = serde_json::from_str(&result.text_content()).unwrap();
+        let content: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).unwrap();
         assert_eq!(content["status"], "interrupted");
     }
 
@@ -641,10 +727,10 @@ mod tests {
             .dispatch(call)
             .await
             .expect("dispatch should succeed");
-        assert!(!result.is_error);
+        assert!(!result.result.is_error);
         // wait returns {"waited_seconds": ..., "status": "complete"} which is an object
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result.text_content()).expect("content should be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
+            .expect("content should be valid JSON");
         assert_eq!(parsed["status"], "complete");
     }
 
@@ -673,13 +759,170 @@ mod tests {
             .dispatch(call)
             .await
             .expect("dispatch should succeed");
-        assert!(!result.is_error);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result.text_content()).expect("content should be valid JSON");
+        assert!(!result.result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
+            .expect("content should be valid JSON");
         assert!(
             parsed.get("iso8601").is_some(),
             "should contain iso8601 field"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_forwards_allowed_external_tool_calls() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockExternalDispatcher::new("mob_list", "List active mobs"));
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ext-1",
+            name: "mob_list",
+            args: &call_json,
+        };
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("external tool dispatch should succeed");
+        assert_eq!(result.result.text_content(), "{}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_forwards_external_tool_calls_when_allowed_set_contains_name() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(MockExternalDispatcher::new("mob_list", "List active mobs"));
+        let mut dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+        dispatcher.allowed_tools.insert("mob_list".to_string());
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ext-2",
+            name: "mob_list",
+            args: &call_json,
+        };
+        let result = dispatcher
+            .dispatch(call)
+            .await
+            .expect("external tool dispatch should succeed even with a stale allow-set entry");
+        assert_eq!(result.result.text_content(), "{}");
+    }
+
+    #[test]
+    fn supports_ops_lifecycle_binding_when_shell_tools_present() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MemoryTaskStore::new());
+        let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = BuiltinToolConfig::default();
+        config.policy.enable.insert("shell".to_string());
+        config.policy.enable.insert("shell_job_cancel".to_string());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &config,
+            None,
+            Some(shell_config),
+            None,
+            Some(SessionId::new().to_string()),
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        assert!(
+            dispatcher.supports_ops_lifecycle_binding(),
+            "shell-enabled composite dispatcher should support ops lifecycle binding"
+        );
+        assert!(
+            !dispatcher
+                .shell_job_manager()
+                .expect("shell manager")
+                .exports_canonical_async_ops(),
+            "shell manager should start unbound before canonical registry binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_ops_lifecycle_rebuilds_shell_tools_with_canonical_registry() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MemoryTaskStore::new());
+        let shell_config = ShellConfig::with_project_root(temp_dir.path().to_path_buf());
+        let mut config = BuiltinToolConfig::default();
+        config.policy.enable.insert("shell".to_string());
+        config.policy.enable.insert("shell_job_cancel".to_string());
+        let dispatcher = Arc::new(
+            CompositeDispatcher::new(
+                store,
+                &config,
+                None,
+                Some(shell_config),
+                None,
+                Some(SessionId::new().to_string()),
+                true,
+            )
+            .expect("composite dispatcher should build"),
+        );
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = dispatcher
+            .bind_ops_lifecycle(Arc::clone(&registry), SessionId::new())
+            .expect("ops lifecycle binding should succeed");
+
+        let call_json = serde_json::value::RawValue::from_string(
+            r#"{"command":"sleep 60","background":true}"#.to_string(),
+        )
+        .unwrap();
+        let call = ToolCallView {
+            id: "shell-bg",
+            name: "shell",
+            args: &call_json,
+        };
+        let outcome = rebound
+            .dispatch(call)
+            .await
+            .expect("background shell dispatch");
+        assert_eq!(
+            outcome.async_ops.len(),
+            1,
+            "rebound shell dispatcher must emit canonical async op refs"
+        );
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("json result");
+        let cancel_json = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "job_id": payload["job_id"].as_str().expect("job id"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cancel = ToolCallView {
+            id: "shell-cancel",
+            name: "shell_job_cancel",
+            args: &cancel_json,
+        };
+        let _ = rebound
+            .dispatch(cancel)
+            .await
+            .expect("background shell cancel");
     }
 
     #[tokio::test]

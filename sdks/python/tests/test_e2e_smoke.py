@@ -101,9 +101,9 @@ if include_scenario(37):
             assert "teal" in text_lower
 
             details = await client.read_session(session.id)
-            assert details["session_id"] == session.id
-            assert details["is_active"] is False
-            assert details["message_count"] >= 4
+            assert details.session_id == session.id
+            assert details.is_active is False
+            assert details.message_count >= 4
 
             history = await client.read_session_history(session.id)
             assert history.session_id == session.id
@@ -189,8 +189,8 @@ if include_scenario(39):
 
         async with live_client(**realm) as client_b:
             read_back = await client_b.read_session(session_id)
-            assert read_back["session_id"] == session_id
-            assert read_back["message_count"] >= 2
+            assert read_back.session_id == session_id
+            assert read_back.message_count >= 2
 
             runtime_state = await raw_request(
                 client_b,
@@ -198,6 +198,7 @@ if include_scenario(39):
                 {"session_id": session_id},
             )
             assert runtime_state["state"] in {
+                "attached",
                 "idle",
                 "running",
                 "initializing",
@@ -237,11 +238,11 @@ if include_scenario(39):
             after_runtime = await wait_for(
                 "runtime-authored assistant reply",
                 lambda: client_b.read_session(session_id),
-                lambda state: "py-runtime-39" in (state.get("last_assistant_text") or "").lower()
-                and "py-runtime-ok" in (state.get("last_assistant_text") or "").lower(),
+                lambda state: "py-runtime-39" in (state.last_assistant_text or "").lower()
+                and "py-runtime-ok" in (state.last_assistant_text or "").lower(),
                 timeout_secs=120.0,
             )
-            last_text = (after_runtime.get("last_assistant_text") or "").lower()
+            last_text = (after_runtime.last_assistant_text or "").lower()
             assert "py-runtime-39" in last_text
             assert "py-runtime-ok" in last_text
             assert marker in last_text
@@ -328,10 +329,11 @@ if include_scenario(40):
             assert append["status"] in {"staged", "duplicate"}
 
             async with await mob.subscribe_member_events("reviewer-1") as subscription:
-                await mob.send_message(
-                    "reviewer-1",
+                reviewer_receipt = await mob.member("reviewer-1").send(
                     "Reply with REVIEWER_READY_40 and include [PY-SWARM-40].",
                 )
+                assert reviewer_receipt["session_id"] == reviewer_session_id
+                assert reviewer_receipt["member_id"] == "reviewer-1"
                 observed = await next_subscription_event(subscription)
                 assert observed is not None
 
@@ -339,21 +341,21 @@ if include_scenario(40):
                 "reviewer turn to finish",
                 lambda: client.read_session(reviewer_session_id),
                 lambda state: "reviewer_ready_40"
-                in (state.get("last_assistant_text") or "").lower(),
+                in (state.last_assistant_text or "").lower(),
                 timeout_secs=120.0,
             )
-            reviewer_text = (reviewer_state.get("last_assistant_text") or "").lower()
+            reviewer_text = (reviewer_state.last_assistant_text or "").lower()
             assert "reviewer_ready_40" in reviewer_text
             assert "py-swarm-40" in reviewer_text
 
             await wait_for(
-                "reviewer runtime to become idle",
+                "reviewer runtime to become idle/attached",
                 lambda: raw_request(
                     client,
                     "runtime/state",
                     {"session_id": reviewer_session_id},
                 ),
-                lambda payload: payload.get("state") == "idle",
+                lambda payload: payload.get("state") in ("idle", "attached"),
                 timeout_secs=120.0,
             )
 
@@ -375,12 +377,11 @@ if include_scenario(40):
                 broken_session_id = broken["session_id"]
                 assert broken_session_id
                 with pytest.raises(MeerkatError):
-                    await mob.send_message(
-                        "broken-1",
+                    await mob.member("broken-1").send(
                         "This turn must fail because the member model is invalid.",
                     )
                 broken_state = await client.read_session(broken_session_id)
-                assert not (broken_state.get("last_assistant_text") or "").strip()
+                assert not (broken_state.last_assistant_text or "").strip()
 
             await mob.respawn(
                 "reviewer-1",
@@ -403,28 +404,29 @@ if include_scenario(40):
             )
             assert respawned_session_id
             await wait_for(
-                "reviewer runtime idle after respawn",
+                "reviewer runtime idle/attached after respawn",
                 lambda: raw_request(
                     client,
                     "runtime/state",
                     {"session_id": respawned_session_id},
                 ),
-                lambda payload: payload.get("state") == "idle",
+                lambda payload: payload.get("state") in ("idle", "attached"),
                 timeout_secs=120.0,
             )
-            await mob.send_message(
-                "reviewer-1",
+            respawn_receipt = await mob.member("reviewer-1").send(
                 "Reply with REVIEWER_RESPAWN_40.",
             )
+            assert respawn_receipt["session_id"] == respawned_session_id
+            assert respawn_receipt["member_id"] == "reviewer-1"
             respawned_state = await wait_for(
                 "reviewer reply after respawn",
                 lambda: client.read_session(respawned_session_id),
                 lambda state: "reviewer_respawn_40"
-                in (state.get("last_assistant_text") or "").lower(),
+                in (state.last_assistant_text or "").lower(),
                 timeout_secs=120.0,
             )
             assert "reviewer_respawn_40" in (
-                respawned_state.get("last_assistant_text") or ""
+                respawned_state.last_assistant_text or ""
             ).lower()
 
             await mob.retire("reviewer-1")

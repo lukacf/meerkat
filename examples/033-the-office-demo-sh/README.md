@@ -30,8 +30,13 @@
 ## Prerequisites
 
 ```bash
+rustc --version # stable Rust toolchain
+wasm-pack --version
 node --version  # 20+
 ```
+
+`examples.sh` rebuilds the repo-local `@rkat/web` WASM runtime before the Vite
+build, so both the Rust toolchain and `wasm-pack` must be available on `PATH`.
 
 ## Build & Run
 
@@ -51,7 +56,9 @@ open http://127.0.0.1:4174
 cd web && npm install && npm run dev
 ```
 
-`npm run dev`/`npm run build` auto-sync the paired WASM runtime bundle from `@rkat/web` into `web/public/meerkat-pkg`.
+`npm run dev`/`npm run build` auto-sync the paired WASM runtime bundle from the
+repo-local `sdks/web` package (falling back to the installed `@rkat/web`
+package only if needed) into `web/public/meerkat-pkg`.
 
 ## Usage
 

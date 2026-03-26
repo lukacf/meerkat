@@ -5,6 +5,8 @@
 mod adapter;
 mod connection;
 mod error;
+pub mod external_tool_surface_authority;
+pub mod generated;
 mod protocol;
 mod router;
 mod transport;
@@ -12,14 +14,12 @@ mod transport;
 pub use adapter::McpRouterAdapter;
 pub use connection::McpConnection;
 pub use error::McpError;
+pub use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase};
 pub use protocol::McpProtocol;
 pub use router::{
-    McpApplyDelta, McpApplyResult, McpLifecycleAction, McpReloadTarget, McpRouter,
-    McpServerLifecycleState,
+    McpApplyDelta, McpApplyResult, McpLifecycleAction, McpLifecyclePhase, McpReloadTarget,
+    McpRouter, McpServerLifecycleState,
 };
-
-// Re-export McpServerConfig from meerkat-core for backwards compatibility
-pub use meerkat_core::McpServerConfig;
 
 // Capability registration
 inventory::submit! {

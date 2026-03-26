@@ -13,9 +13,10 @@ type SessionSvc = EphemeralSessionService<FactoryAgentBuilder>;
 /// Global server state — lazy-initialized on first tool call.
 ///
 /// Both `session_service` and `mob_state` share the same underlying
-/// `EphemeralSessionService`. The `session_service` field provides direct
-/// access for the `consult` tool (single-agent, no mob). The `mob_state`
-/// wraps it for multi-agent orchestration in the `deliberate` tool.
+/// `EphemeralSessionService` (in-memory substrate). The `session_service`
+/// field provides direct access for the `consult` tool (single-agent, no mob).
+/// The `mob_state` wraps it for multi-agent orchestration in the `deliberate`
+/// tool. Production deployments use the runtime-backed path instead.
 ///
 /// API keys are read from environment variables by `Config::default()`:
 /// `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.

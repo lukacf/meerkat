@@ -1,73 +1,29 @@
 # RuntimeControlMachine
 
-Status: normative `0.5` machine contract, first formal-spec draft
+_Generated from the Rust machine catalog. Do not edit by hand._
 
-## Purpose
+- Version: `2`
+- Rust owner: `meerkat-runtime` / `generated::runtime_control`
 
-`RuntimeControlMachine` is the top-level per-runtime operational owner.
+## State
+- Phase enum: `Initializing | Idle | Attached | Running | Recovering | Retired | Stopped | Destroyed`
+- `current_run_id`: `Option<RunId>`
+- `pre_run_state`: `Option<RuntimeState>`
+- `wake_pending`: `Bool`
+- `process_pending`: `Bool`
 
-It owns:
-
-- runtime lifecycle state
-- ordinary admission surface for work candidates
-- wake/process scheduling decisions
-- starting and finishing runs
-- explicit control-plane handling
-- coordination with `RuntimeIngressMachine`
-
-It does **not** own:
-
-- peer transport and trust/auth
-- admitted-work queue internals
-- LLM/tool execution internals
-- external tool surface lifecycle
-
-## Authoritative State Model
-
-For one runtime instance, the machine state is:
-
-- `runtime_state: RuntimeState`
-- `current_run_id: Option<RunId>`
-- `pre_run_state: Option<RuntimeState>`
-- `wake_pending: Bool`
-- `process_pending: Bool`
-- `control_plane_status: ControlPlaneStatus`
-
-Closed `RuntimeState` set:
-
-- `Initializing`
-- `Idle`
-- `Running`
-- `Recovering`
-- `Retired`
-- `Stopped`
-- `Destroyed`
-
-Terminal states:
-
-- `Stopped`
-- `Destroyed`
-
-Derived predicates:
-
-- `CanAcceptOrdinaryInput := runtime_state ∈ {Idle, Running}`
-- `CanProcessQueue := runtime_state ∈ {Idle, Retired}`
-- `IsTerminal := runtime_state ∈ {Stopped, Destroyed}`
-
-## Input Alphabet
-
-The closed external input/command alphabet is:
-
+## Inputs
 - `Initialize`
-- `SubmitCandidate(candidate_id, candidate_kind)`
-- `AdmissionAccepted(candidate_id, admission_effect, wake, process)`
-- `AdmissionRejected(candidate_id, reason)`
-- `AdmissionDeduplicated(candidate_id, existing_input_id)`
-- `BeginRun(run_id)`
-- `RunBoundaryApplied(run_id)`
-- `RunCompleted(run_id)`
-- `RunFailed(run_id)`
-- `RunCancelled(run_id)`
+- `SubmitWork`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>)
+- `AdmissionAccepted`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>, admission_effect: AdmissionEffect)
+- `AdmissionRejected`(work_id: WorkId, reason: String)
+- `AdmissionDeduplicated`(work_id: WorkId, existing_work_id: WorkId)
+- `BeginRun`(run_id: RunId)
+- `RunCompleted`(run_id: RunId)
+- `RunFailed`(run_id: RunId)
+- `RunCancelled`(run_id: RunId)
+- `AttachExecutor`
+- `DetachExecutor`
 - `RecoverRequested`
 - `RecoverySucceeded`
 - `RetireRequested`
@@ -76,226 +32,400 @@ The closed external input/command alphabet is:
 - `DestroyRequested`
 - `ResumeRequested`
 - `ExternalToolDeltaReceived`
+- `RecycleRequested`
+- `RecycleSucceeded`
 
-Notes:
-
-- `SubmitCandidate` is the external admission surface input
-- `AdmissionAccepted` is the normalized result of runtime policy resolution
-- `candidate_kind` ranges over the closed runtime ingress family:
-  `WorkInput`, `PeerInput`, `ExternalEventInput`, `OperationInput`, and
-  `ContinuationInput`
-- ordinary work candidates are not admitted in `Retired`, `Stopped`, or
-  `Destroyed`
-- out-of-band control-plane commands are not FIFO-ordered relative to ordinary
-  ingress
-
-## Effect Family
-
-The closed machine-boundary effect family is:
-
-- `ResolveAdmission(candidate_id)`
-- `SubmitAdmittedIngressEffect(candidate_id, admission_effect)`
+## Effects
+- `ResolveAdmission`(work_id: WorkId)
+- `SubmitAdmittedIngressEffect`(work_id: WorkId, content_shape: ContentShape, handling_mode: HandlingMode, request_id: Option<RequestId>, reservation_key: Option<ReservationKey>, admission_effect: AdmissionEffect)
+- `SubmitRunPrimitive`(run_id: RunId)
 - `SignalWake`
 - `SignalImmediateProcess`
-- `SubmitRunPrimitive(run_id)`
-- `EmitRuntimeNotice(kind, detail)`
-- `ResolveCompletionAsTerminated(reason)`
-- `ApplyControlPlaneCommand(command)`
-
-## Admission contract
-
-`RuntimeControlMachine` owns the admission surface.
-
-For each submitted candidate, it is responsible for:
-
-- accepting or rejecting admission in the current runtime state
-- resolving policy against current runtime state
-- converting that policy into a normalized ingress effect
-- submitting accepted work into `RuntimeIngressMachine`
-- issuing wake/process signals as needed
-
-This means the canonical sequencing is:
-
-`SubmitCandidate -> ResolveAdmission -> AdmissionAccepted/Rejected/Deduplicated -> Ingress effect`
-
-## Transition Relation
-
-### Lifecycle transitions
-
-1. `Initialize`
-
-- `Initializing -> Idle`
-
-2. `BeginRun`
-
-Preconditions:
-
-- `runtime_state ∈ {Idle, Retired}`
-- no current active run
-
-State updates:
-
-- `current_run_id := run_id`
-- `pre_run_state := runtime_state`
-- `runtime_state := Running`
-- `wake_pending := false`
-- `process_pending := false`
-
-3. `RunCompleted`, `RunFailed`, `RunCancelled`
-
-Preconditions:
-
-- `runtime_state = Running`
-- `current_run_id = run_id`
-
-State updates:
-
-- if `pre_run_state = Retired`, return to `Retired`
-- otherwise return to `Idle`
-- clear `current_run_id`
-- clear `pre_run_state`
-
-4. `RecoverRequested`
-
-- `Idle | Running -> Recovering`
-
-5. `RecoverySucceeded`
-
-- `Recovering -> Idle`
-
-6. `RetireRequested`
-
-- `Idle | Running -> Retired`
-
-Normative rule:
-
-- retiring stops new ordinary admissions
-- retiring does not discard already admitted work
-- retired runtimes may re-enter `Running` only for queue drain
-- if retire is requested during an already-active run, the runtime may enter a
-  `Retired`-with-active-run condition until that run finishes; this is still a
-  runtime-control state, not a second execution owner
-
-7. `ResetRequested`
-
-Preconditions:
-
-- `runtime_state ≠ Running`
-
-State updates:
-
-- abandon pending work through ingress
-- `runtime_state := Idle`
-- clear run state
-- clear wake/process flags
-
-8. `StopRequested`
-
-- `Initializing | Idle | Running | Recovering | Retired -> Stopped`
-
-State updates:
-
-- clear run state
-- resolve pending completions as terminated
-
-9. `DestroyRequested`
-
-- any non-terminal state -> `Destroyed`
-
-State updates:
-
-- clear run state
-- resolve pending completions as terminated
-
-10. `ResumeRequested`
-
-- `Recovering -> Idle`
-
-### Admission and scheduling transitions
-
-11. `SubmitCandidate`
-
-Preconditions:
-
-- `CanAcceptOrdinaryInput`
-
-Effect:
-
-- emit `ResolveAdmission(candidate_id)`
-
-12. `AdmissionAccepted`
-
-State updates:
-
-- emit `SubmitAdmittedIngressEffect`
-- if `wake = true`, set `wake_pending := true` and emit `SignalWake`
-- if `process = true`, set `process_pending := true` and emit
-  `SignalImmediateProcess`
-
-13. `AdmissionRejected`
-
-State updates:
-
-- emit runtime notice if operator/runtime policy requires visibility
-
-14. `AdmissionDeduplicated`
-
-State updates:
-
-- may emit completion waiter linkage or informational notice
-- does not change runtime lifecycle state
-
-15. `ExternalToolDeltaReceived`
-
-State updates:
-
-- no required lifecycle change
-- may emit `EmitRuntimeNotice`
+- `EmitRuntimeNotice`(kind: String, detail: String)
+- `ResolveCompletionAsTerminated`(reason: String)
+- `ApplyControlPlaneCommand`(command: String)
+- `InitiateRecycle`
 
 ## Invariants
+- `running_implies_active_run`
+- `active_run_only_while_running_or_retired`
 
-1. `runtime_state = Running` implies `current_run_id ≠ None`
-2. `current_run_id ≠ None` implies `runtime_state ∈ {Running, Retired}`
-3. `pre_run_state ≠ None` only while there is an active run or immediately
-   around run-transition bookkeeping
-4. `Retired` rejects new ordinary work admission
-5. `Stopped` and `Destroyed` reject all ordinary work admission
-6. only `Idle` and `Retired` may transition to `Running`
-7. only `Recovering` may transition via `ResumeRequested`
-8. control-plane commands may preempt ordinary scheduling
-9. ordinary work does not bypass admission and mutate runtime state directly
-10. external tool lifecycle reaches runtime as typed deltas rather than split
-    transport-local notice shapes
+## Transitions
+### `Initialize`
+- From: `Initializing`
+- On: `Initialize`()
+- To: `Idle`
 
-## Liveness / Fairness Assumptions
+### `AttachFromIdle`
+- From: `Idle`
+- On: `AttachExecutor`()
+- To: `Attached`
 
-Under fair scheduling:
+### `DetachToIdle`
+- From: `Attached`
+- On: `DetachExecutor`()
+- To: `Idle`
 
-- if `runtime_state = Idle`, admitted runnable work exists, and no terminal
-  control command intervenes, the runtime eventually begins a run
-- if `runtime_state = Running`, the run eventually produces
-  `RunCompleted`, `RunFailed`, or `RunCancelled`
-- if `StopRequested` or `DestroyRequested` is accepted, the machine eventually
-  reaches the corresponding terminal state
+### `BeginRunFromIdle`
+- From: `Idle`
+- On: `BeginRun`(run_id)
+- Guards:
+  - `no_active_run`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
 
-## Rust Refinement Anchors
+### `BeginRunFromRetired`
+- From: `Retired`
+- On: `BeginRun`(run_id)
+- Guards:
+  - `no_active_run`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
 
-Current implementation anchors:
+### `BeginRunFromAttached`
+- From: `Attached`
+- On: `BeginRun`(run_id)
+- Guards:
+  - `no_active_run`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
 
-- `meerkat-runtime/src/runtime_state.rs`
-- `meerkat-runtime/src/state_machine.rs`
-- `meerkat-runtime/src/session_adapter.rs`
-- `meerkat-runtime/src/runtime_loop.rs`
-- `meerkat-runtime/src/traits.rs`
-- `meerkat-runtime/src/policy_table.rs`
+### `BeginRunFromRecovering`
+- From: `Recovering`
+- On: `BeginRun`(run_id)
+- Guards:
+  - `no_active_run`
+- Emits: `SubmitRunPrimitive`
+- To: `Running`
 
-## Known `0.4` / precursor divergences
+### `RunCompletedToIdle`
+- From: `Running`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_idle`
+- To: `Idle`
 
-- today, runtime control and runtime ingress are partly folded together inside
-  `RuntimeDriver` implementations and `RuntimeSessionAdapter`
-- host-idle/wake/drain behavior in `meerkat-core` still exists as a legacy path
-  outside the canonical runtime loop
-- `TurnExecutionMachine` is not yet fully factored as a narrower execution
-  owner driven by runtime control
-- admission normalization and queue mutation are not yet fully separated into
-  distinct machine owners
+### `RunCompletedToAttached`
+- From: `Running`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_attached`
+- To: `Attached`
+
+### `RunCompletedToRetired`
+- From: `Running`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_retired`
+- To: `Retired`
+
+### `RunFailedToIdle`
+- From: `Running`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_idle`
+- To: `Idle`
+
+### `RunFailedToAttached`
+- From: `Running`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_attached`
+- To: `Attached`
+
+### `RunFailedToRetired`
+- From: `Running`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_retired`
+- To: `Retired`
+
+### `RunCancelledToIdle`
+- From: `Running`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_idle`
+- To: `Idle`
+
+### `RunCancelledToAttached`
+- From: `Running`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_attached`
+- To: `Attached`
+
+### `RunCancelledToRetired`
+- From: `Running`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+  - `pre_run_state_is_retired`
+- To: `Retired`
+
+### `RunCompletedFromRetiredInFlight`
+- From: `Retired`
+- On: `RunCompleted`(run_id)
+- Guards:
+  - `active_run_matches`
+- To: `Retired`
+
+### `RunFailedFromRetiredInFlight`
+- From: `Retired`
+- On: `RunFailed`(run_id)
+- Guards:
+  - `active_run_matches`
+- To: `Retired`
+
+### `RunCancelledFromRetiredInFlight`
+- From: `Retired`
+- On: `RunCancelled`(run_id)
+- Guards:
+  - `active_run_matches`
+- To: `Retired`
+
+### `RecoverRequestedFromIdle`
+- From: `Idle`
+- On: `RecoverRequested`()
+- To: `Recovering`
+
+### `RecoverRequestedFromRunning`
+- From: `Running`
+- On: `RecoverRequested`()
+- To: `Recovering`
+
+### `RecoverRequestedFromAttached`
+- From: `Attached`
+- On: `RecoverRequested`()
+- To: `Recovering`
+
+### `RecoverySucceeded`
+- From: `Recovering`
+- On: `RecoverySucceeded`()
+- To: `Idle`
+
+### `RetireRequestedFromIdle`
+- From: `Idle`
+- On: `RetireRequested`()
+- Emits: `ApplyControlPlaneCommand`
+- To: `Retired`
+
+### `RetireRequestedFromRunning`
+- From: `Running`
+- On: `RetireRequested`()
+- Emits: `ApplyControlPlaneCommand`
+- To: `Retired`
+
+### `RetireRequestedFromAttached`
+- From: `Attached`
+- On: `RetireRequested`()
+- Emits: `ApplyControlPlaneCommand`
+- To: `Retired`
+
+### `ResetRequested`
+- From: `Initializing`, `Idle`, `Attached`, `Recovering`, `Retired`
+- On: `ResetRequested`()
+- Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
+- To: `Idle`
+
+### `StopRequested`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`
+- On: `StopRequested`()
+- Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
+- To: `Stopped`
+
+### `DestroyRequested`
+- From: `Initializing`, `Idle`, `Attached`, `Running`, `Recovering`, `Retired`, `Stopped`
+- On: `DestroyRequested`()
+- Emits: `ApplyControlPlaneCommand`, `ResolveCompletionAsTerminated`
+- To: `Destroyed`
+
+### `ResumeRequested`
+- From: `Recovering`
+- On: `ResumeRequested`()
+- To: `Idle`
+
+### `SubmitWorkFromIdle`
+- From: `Idle`
+- On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
+- Emits: `ResolveAdmission`
+- To: `Idle`
+
+### `SubmitWorkFromRunning`
+- From: `Running`
+- On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
+- Emits: `ResolveAdmission`
+- To: `Running`
+
+### `SubmitWorkFromAttached`
+- From: `Attached`
+- On: `SubmitWork`(work_id, content_shape, handling_mode, request_id, reservation_key)
+- Emits: `ResolveAdmission`
+- To: `Attached`
+
+### `AdmissionAcceptedIdleQueue`
+- From: `Idle`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_queue`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`
+- To: `Idle`
+
+### `AdmissionAcceptedIdleSteer`
+- From: `Idle`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_steer`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
+- To: `Idle`
+
+### `AdmissionAcceptedRunningQueue`
+- From: `Running`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_queue`
+- Emits: `SubmitAdmittedIngressEffect`
+- To: `Running`
+
+### `AdmissionAcceptedRunningSteer`
+- From: `Running`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_steer`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
+- To: `Running`
+
+### `AdmissionAcceptedAttachedQueue`
+- From: `Attached`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_queue`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`
+- To: `Attached`
+
+### `AdmissionAcceptedAttachedSteer`
+- From: `Attached`
+- On: `AdmissionAccepted`(work_id, content_shape, handling_mode, request_id, reservation_key, admission_effect)
+- Guards:
+  - `handling_mode_is_steer`
+- Emits: `SubmitAdmittedIngressEffect`, `SignalWake`, `SignalImmediateProcess`
+- To: `Attached`
+
+### `AdmissionRejectedIdle`
+- From: `Idle`
+- On: `AdmissionRejected`(work_id, reason)
+- Emits: `EmitRuntimeNotice`
+- To: `Idle`
+
+### `AdmissionRejectedRunning`
+- From: `Running`
+- On: `AdmissionRejected`(work_id, reason)
+- Emits: `EmitRuntimeNotice`
+- To: `Running`
+
+### `AdmissionRejectedAttached`
+- From: `Attached`
+- On: `AdmissionRejected`(work_id, reason)
+- Emits: `EmitRuntimeNotice`
+- To: `Attached`
+
+### `AdmissionDeduplicatedIdle`
+- From: `Idle`
+- On: `AdmissionDeduplicated`(work_id, existing_work_id)
+- Emits: `EmitRuntimeNotice`
+- To: `Idle`
+
+### `AdmissionDeduplicatedRunning`
+- From: `Running`
+- On: `AdmissionDeduplicated`(work_id, existing_work_id)
+- Emits: `EmitRuntimeNotice`
+- To: `Running`
+
+### `AdmissionDeduplicatedAttached`
+- From: `Attached`
+- On: `AdmissionDeduplicated`(work_id, existing_work_id)
+- Emits: `EmitRuntimeNotice`
+- To: `Attached`
+
+### `ExternalToolDeltaReceivedIdle`
+- From: `Idle`
+- On: `ExternalToolDeltaReceived`()
+- Emits: `EmitRuntimeNotice`
+- To: `Idle`
+
+### `ExternalToolDeltaReceivedRunning`
+- From: `Running`
+- On: `ExternalToolDeltaReceived`()
+- Emits: `EmitRuntimeNotice`
+- To: `Running`
+
+### `ExternalToolDeltaReceivedRecovering`
+- From: `Recovering`
+- On: `ExternalToolDeltaReceived`()
+- Emits: `EmitRuntimeNotice`
+- To: `Recovering`
+
+### `ExternalToolDeltaReceivedRetired`
+- From: `Retired`
+- On: `ExternalToolDeltaReceived`()
+- Emits: `EmitRuntimeNotice`
+- To: `Retired`
+
+### `ExternalToolDeltaReceivedAttached`
+- From: `Attached`
+- On: `ExternalToolDeltaReceived`()
+- Emits: `EmitRuntimeNotice`
+- To: `Attached`
+
+### `RecycleRequestedFromRetired`
+- From: `Retired`
+- On: `RecycleRequested`()
+- Guards:
+  - `no_active_run`
+- Emits: `InitiateRecycle`
+- To: `Recovering`
+
+### `RecycleRequestedFromIdle`
+- From: `Idle`
+- On: `RecycleRequested`()
+- Guards:
+  - `no_active_run`
+- Emits: `InitiateRecycle`
+- To: `Recovering`
+
+### `RecycleRequestedFromAttached`
+- From: `Attached`
+- On: `RecycleRequested`()
+- Guards:
+  - `no_active_run`
+- Emits: `InitiateRecycle`
+- To: `Recovering`
+
+### `RecycleSucceeded`
+- From: `Recovering`
+- On: `RecycleSucceeded`()
+- Emits: `EmitRuntimeNotice`
+- To: `Idle`
+
+## Coverage
+### Code Anchors
+- `meerkat-runtime/src/runtime_state.rs` — runtime lifecycle state precursor
+- `meerkat-runtime/src/runtime_control_authority.rs` — canonical runtime control authority and transition reducer
+- `meerkat-runtime/src/runtime_loop.rs` — control-plane select loop and run coordination precursor
+- `meerkat-runtime/src/control_plane.rs` — stop/preemption seam and completion-resolution precursor
+- `meerkat-runtime/src/session_adapter.rs` — surface-facing lifecycle and completion owner precursor
+
+### Scenarios
+- `control-preempts-ingress` — control commands preempt ordinary ingress work
+- `prompt-queue` — queued ordinary work waits for the next outer-loop turn without modifying the current run
+- `prompt-steer` — steered ordinary work drains into the active run at the earliest admissible boundary
+- `begin-run-complete` — runtime transitions idle to running to idle for a completed run
+- `retire-stop-destroy` — runtime transitions through retire/stop/destroy commands without reopening ordinary work
+- `reset-terminates-waiters` — reset abandons pending work and resolves completion waiters exactly once

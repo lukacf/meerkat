@@ -3,11 +3,18 @@
 //! The `TaskBoard` is a projection built from `TaskCreated` and `TaskUpdated`
 //! events. It provides the current view of all tasks in a mob.
 
+use crate::MobError;
+use crate::event::NewMobEvent;
 use crate::event::{MobEvent, MobEventKind};
-use crate::ids::{MeerkatId, TaskId};
+use crate::ids::{MeerkatId, MobId, TaskId};
+use crate::store::MobEventStore;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Task lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +55,123 @@ pub struct MobTask {
 #[derive(Debug, Clone, Default)]
 pub struct TaskBoard {
     tasks: BTreeMap<TaskId, MobTask>,
+}
+
+/// Explicit task-board owner that validates updates and maintains the projection.
+#[derive(Clone)]
+pub struct MobTaskBoardService {
+    mob_id: MobId,
+    board: Arc<RwLock<TaskBoard>>,
+    events: Arc<dyn MobEventStore>,
+}
+
+impl MobTaskBoardService {
+    pub fn new(
+        mob_id: MobId,
+        board: Arc<RwLock<TaskBoard>>,
+        events: Arc<dyn MobEventStore>,
+    ) -> Self {
+        Self {
+            mob_id,
+            board,
+            events,
+        }
+    }
+
+    pub async fn create_task(
+        &self,
+        subject: String,
+        description: String,
+        blocked_by: Vec<TaskId>,
+    ) -> Result<TaskId, MobError> {
+        if subject.trim().is_empty() {
+            return Err(MobError::Internal(
+                "task subject cannot be empty".to_string(),
+            ));
+        }
+
+        let task_id = TaskId::from(uuid::Uuid::new_v4().to_string());
+        let appended = self
+            .events
+            .append(NewMobEvent {
+                mob_id: self.mob_id.clone(),
+                timestamp: None,
+                kind: MobEventKind::TaskCreated {
+                    task_id: task_id.clone(),
+                    subject,
+                    description,
+                    blocked_by,
+                },
+            })
+            .await?;
+        self.board.write().await.apply(&appended);
+        Ok(task_id)
+    }
+
+    pub async fn update_task(
+        &self,
+        task_id: TaskId,
+        status: TaskStatus,
+        owner: Option<MeerkatId>,
+    ) -> Result<(), MobError> {
+        // We treat `owner` as an *optional* claim/mutation field.
+        //
+        // Contract:
+        // - Owner changes are only applied when `status == in_progress`.
+        // - For other status transitions (open/completed/cancelled), any provided
+        //   `owner` value is ignored and the current owner is preserved.
+        //
+        // Rationale: some tool-schema layers may erroneously require sending
+        // `owner` even when completing/cancelling a task. Ignoring `owner` for
+        // non-in_progress transitions avoids spurious failures while still
+        // preventing owner changes outside of in_progress.
+        let effective_owner = {
+            let board = self.board.read().await;
+            let task = board
+                .get(&task_id)
+                .ok_or_else(|| MobError::Internal(format!("task '{task_id}' not found")))?;
+            let current_owner = task.owner.clone();
+
+            if matches!(status, TaskStatus::InProgress) {
+                if let Some(new_owner) = owner {
+                    let blocked = task.blocked_by.iter().any(|dependency| {
+                        board.get(dependency).map(|t| t.status) != Some(TaskStatus::Completed)
+                    });
+                    if blocked {
+                        return Err(MobError::Internal(format!(
+                            "task '{task_id}' is blocked by incomplete dependencies"
+                        )));
+                    }
+                    Some(new_owner)
+                } else {
+                    // No owner supplied: preserve current owner (if any).
+                    current_owner
+                }
+            } else {
+                // Owner is not mutable for non-in_progress statuses.
+                current_owner
+            }
+        };
+
+        let appended = self
+            .events
+            .append(NewMobEvent {
+                mob_id: self.mob_id.clone(),
+                timestamp: None,
+                kind: MobEventKind::TaskUpdated {
+                    task_id,
+                    status,
+                    owner: effective_owner,
+                },
+            })
+            .await?;
+        self.board.write().await.apply(&appended);
+        Ok(())
+    }
+
+    pub async fn clear(&self) {
+        self.board.write().await.clear();
+    }
 }
 
 impl TaskBoard {
@@ -139,6 +263,9 @@ impl TaskBoard {
 mod tests {
     use super::*;
     use crate::ids::MobId;
+    use crate::store::InMemoryMobEventStore;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     fn make_event(cursor: u64, kind: MobEventKind) -> MobEvent {
         MobEvent {
@@ -331,6 +458,61 @@ mod tests {
         assert_eq!(
             board1.get(&task_id).unwrap().status,
             board2.get(&task_id).unwrap().status
+        );
+    }
+
+    #[tokio::test]
+    async fn task_board_service_validates_dependency_gated_claims() {
+        let board = Arc::new(RwLock::new(TaskBoard::default()));
+        let service = MobTaskBoardService::new(
+            MobId::from("service-mob"),
+            board.clone(),
+            Arc::new(InMemoryMobEventStore::new()),
+        );
+
+        let blocker = service
+            .create_task("Blocker".into(), "done first".into(), vec![])
+            .await
+            .expect("create blocker");
+        let blocked = service
+            .create_task(
+                "Blocked".into(),
+                "done second".into(),
+                vec![blocker.clone()],
+            )
+            .await
+            .expect("create blocked task");
+
+        let err = service
+            .update_task(
+                blocked.clone(),
+                TaskStatus::InProgress,
+                Some(MeerkatId::from("worker-1")),
+            )
+            .await
+            .expect_err("blocked task claim should be rejected");
+        assert!(
+            err.to_string()
+                .contains("blocked by incomplete dependencies")
+        );
+
+        service
+            .update_task(blocker, TaskStatus::Completed, None)
+            .await
+            .expect("complete blocker");
+        service
+            .update_task(
+                blocked.clone(),
+                TaskStatus::InProgress,
+                Some(MeerkatId::from("worker-1")),
+            )
+            .await
+            .expect("claim unblocked task");
+
+        let board = board.read().await;
+        assert_eq!(
+            board.get(&blocked).expect("blocked task snapshot").owner,
+            Some(MeerkatId::from("worker-1"))
         );
     }
 }

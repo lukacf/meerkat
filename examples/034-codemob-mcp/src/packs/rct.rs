@@ -72,13 +72,13 @@ impl Pack for RctPack {
             "Implement the plan. Read .rct/checklist.yaml for tasks. Run verification commands. Mark tasks done.\n\n## Plan\n{{ steps.plan }}".into(),
             &["plan"], 600_000));
         // 3 reviewers run in parallel (all depend on implement, no deps between them)
-        steps.insert(StepId::from("review_rct"),         flow_step("rct_guardian",       "Gate review: Check representation contracts. Run tests independently. Produce verdict.".into(), &["implement"], 180_000));
-        steps.insert(StepId::from("review_integration"), flow_step("integration_sheriff","Gate review: Check cross-component wiring. Run tests independently. Produce verdict.".into(), &["implement"], 180_000));
-        steps.insert(StepId::from("review_spec"),        flow_step("spec_auditor",       "Gate review: Check requirements compliance against .rct/spec.yaml. Produce verdict.".into(), &["implement"], 180_000));
+        steps.insert(StepId::from("review_rct"),         flow_step("rct_guardian",       "Gate review: Check representation contracts. Run tests independently. Produce verdict.".into(), &["implement"], 600_000));
+        steps.insert(StepId::from("review_integration"), flow_step("integration_sheriff","Gate review: Check cross-component wiring. Run tests independently. Produce verdict.".into(), &["implement"], 600_000));
+        steps.insert(StepId::from("review_spec"),        flow_step("spec_auditor",       "Gate review: Check requirements compliance against .rct/spec.yaml. Produce verdict.".into(), &["implement"], 600_000));
         steps.insert(StepId::from("aggregate"), flow_step("aggregator",
             "Aggregate the 3 reviewer verdicts into a final gate result: APPROVE/BLOCK, blocking issues, recommendations.\n\n\
              ## RCT Guardian\n{{ steps.review_rct }}\n\n## Integration Sheriff\n{{ steps.review_integration }}\n\n## Spec Auditor\n{{ steps.review_spec }}".into(),
-            &["review_rct", "review_integration", "review_spec"], 120_000));
+            &["review_rct", "review_integration", "review_spec"], 300_000));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec {

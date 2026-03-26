@@ -10,10 +10,10 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat_core::service::AppendSystemContextRequest;
-use meerkat_core::types::{ContentInput, SessionId};
+use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
 use meerkat_mob::{
-    FlowId, MeerkatId, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Prefab, RunId,
-    SpawnMemberSpec,
+    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobDefinition, MobId, MobRespawnError,
+    MobRuntimeMode, Prefab, RunId, SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -231,20 +231,20 @@ pub async fn handle_spawn(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let resume_session_id = match params.resume_session_id {
-        Some(session_id) => match SessionId::parse(&session_id) {
-            Ok(session_id) => Some(session_id),
-            Err(err) => return invalid_params(id, format!("Invalid resume_session_id: {err}")),
-        },
-        None => None,
-    };
     let mut spec = SpawnMemberSpec::new(params.profile.as_str(), params.meerkat_id.as_str());
     spec.initial_message = params.initial_message;
     spec.runtime_mode = params.runtime_mode;
     spec.backend = params.backend;
     spec.context = params.context;
     spec.labels = params.labels;
-    spec.resume_session_id = resume_session_id;
+    if let Some(session_id) = params.resume_session_id {
+        match SessionId::parse(&session_id) {
+            Ok(sid) => {
+                spec = spec.with_resume_session_id(sid);
+            }
+            Err(err) => return invalid_params(id, format!("Invalid resume_session_id: {err}")),
+        }
+    }
     spec.additional_instructions = params.additional_instructions;
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(member_ref) => RpcResponse::success(
@@ -319,25 +319,25 @@ pub async fn handle_spawn_many(
 
     let mut specs = Vec::with_capacity(params.specs.len());
     for s in &params.specs {
-        let resume_session_id = match &s.resume_session_id {
-            Some(raw) => match SessionId::parse(raw) {
-                Ok(sid) => Some(sid),
-                Err(err) => {
-                    return invalid_params(
-                        id,
-                        format!("Invalid resume_session_id for {}: {err}", s.meerkat_id),
-                    );
-                }
-            },
-            None => None,
-        };
         let mut spec = SpawnMemberSpec::new(s.profile.as_str(), s.meerkat_id.as_str());
         spec.initial_message = s.initial_message.clone();
         spec.runtime_mode = s.runtime_mode;
         spec.backend = s.backend;
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
-        spec.resume_session_id = resume_session_id;
+        if let Some(raw) = &s.resume_session_id {
+            match SessionId::parse(raw) {
+                Ok(sid) => {
+                    spec = spec.with_resume_session_id(sid);
+                }
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("Invalid resume_session_id for {}: {err}", s.meerkat_id),
+                    );
+                }
+            }
+        }
         spec.additional_instructions = s.additional_instructions.clone();
         specs.push(spec);
     }
@@ -426,16 +426,47 @@ pub async fn handle_respawn(
         )
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"respawned": true})),
+        Ok(receipt) => respawn_result_response(id, Ok(receipt)),
+        Err(err) => respawn_result_response(id, Err(err)),
+    }
+}
+
+fn respawn_result_response(
+    id: Option<RpcId>,
+    result: Result<MemberRespawnReceipt, MobRespawnError>,
+) -> RpcResponse {
+    match result {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "status": "completed",
+                "receipt": receipt,
+            }),
+        ),
+        Err(MobRespawnError::TopologyRestoreFailed {
+            receipt,
+            failed_peer_ids,
+        }) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "status": "topology_restore_failed",
+                "receipt": receipt,
+                "failed_peer_ids": failed_peer_ids
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
+            }),
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobWireParams {
     pub mob_id: String,
-    pub a: String,
-    pub b: String,
+    pub member: String,
+    pub peer: meerkat_mob::PeerTarget,
 }
 
 pub async fn handle_wire(
@@ -454,8 +485,8 @@ pub async fn handle_wire(
     match state
         .mob_wire(
             &mob_id,
-            MeerkatId::from(params.a.as_str()),
-            MeerkatId::from(params.b.as_str()),
+            MeerkatId::from(params.member.as_str()),
+            params.peer,
         )
         .await
     {
@@ -480,8 +511,8 @@ pub async fn handle_unwire(
     match state
         .mob_unwire(
             &mob_id,
-            MeerkatId::from(params.a.as_str()),
-            MeerkatId::from(params.b.as_str()),
+            MeerkatId::from(params.member.as_str()),
+            params.peer,
         )
         .await
     {
@@ -527,10 +558,15 @@ pub async fn handle_lifecycle(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobSendParams {
     pub mob_id: String,
     pub meerkat_id: String,
-    pub message: ContentInput,
+    pub content: ContentInput,
+    #[serde(default)]
+    pub handling_mode: HandlingMode,
+    #[serde(default)]
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 pub async fn handle_send(
@@ -547,17 +583,16 @@ pub async fn handle_send(
         Err(resp) => return resp,
     };
     match state
-        .mob_send_message(
+        .mob_member_send(
             &mob_id,
             MeerkatId::from(params.meerkat_id.as_str()),
-            params.message,
+            params.content,
+            params.handling_mode,
+            params.render_metadata,
         )
         .await
     {
-        Ok(session_id) => RpcResponse::success(
-            id,
-            serde_json::json!({"sent": true, "session_id": session_id}),
-        ),
+        Ok(receipt) => RpcResponse::success(id, serde_json::json!(receipt)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -766,9 +801,235 @@ pub async fn handle_flow_cancel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// mob/spawn_helper
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobSpawnHelperParams {
+    pub mob_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub meerkat_id: Option<String>,
+    #[serde(default)]
+    pub profile_name: Option<String>,
+    #[serde(default)]
+    pub runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    pub backend: Option<MobBackendKind>,
+}
+
+pub async fn handle_spawn_helper(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobSpawnHelperParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let meerkat_id = MeerkatId::from(
+        params
+            .meerkat_id
+            .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
+    );
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile) = params.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    }
+    options.runtime_mode = params.runtime_mode;
+    options.backend = params.backend;
+    match state
+        .mob_spawn_helper(&mob_id, meerkat_id, params.prompt, options)
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "output": result.output,
+                "tokens_used": result.tokens_used,
+                "session_id": result.session_id,
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/fork_helper
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobForkHelperParams {
+    pub mob_id: String,
+    pub source_member_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub meerkat_id: Option<String>,
+    #[serde(default)]
+    pub profile_name: Option<String>,
+    #[serde(default)]
+    pub fork_context: Option<meerkat_mob::ForkContext>,
+    #[serde(default)]
+    pub runtime_mode: Option<MobRuntimeMode>,
+    #[serde(default)]
+    pub backend: Option<MobBackendKind>,
+}
+
+pub async fn handle_fork_helper(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobForkHelperParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let source_member_id = MeerkatId::from(params.source_member_id.as_str());
+    let meerkat_id = MeerkatId::from(
+        params
+            .meerkat_id
+            .unwrap_or_else(|| format!("fork-{}", uuid::Uuid::new_v4())),
+    );
+    let fork_context = params
+        .fork_context
+        .unwrap_or(meerkat_mob::ForkContext::FullHistory);
+    let mut options = meerkat_mob::HelperOptions::default();
+    if let Some(profile) = params.profile_name {
+        options.profile_name = Some(meerkat_mob::ProfileName::from(profile));
+    }
+    options.runtime_mode = params.runtime_mode;
+    options.backend = params.backend;
+    match state
+        .mob_fork_helper(
+            &mob_id,
+            &source_member_id,
+            meerkat_id,
+            params.prompt,
+            fork_context,
+            options,
+        )
+        .await
+    {
+        Ok(result) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "output": result.output,
+                "tokens_used": result.tokens_used,
+                "session_id": result.session_id,
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/force_cancel
+// ---------------------------------------------------------------------------
+
+pub async fn handle_force_cancel(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_force_cancel(&mob_id, MeerkatId::from(params.meerkat_id.as_str()))
+        .await
+    {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({"cancelled": true})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/member_status
+// ---------------------------------------------------------------------------
+
+pub async fn handle_member_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_member_status(&mob_id, &MeerkatId::from(params.meerkat_id.as_str()))
+        .await
+    {
+        Ok(snapshot) => RpcResponse::success(id, serde_json::json!(snapshot)),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/wait_kickoff
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MobWaitKickoffParams {
+    pub mob_id: String,
+    #[serde(default)]
+    pub member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+pub async fn handle_wait_kickoff(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobWaitKickoffParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
+    let member_ids = params.member_ids.map(|ids| {
+        ids.into_iter()
+            .map(|member_id| MeerkatId::from(member_id.as_str()))
+            .collect::<Vec<_>>()
+    });
+
+    match state
+        .mob_wait_kickoff(&mob_id, member_ids, params.timeout_ms)
+        .await
+    {
+        Ok(members) => RpcResponse::success(id, serde_json::json!({ "members": members })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::types::SessionId;
 
     #[tokio::test]
     async fn handle_prefabs_returns_expected_shape() -> Result<(), Box<dyn std::error::Error>> {
@@ -792,6 +1053,125 @@ mod tests {
                 .iter()
                 .all(|entry| entry["toml_template"].is_string())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn respawn_result_preserves_receipt_on_topology_restore_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let receipt = MemberRespawnReceipt::new(
+            MeerkatId::from("worker"),
+            Some(SessionId::new()),
+            Some(SessionId::new()),
+        );
+        let response = respawn_result_response(
+            Some(RpcId::Num(42)),
+            Err(MobRespawnError::TopologyRestoreFailed {
+                receipt: receipt.clone(),
+                failed_peer_ids: vec![MeerkatId::from("peer-a"), MeerkatId::from("peer-b")],
+            }),
+        );
+
+        assert!(
+            response.error.is_none(),
+            "partial failure should stay in result envelope"
+        );
+        let Some(raw) = response.result.as_ref() else {
+            panic!("result payload should exist");
+        };
+        let value: serde_json::Value = serde_json::from_str(raw.get())?;
+        assert_eq!(value["status"], "topology_restore_failed");
+        assert_eq!(value["receipt"]["member_id"], receipt.member_id.to_string());
+        assert_eq!(
+            value["failed_peer_ids"],
+            serde_json::json!(["peer-a", "peer-b"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mob_send_params_accept_canonical_content_field() -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "meerkat_id": "worker-1",
+            "content": "hello from canonical caller"
+        });
+        let params: MobSendParams = serde_json::from_value(value)?;
+        assert_eq!(
+            params.content,
+            ContentInput::Text("hello from canonical caller".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mob_send_params_reject_legacy_message_field() {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "meerkat_id": "worker-1",
+            "message": "legacy hello"
+        });
+        let err = serde_json::from_value::<MobSendParams>(value)
+            .expect_err("legacy message field must be rejected");
+        assert!(err.to_string().contains("unknown field `message`"));
+    }
+
+    #[test]
+    fn mob_wire_params_accept_canonical_member_and_peer_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "member": "worker-a",
+            "peer": { "local": "worker-b" }
+        });
+        let params: MobWireParams = serde_json::from_value(value)?;
+        assert_eq!(
+            MeerkatId::from(params.member.as_str()),
+            MeerkatId::from("worker-a")
+        );
+        assert_eq!(
+            params.peer,
+            meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mob_wire_params_reject_compatibility_shapes() {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "local": "worker-a",
+            "target": { "local": "worker-b" }
+        });
+        let err = serde_json::from_value::<MobWireParams>(value)
+            .expect_err("compatibility shape must be rejected");
+        assert!(err.to_string().contains("unknown field `local`"));
+    }
+
+    #[test]
+    fn mob_wire_params_reject_legacy_a_b_shape() {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "a": "worker-a",
+            "b": "worker-b"
+        });
+        let err = serde_json::from_value::<MobWireParams>(value)
+            .expect_err("legacy a/b shape must be rejected");
+        assert!(err.to_string().contains("unknown field `a`"));
+    }
+
+    #[test]
+    fn mob_wait_kickoff_params_accept_optional_member_ids_and_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "mob_id": "mob-1",
+            "member_ids": ["a", "b"],
+            "timeout_ms": 2500
+        });
+        let params: MobWaitKickoffParams = serde_json::from_value(value)?;
+        assert_eq!(params.mob_id, "mob-1");
+        assert_eq!(params.member_ids.unwrap_or_default(), vec!["a", "b"]);
+        assert_eq!(params.timeout_ms, Some(2500));
         Ok(())
     }
 }

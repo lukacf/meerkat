@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::identifiers::InputId;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
+use crate::types::{HandlingMode, RenderMetadata};
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -77,9 +78,12 @@ pub struct ConversationContextAppend {
 /// An input staged for application at a run boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeTurnMetadata {
-    /// `None` = use session default; `Some(true)` = force host mode; `Some(false)` = force non-host.
+    /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_mode: Option<bool>,
+    pub handling_mode: Option<HandlingMode>,
+    /// `None` = use session default; `Some(true)` = force keep-alive; `Some(false)` = force non-keep-alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_references: Option<Vec<SkillKey>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +99,9 @@ pub struct RuntimeTurnMetadata {
     /// Override provider-specific parameters for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Optional normalized rendering metadata for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_metadata: Option<RenderMetadata>,
 }
 
 /// An input staged for application at a run boundary.
@@ -243,7 +250,7 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
-                host_mode: Some(true),
+                keep_alive: Some(true),
                 ..Default::default()
             }),
         };

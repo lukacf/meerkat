@@ -110,7 +110,7 @@ When `enable_mob` is set, the agent gets these tools:
 | `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
 | `meerkat_wire` | `mob_id`, `a`, `b` | Establish trusted comms channel |
 | `meerkat_list` | `mob_id` | List mob members and their state |
-| `meerkat_message` | `mob_id`, `meerkat_id`, `message` | Send a direct turn to a member |
+| `meerkat_message` | `mob_id`, `meerkat_id`, `content` | Send a direct turn to a member |
 
 ---
 
@@ -286,7 +286,7 @@ When `enable_mob` is set, the agent gets these tools:
   <Tab title="JSON-RPC">
     Agent calls `meerkat_wire` tool:
     ```json
-    {"mob_id": "my-mob", "a": "lead-1", "b": "worker-1"}
+    {"mob_id": "my-mob", "member": "lead-1", "peer": {"local": "worker-1"}}
     ```
   </Tab>
   <Tab title="REST">
@@ -355,7 +355,7 @@ Send a message directly to a specific mob member, triggering an LLM turn.
   <Tab title="JSON-RPC">
     Agent calls `meerkat_message` tool:
     ```json
-    {"mob_id": "my-mob", "meerkat_id": "lead-1", "message": "Decompose the task and assign to workers."}
+    {"mob_id": "my-mob", "meerkat_id": "lead-1", "content": "Decompose the task and assign to workers."}
     ```
   </Tab>
   <Tab title="REST">
@@ -372,7 +372,10 @@ Send a message directly to a specific mob member, triggering an LLM turn.
   </Tab>
   <Tab title="Rust">
     ```rust
-    handle.send_message("lead-1".into(), "Decompose the task and assign to workers.".into()).await?;
+    use meerkat_core::types::HandlingMode;
+
+    let lead = handle.member(&"lead-1".into()).await?;
+    lead.send("Decompose the task and assign to workers.", HandlingMode::Queue, None).await?;
     ```
   </Tab>
 </Tabs>
@@ -594,14 +597,13 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
     let factory = AgentFactory::new(root)
         .builtins(true)
         .mob(true);
-    let service = build_ephemeral_service(factory, config, 64);
+    let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-5".into(),
         prompt: "Create a research team and run the synthesis flow".into(),
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -615,8 +617,8 @@ The primary pattern across all surfaces: enable mob tools and let the agent orch
 
 | Mode | Behavior | Use case |
 |------|----------|----------|
-| `autonomous_host` (default) | Member runs a continuous loop: wake on inbox → process → respond → sleep | Long-lived agents that react to messages |
-| `turn_driven` | Member only executes when explicitly given a turn via `meerkat_message` or flow dispatch | Controlled execution, deterministic ordering |
+| `autonomous_host` (default) | Member runs a long-lived runtime-backed loop: admit inbox work → process → respond → sleep | Long-lived agents that react to messages |
+| `turn_driven` | Member only executes when explicitly given a turn via `meerkat_message` content dispatch or flow dispatch | Controlled execution, deterministic ordering |
 
 Set per-profile in the definition:
 ```json

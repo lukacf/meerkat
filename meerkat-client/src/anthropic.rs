@@ -7,7 +7,7 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
-use meerkat_core::{ContentBlock, Message, OutputSchema, StopReason, Usage};
+use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
@@ -161,16 +161,20 @@ impl AnthropicClient {
                                     "type": "text",
                                     "text": text
                                 }),
-                                ContentBlock::Image {
-                                    media_type, data, ..
-                                } => serde_json::json!({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": media_type,
-                                        "data": data
-                                    }
-                                }),
+                                ContentBlock::Image { media_type, data } => match data {
+                                    ImageData::Inline { data } => serde_json::json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": media_type,
+                                            "data": data
+                                        }
+                                    }),
+                                    ImageData::Blob { .. } => serde_json::json!({
+                                        "type": "text",
+                                        "text": block.text_projection()
+                                    }),
+                                },
                                 _ => serde_json::json!({
                                     "type": "text",
                                     "text": block.text_projection()
@@ -299,7 +303,8 @@ impl AnthropicClient {
                                         "text": text
                                     }),
                                     ContentBlock::Image {
-                                        media_type, data, ..
+                                        media_type,
+                                        data: ImageData::Inline { data },
                                     } => serde_json::json!({
                                         "type": "image",
                                         "source": {
@@ -307,6 +312,10 @@ impl AnthropicClient {
                                             "media_type": media_type,
                                             "data": data
                                         }
+                                    }),
+                                    ContentBlock::Image { .. } => serde_json::json!({
+                                        "type": "text",
+                                        "text": block.text_projection()
                                     }),
                                     _ => serde_json::json!({
                                         "type": "text",
@@ -617,8 +626,9 @@ impl LlmClient for AnthropicClient {
             let stream_result = if (200..=299).contains(&status_code) {
                 Ok(response.bytes_stream())
             } else {
+                let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
+                Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
@@ -2037,8 +2047,7 @@ mod tests {
                             },
                             ContentBlock::Image {
                                 media_type: "image/png".to_string(),
-                                data: "iVBOR...".to_string(),
-                                source_path: Some("/tmp/screenshot.png".to_string()),
+                                data: "iVBOR...".into(),
                             },
                         ],
                         false,
@@ -2093,8 +2102,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/jpeg".to_string(),
-                    data: "/9j/4AAQ...".to_string(),
-                    source_path: Some("/home/user/photo.jpg".to_string()),
+                    data: "/9j/4AAQ...".into(),
                 },
             ]))],
         );

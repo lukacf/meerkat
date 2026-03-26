@@ -5,8 +5,10 @@ use crate::error::DispatchError;
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::types::ToolResult;
+use meerkat_core::types::{ToolCallView, ToolDef};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -30,7 +32,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::NotFound {
             name: call.name.to_string(),
         })
@@ -70,13 +72,13 @@ impl ToolDispatcher {
         self.registry.validate(call.name, &args)?;
 
         // 2. Dispatch to router with timeout
-        let result = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
+        let outcome = tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
             .await
             .map_err(|_| DispatchError::Timeout {
                 timeout_ms: self.default_timeout.as_millis() as u64,
             })??;
 
-        Ok(result)
+        Ok(outcome.result)
     }
 }
 
@@ -87,7 +89,7 @@ impl AgentToolDispatcher for ToolDispatcher {
         Arc::from(self.registry.list())
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.to_string(),
@@ -112,7 +114,7 @@ impl AgentToolDispatcher for ToolDispatcher {
 
 /// A dispatcher wrapper that filters tools based on a ToolAccessPolicy.
 ///
-/// This is used to restrict which tools a sub-agent can access when spawned
+/// This is used to restrict which tools a delegated branch can access
 /// with an allow/deny list configuration.
 pub struct FilteredDispatcher {
     inner: Arc<dyn AgentToolDispatcher>,
@@ -174,7 +176,7 @@ impl AgentToolDispatcher for FilteredDispatcher {
             .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         if !self.allowed_names.contains(call.name) {
             return Err(ToolError::NotFound {
                 name: call.name.to_string(),
@@ -225,13 +227,14 @@ mod tests {
                 .into()
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             if self.tool_names.contains(&call.name) {
                 Ok(ToolResult::new(
                     call.id.to_string(),
                     json!({"called": call.name}).to_string(),
                     false,
-                ))
+                )
+                .into())
             } else {
                 Err(ToolError::NotFound {
                     name: call.name.to_string(),
@@ -298,21 +301,19 @@ mod tests {
         }
     }
 
-    /// Regression test: Ensure tool access policy is actually enforced
-    /// Previously, _tool_access was parsed but never applied, so sub-agents
-    /// could access all tools regardless of allow/deny configuration.
+    /// Regression test: Ensure tool access policy is actually enforced.
     #[tokio::test]
     async fn test_regression_tool_access_policy_must_be_enforced() {
         let inner = Arc::new(MockDispatcher::new(vec![
             "shell",
-            "agent_spawn",
+            "dangerous_exec",
             "task_list",
             "wait",
         ]));
 
-        // Deny shell and agent_spawn - common security restriction
+        // Deny shell and dangerous_exec - common security restriction
         let policy =
-            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "agent_spawn".to_string()]);
+            ToolAccessPolicy::DenyList(vec!["shell".to_string(), "dangerous_exec".to_string()]);
         let filtered = FilteredDispatcher::new(inner, &policy);
 
         // Only safe tools should be visible
@@ -327,8 +328,8 @@ mod tests {
             "shell should not be visible in tools list"
         );
         assert!(
-            !visible_tools.contains(&"agent_spawn".to_string()),
-            "agent_spawn should not be visible in tools list"
+            !visible_tools.contains(&"dangerous_exec".to_string()),
+            "dangerous_exec should not be visible in tools list"
         );
 
         // Attempting to dispatch denied tools should fail

@@ -1,7 +1,9 @@
 //! Pure topology policy evaluator.
 
-use crate::definition::TopologyRule;
+use crate::definition::{TopologyRule, TopologySpec};
 use crate::ids::ProfileName;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const WILDCARD_ROLE: &str = "*";
 
@@ -10,6 +12,56 @@ const WILDCARD_ROLE: &str = "*";
 pub enum PolicyDecision {
     Allow,
     Deny,
+}
+
+/// Explicit owner for topology policy and monotonic revision tracking.
+#[derive(Clone)]
+pub struct MobTopologyService {
+    spec: Option<TopologySpec>,
+    coordinator_bound: Arc<AtomicBool>,
+    revision: Arc<AtomicU32>,
+}
+
+impl MobTopologyService {
+    pub fn new(spec: Option<TopologySpec>) -> Self {
+        Self {
+            spec,
+            coordinator_bound: Arc::new(AtomicBool::new(false)),
+            revision: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    pub fn evaluate(&self, from_role: &ProfileName, to_role: &ProfileName) -> PolicyDecision {
+        self.spec.as_ref().map_or(PolicyDecision::Allow, |spec| {
+            evaluate_topology(&spec.rules, from_role, to_role)
+        })
+    }
+
+    pub fn bind_coordinator(&self) -> u32 {
+        if !self.coordinator_bound.swap(true, Ordering::AcqRel) {
+            return self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        }
+        self.revision()
+    }
+
+    pub fn unbind_coordinator(&self) -> u32 {
+        if self.coordinator_bound.swap(false, Ordering::AcqRel) {
+            return self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        }
+        self.revision()
+    }
+
+    pub fn note_spawn_boundary(&self) -> u32 {
+        self.revision.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn coordinator_bound(&self) -> bool {
+        self.coordinator_bound.load(Ordering::Acquire)
+    }
+
+    pub fn revision(&self) -> u32 {
+        self.revision.load(Ordering::Acquire)
+    }
 }
 
 /// Evaluate topology allow/deny decision for a role edge.
@@ -41,6 +93,7 @@ fn role_matches(rule_role: &ProfileName, actual_role: &ProfileName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::definition::{PolicyMode, TopologySpec};
 
     #[test]
     fn test_topology_defaults_to_allow() {
@@ -164,5 +217,21 @@ mod tests {
             ),
             PolicyDecision::Allow
         );
+    }
+
+    #[test]
+    fn topology_service_tracks_coordinator_and_revision() {
+        let service = MobTopologyService::new(Some(TopologySpec {
+            mode: PolicyMode::Advisory,
+            rules: vec![],
+        }));
+        assert_eq!(service.revision(), 0);
+        assert!(!service.coordinator_bound());
+
+        assert_eq!(service.bind_coordinator(), 1);
+        assert!(service.coordinator_bound());
+        assert_eq!(service.note_spawn_boundary(), 2);
+        assert_eq!(service.unbind_coordinator(), 3);
+        assert!(!service.coordinator_bound());
     }
 }

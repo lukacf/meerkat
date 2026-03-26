@@ -29,11 +29,14 @@
 //! ```
 
 use crate::AgentToolDispatcher;
-use crate::agent::{ExternalToolNotice, ExternalToolUpdate};
+use crate::agent::ExternalToolUpdate;
 use crate::error::ToolError;
+use crate::event::ExternalToolDelta;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{ToolCallView, ToolDef, ToolResult};
+#[cfg(test)]
+use crate::types::ToolResult;
+use crate::types::{ToolCallView, ToolDef};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -351,7 +354,10 @@ impl AgentToolDispatcher for ToolGateway {
     /// - `ToolError::NotFound` if the tool doesn't exist
     /// - `ToolError::Unavailable` if the tool exists but is currently hidden
     /// - The tool result if execution succeeds
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
         let idx = self
             .route
             .get(call.name)
@@ -409,24 +415,70 @@ impl AgentToolDispatcher for ToolGateway {
             .any(|e| e.dispatcher.supports_wait_interrupt())
     }
 
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::agent::OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
+
+        let mut builder = ToolGatewayBuilder::new();
+        let mut any_rebound = false;
+        for entry in owned.entries {
+            if entry.dispatcher.supports_ops_lifecycle_binding() {
+                let rebound = entry
+                    .dispatcher
+                    .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?;
+                builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
+                any_rebound = true;
+            } else {
+                builder =
+                    builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
+            }
+        }
+
+        if !any_rebound {
+            return Err(crate::agent::OpsLifecycleBindError::Unsupported);
+        }
+
+        let gateway = builder
+            .build()
+            .map_err(|_| crate::agent::OpsLifecycleBindError::Unsupported)?;
+        Ok(Arc::new(gateway))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.dispatcher.supports_ops_lifecycle_binding())
+    }
+
     /// Aggregate external updates across all dispatcher entries.
     ///
     /// Deduplicates by server name for pending, by `(server, operation, status)`
     /// for notices. First-seen wins, stable order.
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
-        let mut all_notices: Vec<ExternalToolNotice> = Vec::new();
+        let mut all_notices: Vec<ExternalToolDelta> = Vec::new();
         let mut all_pending: Vec<String> = Vec::new();
         let mut seen_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut seen_notices: std::collections::HashSet<(String, String, String)> =
-            std::collections::HashSet::new();
+        let mut seen_notices: std::collections::HashSet<(
+            String,
+            String,
+            String,
+            bool,
+            Option<u32>,
+        )> = std::collections::HashSet::new();
 
         for entry in &self.entries {
             let update = entry.dispatcher.poll_external_updates().await;
             for notice in update.notices {
                 let key = (
-                    notice.server.clone(),
+                    notice.target.clone(),
                     format!("{:?}", notice.operation),
-                    notice.status.clone(),
+                    notice.status_text(),
+                    notice.persisted,
+                    notice.applied_at_turn,
                 );
                 if seen_notices.insert(key) {
                     all_notices.push(notice);
@@ -466,8 +518,8 @@ mod tests {
             name,
             args: &args_raw,
         };
-        let result = gateway.dispatch(call).await?;
-        serde_json::from_str(&result.text_content())
+        let outcome = gateway.dispatch(call).await?;
+        serde_json::from_str(&outcome.result.text_content())
             .map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 
@@ -515,13 +567,17 @@ mod tests {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             if self.tools.iter().any(|t| t.name == call.name) {
                 Ok(ToolResult::new(
                     call.id.to_string(),
                     json!({"source": self.prefix, "tool": call.name}).to_string(),
                     false,
-                ))
+                )
+                .into())
             } else {
                 Err(ToolError::not_found(call.name))
             }

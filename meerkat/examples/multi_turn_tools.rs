@@ -14,7 +14,7 @@ use meerkat::{
     AgentBuilder, AgentFactory, AgentToolDispatcher, AnthropicClient, ToolDef, ToolError,
     ToolResult,
 };
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -90,7 +90,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
         .into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let name = call.name;
         let value = match name {
             "calculate" => {
@@ -141,11 +141,7 @@ impl AgentToolDispatcher for MultiToolDispatcher {
             }
             _ => return Err(ToolError::not_found(name)),
         };
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            value.to_string(),
-            false,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
     }
 }
 

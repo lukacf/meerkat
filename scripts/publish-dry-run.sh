@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 JOBS="${MEERKAT_PUBLISH_DRY_RUN_JOBS:-4}"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 
 if ! command -v xargs >/dev/null 2>&1; then
   echo "xargs is required for parallel publish checks"
@@ -46,7 +47,7 @@ run_publish() {
   cfg="$2"
   log_file="$LOG_DIR/$pkg.log"
   result_file="$LOG_DIR/$pkg.result"
-  if cargo publish -p "$pkg" --dry-run --allow-dirty --no-verify --config "$cfg" > "$log_file" 2>&1; then
+  if "$CARGO" publish -p "$pkg" --dry-run --allow-dirty --no-verify --config "$cfg" > "$log_file" 2>&1; then
     printf "%s:ok\n" "$pkg" > "$result_file"
   else
     printf "%s:fail\n" "$pkg" > "$result_file"
@@ -55,6 +56,7 @@ run_publish() {
 
 export -f run_publish
 export LOG_DIR
+export CARGO
 
 # shellcheck disable=SC2068
 printf '%s\n' "${PACKAGES[@]}" \

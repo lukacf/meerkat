@@ -4,7 +4,7 @@ description: "Getting started with the Meerkat Python SDK: sessions, turns, stre
 icon: "python"
 ---
 
-The Python SDK (`meerkat-sdk`) lets you create sessions, run agent turns, stream typed events, and query capabilities from Python. It spawns `rkat-rpc` as a subprocess and communicates with it over JSON-RPC 2.0.
+The Python SDK (`meerkat-sdk`) is a thin wrapper over Meerkat's settled runtime-backed contracts. It spawns `rkat-rpc` as a subprocess, then exposes the same session lifecycle used by the CLI, REST, JSON-RPC, and MCP surfaces as Python-native `Session` and `DeferredSession` handles.
 
 - **Python:** `>=3.10`
 - **Dependencies:** zero runtime dependencies
@@ -78,7 +78,8 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `await client.list_sessions()` | List active sessions; returns `list[SessionInfo]` |
 | `await client.read_session(session_id)` | Read raw session state |
 | `await client.read_session_history(session_id, offset=0, limit=None)` | Read committed session transcript history |
-| `await client.create_mob(definition, ...)` | Create a mob; returns `Mob` |
+| `await client.create_mob(*, prefab=..., definition=...)` | Create a mob; returns `Mob` |
+| `await client.create_deferred_session(prompt, ...)` | Create a session without running the first turn; returns `DeferredSession` |
 | `await client.list_mobs()` | List mobs; returns `list[MobSummary]` |
 | `client.capabilities` | `list[Capability]` — capabilities fetched during handshake |
 | `client.has_capability(id)` | `True` if a capability is available |
@@ -89,7 +90,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 
 ### Session methods
 
-`create_session()` returns a `Session` object. All subsequent operations on a session go through it.
+`create_session()` returns a `Session` object. All subsequent operations on a session go through that runtime-backed handle rather than through wrapper-local execution state.
 
 | Method / Property | Description |
 |-------------------|-------------|
@@ -126,7 +127,7 @@ client = MeerkatClient(rkat_path="/path/to/rkat-rpc")
 | `await mob.wire(a, b)` | Wire two members for comms |
 | `await mob.unwire(a, b)` | Remove comms wiring |
 | `await mob.members()` | List mob members |
-| `await mob.send_message(meerkat_id, message)` | Send work to a member |
+| `await mob.member(meerkat_id).send(content, handling_mode=...)` | Send work to a member |
 | `await mob.flows()` | List available flows |
 | `await mob.run_flow(flow_id, params)` | Start a flow run |
 | `await mob.flow_status(run_id)` | Get flow run status |
@@ -190,10 +191,9 @@ async def create_session(
     hooks_override: dict | None = None,
     enable_builtins: bool = False,
     enable_shell: bool = False,
-    enable_subagents: bool = False,
     enable_memory: bool = False,
     enable_mob: bool = False,
-    host_mode: bool = False,
+    keep_alive: bool = False,
     comms_name: str | None = None,
     peer_meta: dict | None = None,
     budget_limits: dict | None = None,

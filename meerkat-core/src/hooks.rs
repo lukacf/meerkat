@@ -133,6 +133,7 @@ impl HookDecision {
 }
 
 /// Typed patch intents used by rewrite hooks.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "patch_type", rename_all = "snake_case")]
 pub enum HookPatch {
@@ -160,11 +161,13 @@ pub enum HookPatch {
 }
 
 /// Monotonic patch revision metadata.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct HookRevision(pub u64);
 
 /// Stable envelope emitted for async patch publication.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct HookPatchEnvelope {
@@ -172,6 +175,7 @@ pub struct HookPatchEnvelope {
     pub hook_id: HookId,
     pub point: HookPoint,
     pub patch: HookPatch,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub published_at: DateTime<Utc>,
 }
 
@@ -370,8 +374,7 @@ mod tests {
     fn image_block(media_type: &str, data: &str) -> ContentBlock {
         ContentBlock::Image {
             media_type: media_type.to_string(),
-            data: data.to_string(),
-            source_path: None,
+            data: data.into(),
         }
     }
 
@@ -429,11 +432,13 @@ mod tests {
         );
         assert!(
             matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/png" && data == "AAAA")
+            if media_type == "image/png"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "AAAA"))
         );
         assert!(
             matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/jpeg" && data == "BBBB")
+            if media_type == "image/jpeg"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "BBBB"))
         );
     }
 
@@ -480,11 +485,13 @@ mod tests {
         assert_eq!(tr.content[0], ContentBlock::Text { text: "c".into() });
         assert!(
             matches!(&tr.content[1], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/png" && data == "X")
+            if media_type == "image/png"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "X"))
         );
         assert!(
             matches!(&tr.content[2], ContentBlock::Image { media_type, data, .. }
-            if media_type == "image/jpeg" && data == "Y")
+            if media_type == "image/jpeg"
+                && matches!(data, crate::types::ImageData::Inline { data } if data == "Y"))
         );
     }
 

@@ -85,17 +85,18 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
     let metadata = meerkat_core::SessionMetadata {
         model: "claude-test".to_string(),
         max_tokens: 1234,
+        structured_output_retries: 2,
         provider: meerkat_core::Provider::Anthropic,
+        provider_params: None,
         tooling: meerkat_core::SessionTooling {
             builtins: true,
             shell: true,
             comms: false,
-            subagents: true,
             mob: false,
             memory: false,
             active_skills: None,
         },
-        host_mode: true,
+        keep_alive: true,
         comms_name: Some("agent-a".to_string()),
         peer_meta: None,
         realm_id: None,
@@ -119,7 +120,6 @@ fn test_comms_runtime_contract() -> Result<(), Box<dyn std::error::Error>> {
     let config = CommsRuntimeConfig::default();
     assert_eq!(config.mode, CommsRuntimeMode::Inproc);
     assert!(config.address.is_none());
-    assert!(!config.auto_enable_for_subagents);
 
     let encoded = serde_json::to_value(&config)?;
     let decoded: CommsRuntimeConfig = serde_json::from_value(encoded)?;
@@ -250,9 +250,11 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
     let metadata = meerkat_core::SessionMetadata {
         model: "model-x".to_string(),
         max_tokens: 999,
+        structured_output_retries: 2,
         provider: meerkat_core::Provider::OpenAI,
+        provider_params: None,
         tooling: meerkat_core::SessionTooling::default(),
-        host_mode: false,
+        keep_alive: false,
         comms_name: None,
         peer_meta: None,
         realm_id: None,
@@ -288,7 +290,6 @@ async fn test_inv_005_agents_md_injected() -> Result<(), Box<dyn std::error::Err
 fn test_inv_008_comms_runtime_defaults_consistent() {
     let config = CommsRuntimeConfig::default();
     assert_eq!(config.mode, CommsRuntimeMode::Inproc);
-    assert!(!config.auto_enable_for_subagents);
 }
 
 #[tokio::test]
@@ -425,13 +426,9 @@ impl AgentToolDispatcher for MockDispatcher {
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
-    ) -> Result<ToolResult, meerkat_core::ToolError> {
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         let value = json!({"dispatched": call.name});
-        Ok(ToolResult::new(
-            call.id.to_string(),
-            value.to_string(),
-            false,
-        ))
+        Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
     }
 }
 

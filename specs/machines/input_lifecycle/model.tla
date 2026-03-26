@@ -1,131 +1,137 @@
 ---- MODULE model ----
-EXTENDS TLC
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-\* Abstract, per-input lifecycle model for InputLifecycleMachine.
+\* Generated semantic machine model for InputLifecycleMachine.
 
-CONSTANTS
-    RunIds,
-    NoRun,
-    BoundaryIds,
-    NoBoundary
+CONSTANTS BoundarySequenceValues, RunIdValues
 
-ASSUME NoRun \notin RunIds
-ASSUME NoBoundary \notin BoundaryIds
+None == [tag |-> "none", value |-> "none"]
+Some(v) == [tag |-> "some", value |-> v]
 
-States ==
-    {"accepted", "queued", "staged", "applied",
-     "applied_pending_consumption", "consumed",
-     "superseded", "coalesced", "abandoned"}
+MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
+MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
+StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
+SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
+RECURSIVE SeqRemove(_, _)
+SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \o SeqRemove(Tail(seq), value)
+RECURSIVE SeqRemoveAll(_, _)
+SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-TerminalStates == {"consumed", "superseded", "coalesced", "abandoned"}
-Outcomes == {"none", "consumed", "superseded", "coalesced", "abandoned"}
+VARIABLES phase, model_step_count, terminal_outcome, last_run_id, last_boundary_sequence
 
-VARIABLES
-    state,
-    terminalOutcome,
-    lastRun,
-    lastBoundary
-
-vars == << state, terminalOutcome, lastRun, lastBoundary >>
+vars == << phase, model_step_count, terminal_outcome, last_run_id, last_boundary_sequence >>
 
 Init ==
-    /\ state = "accepted"
-    /\ terminalOutcome = "none"
-    /\ lastRun = NoRun
-    /\ lastBoundary = NoBoundary
-
-QueueAccepted ==
-    /\ state = "accepted"
-    /\ state' = "queued"
-    /\ UNCHANGED << terminalOutcome, lastRun, lastBoundary >>
-
-StageForRun(r) ==
-    /\ r \in RunIds
-    /\ state = "queued"
-    /\ state' = "staged"
-    /\ lastRun' = r
-    /\ UNCHANGED << terminalOutcome, lastBoundary >>
-
-RollbackStaged ==
-    /\ state = "staged"
-    /\ state' = "queued"
-    /\ UNCHANGED << terminalOutcome, lastRun, lastBoundary >>
-
-MarkApplied ==
-    /\ state = "staged"
-    /\ lastRun # NoRun
-    /\ state' = "applied"
-    /\ UNCHANGED << terminalOutcome, lastRun, lastBoundary >>
-
-MarkAppliedPendingConsumption(b) ==
-    /\ b \in BoundaryIds
-    /\ state = "applied"
-    /\ state' = "applied_pending_consumption"
-    /\ lastBoundary' = b
-    /\ UNCHANGED << terminalOutcome, lastRun >>
-
-Consume ==
-    /\ state = "applied_pending_consumption"
-    /\ state' = "consumed"
-    /\ terminalOutcome' = "consumed"
-    /\ UNCHANGED << lastRun, lastBoundary >>
-
-Supersede ==
-    /\ state \in {"accepted", "queued", "staged"}
-    /\ state' = "superseded"
-    /\ terminalOutcome' = "superseded"
-    /\ UNCHANGED << lastRun, lastBoundary >>
-
-Coalesce ==
-    /\ state \in {"accepted", "queued"}
-    /\ state' = "coalesced"
-    /\ terminalOutcome' = "coalesced"
-    /\ UNCHANGED << lastRun, lastBoundary >>
-
-Abandon ==
-    /\ state \in {"accepted", "queued", "staged", "applied", "applied_pending_consumption"}
-    /\ state' = "abandoned"
-    /\ terminalOutcome' = "abandoned"
-    /\ UNCHANGED << lastRun, lastBoundary >>
+    /\ phase = "Accepted"
+    /\ model_step_count = 0
+    /\ terminal_outcome = None
+    /\ last_run_id = None
+    /\ last_boundary_sequence = None
 
 TerminalStutter ==
-    /\ state \in TerminalStates
+    /\ phase = "Consumed" \/ phase = "Superseded" \/ phase = "Coalesced" \/ phase = "Abandoned"
     /\ UNCHANGED vars
+
+QueueAccepted ==
+    /\ phase = "Accepted"
+    /\ phase' = "Queued"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << terminal_outcome, last_run_id, last_boundary_sequence >>
+
+
+StageForRun(run_id) ==
+    /\ phase = "Queued"
+    /\ phase' = "Staged"
+    /\ model_step_count' = model_step_count + 1
+    /\ last_run_id' = Some(run_id)
+    /\ UNCHANGED << terminal_outcome, last_boundary_sequence >>
+
+
+RollbackStaged ==
+    /\ phase = "Staged"
+    /\ phase' = "Queued"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << terminal_outcome, last_run_id, last_boundary_sequence >>
+
+
+MarkApplied(run_id) ==
+    /\ phase = "Staged"
+    /\ (last_run_id = Some(run_id))
+    /\ phase' = "Applied"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << terminal_outcome, last_run_id, last_boundary_sequence >>
+
+
+MarkAppliedPendingConsumption(boundary_sequence) ==
+    /\ phase = "Applied"
+    /\ phase' = "AppliedPendingConsumption"
+    /\ model_step_count' = model_step_count + 1
+    /\ last_boundary_sequence' = Some(boundary_sequence)
+    /\ UNCHANGED << terminal_outcome, last_run_id >>
+
+
+Consume ==
+    /\ phase = "AppliedPendingConsumption"
+    /\ phase' = "Consumed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = Some("Consumed")
+    /\ UNCHANGED << last_run_id, last_boundary_sequence >>
+
+
+ConsumeOnAccept ==
+    /\ phase = "Accepted"
+    /\ phase' = "Consumed"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = Some("Consumed")
+    /\ UNCHANGED << last_run_id, last_boundary_sequence >>
+
+
+Supersede ==
+    /\ phase = "Queued"
+    /\ phase' = "Superseded"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = Some("Superseded")
+    /\ UNCHANGED << last_run_id, last_boundary_sequence >>
+
+
+Coalesce ==
+    /\ phase = "Queued"
+    /\ phase' = "Coalesced"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = Some("Coalesced")
+    /\ UNCHANGED << last_run_id, last_boundary_sequence >>
+
+
+Abandon ==
+    /\ phase = "Accepted" \/ phase = "Queued" \/ phase = "Staged" \/ phase = "Applied" \/ phase = "AppliedPendingConsumption"
+    /\ phase' = "Abandoned"
+    /\ model_step_count' = model_step_count + 1
+    /\ terminal_outcome' = Some("Abandoned")
+    /\ UNCHANGED << last_run_id, last_boundary_sequence >>
+
 
 Next ==
     \/ QueueAccepted
-    \/ \E r \in RunIds : StageForRun(r)
+    \/ \E run_id \in RunIdValues : StageForRun(run_id)
     \/ RollbackStaged
-    \/ MarkApplied
-    \/ \E b \in BoundaryIds : MarkAppliedPendingConsumption(b)
+    \/ \E run_id \in RunIdValues : MarkApplied(run_id)
+    \/ \E boundary_sequence \in BoundarySequenceValues : MarkAppliedPendingConsumption(boundary_sequence)
     \/ Consume
+    \/ ConsumeOnAccept
     \/ Supersede
     \/ Coalesce
     \/ Abandon
     \/ TerminalStutter
 
-TerminalOutcomeMatchesState ==
-    /\ (state = "consumed") => terminalOutcome = "consumed"
-    /\ (state = "superseded") => terminalOutcome = "superseded"
-    /\ (state = "coalesced") => terminalOutcome = "coalesced"
-    /\ (state = "abandoned") => terminalOutcome = "abandoned"
-    /\ (state \notin TerminalStates) => terminalOutcome = "none"
+accepted_has_no_run_or_boundary_metadata == ((phase # "Accepted") \/ ((last_run_id = None) /\ (last_boundary_sequence = None)))
+boundary_metadata_requires_application == ((last_boundary_sequence = None) \/ ((phase = "AppliedPendingConsumption") \/ (phase = "Consumed") \/ (phase = "Abandoned")))
 
-BoundaryOnlyAfterApply ==
-    lastBoundary # NoBoundary =>
-        state \in {"applied_pending_consumption", "consumed", "abandoned"}
-
-AcceptedHasNoExecutionMetadata ==
-    state = "accepted" => /\ lastRun = NoRun /\ lastBoundary = NoBoundary
-
-CoalescedNeverHasBoundaryMetadata ==
-    state = "coalesced" => lastBoundary = NoBoundary
+CiStateConstraint == /\ model_step_count <= 6
+DeepStateConstraint == /\ model_step_count <= 8
 
 Spec == Init /\ [][Next]_vars
 
-THEOREM Spec => []TerminalOutcomeMatchesState
-THEOREM Spec => []BoundaryOnlyAfterApply
-THEOREM Spec => []AcceptedHasNoExecutionMetadata
-THEOREM Spec => []CoalescedNeverHasBoundaryMetadata
+THEOREM Spec => []accepted_has_no_run_or_boundary_metadata
+THEOREM Spec => []boundary_metadata_requires_application
 
 =============================================================================

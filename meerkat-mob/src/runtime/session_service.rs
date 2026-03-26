@@ -265,7 +265,10 @@ where
             let key = std::ptr::from_ref(self) as usize;
             self.runtime_store().map(|store| {
                 cached_runtime_adapter(persistent_runtime_adapter_cache(), key, || {
-                    Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(store))
+                    Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
+                        store,
+                        self.blob_store(),
+                    ))
                 })
             })
         }

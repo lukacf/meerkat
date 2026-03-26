@@ -89,16 +89,16 @@ const CATALOG_DATA: &[CatalogEntry] = &[
     },
     // ── OpenAI ─────────────────────────────────────────────────────────
     CatalogEntry {
-        id: "gpt-5.2",
-        display_name: "GPT-5.2",
+        id: "gpt-5.4",
+        display_name: "GPT-5.4",
         provider: "openai",
         tier: ModelTier::Recommended,
         context_window: Some(128_000),
         max_output_tokens: Some(16_384),
     },
     CatalogEntry {
-        id: "gpt-5.2-pro",
-        display_name: "GPT-5.2 Pro",
+        id: "gpt-5.3-codex",
+        display_name: "GPT-5.3 Codex",
         provider: "openai",
         tier: ModelTier::Supported,
         context_window: Some(128_000),
@@ -114,8 +114,16 @@ const CATALOG_DATA: &[CatalogEntry] = &[
         max_output_tokens: Some(8_192),
     },
     CatalogEntry {
-        id: "gemini-3-pro-preview",
-        display_name: "Gemini 3 Pro Preview",
+        id: "gemini-3.1-pro-preview",
+        display_name: "Gemini 3.1 Pro Preview",
+        provider: "gemini",
+        tier: ModelTier::Supported,
+        context_window: Some(1_000_000),
+        max_output_tokens: Some(8_192),
+    },
+    CatalogEntry {
+        id: "gemini-3.1-flash-lite-preview",
+        display_name: "Gemini 3.1 Flash Lite Preview",
         provider: "gemini",
         tier: ModelTier::Supported,
         context_window: Some(1_000_000),
@@ -125,7 +133,7 @@ const CATALOG_DATA: &[CatalogEntry] = &[
 
 /// Default model ID per provider. First recommended model wins.
 const DEFAULT_ANTHROPIC: &str = "claude-opus-4-6";
-const DEFAULT_OPENAI: &str = "gpt-5.2";
+const DEFAULT_OPENAI: &str = "gpt-5.4";
 const DEFAULT_GEMINI: &str = "gemini-3-flash-preview";
 
 // ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ from __future__ import annotations
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from .types import RunResult, SessionHistory, SkillKey, SkillRef
+from .types import ContentBlock, RunResult, SessionHistory, SkillKey, SkillRef
 
 if TYPE_CHECKING:
     from .client import MeerkatClient
@@ -131,7 +131,7 @@ class Session:
 
     async def turn(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -154,7 +154,7 @@ class Session:
 
     def stream(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
@@ -190,6 +190,22 @@ class Session:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
 
+
+    async def inject_context(
+        self,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject system context into this session."""
+        return await self._client.inject_context(
+            self._id,
+            text,
+            source=source,
+            idempotency_key=idempotency_key,
+        )
+
     async def history(
         self,
         *,
@@ -212,7 +228,7 @@ class Session:
     async def invoke_skill(
         self,
         skill_ref: SkillRef,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
     ) -> RunResult:
         """Invoke a skill in this session.
 
@@ -285,12 +301,12 @@ class DeferredSession:
 
     async def start_turn(
         self,
-        prompt: str | list[dict],
+        prompt: str | list[ContentBlock],
         *,
         skill_refs: list[SkillRef] | None = None,
         skill_references: list[str] | None = None,
         flow_tool_overlay: dict[str, Any] | None = None,
-        host_mode: bool | None = None,
+        keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
         max_tokens: int | None = None,
@@ -310,7 +326,7 @@ class DeferredSession:
             skill_refs=skill_refs,
             skill_references=skill_references,
             flow_tool_overlay=flow_tool_overlay,
-            host_mode=host_mode,
+            keep_alive=keep_alive,
             model=model,
             provider=provider,
             max_tokens=max_tokens,
@@ -327,6 +343,22 @@ class DeferredSession:
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
+
+
+    async def inject_context(
+        self,
+        text: str,
+        *,
+        source: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inject system context into this session."""
+        return await self._client.inject_context(
+            self._id,
+            text,
+            source=source,
+            idempotency_key=idempotency_key,
+        )
 
     async def history(
         self,

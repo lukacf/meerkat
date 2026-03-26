@@ -7,11 +7,11 @@ use crate::definition::MobDefinition;
 use crate::ids::{FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fmt;
 
 /// A mob event with metadata assigned by the event store.
 #[derive(Debug, Clone, Serialize)]
@@ -34,28 +34,18 @@ struct MobEventCanonical {
     pub kind: MobEventKind,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum MobEventWire {
-    Canonical(MobEventCanonical),
-    Compat(MobEventCompat),
-}
-
 impl<'de> Deserialize<'de> for MobEvent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = MobEventWire::deserialize(deserializer)?;
-        match wire {
-            MobEventWire::Canonical(event) => Ok(Self {
-                cursor: event.cursor,
-                timestamp: event.timestamp,
-                mob_id: event.mob_id,
-                kind: event.kind,
-            }),
-            MobEventWire::Compat(event) => Self::try_from(event).map_err(serde::de::Error::custom),
-        }
+        let canonical = MobEventCanonical::deserialize(deserializer)?;
+        Ok(Self {
+            cursor: canonical.cursor,
+            timestamp: canonical.timestamp,
+            mob_id: canonical.mob_id,
+            kind: canonical.kind,
+        })
     }
 }
 
@@ -154,328 +144,6 @@ impl<'de> Deserialize<'de> for MemberRef {
     }
 }
 
-/// Compatibility wire model for old/new event payloads.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MobEventCompat {
-    pub cursor: u64,
-    pub timestamp: DateTime<Utc>,
-    pub mob_id: MobId,
-    pub kind: MobEventKindCompat,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MobEventKindCompat {
-    MobCreated {
-        definition: Box<MobDefinition>,
-    },
-    MobCompleted,
-    MobReset,
-    MeerkatSpawned {
-        meerkat_id: MeerkatId,
-        role: ProfileName,
-        #[serde(default)]
-        runtime_mode: MobRuntimeMode,
-        #[serde(default)]
-        session_id: Option<SessionId>,
-        #[serde(default)]
-        member_ref: Option<MemberRef>,
-        #[serde(default)]
-        labels: BTreeMap<String, String>,
-    },
-    MeerkatRetired {
-        meerkat_id: MeerkatId,
-        role: ProfileName,
-        #[serde(default)]
-        session_id: Option<SessionId>,
-        #[serde(default)]
-        member_ref: Option<MemberRef>,
-    },
-    PeersWired {
-        a: MeerkatId,
-        b: MeerkatId,
-    },
-    PeersUnwired {
-        a: MeerkatId,
-        b: MeerkatId,
-    },
-    TaskCreated {
-        task_id: TaskId,
-        subject: String,
-        description: String,
-        blocked_by: Vec<TaskId>,
-    },
-    TaskUpdated {
-        task_id: TaskId,
-        status: super::tasks::TaskStatus,
-        owner: Option<MeerkatId>,
-    },
-    FlowStarted {
-        run_id: RunId,
-        flow_id: FlowId,
-        params: serde_json::Value,
-    },
-    FlowCompleted {
-        run_id: RunId,
-        flow_id: FlowId,
-    },
-    FlowFailed {
-        run_id: RunId,
-        flow_id: FlowId,
-        reason: String,
-    },
-    FlowCanceled {
-        run_id: RunId,
-        flow_id: FlowId,
-    },
-    StepDispatched {
-        run_id: RunId,
-        step_id: StepId,
-        meerkat_id: MeerkatId,
-    },
-    StepTargetCompleted {
-        run_id: RunId,
-        step_id: StepId,
-        meerkat_id: MeerkatId,
-    },
-    StepTargetFailed {
-        run_id: RunId,
-        step_id: StepId,
-        meerkat_id: MeerkatId,
-        reason: String,
-    },
-    StepCompleted {
-        run_id: RunId,
-        step_id: StepId,
-    },
-    StepFailed {
-        run_id: RunId,
-        step_id: StepId,
-        reason: String,
-    },
-    StepSkipped {
-        run_id: RunId,
-        step_id: StepId,
-        reason: String,
-    },
-    TopologyViolation {
-        from_role: ProfileName,
-        to_role: ProfileName,
-    },
-    SupervisorEscalation {
-        run_id: RunId,
-        step_id: StepId,
-        escalated_to: MeerkatId,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MobEventCompatError {
-    MissingMemberRef {
-        event_kind: &'static str,
-        meerkat_id: MeerkatId,
-    },
-}
-
-impl fmt::Display for MobEventCompatError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingMemberRef {
-                event_kind,
-                meerkat_id,
-            } => write!(
-                f,
-                "{event_kind} for '{meerkat_id}' is missing a member reference"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MobEventCompatError {}
-
-fn upcast_member_ref(
-    event_kind: &'static str,
-    meerkat_id: &MeerkatId,
-    member_ref: Option<MemberRef>,
-    session_id: Option<SessionId>,
-) -> Result<MemberRef, MobEventCompatError> {
-    if let Some(member_ref) = member_ref {
-        return Ok(member_ref);
-    }
-
-    if let Some(session_id) = session_id {
-        return Ok(MemberRef::from_session_id(session_id));
-    }
-
-    Err(MobEventCompatError::MissingMemberRef {
-        event_kind,
-        meerkat_id: meerkat_id.clone(),
-    })
-}
-
-impl TryFrom<MobEventCompat> for MobEvent {
-    type Error = MobEventCompatError;
-
-    fn try_from(value: MobEventCompat) -> Result<Self, Self::Error> {
-        let kind = match value.kind {
-            MobEventKindCompat::MobCreated { definition } => {
-                MobEventKind::MobCreated { definition }
-            }
-            MobEventKindCompat::MobCompleted => MobEventKind::MobCompleted,
-            MobEventKindCompat::MobReset => MobEventKind::MobReset,
-            MobEventKindCompat::MeerkatSpawned {
-                meerkat_id,
-                role,
-                runtime_mode,
-                session_id,
-                member_ref,
-                labels,
-            } => MobEventKind::MeerkatSpawned {
-                member_ref: upcast_member_ref(
-                    "meerkat_spawned",
-                    &meerkat_id,
-                    member_ref,
-                    session_id,
-                )?,
-                meerkat_id,
-                role,
-                runtime_mode,
-                labels,
-            },
-            MobEventKindCompat::MeerkatRetired {
-                meerkat_id,
-                role,
-                session_id,
-                member_ref,
-            } => MobEventKind::MeerkatRetired {
-                member_ref: upcast_member_ref(
-                    "meerkat_retired",
-                    &meerkat_id,
-                    member_ref,
-                    session_id,
-                )?,
-                meerkat_id,
-                role,
-            },
-            MobEventKindCompat::PeersWired { a, b } => MobEventKind::PeersWired { a, b },
-            MobEventKindCompat::PeersUnwired { a, b } => MobEventKind::PeersUnwired { a, b },
-            MobEventKindCompat::TaskCreated {
-                task_id,
-                subject,
-                description,
-                blocked_by,
-            } => MobEventKind::TaskCreated {
-                task_id,
-                subject,
-                description,
-                blocked_by,
-            },
-            MobEventKindCompat::TaskUpdated {
-                task_id,
-                status,
-                owner,
-            } => MobEventKind::TaskUpdated {
-                task_id,
-                status,
-                owner,
-            },
-            MobEventKindCompat::FlowStarted {
-                run_id,
-                flow_id,
-                params,
-            } => MobEventKind::FlowStarted {
-                run_id,
-                flow_id,
-                params,
-            },
-            MobEventKindCompat::FlowCompleted { run_id, flow_id } => {
-                MobEventKind::FlowCompleted { run_id, flow_id }
-            }
-            MobEventKindCompat::FlowFailed {
-                run_id,
-                flow_id,
-                reason,
-            } => MobEventKind::FlowFailed {
-                run_id,
-                flow_id,
-                reason,
-            },
-            MobEventKindCompat::FlowCanceled { run_id, flow_id } => {
-                MobEventKind::FlowCanceled { run_id, flow_id }
-            }
-            MobEventKindCompat::StepDispatched {
-                run_id,
-                step_id,
-                meerkat_id,
-            } => MobEventKind::StepDispatched {
-                run_id,
-                step_id,
-                meerkat_id,
-            },
-            MobEventKindCompat::StepTargetCompleted {
-                run_id,
-                step_id,
-                meerkat_id,
-            } => MobEventKind::StepTargetCompleted {
-                run_id,
-                step_id,
-                meerkat_id,
-            },
-            MobEventKindCompat::StepTargetFailed {
-                run_id,
-                step_id,
-                meerkat_id,
-                reason,
-            } => MobEventKind::StepTargetFailed {
-                run_id,
-                step_id,
-                meerkat_id,
-                reason,
-            },
-            MobEventKindCompat::StepCompleted { run_id, step_id } => {
-                MobEventKind::StepCompleted { run_id, step_id }
-            }
-            MobEventKindCompat::StepFailed {
-                run_id,
-                step_id,
-                reason,
-            } => MobEventKind::StepFailed {
-                run_id,
-                step_id,
-                reason,
-            },
-            MobEventKindCompat::StepSkipped {
-                run_id,
-                step_id,
-                reason,
-            } => MobEventKind::StepSkipped {
-                run_id,
-                step_id,
-                reason,
-            },
-            MobEventKindCompat::TopologyViolation { from_role, to_role } => {
-                MobEventKind::TopologyViolation { from_role, to_role }
-            }
-            MobEventKindCompat::SupervisorEscalation {
-                run_id,
-                step_id,
-                escalated_to,
-            } => MobEventKind::SupervisorEscalation {
-                run_id,
-                step_id,
-                escalated_to,
-            },
-        };
-
-        Ok(Self {
-            cursor: value.cursor,
-            timestamp: value.timestamp,
-            mob_id: value.mob_id,
-            kind,
-        })
-    }
-}
-
 /// Structural event kinds covering all mob state transitions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -519,6 +187,20 @@ pub enum MobEventKind {
         a: MeerkatId,
         /// Second meerkat.
         b: MeerkatId,
+    },
+    /// Trust was established from a local member to an external peer.
+    ExternalPeerWired {
+        /// Local meerkat that trusts the external peer.
+        local: MeerkatId,
+        /// Full trusted-peer specification for replay/respawn restore.
+        spec: TrustedPeerSpec,
+    },
+    /// Trust was removed from a local member to an external peer.
+    ExternalPeerUnwired {
+        /// Local meerkat removing trust.
+        local: MeerkatId,
+        /// External peer name that was removed from the local projection.
+        peer_name: MeerkatId,
     },
     /// Bidirectional trust was removed between two meerkats.
     PeersUnwired {
@@ -631,11 +313,9 @@ mod tests {
     use crate::definition::{BackendConfig, MobDefinition, WiringRules};
     use crate::ids::MobId;
     use crate::profile::{Profile, ToolConfig};
-    use crate::roster::Roster;
     use crate::tasks::TaskStatus;
     use serde_json::json;
     use std::collections::BTreeMap;
-    use std::collections::BTreeSet;
     use uuid::Uuid;
 
     fn sample_definition() -> MobDefinition {
@@ -709,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_meerkat_spawned_defaults_runtime_mode() {
+    fn test_meerkat_spawned_defaults_runtime_mode() {
         let event: MobEvent = serde_json::from_value(json!({
             "cursor": 1,
             "timestamp": "2026-02-19T00:00:00Z",
@@ -718,10 +398,13 @@ mod tests {
                 "type": "meerkat_spawned",
                 "meerkat_id": "a",
                 "role": "worker",
-                "session_id": SessionId::from_uuid(Uuid::nil()),
+                "member_ref": {
+                    "kind": "session",
+                    "session_id": SessionId::from_uuid(Uuid::nil()),
+                },
             },
         }))
-        .expect("legacy event should parse");
+        .expect("event without runtime_mode should parse");
         match event.kind {
             MobEventKind::MeerkatSpawned { runtime_mode, .. } => {
                 assert_eq!(runtime_mode, MobRuntimeMode::AutonomousHost);
@@ -748,10 +431,31 @@ mod tests {
     }
 
     #[test]
+    fn test_external_peer_wired_roundtrip() {
+        roundtrip(&MobEventKind::ExternalPeerWired {
+            local: MeerkatId::from("agent-1"),
+            spec: TrustedPeerSpec::new(
+                "remote-mob/worker/agent-2",
+                "ed25519:remote-agent-2",
+                "inproc://remote-mob/worker/agent-2",
+            )
+            .expect("valid trusted peer spec"),
+        });
+    }
+
+    #[test]
     fn test_peers_unwired_roundtrip() {
         roundtrip(&MobEventKind::PeersUnwired {
             a: MeerkatId::from("agent-1"),
             b: MeerkatId::from("agent-2"),
+        });
+    }
+
+    #[test]
+    fn test_external_peer_unwired_roundtrip() {
+        roundtrip(&MobEventKind::ExternalPeerUnwired {
+            local: MeerkatId::from("agent-1"),
+            peer_name: MeerkatId::from("remote-mob/worker/agent-2"),
         });
     }
 
@@ -841,33 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn test_event_compat_mapping_for_new_variants() {
-        let run_id = RunId::new();
-        let flow_id = FlowId::from("flow-a");
-        let compat = MobEventCompat {
-            cursor: 7,
-            timestamp: Utc::now(),
-            mob_id: MobId::from("mob"),
-            kind: MobEventKindCompat::FlowStarted {
-                run_id: run_id.clone(),
-                flow_id: flow_id.clone(),
-                params: serde_json::json!({"x":1}),
-            },
-        };
-
-        let canonical = MobEvent::try_from(compat).expect("compat mapping");
-        assert_eq!(canonical.cursor, 7);
-        assert_eq!(
-            canonical.kind,
-            MobEventKind::FlowStarted {
-                run_id,
-                flow_id,
-                params: serde_json::json!({"x":1}),
-            }
-        );
-    }
-
-    #[test]
     fn test_mob_event_full_roundtrip() {
         let event = MobEvent {
             cursor: 42,
@@ -917,125 +594,5 @@ mod tests {
         let json = serde_json::to_string(&member_ref).unwrap();
         let parsed: MemberRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, member_ref);
-    }
-
-    fn parse_compat_events(events: serde_json::Value) -> Vec<MobEvent> {
-        let compat: Vec<MobEventCompat> = serde_json::from_value(events).unwrap();
-        compat
-            .into_iter()
-            .map(|event| MobEvent::try_from(event).unwrap())
-            .collect()
-    }
-
-    fn roster_snapshot(roster: &Roster) -> BTreeMap<String, (String, String, BTreeSet<String>)> {
-        roster
-            .list()
-            .map(|entry| {
-                (
-                    entry.meerkat_id.as_str().to_string(),
-                    (
-                        entry.profile.as_str().to_string(),
-                        entry
-                            .session_id()
-                            .expect("session-backed member ref")
-                            .to_string(),
-                        entry
-                            .wired_to
-                            .iter()
-                            .map(|peer| peer.as_str().to_string())
-                            .collect(),
-                    ),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_event_compat_upcast_replay_legacy_and_new_member_refs_match_projection() {
-        let sid_a = SessionId::from_uuid(Uuid::nil());
-        let sid_b = SessionId::from_uuid(Uuid::from_u128(1));
-
-        let legacy = parse_compat_events(json!([
-            {
-                "cursor": 1,
-                "timestamp": "2026-02-19T00:00:00Z",
-                "mob_id": "test-mob",
-                "kind": {
-                    "type": "meerkat_spawned",
-                    "meerkat_id": "a",
-                    "role": "worker",
-                    "session_id": sid_a,
-                },
-            },
-            {
-                "cursor": 2,
-                "timestamp": "2026-02-19T00:00:01Z",
-                "mob_id": "test-mob",
-                "kind": {
-                    "type": "meerkat_spawned",
-                    "meerkat_id": "b",
-                    "role": "worker",
-                    "session_id": sid_b,
-                },
-            },
-            {
-                "cursor": 3,
-                "timestamp": "2026-02-19T00:00:02Z",
-                "mob_id": "test-mob",
-                "kind": {
-                    "type": "peers_wired",
-                    "a": "a",
-                    "b": "b",
-                },
-            },
-        ]));
-
-        let new_form = parse_compat_events(json!([
-            {
-                "cursor": 1,
-                "timestamp": "2026-02-19T00:00:00Z",
-                "mob_id": "test-mob",
-                "kind": {
-                    "type": "meerkat_spawned",
-                    "meerkat_id": "a",
-                    "role": "worker",
-                    "member_ref": {
-                        "kind": "session",
-                        "session_id": sid_a,
-                    },
-                },
-            },
-            {
-                "cursor": 2,
-                "timestamp": "2026-02-19T00:00:01Z",
-                "mob_id": "test-mob",
-                "kind": {
-                    "type": "meerkat_spawned",
-                    "meerkat_id": "b",
-                    "role": "worker",
-                    "member_ref": {
-                        "kind": "session",
-                        "session_id": sid_b,
-                    },
-                },
-            },
-            {
-                "cursor": 3,
-                "timestamp": "2026-02-19T00:00:02Z",
-                "mob_id": "test-mob",
-                "kind": {
-                    "type": "peers_wired",
-                    "a": "a",
-                    "b": "b",
-                },
-            },
-        ]));
-
-        let legacy_roster = Roster::project(&legacy);
-        let new_roster = Roster::project(&new_form);
-        assert_eq!(
-            roster_snapshot(&legacy_roster),
-            roster_snapshot(&new_roster)
-        );
     }
 }

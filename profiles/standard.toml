@@ -4,7 +4,7 @@ name = "meerkat-standard"
 
 [features]
 include = ["session-store", "skills"]
-exclude = ["comms", "sub-agents", "memory-store", "session-compaction"]
+exclude = ["comms", "memory-store", "session-compaction"]
 
 [sdk]
 languages = ["python", "typescript"]

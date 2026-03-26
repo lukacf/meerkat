@@ -1,6 +1,0 @@
-project: "Meerkat 0.5"
-last_updated: "2026-03-15"
-notes:
-  - "Initial blocker ledger for the docs-local RCT package."
-  - "No live execution has started yet; blockers are empty by design."
-blockers: []

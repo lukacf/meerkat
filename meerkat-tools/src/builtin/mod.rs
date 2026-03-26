@@ -29,8 +29,6 @@ pub mod shell;
 #[cfg(feature = "skills")]
 pub mod skills;
 pub mod store;
-#[cfg(all(feature = "sub-agents", not(target_arch = "wasm32")))]
-pub mod sub_agent;
 pub mod tasks;
 pub mod types;
 pub mod utility;
@@ -51,6 +49,7 @@ pub use store::TaskStore;
 
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::types::ContentBlock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -101,6 +100,19 @@ pub trait BuiltinTool: Send + Sync {
     /// * `Ok(ToolOutput)` - The tool's result (JSON or multimodal blocks)
     /// * `Err(BuiltinToolError)` - If execution failed
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError>;
+
+    /// Async operation IDs started by this tool call, if any.
+    ///
+    /// Default is none. Tools that start background or delegated work should
+    /// override this so the turn machine can own the exact `WaitingForOps`
+    /// wait-set for the current turn.
+    ///
+    /// Returns typed [`AsyncOpRef`] values with explicit wait policies:
+    /// - `AsyncOpRef::barrier(id)` — blocks the turn boundary until resolved
+    /// - `AsyncOpRef::detached(id)` — runs independently, does not block
+    fn async_ops_for_output(&self, _output: &ToolOutput) -> Vec<AsyncOpRef> {
+        Vec::new()
+    }
 }
 
 /// A registry entry for a built-in tool with its enabled state

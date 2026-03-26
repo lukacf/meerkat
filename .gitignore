@@ -27,6 +27,8 @@ nohup.out
 .release-hook-done
 .rct/
 test-project/
+.cache/
+.codemob-mcp/
 
 # Vendored deps (local symlink, not portable)
 vendor
@@ -59,3 +61,4 @@ examples/*/web/dist/
 examples/*/web/public/meerkat-pkg/
 *.png
 artifacts/live_smoke_last_failures.json
+states/

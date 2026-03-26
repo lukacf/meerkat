@@ -1,6 +1,6 @@
 # Reviewer Agent Prompts
 
-These prompts are used to spawn reviewer sub-agents at the end of each implementation phase.
+These prompts are used to spawn reviewer helper agents at the end of each implementation phase.
 Store reviewer prompts under `.rct/agents/` (one file per reviewer). Replace `{PHASE}` with the phase number and `{PHASE_SPECIFIC_COMMANDS}` with the `verification_commands` list from `.rct/checklist.yaml` for that phase.
 
 > **Philosophy**: Reviewers must be brutally honest and critical. A false APPROVE is worse than a false BLOCK. When evidence exists for a problem, reviewers MUST block - do not soften findings to be "helpful."

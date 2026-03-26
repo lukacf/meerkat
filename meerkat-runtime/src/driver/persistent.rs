@@ -7,19 +7,25 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunEvent};
 
 use crate::accept::AcceptOutcome;
+use crate::driver::ephemeral::handling_mode_from_policy;
 use crate::identifiers::LogicalRuntimeId;
-use crate::input::Input;
+use crate::input::{Input, externalize_input_images};
 use crate::input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry,
     InputTerminalOutcome,
 };
 use crate::runtime_event::RuntimeEventEnvelope;
+use crate::runtime_ingress_authority::ContentShape;
 use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
-use crate::traits::{RecoveryReport, RuntimeControlCommand, RuntimeDriver, RuntimeDriverError};
+use crate::traits::{
+    DestroyReport, RecoveryReport, RuntimeControlCommand, RuntimeDriver, RuntimeDriverError,
+};
+use meerkat_core::types::HandlingMode;
 
 use super::ephemeral::EphemeralRuntimeDriver;
 
@@ -29,16 +35,23 @@ pub struct PersistentRuntimeDriver {
     inner: EphemeralRuntimeDriver,
     /// Durable store for InputState + receipts.
     store: Arc<dyn RuntimeStore>,
+    /// Blob store used to externalize durable input payloads.
+    blob_store: Arc<dyn BlobStore>,
     /// Runtime ID for store operations.
     runtime_id: LogicalRuntimeId,
 }
 
 impl PersistentRuntimeDriver {
     /// Create a new persistent runtime driver.
-    pub fn new(runtime_id: LogicalRuntimeId, store: Arc<dyn RuntimeStore>) -> Self {
+    pub fn new(
+        runtime_id: LogicalRuntimeId,
+        store: Arc<dyn RuntimeStore>,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Self {
         Self {
             inner: EphemeralRuntimeDriver::new(runtime_id.clone()),
             store,
+            blob_store,
             runtime_id,
         }
     }
@@ -48,9 +61,42 @@ impl PersistentRuntimeDriver {
         &self.inner
     }
 
+    /// Set the list of comms intents that should be silently accepted (delegates to inner).
+    pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
+        self.inner.set_silent_comms_intents(intents);
+    }
+
     /// Check if the runtime is idle (delegates to inner).
     pub fn is_idle(&self) -> bool {
         self.inner.is_idle()
+    }
+
+    /// Check if the runtime is idle or attached (delegates to inner).
+    pub fn is_idle_or_attached(&self) -> bool {
+        self.inner.is_idle_or_attached()
+    }
+
+    /// Attach an executor (Idle → Attached). Delegates to inner.
+    pub fn attach(&mut self) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+        self.inner.attach()
+    }
+
+    /// Detach an executor (Attached → Idle). Delegates to inner.
+    pub fn detach(
+        &mut self,
+    ) -> Result<Option<RuntimeState>, crate::runtime_state::RuntimeStateTransitionError> {
+        self.inner.detach()
+    }
+
+    /// Map runtime state for persistence.
+    ///
+    /// Attached must never be persisted — on recovery, the executor is
+    /// re-attached by the surface. Map Attached to Idle for store operations.
+    fn runtime_state_for_persistence(&self) -> RuntimeState {
+        match self.inner.runtime_state() {
+            RuntimeState::Attached => RuntimeState::Idle,
+            other => other,
+        }
     }
 
     /// Start a new run (delegates to inner).
@@ -89,13 +135,36 @@ impl PersistentRuntimeDriver {
         self.inner.dequeue_next()
     }
 
+    /// Dequeue a specific input by ID (delegates to inner).
+    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
+        self.inner.dequeue_by_id(input_id)
+    }
+
+    /// Look up the persisted input for a given ID (delegates to inner).
+    pub fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
+        self.inner.persisted_input(input_id)
+    }
+
+    pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+        self.inner.has_queued_input_outside(excluded)
+    }
+
     /// Stage input (delegates to inner).
     pub fn stage_input(
         &mut self,
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.stage_input(input_id, run_id)
+    }
+
+    /// Stage a batch of inputs atomically (delegates to inner).
+    pub fn stage_batch(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+        self.inner.stage_batch(input_ids, run_id)
     }
 
     /// Apply input (delegates to inner).
@@ -103,7 +172,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.apply_input(input_id, run_id)
     }
 
@@ -111,7 +180,7 @@ impl PersistentRuntimeDriver {
     pub fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.rollback_staged(input_ids)
     }
 
@@ -120,13 +189,8 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_machine::InputStateMachineError> {
+    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
         self.inner.consume_inputs(input_ids, run_id)
-    }
-
-    /// Remove a previously accepted input from the ledger/queue.
-    pub fn forget_input(&mut self, input_id: &InputId) {
-        self.inner.forget_input(input_id);
     }
 
     async fn persist_state(&self, state: &InputState) -> Result<(), RuntimeDriverError> {
@@ -135,12 +199,49 @@ impl PersistentRuntimeDriver {
             .await
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))
     }
+
+    pub async fn abandon_pending_inputs(
+        &mut self,
+        reason: InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
+        let checkpoint = self.inner.clone();
+        let abandoned = self.inner.abandon_pending_inputs(reason);
+        let input_states = self.inner.input_states_snapshot();
+        if let Err(err) = self
+            .store
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
+            .await
+        {
+            self.inner = checkpoint;
+            return Err(RuntimeDriverError::Internal(format!(
+                "pending input abandon persist failed: {err}"
+            )));
+        }
+        Ok(abandoned)
+    }
+
+    /// Recycle the in-memory driver shell while preserving canonical pending
+    /// work from durable runtime truth.
+    ///
+    /// Unlike `reset()`, this must not abandon queued/staged work.
+    pub async fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
+        let silent_intents = self.inner.silent_comms_intents();
+        self.inner = EphemeralRuntimeDriver::new(self.runtime_id.clone());
+        self.inner.set_silent_comms_intents(silent_intents);
+        let _ = RuntimeDriver::recover(self).await?;
+        Ok(self.inner.active_input_ids().len())
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeDriver for PersistentRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let checkpoint = self.inner.clone();
         let input_for_recovery = input.clone();
 
         // Delegate to ephemeral for state machine logic
@@ -154,11 +255,20 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         } = outcome
             && let Some(inner_state) = self.inner.input_state(input_id).cloned()
         {
+            let mut input_for_recovery = input_for_recovery.clone();
+            if let Err(err) =
+                externalize_input_images(self.blob_store.as_ref(), &mut input_for_recovery).await
+            {
+                self.inner = checkpoint;
+                return Err(RuntimeDriverError::Internal(format!(
+                    "failed to externalize runtime input images: {err}"
+                )));
+            }
             let mut persisted = inner_state;
             persisted.persisted_input = Some(input_for_recovery);
             self.inner.ledger_mut().accept(persisted.clone());
             if let Err(err) = self.persist_state(&persisted).await {
-                self.forget_input(input_id);
+                self.inner = checkpoint;
                 return Err(err);
             }
             *state = persisted;
@@ -225,7 +335,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                     .store
                     .atomic_lifecycle_commit(
                         &self.runtime_id,
-                        self.inner.runtime_state(),
+                        self.runtime_state_for_persistence(),
                         &input_states,
                     )
                     .await
@@ -253,7 +363,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -279,59 +393,163 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         // dedup correctness and filters out Ephemeral inputs.
         for mut state in stored_states {
             if matches!(
-                state.current_state,
+                state.current_state(),
                 InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
             ) {
-                let has_receipt = match (state.last_run_id.clone(), state.last_boundary_sequence) {
-                    (Some(run_id), Some(sequence)) => self
-                        .store
-                        .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
-                        .await
-                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                        .is_some(),
-                    _ => false,
-                };
+                let has_receipt =
+                    match (state.last_run_id().cloned(), state.last_boundary_sequence()) {
+                        (Some(run_id), Some(sequence)) => self
+                            .store
+                            .load_boundary_receipt(&self.runtime_id, &run_id, sequence)
+                            .await
+                            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                            .is_some(),
+                        _ => false,
+                    };
                 let now = Utc::now();
+                let from = state.current_state();
                 if has_receipt {
-                    state.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: state.current_state,
-                        to: InputLifecycleState::Consumed,
-                        reason: Some("recovery: boundary receipt already committed".into()),
-                    });
-                    state.current_state = InputLifecycleState::Consumed;
-                    state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                    state.updated_at = now;
+                    let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                        InputLifecycleState::Consumed,
+                        Some(InputTerminalOutcome::Consumed),
+                        state.last_run_id().cloned(),
+                        state.last_boundary_sequence(),
+                        {
+                            let mut h = state.history().to_vec();
+                            h.push(InputStateHistoryEntry {
+                                timestamp: now,
+                                from,
+                                to: InputLifecycleState::Consumed,
+                                reason: Some("recovery: boundary receipt already committed".into()),
+                            });
+                            h
+                        },
+                        now,
+                    );
+                    *state.authority_mut() = auth;
                 } else {
-                    state.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: state.current_state,
-                        to: InputLifecycleState::Queued,
-                        reason: Some("recovery: missing boundary receipt".into()),
-                    });
-                    state.current_state = InputLifecycleState::Queued;
-                    state.updated_at = now;
+                    let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                        InputLifecycleState::Queued,
+                        None,
+                        state.last_run_id().cloned(),
+                        state.last_boundary_sequence(),
+                        {
+                            let mut h = state.history().to_vec();
+                            h.push(InputStateHistoryEntry {
+                                timestamp: now,
+                                from,
+                                to: InputLifecycleState::Queued,
+                                reason: Some("recovery: missing boundary receipt".into()),
+                            });
+                            h
+                        },
+                        now,
+                    );
+                    *state.authority_mut() = auth;
                 }
             }
-
-            if let Some(input) = state.persisted_input.clone() {
-                recovered_payloads.push((state.input_id.clone(), input));
+            if matches!(
+                state.current_state(),
+                InputLifecycleState::Accepted | InputLifecycleState::Staged
+            ) {
+                // Accepted/Staged are pre-run in-flight states. On recovery they
+                // must re-enter the queue explicitly so ingress/ledger/queue
+                // truth stays aligned before Recover effects are evaluated.
+                let now = Utc::now();
+                let from = state.current_state();
+                let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                    InputLifecycleState::Queued,
+                    None,
+                    state.last_run_id().cloned(),
+                    state.last_boundary_sequence(),
+                    {
+                        let mut h = state.history().to_vec();
+                        h.push(InputStateHistoryEntry {
+                            timestamp: now,
+                            from,
+                            to: InputLifecycleState::Queued,
+                            reason: Some("recovery: pre-run state normalized to queued".into()),
+                        });
+                        h
+                    },
+                    now,
+                );
+                *state.authority_mut() = auth;
             }
-            let ledger = &mut self.inner;
-            if ledger.input_state(&state.input_id).is_none() {
-                ledger.ledger_mut().recover(state);
+
+            // Admit to ingress authority so Recover can see this input.
+            if self.inner.input_state(&state.input_id).is_none() {
+                let handling_mode = state
+                    .policy
+                    .as_ref()
+                    .map(|p| handling_mode_from_policy(&p.decision))
+                    .unwrap_or(HandlingMode::Queue);
+                let content_shape = state
+                    .persisted_input
+                    .as_ref()
+                    .map(|i| ContentShape(i.kind_id().to_string()))
+                    .unwrap_or_else(|| ContentShape("unknown".into()));
+                let policy = match state.policy.as_ref() {
+                    Some(p) => p.decision.clone(),
+                    None => match state.persisted_input.as_ref() {
+                        Some(input) => {
+                            crate::policy_table::DefaultPolicyTable::resolve(input, true)
+                        }
+                        None => {
+                            // No policy and no payload — load into ledger for dedup
+                            // but skip ingress admission (nothing to route).
+                            self.inner.ledger_mut().recover(state);
+                            continue;
+                        }
+                    },
+                };
+                let request_id = None;
+                let reservation_key = None;
+
+                let inserted = self.inner.ledger_mut().recover(state.clone());
+                if !inserted {
+                    // Filtered by ledger recover (e.g. ephemeral durability): do not
+                    // admit to ingress, otherwise ingress queue truth can outlive
+                    // canonical ledger truth.
+                    continue;
+                }
+
+                if let Some(input) = state.persisted_input.clone() {
+                    recovered_payloads.push((state.input_id.clone(), input));
+                }
+
+                let lifecycle_state = state.current_state();
+
+                if let Err(err) = self.inner.admit_recovered_to_ingress(
+                    state.input_id.clone(),
+                    content_shape,
+                    handling_mode,
+                    lifecycle_state,
+                    policy,
+                    request_id,
+                    reservation_key,
+                ) {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "failed to admit recovered input '{}' to ingress authority: {err}",
+                        state.input_id
+                    )));
+                }
             }
         }
 
-        // Then run ephemeral recovery logic (requeue Accepted/Staged)
+        // Then run ephemeral recovery logic to finalize ingress recovery,
+        // execute any remaining per-input recovery effects, and rebuild the
+        // physical queue projections from canonical ingress truth.
         let report = self.inner.recover().await?;
 
-        for (input_id, input) in recovered_payloads {
+        for (input_id, _input) in recovered_payloads {
             let should_requeue = self.inner.input_state(&input_id).is_some_and(|state| {
-                state.current_state == crate::input_state::InputLifecycleState::Queued
+                state.current_state() == crate::input_state::InputLifecycleState::Queued
             });
             if should_requeue && !self.inner.has_queued_input(&input_id) {
-                self.inner.enqueue_recovered_input(input_id, input);
+                return Err(RuntimeDriverError::Internal(format!(
+                    "persistent recover left queued input '{input_id}' out of the runtime queue projection"
+                )));
             }
         }
 
@@ -363,26 +581,16 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             }
 
             // Terminal states must not have active inputs. If persisted state
-            // is terminal but active inputs exist, treat as store corruption:
-            // terminalize those inputs instead of resurrecting work.
+            // is terminal but active inputs exist, fail closed as store
+            // corruption instead of mutating queue projections in shell code.
             if runtime_state.is_terminal() {
                 let active = self.inner.active_input_ids();
                 if !active.is_empty() {
-                    tracing::warn!(
-                        runtime_id = %self.runtime_id,
-                        active_count = active.len(),
-                        persisted_state = %runtime_state,
-                        "terminal runtime has active inputs — terminalizing as corrupted"
-                    );
-                    let abandoned = self
-                        .inner
-                        .abandon_all_non_terminal(InputAbandonReason::Destroyed);
-                    self.inner.queue_mut().drain();
-                    tracing::warn!(
-                        runtime_id = %self.runtime_id,
-                        abandoned,
-                        "force-abandoned active inputs from terminal runtime"
-                    );
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "store corruption: terminal runtime '{}' has {} active inputs",
+                        runtime_state,
+                        active.len()
+                    )));
                 }
             }
         }
@@ -390,7 +598,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         // Persist recovered state atomically
         let input_states = self.inner.input_states_snapshot();
         self.store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
             .map_err(|e| RuntimeDriverError::Internal(format!("recovery persist failed: {e}")))?;
         Ok(report)
@@ -402,7 +614,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -419,7 +635,11 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self
             .store
-            .atomic_lifecycle_commit(&self.runtime_id, self.inner.runtime_state(), &input_states)
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
             .await
         {
             self.inner = checkpoint;
@@ -428,6 +648,27 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             )));
         }
         Ok(report)
+    }
+
+    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+        let abandoned = self.inner.destroy()?;
+        let input_states = self.inner.input_states_snapshot();
+        if let Err(err) = self
+            .store
+            .atomic_lifecycle_commit(
+                &self.runtime_id,
+                self.runtime_state_for_persistence(),
+                &input_states,
+            )
+            .await
+        {
+            return Err(RuntimeDriverError::Internal(format!(
+                "destroy persist failed: {err}"
+            )));
+        }
+        Ok(DestroyReport {
+            inputs_abandoned: abandoned,
+        })
     }
 
     fn runtime_state(&self) -> RuntimeState {
@@ -440,312 +681,5 @@ impl RuntimeDriver for PersistentRuntimeDriver {
 
     fn active_input_ids(&self) -> Vec<InputId> {
         self.inner.active_input_ids()
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::input::*;
-    use crate::store::InMemoryRuntimeStore;
-    use chrono::Utc;
-
-    fn make_prompt(text: &str) -> Input {
-        Input::Prompt(PromptInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::Operator,
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            text: text.into(),
-            blocks: None,
-            turn_metadata: None,
-        })
-    }
-
-    #[tokio::test]
-    async fn durable_before_ack() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
-
-        let input = make_prompt("hello");
-        let input_id = input.id().clone();
-        let outcome = driver.accept_input(input).await.unwrap();
-        assert!(outcome.is_accepted());
-
-        // Verify state was persisted to store BEFORE we returned
-        let stored = store.load_input_state(&rid, &input_id).await.unwrap();
-        assert!(stored.is_some());
-        assert!(stored.unwrap().persisted_input.is_some());
-    }
-
-    #[tokio::test]
-    async fn dedup_not_persisted() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
-
-        let key = crate::identifiers::IdempotencyKey::new("req-1");
-        let mut input1 = make_prompt("hello");
-        if let Input::Prompt(ref mut p) = input1 {
-            p.header.idempotency_key = Some(key.clone());
-        }
-        driver.accept_input(input1).await.unwrap();
-
-        let mut input2 = make_prompt("hello again");
-        if let Input::Prompt(ref mut p) = input2 {
-            p.header.idempotency_key = Some(key);
-        }
-        let outcome = driver.accept_input(input2).await.unwrap();
-        assert!(outcome.is_deduplicated());
-
-        // Only one state in store
-        let states = store.load_input_states(&rid).await.unwrap();
-        assert_eq!(states.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn recover_from_store() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-
-        // Pre-populate store with a state (simulating crash recovery)
-        let input = make_prompt("hello");
-        let input_id = input.id().clone();
-        let mut state = InputState::new_accepted(input_id.clone());
-        state.persisted_input = Some(input.clone());
-        state.durability = Some(InputDurability::Durable);
-        store.persist_input_state(&rid, &state).await.unwrap();
-
-        // Create a fresh driver (simulating restart)
-        let mut driver = PersistentRuntimeDriver::new(rid, store);
-
-        // Recover
-        let report = driver.recover().await.unwrap();
-        assert_eq!(report.inputs_recovered, 1);
-
-        // State should now be in the driver
-        assert!(driver.input_state(&input_id).is_some());
-        let dequeued = driver.dequeue_next();
-        assert!(
-            dequeued.is_some(),
-            "Recovered queued input should be re-enqueued"
-        );
-        let (queued_id, queued_input) = dequeued.unwrap();
-        assert_eq!(queued_id, input_id);
-        assert_eq!(queued_input.id(), &input_id);
-    }
-
-    #[tokio::test]
-    async fn recover_rebuilds_dedup_index() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let key = crate::identifiers::IdempotencyKey::new("dedup-key");
-
-        // Pre-populate store with a state that has an idempotency key
-        let input_id = InputId::new();
-        let mut state = InputState::new_accepted(input_id.clone());
-        state.idempotency_key = Some(key.clone());
-        state.durability = Some(InputDurability::Durable);
-        store.persist_input_state(&rid, &state).await.unwrap();
-
-        // Create a fresh driver and recover
-        let mut driver = PersistentRuntimeDriver::new(rid, store);
-        driver.recover().await.unwrap();
-
-        // Now try to accept a new input with the same idempotency key
-        let mut dup_input = make_prompt("duplicate");
-        if let Input::Prompt(ref mut p) = dup_input {
-            p.header.idempotency_key = Some(key);
-        }
-        let outcome = driver.accept_input(dup_input).await.unwrap();
-        assert!(
-            outcome.is_deduplicated(),
-            "After recovery, dedup index should be rebuilt so duplicates are caught"
-        );
-    }
-
-    #[tokio::test]
-    async fn recover_filters_ephemeral_inputs() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-
-        // Pre-populate with an ephemeral input state
-        let input_id = InputId::new();
-        let mut state = InputState::new_accepted(input_id.clone());
-        state.durability = Some(InputDurability::Ephemeral);
-        store.persist_input_state(&rid, &state).await.unwrap();
-
-        // Create fresh driver and recover
-        let mut driver = PersistentRuntimeDriver::new(rid, store);
-        let report = driver.recover().await.unwrap();
-
-        // Ephemeral input should NOT be recovered (it shouldn't survive restart)
-        assert!(
-            driver.input_state(&input_id).is_none(),
-            "Ephemeral inputs should be filtered during recovery"
-        );
-        assert_eq!(report.inputs_recovered, 0);
-    }
-
-    #[tokio::test]
-    async fn boundary_applied_persists_atomically() {
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
-
-        // Accept and manually process an input
-        let input = make_prompt("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        let run_id = RunId::new();
-        driver.start_run(run_id.clone()).unwrap();
-        driver.stage_input(&input_id, &run_id).unwrap();
-
-        // Fire BoundaryApplied — this should persist atomically
-        let receipt = RunBoundaryReceipt {
-            run_id: run_id.clone(),
-            boundary: RunApplyBoundary::RunStart,
-            contributing_input_ids: vec![input_id.clone()],
-            conversation_digest: None,
-            message_count: 1,
-            sequence: 0,
-        };
-        driver
-            .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
-                run_id: run_id.clone(),
-                receipt: receipt.clone(),
-                session_snapshot: Some(b"session-data".to_vec()),
-            })
-            .await
-            .unwrap();
-
-        // Verify the receipt was persisted via atomic_apply
-        let loaded = store.load_boundary_receipt(&rid, &run_id, 0).await.unwrap();
-        assert!(
-            loaded.is_some(),
-            "BoundaryApplied should persist the receipt via atomic_apply"
-        );
-    }
-
-    #[tokio::test]
-    async fn retire_preserves_inputs_for_drain() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
-
-        let input = make_prompt("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        let report = driver.retire().await.unwrap();
-        assert_eq!(report.inputs_abandoned, 0);
-        assert_eq!(report.inputs_pending_drain, 1);
-
-        // Input is still queued, not abandoned
-        let stored = store
-            .load_input_state(&rid, &input_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.current_state,
-            crate::input_state::InputLifecycleState::Queued
-        );
-    }
-
-    #[tokio::test]
-    async fn reset_persists_abandoned_inputs() {
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone());
-
-        let input = make_prompt("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        let report = driver.reset().await.unwrap();
-        assert_eq!(report.inputs_abandoned, 1);
-
-        let stored = store
-            .load_input_state(&rid, &input_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.current_state,
-            crate::input_state::InputLifecycleState::Abandoned
-        );
-    }
-
-    #[tokio::test]
-    async fn recover_consumes_committed_applied_pending_inputs() {
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        let store = Arc::new(InMemoryRuntimeStore::new());
-        let rid = LogicalRuntimeId::new("test");
-        let input = make_prompt("already committed");
-        let input_id = input.id().clone();
-        let run_id = RunId::new();
-
-        let mut state = InputState::new_accepted(input_id.clone());
-        state.persisted_input = Some(input);
-        state.durability = Some(InputDurability::Durable);
-        state.current_state = InputLifecycleState::AppliedPendingConsumption;
-        state.last_run_id = Some(run_id.clone());
-        state.last_boundary_sequence = Some(0);
-        store.persist_input_state(&rid, &state).await.unwrap();
-        store
-            .atomic_apply(
-                &rid,
-                None,
-                RunBoundaryReceipt {
-                    run_id: run_id.clone(),
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: vec![input_id.clone()],
-                    conversation_digest: None,
-                    message_count: 1,
-                    sequence: 0,
-                },
-                vec![state.clone()],
-                None,
-            )
-            .await
-            .unwrap();
-
-        let mut driver = PersistentRuntimeDriver::new(rid, store);
-        driver.recover().await.unwrap();
-
-        let recovered = driver.input_state(&input_id);
-        assert!(
-            recovered.is_some(),
-            "committed input should remain queryable after recovery"
-        );
-        let Some(recovered) = recovered else {
-            unreachable!("asserted some recovery state above");
-        };
-        assert_eq!(recovered.current_state, InputLifecycleState::Consumed);
-        assert!(
-            driver.active_input_ids().is_empty(),
-            "committed applied inputs should not stay active after recovery"
-        );
-        assert!(
-            driver.dequeue_next().is_none(),
-            "committed applied inputs should not be replayed after recovery"
-        );
     }
 }

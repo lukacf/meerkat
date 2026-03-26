@@ -130,7 +130,6 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
@@ -231,7 +230,6 @@ When validation fails, the agent retries the extraction turn with error feedback
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {

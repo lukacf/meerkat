@@ -4,7 +4,7 @@ description: "Getting started with the Meerkat TypeScript SDK: sessions, turns, 
 icon: "js"
 ---
 
-The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stream typed events, and query capabilities from TypeScript or JavaScript. It spawns a local `rkat-rpc` subprocess and communicates with it over JSON-RPC 2.0.
+The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtime-backed contracts. It spawns a local `rkat-rpc` subprocess and exposes the same session lifecycle used by the CLI, REST, JSON-RPC, and MCP surfaces as TypeScript-native `Session` and `DeferredSession` handles.
 
 ## Getting started
 
@@ -71,7 +71,8 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 | `listSessions()` | List active sessions |
 | `readSession(sessionId)` | Read raw session state |
 | `readSessionHistory(sessionId, options?)` | Read committed session transcript history |
-| `createMob(definition, options?)` | Create a mob, return a `Mob` |
+| `createMob(options?)` | Create a mob, return a `Mob` |
+| `createDeferredSession(prompt, options?)` | Create a session without running the first turn; returns a `DeferredSession` |
 | `listMobs()` | List mobs |
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
@@ -112,7 +113,7 @@ The TypeScript SDK (`@rkat/sdk`) lets you create sessions, run agent turns, stre
 | `mob.wire(a, b)` | Wire two members |
 | `mob.unwire(a, b)` | Remove wiring |
 | `mob.listMembers()` | List mob members |
-| `mob.sendMessage(meerkatId, message)` | Send work to a member |
+| `mob.member(meerkatId).send(content, handlingMode?)` | Send work to a member |
 | `mob.listFlows()` | List available flows |
 | `mob.runFlow(flowId, params)` | Start a flow run |
 | `mob.flowStatus(runId)` | Get flow run status |
@@ -144,7 +145,7 @@ Spawns `rkat-rpc`, performs `initialize` handshake, checks contract version comp
 export interface ConnectOptions {
   realmId?: string;
   instanceId?: string;
-  realmBackend?: "sqlite" | "jsonl" | "redb";
+  realmBackend?: "jsonl" | "redb";
   isolated?: boolean;
   stateRoot?: string;
   contextRoot?: string;
@@ -214,10 +215,9 @@ interface SessionOptions {
   hooksOverride?: Record<string, unknown>;
   enableBuiltins?: boolean;
   enableShell?: boolean;
-  enableSubagents?: boolean;
   enableMemory?: boolean;
   enableMob?: boolean;
-  hostMode?: boolean;
+  keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
@@ -232,7 +232,7 @@ interface SessionOptions {
 
 ## Session
 
-`createSession()` and `createSessionStreaming()` both produce a `Session` object that acts as the handle for all subsequent turns on the same conversation.
+`createSession()` and `createSessionStreaming()` both produce a `Session` object that acts as the handle for all subsequent turns on the same conversation. The SDK does not own a second execution path; it only wraps the canonical runtime session identity.
 
 ### Identity
 
@@ -385,7 +385,6 @@ client.requireCapability("skills");  // throws CapabilityUnavailableError if not
 | `builtins` | Built-in tools |
 | `shell` | Shell tool |
 | `comms` | Inter-agent communication |
-| `sub_agents` | Sub-agent tools |
 | `memory_store` | Semantic memory |
 | `session_store` | Session persistence |
 | `session_compaction` | Context compaction |

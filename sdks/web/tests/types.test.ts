@@ -6,8 +6,10 @@
  */
 
 import type {
+  Mob,
   RuntimeConfig,
   SessionConfig,
+  SessionState,
   AppendSystemContextOptions,
   AppendSystemContextResult,
   MobAppendSystemContextResult,
@@ -16,6 +18,9 @@ import type {
   AgentEvent,
   ToolCallback,
   MobLifecycleAction,
+  MemberDeliveryReceipt,
+  MobMemberSnapshot,
+  MobHelperResult,
 } from '../src/index.js';
 
 // ─── RuntimeConfig ──────────────────────────────────────────────
@@ -60,6 +65,18 @@ const appendSystemContextResult: AppendSystemContextResult = {
   status: 'staged',
 };
 
+const sessionState: SessionState = {
+  handle: 1,
+  session_id: '00000000-0000-0000-0000-000000000001',
+  mob_id: '',
+  model: 'claude-sonnet-4-5',
+  usage: { input_tokens: 1, output_tokens: 2 },
+  run_counter: 0,
+  message_count: 0,
+  is_active: true,
+  last_assistant_text: null,
+};
+
 const mobAppendSystemContextResult: MobAppendSystemContextResult = {
   mob_id: 'mob-1',
   meerkat_id: 'worker-1',
@@ -99,6 +116,20 @@ const spawnSpec: SpawnSpec = {
 
 function handleEvent(event: AgentEvent): string {
   switch (event.type) {
+    case 'run_started':
+      return event.prompt;
+    case 'hook_started':
+      return `${event.hook_id}:${event.point}`;
+    case 'hook_completed':
+      return `${event.hook_id}:${event.duration_ms}`;
+    case 'hook_failed':
+      return event.error;
+    case 'hook_denied':
+      return `${event.reason_code}:${event.message}`;
+    case 'hook_rewrite_applied':
+      return event.hook_id;
+    case 'hook_patch_published':
+      return event.hook_id;
     case 'text_delta':
       return event.delta;
     case 'text_complete':
@@ -119,6 +150,30 @@ function handleEvent(event: AgentEvent): string {
       return `exec:${event.name}`;
     case 'tool_execution_completed':
       return `done:${event.name}:${event.duration_ms}ms`;
+    case 'tool_execution_timed_out':
+      return `timeout:${event.name}:${event.timeout_ms}`;
+    case 'compaction_started':
+      return `compact:${event.input_tokens}`;
+    case 'compaction_completed':
+      return `compact:${event.summary_tokens}`;
+    case 'compaction_failed':
+      return event.error;
+    case 'budget_warning':
+      return `${event.budget_type}:${event.percent}`;
+    case 'retrying':
+      return `${event.attempt}/${event.max_attempts}`;
+    case 'skills_resolved':
+      return `${event.skills.length}`;
+    case 'skill_resolution_failed':
+      return event.reference;
+    case 'interaction_complete':
+      return event.result;
+    case 'interaction_failed':
+      return event.error;
+    case 'stream_truncated':
+      return event.reason;
+    case 'tool_config_changed':
+      return event.payload.target;
     case 'reasoning_delta':
       return event.delta;
     case 'reasoning_complete':
@@ -135,13 +190,25 @@ const myTool: ToolCallback = async (args: string) => {
 
 // ─── MobLifecycleAction ─────────────────────────────────────────
 
-const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'destroy'];
+const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'reset', 'destroy'];
+
+declare const mob: Mob;
+const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
+const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
+const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
+const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
+  'worker-1',
+  'Review the draft and suggest one improvement.',
+);
+const memberSubscription = mob.member('worker-1').subscribe();
+const mobSubscription = mob.subscribeEvents();
 
 // ─── Ensure all exports type-check (suppress unused warnings) ───
 
 void minimalConfig;
 void fullConfig;
 void sessionConfig;
+void sessionState;
 void appendSystemContextOptions;
 void appendSystemContextResult;
 void mobAppendSystemContextResult;
@@ -150,3 +217,9 @@ void spawnSpec;
 void handleEvent;
 void myTool;
 void actions;
+void memberSendResult;
+void memberStatusResult;
+void helperResult;
+void forkedHelperResult;
+void memberSubscription;
+void mobSubscription;

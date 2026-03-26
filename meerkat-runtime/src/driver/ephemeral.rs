@@ -1,217 +1,623 @@
-//! EphemeralRuntimeDriver — in-memory runtime driver for ephemeral sessions.
+//! EphemeralRuntimeDriver -- in-memory runtime driver for ephemeral sessions.
 //!
 //! Implements `RuntimeDriver` with:
 //! - Input acceptance with validation, policy resolution, dedup, supersession
-//! - InputState lifecycle management via InputStateMachine
+//! - InputState lifecycle management via InputLifecycleAuthority
 //! - InputQueue FIFO management
-//! - §24 ephemeral recovery
-//! - §25 retire/reset/destroy lifecycle operations
+//! - S24 ephemeral recovery
+//! - S25 retire/reset/destroy lifecycle operations
+
+use std::collections::BTreeSet;
 
 use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::types::HandlingMode;
 
 use crate::accept::AcceptOutcome;
 use crate::durability::{DurabilityError, validate_durability};
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
 use crate::input_ledger::InputLedger;
-use crate::input_machine::{InputStateMachine, InputStateMachineError};
+use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
-use crate::policy::{ApplyMode, ConsumePoint, WakeMode};
+use crate::policy::{PolicyDecision, RoutingDisposition};
 use crate::policy_table::DefaultPolicyTable;
 use crate::queue::InputQueue;
+use crate::runtime_control_authority::{
+    RuntimeControlAuthority, RuntimeControlInput, RuntimeControlMutator,
+};
 use crate::runtime_event::{
     InputLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope, RuntimeStateChangeEvent,
 };
+use crate::runtime_ingress_authority::{
+    ContentShape, RequestId, ReservationKey, RuntimeIngressAuthority, RuntimeIngressEffect,
+    RuntimeIngressInput, RuntimeIngressMutator,
+};
 use crate::runtime_state::RuntimeState;
-use crate::state_machine::RuntimeStateMachine;
 use crate::traits::{
-    RecoveryReport, ResetReport, RetireReport, RuntimeControlCommand, RuntimeDriverError,
+    DestroyReport, RecoveryReport, ResetReport, RetireReport, RuntimeControlCommand,
+    RuntimeDriverError,
 };
 
-/// Ephemeral runtime driver — all state in-memory.
+/// Derive the handling mode from a policy decision's routing disposition.
+pub(crate) fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
+    match policy.routing_disposition {
+        RoutingDisposition::Steer => HandlingMode::Steer,
+        _ => HandlingMode::Queue,
+    }
+}
+
+/// Ephemeral runtime driver -- all state in-memory.
 #[derive(Clone)]
 pub struct EphemeralRuntimeDriver {
-    /// Logical identity of this runtime.
     runtime_id: LogicalRuntimeId,
-    /// Runtime state machine.
-    state_machine: RuntimeStateMachine,
-    /// Input state ledger.
+    /// Canonical RMAT/MTAS authority for runtime control state.
+    /// Single source of truth for phase transitions (Idle/Attached/Running/Retired/etc.).
+    control: RuntimeControlAuthority,
     ledger: InputLedger,
-    /// Input queue.
     queue: InputQueue,
-    /// Emitted events (buffered for consumers to poll).
+    steer_queue: InputQueue,
     events: Vec<RuntimeEventEnvelope>,
-    /// Whether wake was requested.
     wake_requested: bool,
-    /// Whether immediate processing was requested without a normal wake.
     process_requested: bool,
+    silent_comms_intents: Vec<String>,
+    /// Canonical ingress authority -- coarse-grained ingress orchestration
+    /// (queues, current run, wake/process flags, ingress phase).
+    /// Runs alongside InputLifecycleAuthority (per-input) and InputLedger.
+    ingress: RuntimeIngressAuthority,
 }
 
 impl EphemeralRuntimeDriver {
-    /// Create a new ephemeral runtime driver.
     pub fn new(runtime_id: LogicalRuntimeId) -> Self {
-        // Ephemeral starts directly in Idle (skip Initializing)
-        let sm = RuntimeStateMachine::from_state(RuntimeState::Idle);
-
         Self {
             runtime_id,
-            state_machine: sm,
+            control: RuntimeControlAuthority::from_state(RuntimeState::Idle),
             ledger: InputLedger::new(),
             queue: InputQueue::new(),
+            steer_queue: InputQueue::new(),
             events: Vec::new(),
             wake_requested: false,
             process_requested: false,
+            silent_comms_intents: Vec::new(),
+            ingress: RuntimeIngressAuthority::new(),
         }
     }
 
-    /// Check if the runtime is idle.
-    pub fn is_idle(&self) -> bool {
-        self.state_machine.is_idle()
+    pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
+        let overrides = intents.into_iter().collect::<BTreeSet<_>>();
+        match self
+            .ingress
+            .apply(RuntimeIngressInput::SetSilentIntentOverrides { intents: overrides })
+        {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+                self.silent_comms_intents = self
+                    .ingress
+                    .silent_intent_overrides()
+                    .iter()
+                    .cloned()
+                    .collect();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected SetSilentIntentOverrides"
+                );
+            }
+        }
     }
 
-    /// Start a new run (Idle → Running).
+    pub fn silent_comms_intents(&self) -> Vec<String> {
+        self.silent_comms_intents.clone()
+    }
+
+    /// Get a reference to the ingress authority.
+    pub fn ingress(&self) -> &RuntimeIngressAuthority {
+        &self.ingress
+    }
+
+    fn build_projection_queue(&self, ids: &[InputId], lane: &str) -> InputQueue {
+        let mut queue = InputQueue::new();
+        for input_id in ids {
+            match self
+                .ledger
+                .get(input_id)
+                .and_then(|state| state.persisted_input.clone())
+            {
+                Some(input) => queue.enqueue(input_id.clone(), input),
+                None => {
+                    tracing::error!(
+                        input_id = ?input_id,
+                        lane,
+                        "ingress queue references input without persisted payload"
+                    );
+                    debug_assert!(
+                        false,
+                        "ingress queue projection missing persisted payload for {input_id:?} in {lane}"
+                    );
+                }
+            }
+        }
+        queue
+    }
+
+    fn rebuild_queue_projections(&mut self) {
+        self.queue = self.build_projection_queue(self.ingress.queue(), "queue");
+        self.steer_queue = self.build_projection_queue(self.ingress.steer_queue(), "steer_queue");
+    }
+
+    fn debug_assert_queue_projection_alignment(&self) {
+        debug_assert_eq!(
+            self.queue.input_ids(),
+            self.ingress.queue(),
+            "physical queue must match canonical ingress queue lane"
+        );
+        debug_assert_eq!(
+            self.steer_queue.input_ids(),
+            self.ingress.steer_queue(),
+            "physical steer queue must match canonical ingress steer lane"
+        );
+    }
+
+    /// Admit a store-recovered input into the ingress authority's tracking.
+    /// Called by the persistent driver during crash recovery to ensure the
+    /// authority knows about inputs loaded from the store before `Recover` fires.
+    ///
+    /// Important: this only seeds canonical ingress truth. The caller restores
+    /// the recovered `InputState` into the ledger before this call, so we must
+    /// not rebuild the physical queue projections here. Rebuilding before the
+    /// full recovery batch is loaded would make queue projection checks observe
+    /// transient partial state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_recovered_to_ingress(
+        &mut self,
+        work_id: InputId,
+        content_shape: ContentShape,
+        handling_mode: HandlingMode,
+        lifecycle_state: InputLifecycleState,
+        policy: PolicyDecision,
+        request_id: Option<RequestId>,
+        reservation_key: Option<ReservationKey>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self.ingress.apply(RuntimeIngressInput::AdmitRecovered {
+            work_id,
+            content_shape,
+            handling_mode,
+            lifecycle_state,
+            policy,
+            request_id,
+            reservation_key,
+        }) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+                Ok(())
+            }
+            Err(err) => Err(RuntimeDriverError::Internal(format!(
+                "ingress AdmitRecovered failed: {err}"
+            ))),
+        }
+    }
+
+    /// Process effects returned by the ingress authority.
+    ///
+    /// Translates authority effects into driver state changes and events.
+    /// Called after each successful `ingress.apply()`.
+    fn process_ingress_effects(&mut self, effects: &[RuntimeIngressEffect]) {
+        for effect in effects {
+            match effect {
+                RuntimeIngressEffect::WakeRuntime => {
+                    self.wake_requested = true;
+                }
+                RuntimeIngressEffect::RequestImmediateProcessing => {
+                    self.process_requested = true;
+                }
+                RuntimeIngressEffect::IngressAccepted { work_id } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        "ingress authority: input accepted"
+                    );
+                }
+                RuntimeIngressEffect::Deduplicated {
+                    work_id,
+                    existing_id,
+                } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        existing_id = ?existing_id,
+                        "ingress authority: input deduplicated"
+                    );
+                }
+                RuntimeIngressEffect::CompletionResolved { work_id, outcome } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        outcome = ?outcome,
+                        "ingress authority: completion resolved"
+                    );
+                }
+                RuntimeIngressEffect::InputLifecycleNotice { work_id, new_state } => {
+                    tracing::trace!(
+                        work_id = ?work_id,
+                        new_state = ?new_state,
+                        "ingress authority: lifecycle notice"
+                    );
+                }
+                RuntimeIngressEffect::ReadyForRun {
+                    run_id,
+                    contributing_work_ids,
+                } => {
+                    tracing::debug!(
+                        run_id = ?run_id,
+                        contributors = contributing_work_ids.len(),
+                        "ingress authority: ready for run"
+                    );
+                }
+                RuntimeIngressEffect::IngressNotice { kind, detail } => {
+                    tracing::debug!(
+                        kind = %kind,
+                        detail = %detail,
+                        "ingress authority: notice"
+                    );
+                }
+                RuntimeIngressEffect::SilentIntentApplied { work_id, intent } => {
+                    tracing::debug!(
+                        work_id = ?work_id,
+                        intent = %intent,
+                        "ingress authority: silent intent applied"
+                    );
+                }
+                RuntimeIngressEffect::StageInput { work_id, run_id } => {
+                    // Derived from ingress authority's StageDrainSnapshot decision:
+                    // drive the per-input lifecycle authority and emit the Staged event.
+                    if let Some(state) = self.ledger.get_mut(work_id)
+                        && let Err(e) = state.apply(InputLifecycleInput::StageForRun {
+                            run_id: run_id.clone(),
+                        })
+                    {
+                        tracing::warn!(
+                            work_id = ?work_id,
+                            run_id = ?run_id,
+                            error = %e,
+                            "per-input StageForRun failed (driven by ingress StageInput effect)"
+                        );
+                    }
+                    self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
+                        input_id: work_id.clone(),
+                        run_id: run_id.clone(),
+                    }));
+                }
+                // Accept-phase shell directives — handled by process_accept_effects
+                // when an Input payload is available. Log if they arrive here unexpectedly.
+                RuntimeIngressEffect::PersistAndQueue { .. }
+                | RuntimeIngressEffect::EnqueueTo { .. }
+                | RuntimeIngressEffect::EnqueueFront { .. }
+                | RuntimeIngressEffect::RemoveFromQueues { .. }
+                | RuntimeIngressEffect::CoalesceExisting { .. }
+                | RuntimeIngressEffect::SupersedeExisting { .. }
+                | RuntimeIngressEffect::ConsumeOnAccept { .. }
+                | RuntimeIngressEffect::EmitQueuedEvent { .. } => {
+                    tracing::trace!(
+                        effect = ?effect,
+                        "ingress authority: accept-phase effect (handled in accept path)"
+                    );
+                }
+                RuntimeIngressEffect::RecoverConsumeOnAccept { work_id }
+                | RuntimeIngressEffect::RecoverRollback { work_id }
+                | RuntimeIngressEffect::RecoverKeep { work_id } => {
+                    tracing::trace!(
+                        work_id = ?work_id,
+                        effect = ?effect,
+                        "ingress authority: recovery effect"
+                    );
+                }
+            }
+        }
+    }
+    /// Process ingress authority effects that require the Input payload.
+    ///
+    /// Called only from `accept_input` where the `Input` is available.
+    /// Delegates non-accept effects to `process_ingress_effects`, then
+    /// handles the accept-phase shell directives (enqueue, coalesce, etc.).
+    fn process_accept_effects(&mut self, effects: &[RuntimeIngressEffect], input: &Input) {
+        for effect in effects {
+            match effect {
+                RuntimeIngressEffect::PersistAndQueue { work_id } => {
+                    if let Some(s) = self.ledger.get_mut(work_id) {
+                        s.persisted_input = Some(input.clone());
+                        let _ = s.apply(InputLifecycleInput::QueueAccepted);
+                    }
+                }
+                RuntimeIngressEffect::EnqueueTo { work_id, target } => {
+                    self.enqueue_to(*target, work_id.clone(), input.clone());
+                }
+                RuntimeIngressEffect::EnqueueFront { work_id, target } => {
+                    self.enqueue_front_to(*target, work_id.clone(), input.clone());
+                }
+                RuntimeIngressEffect::RemoveFromQueues { work_id } => {
+                    let _ = self.queue.remove(work_id);
+                    let _ = self.steer_queue.remove(work_id);
+                }
+                RuntimeIngressEffect::CoalesceExisting {
+                    new_id,
+                    existing_id,
+                } => {
+                    if let Some(existing_state) = self.ledger.get_mut(existing_id) {
+                        let _ = crate::coalescing::apply_coalescing(existing_state, new_id.clone());
+                    }
+                }
+                RuntimeIngressEffect::SupersedeExisting {
+                    new_id,
+                    existing_id,
+                } => {
+                    if let Some(existing_state) = self.ledger.get_mut(existing_id) {
+                        let _ =
+                            crate::coalescing::apply_supersession(existing_state, new_id.clone());
+                    }
+                }
+                RuntimeIngressEffect::ConsumeOnAccept { work_id } => {
+                    if let Some(s) = self.ledger.get_mut(work_id) {
+                        let _ = s.apply(InputLifecycleInput::ConsumeOnAccept);
+                    }
+                }
+                RuntimeIngressEffect::EmitQueuedEvent { work_id } => {
+                    self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
+                        input_id: work_id.clone(),
+                    }));
+                }
+                // All other effects: delegate to the standard handler.
+                other => {
+                    self.process_ingress_effects(std::slice::from_ref(other));
+                }
+            }
+        }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.control.is_idle()
+    }
+    pub fn is_idle_or_attached(&self) -> bool {
+        self.control.phase().is_idle_or_attached()
+    }
+
+    pub fn attach(&mut self) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
+        let transition = self.control.apply(RuntimeControlInput::AttachExecutor)?;
+        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+            from: transition.from_phase,
+            to: transition.next_phase,
+        }));
+        Ok(())
+    }
+    pub fn detach(
+        &mut self,
+    ) -> Result<Option<RuntimeState>, crate::runtime_state::RuntimeStateTransitionError> {
+        if self.control.is_attached() {
+            let transition = self.control.apply(RuntimeControlInput::DetachExecutor)?;
+            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                from: transition.from_phase,
+                to: transition.next_phase,
+            }));
+            Ok(Some(RuntimeState::Attached))
+        } else {
+            Ok(None)
+        }
+    }
     pub fn start_run(
         &mut self,
         run_id: RunId,
     ) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
-        self.state_machine.start_run(run_id)
+        let _transition = self
+            .control
+            .apply(RuntimeControlInput::BeginRun { run_id })?;
+        Ok(())
     }
-
-    /// Complete a run (Running → Idle), returning the finished RunId.
     pub fn complete_run(
         &mut self,
     ) -> Result<RunId, crate::runtime_state::RuntimeStateTransitionError> {
-        self.state_machine.complete_run()
+        let run_id = self.control.current_run_id().cloned().ok_or(
+            crate::runtime_state::RuntimeStateTransitionError {
+                from: self.control.phase(),
+                to: RuntimeState::Idle,
+            },
+        )?;
+        let _transition = self.control.apply(RuntimeControlInput::RunCompleted {
+            run_id: run_id.clone(),
+        })?;
+        Ok(run_id)
     }
-
-    /// Check if a wake was requested (and clear the flag).
     pub fn take_wake_requested(&mut self) -> bool {
         std::mem::take(&mut self.wake_requested)
     }
-
-    /// Check if immediate processing was requested (and clear the flag).
     pub fn take_process_requested(&mut self) -> bool {
         std::mem::take(&mut self.process_requested)
     }
-
-    /// Get pending events (and drain them).
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         std::mem::take(&mut self.events)
     }
-
-    /// Get the queue for external inspection.
     pub fn queue(&self) -> &InputQueue {
         &self.queue
     }
+    pub fn steer_queue(&self) -> &InputQueue {
+        &self.steer_queue
+    }
 
-    /// Get mutable access to the queue (for lifecycle cleanup).
+    #[cfg(test)]
     pub fn queue_mut(&mut self) -> &mut InputQueue {
         &mut self.queue
     }
 
-    /// Enqueue a recovered input payload back into the runtime queue.
-    pub fn enqueue_recovered_input(&mut self, input_id: InputId, input: Input) {
-        self.queue.enqueue(input_id, input);
+    #[cfg(test)]
+    pub fn steer_queue_mut(&mut self) -> &mut InputQueue {
+        &mut self.steer_queue
     }
 
-    /// Check whether a specific input is already queued.
+    /// Route an input to the correct queue based on handling mode.
+    fn enqueue_to(&mut self, mode: HandlingMode, input_id: InputId, input: Input) {
+        match mode {
+            HandlingMode::Steer => self.steer_queue.enqueue(input_id, input),
+            HandlingMode::Queue => self.queue.enqueue(input_id, input),
+        }
+    }
+    /// Route an input to the front of the correct queue based on handling mode.
+    fn enqueue_front_to(&mut self, mode: HandlingMode, input_id: InputId, input: Input) {
+        match mode {
+            HandlingMode::Steer => self.steer_queue.enqueue_front(input_id, input),
+            HandlingMode::Queue => self.queue.enqueue_front(input_id, input),
+        }
+    }
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
-        self.queue
-            .input_ids()
+        self.ingress
+            .queue()
             .iter()
             .any(|queued_id| queued_id == input_id)
+            || self
+                .ingress
+                .steer_queue()
+                .iter()
+                .any(|queued_id| queued_id == input_id)
     }
-
-    /// Check whether the queue contains work outside a specific excluded set.
-    fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
-        self.queue
-            .input_ids()
+    pub fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+        self.ingress
+            .queue()
             .iter()
+            .chain(self.ingress.steer_queue().iter())
             .any(|queued_id| !excluded.iter().any(|excluded_id| excluded_id == queued_id))
     }
-
-    /// Remove an input entirely (used when durable persistence fails).
-    pub fn remove_input(&mut self, input_id: &InputId) {
-        let _ = self.queue.remove(input_id);
-        let _ = self.ledger.remove(input_id);
+    fn existing_superseded_input(
+        &self,
+        input: &Input,
+    ) -> Option<(InputId, crate::coalescing::CoalescingResult)> {
+        self.ingress
+            .queue()
+            .iter()
+            .chain(self.ingress.steer_queue().iter())
+            .find_map(|queued_id| {
+                let existing = self.ledger.get(queued_id)?.persisted_input.as_ref()?;
+                let result =
+                    crate::coalescing::check_supersession(input, existing, &self.runtime_id);
+                match result {
+                    crate::coalescing::CoalescingResult::Supersedes { .. } => {
+                        Some((queued_id.clone(), result))
+                    }
+                    crate::coalescing::CoalescingResult::Standalone => None,
+                }
+            })
     }
-
-    /// Get the ledger for external inspection.
     pub fn ledger(&self) -> &InputLedger {
         &self.ledger
     }
-
-    /// Get mutable access to the ledger (for recovery injection).
-    pub fn ledger_mut(&mut self) -> &mut InputLedger {
+    pub(crate) fn ledger_mut(&mut self) -> &mut InputLedger {
         &mut self.ledger
     }
-
-    /// Snapshot all tracked input states.
     pub fn input_states_snapshot(&self) -> Vec<InputState> {
         self.ledger.iter().map(|(_, state)| state.clone()).collect()
     }
-
-    /// Remove a previously accepted input from the ledger/queue.
-    pub fn forget_input(&mut self, input_id: &InputId) {
-        let _ = self.queue.remove(input_id);
-        let _ = self.ledger.remove(input_id);
-        self.wake_requested = false;
-        self.process_requested = false;
+    /// Get a reference to the runtime control authority.
+    pub fn control(&self) -> &RuntimeControlAuthority {
+        &self.control
     }
-
-    /// Get immutable access to the state machine.
-    pub fn state_machine_ref(&self) -> &RuntimeStateMachine {
-        &self.state_machine
+    /// Get a mutable reference to the runtime control authority.
+    ///
+    /// This is primarily a contract-test hook for driving explicit runtime
+    /// control transitions in recovery scenarios.
+    pub fn control_mut(&mut self) -> &mut RuntimeControlAuthority {
+        &mut self.control
     }
-
-    /// Get mutable access to the state machine (for external lifecycle control).
-    pub fn state_machine_mut(&mut self) -> &mut RuntimeStateMachine {
-        &mut self.state_machine
+    /// Clear the physical queue projections without touching canonical ingress
+    /// truth. Used by recovery contract tests to simulate projection loss.
+    pub fn clear_queue_projections(&mut self) {
+        self.queue = InputQueue::new();
+        self.steer_queue = InputQueue::new();
     }
-
-    /// Dequeue the next input for processing.
     pub fn dequeue_next(&mut self) -> Option<(InputId, Input)> {
-        let queued = self.queue.dequeue()?;
+        let queued = self
+            .steer_queue
+            .dequeue()
+            .or_else(|| self.queue.dequeue())?;
         Some((queued.input_id, queued.input))
     }
 
-    /// Stage an input (transition Queued → Staged).
+    /// Dequeue a specific input by ID from whichever queue contains it.
+    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
+        self.steer_queue
+            .dequeue_by_id(input_id)
+            .or_else(|| self.queue.dequeue_by_id(input_id))
+    }
+
+    /// Look up the persisted input for a given ID (from the ledger).
+    #[allow(dead_code)] // Used by runtime_loop boundary classification via authority
+    pub fn persisted_input(&self, input_id: &InputId) -> Option<&Input> {
+        self.ledger
+            .get(input_id)
+            .and_then(|state| state.persisted_input.as_ref())
+    }
+
     pub fn stage_input(
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
-        let state =
-            self.ledger
-                .get_mut(input_id)
-                .ok_or(InputStateMachineError::InvalidTransition {
-                    from: InputLifecycleState::Accepted,
-                    to: InputLifecycleState::Staged,
-                })?;
-        state.last_run_id = Some(run_id.clone());
-        InputStateMachine::transition(state, InputLifecycleState::Staged, None)?;
-        self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
-            input_id: input_id.clone(),
+    ) -> Result<(), InputLifecycleError> {
+        self.stage_batch(std::slice::from_ref(input_id), run_id)
+    }
+
+    /// Stage a batch of inputs in a single `StageDrainSnapshot` call.
+    ///
+    /// All input IDs are passed as contributing work IDs to the ingress
+    /// authority atomically, avoiding the guard rejection that occurs when
+    /// `stage_input` is called one-at-a-time (since the first call sets
+    /// `current_run` and subsequent calls fail the `no_current_run` guard).
+    pub fn stage_batch(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &RunId,
+    ) -> Result<(), InputLifecycleError> {
+        // Ingress authority: StageDrainSnapshot — the authority owns the Staged
+        // transition. It emits StageInput effects that drive the per-input lifecycle
+        // authority and Staged events (handled in process_ingress_effects).
+        // No independent shell StageForRun call — single source of truth.
+        match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
             run_id: run_id.clone(),
-        }));
+            contributing_work_ids: input_ids.to_vec(),
+        }) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+                self.rebuild_queue_projections();
+                self.debug_assert_queue_projection_alignment();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    input_ids = ?input_ids,
+                    run_id = ?run_id,
+                    error = %err,
+                    "ingress authority rejected StageDrainSnapshot"
+                );
+                return Err(InputLifecycleError::InvalidTransition {
+                    from: InputLifecycleState::Queued,
+                    input: format!("StageDrainSnapshot rejected: {err}"),
+                });
+            }
+        }
+
         Ok(())
     }
 
-    /// Mark an input as applied (transition Staged → Applied).
     pub fn apply_input(
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         let state =
             self.ledger
                 .get_mut(input_id)
-                .ok_or(InputStateMachineError::InvalidTransition {
+                .ok_or(InputLifecycleError::InvalidTransition {
                     from: InputLifecycleState::Staged,
-                    to: InputLifecycleState::Applied,
+                    input: "MarkApplied (input not found)".into(),
                 })?;
-        InputStateMachine::transition(state, InputLifecycleState::Applied, None)?;
-        InputStateMachine::transition(state, InputLifecycleState::AppliedPendingConsumption, None)?;
+        state.apply(InputLifecycleInput::MarkApplied {
+            run_id: run_id.clone(),
+        })?;
+        state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+            boundary_sequence: 0,
+        })?;
         self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Applied {
             input_id: input_id.clone(),
             run_id: run_id.clone(),
@@ -219,195 +625,220 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    /// Consume inputs after a successful run (AppliedPendingConsumption → Consumed).
     pub fn consume_inputs(
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         for input_id in input_ids {
-            if let Some(state) = self.ledger.get_mut(input_id)
-                && state.current_state == InputLifecycleState::AppliedPendingConsumption
-            {
-                InputStateMachine::transition(state, InputLifecycleState::Consumed, None)?;
-                self.events
-                    .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                        InputLifecycleEvent::Consumed {
-                            input_id: input_id.clone(),
-                            run_id: run_id.clone(),
-                        },
-                    )));
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                match state.apply(InputLifecycleInput::Consume) {
+                    Ok(_) => {
+                        self.events
+                            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                                InputLifecycleEvent::Consumed {
+                                    input_id: input_id.clone(),
+                                    run_id: run_id.clone(),
+                                },
+                            )));
+                    }
+                    Err(
+                        InputLifecycleError::InvalidTransition { .. }
+                        | InputLifecycleError::TerminalState { .. },
+                    ) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(())
     }
 
-    /// Rollback staged inputs to queued (on run failure).
-    pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), InputStateMachineError> {
+    pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), InputLifecycleError> {
         for input_id in input_ids {
             let mut requeue_input = None;
-            if let Some(state) = self.ledger.get_mut(input_id)
-                && state.current_state == InputLifecycleState::Staged
-            {
-                InputStateMachine::transition(
-                    state,
-                    InputLifecycleState::Queued,
-                    Some("run failed, rollback".into()),
-                )?;
-                requeue_input = state.persisted_input.clone();
+            let mut is_steer = false;
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                match state.apply(InputLifecycleInput::RollbackStaged) {
+                    Ok(_) => {
+                        requeue_input = state.persisted_input.clone();
+                        is_steer = requeue_input
+                            .as_ref()
+                            .and_then(super::super::input::Input::handling_mode)
+                            == Some(HandlingMode::Steer);
+                    }
+                    Err(
+                        InputLifecycleError::InvalidTransition { .. }
+                        | InputLifecycleError::TerminalState { .. },
+                    ) => {}
+                    Err(err) => return Err(err),
+                }
             }
             if !self.has_queued_input(input_id)
                 && let Some(input) = requeue_input
             {
-                self.queue.enqueue(input_id.clone(), input);
+                if is_steer {
+                    self.steer_queue.enqueue(input_id.clone(), input);
+                } else {
+                    self.queue.enqueue(input_id.clone(), input);
+                }
             }
         }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(())
     }
 
-    /// Retire: reject new input, continue draining queued/staged work.
-    ///
-    /// Unlike the previous implementation, retire does NOT abandon queued inputs.
-    /// The runtime loop continues to process them via the Retired → Running → Retired
-    /// drain cycle. The runtime remains Retired after all queued work completes.
     pub fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
-        let from = self.state_machine.state();
-        self.state_machine
-            .transition(RuntimeState::Retired)
+        // Ingress authority: Retire
+        match self.ingress.apply(RuntimeIngressInput::Retire) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Retire"
+                );
+            }
+        }
+
+        let transition = self
+            .control
+            .apply(RuntimeControlInput::RetireRequested)
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
         self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from,
-            to: RuntimeState::Retired,
+            from: transition.from_phase,
+            to: transition.next_phase,
         }));
-
         let inputs_pending_drain = self.ledger.iter().filter(|(_, s)| !s.is_terminal()).count();
-
         Ok(RetireReport {
             inputs_abandoned: 0,
             inputs_pending_drain,
         })
     }
 
-    /// Reset: abandon all non-terminal inputs and return to Idle.
-    ///
-    /// Rejected when Running — wait for the current run to complete first.
     pub fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
-        if self.state_machine.is_running() {
-            return Err(RuntimeDriverError::Internal(
-                "cannot reset while running".into(),
-            ));
+        // Ingress authority: Reset (authority rejects if a run is in progress)
+        match self.ingress.apply(RuntimeIngressInput::Reset) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Reset"
+                );
+            }
         }
 
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
-
-        // Drain queue
         self.queue.drain();
+        self.steer_queue.drain();
         self.wake_requested = false;
         self.process_requested = false;
-
-        if let Some(from) = self
-            .state_machine
-            .reset_to_idle()
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-        {
-            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-                from,
-                to: RuntimeState::Idle,
-            }));
+        match self.control.apply(RuntimeControlInput::ResetRequested) {
+            Ok(transition) => {
+                self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                    from: transition.from_phase,
+                    to: transition.next_phase,
+                }));
+            }
+            Err(err) if err.from == RuntimeState::Idle => {}
+            Err(err) => {
+                return Err(RuntimeDriverError::Internal(err.to_string()));
+            }
         }
-
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(ResetReport {
             inputs_abandoned: abandoned,
         })
     }
 
-    /// Destroy: abandon everything, transition to Destroyed.
     pub fn destroy(&mut self) -> Result<usize, RuntimeDriverError> {
-        let from = self.state_machine.state();
-        self.state_machine
-            .transition(RuntimeState::Destroyed)
+        // Ingress authority: Destroy
+        match self.ingress.apply(RuntimeIngressInput::Destroy) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Destroy"
+                );
+            }
+        }
+
+        let transition = self
+            .control
+            .apply(RuntimeControlInput::DestroyRequested)
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
         self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from,
-            to: RuntimeState::Destroyed,
+            from: transition.from_phase,
+            to: transition.next_phase,
         }));
-
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
         Ok(abandoned)
     }
 
-    /// §24 Ephemeral recovery.
     pub fn recover_ephemeral(&mut self) -> RecoveryReport {
+        // Ingress authority: Recover — returns typed per-input recovery effects.
+        let recovery_effects = match self.ingress.apply(RuntimeIngressInput::Recover) {
+            Ok(transition) => {
+                self.process_ingress_effects(&transition.effects);
+                transition.effects
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "ingress authority rejected Recover"
+                );
+                Vec::new()
+            }
+        };
+
+        // Execute the authority's per-input recovery effects.
         let mut recovered = 0;
         let mut abandoned = 0;
         let mut requeued = 0;
 
-        // Collect IDs first to avoid borrow issues
-        let input_ids: Vec<InputId> = self
-            .ledger
-            .iter()
-            .filter(|(_, s)| !s.is_terminal())
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        for input_id in input_ids {
-            if let Some(state) = self.ledger.get_mut(&input_id) {
-                match state.current_state {
-                    InputLifecycleState::Accepted => {
-                        // Accepted → Queued (or → Consumed if Ignore+OnAccept)
-                        if let Some(ref policy) = state.policy {
-                            if policy.decision.apply_mode == ApplyMode::Ignore
-                                && policy.decision.consume_point == ConsumePoint::OnAccept
-                            {
-                                let _ = InputStateMachine::transition(
-                                    state,
-                                    InputLifecycleState::Consumed,
-                                    Some("recovery: Ignore+OnAccept".into()),
-                                );
-                                abandoned += 1;
-                            } else {
-                                let _ = InputStateMachine::transition(
-                                    state,
-                                    InputLifecycleState::Queued,
-                                    Some("recovery: Accepted→Queued".into()),
-                                );
-                                requeued += 1;
-                            }
-                        } else {
-                            let _ = InputStateMachine::transition(
-                                state,
-                                InputLifecycleState::Queued,
-                                Some("recovery: Accepted→Queued (no policy)".into()),
-                            );
-                            requeued += 1;
-                        }
+        for effect in &recovery_effects {
+            match effect {
+                RuntimeIngressEffect::RecoverConsumeOnAccept { work_id } => {
+                    if let Some(state) = self.ledger.get_mut(work_id) {
+                        let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
+                        abandoned += 1;
                         recovered += 1;
                     }
-                    InputLifecycleState::Staged => {
-                        // Staged → Queued (no persisted evidence in ephemeral)
-                        let _ = InputStateMachine::transition(
-                            state,
-                            InputLifecycleState::Queued,
-                            Some("recovery: Staged→Queued (no evidence)".into()),
-                        );
-                        recovered += 1;
-                        requeued += 1;
-                    }
-                    InputLifecycleState::Applied
-                    | InputLifecycleState::AppliedPendingConsumption => {
-                        // Applied stays Applied (side effects already happened)
-                        recovered += 1;
-                    }
-                    InputLifecycleState::Queued => {
-                        // Already queued, nothing to do
-                        recovered += 1;
-                    }
-                    _ => {}
                 }
+                RuntimeIngressEffect::RecoverRollback { work_id } => {
+                    if let Some(state) = self.ledger.get_mut(work_id) {
+                        match state.current_state() {
+                            InputLifecycleState::Accepted => {
+                                let _ = state.apply(InputLifecycleInput::QueueAccepted);
+                            }
+                            InputLifecycleState::Staged => {
+                                let _ = state.apply(InputLifecycleInput::RollbackStaged);
+                            }
+                            _ => {}
+                        }
+                        requeued += 1;
+                        recovered += 1;
+                    }
+                }
+                RuntimeIngressEffect::RecoverKeep { work_id } => {
+                    if self.ledger.get(work_id).is_some() {
+                        recovered += 1;
+                    }
+                }
+                _ => {}
             }
         }
+
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
 
         RecoveryReport {
             inputs_recovered: recovered,
@@ -417,12 +848,48 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    // ---- Internal helpers ----
+    pub fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
+        let transition = self
+            .control
+            .apply(RuntimeControlInput::RecycleRequested)
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+            from: transition.from_phase,
+            to: transition.next_phase,
+        }));
+
+        let transferred = self.ledger.active_input_ids().len();
+        let runtime_id = self.runtime_id.clone();
+        let silent_comms_intents = self.silent_comms_intents.clone();
+        let ledger = self.ledger.clone();
+        let ingress = self.ingress.clone();
+        let control = self.control.clone();
+
+        *self = Self::new(runtime_id);
+        self.silent_comms_intents = silent_comms_intents;
+        self.ledger = ledger;
+        self.ingress = ingress;
+        self.control = control;
+
+        let _ = self.recover_ephemeral();
+
+        let transition = self
+            .control
+            .apply(RuntimeControlInput::RecycleSucceeded)
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+            from: transition.from_phase,
+            to: transition.next_phase,
+        }));
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+
+        Ok(transferred)
+    }
 
     fn emit_event(&mut self, event: RuntimeEvent) {
         self.events.push(self.make_envelope(event));
     }
-
     fn make_envelope(&self, event: RuntimeEvent) -> RuntimeEventEnvelope {
         RuntimeEventEnvelope {
             id: crate::identifiers::RuntimeEventId::new(),
@@ -441,11 +908,14 @@ impl EphemeralRuntimeDriver {
             .filter(|(_, s)| !s.is_terminal())
             .map(|(id, _)| id.clone())
             .collect();
-
         let mut count = 0;
         for id in &non_terminal_ids {
             if let Some(state) = self.ledger.get_mut(id)
-                && InputStateMachine::abandon(state, reason.clone()).is_ok()
+                && state
+                    .apply(InputLifecycleInput::Abandon {
+                        reason: reason.clone(),
+                    })
+                    .is_ok()
             {
                 count += 1;
                 self.events
@@ -459,20 +929,32 @@ impl EphemeralRuntimeDriver {
         }
         count
     }
+
+    pub fn abandon_pending_inputs(&mut self, reason: InputAbandonReason) -> usize {
+        let abandoned = self.abandon_all_non_terminal(reason);
+        self.queue.drain();
+        self.steer_queue.drain();
+        self.wake_requested = false;
+        self.process_requested = false;
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+        abandoned
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        // Check runtime state
-        if !self.state_machine.state().can_accept_input() {
-            return Err(RuntimeDriverError::NotReady {
-                state: self.state_machine.state(),
-            });
+        let control_phase = self.control.phase();
+        match control_phase.can_accept_input() {
+            true => {}
+            false => {
+                return Err(RuntimeDriverError::NotReady {
+                    state: control_phase,
+                });
+            }
         }
-
-        // Validate durability
         if let Err(e) = validate_durability(&input) {
             match e {
                 DurabilityError::DerivedForbidden { .. }
@@ -483,18 +965,33 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 }
             }
         }
-
-        // Check idempotency dedup
         let input_id = input.id().clone();
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
         state.idempotency_key = input.header().idempotency_key.clone();
-
         if let Some(ref key) = input.header().idempotency_key {
             if let Some(existing_id) = self
                 .ledger
                 .accept_with_idempotency(state.clone(), key.clone())
             {
+                // Route dedup decision through ingress authority — the authority
+                // owns the semantic decision to reject the duplicate.
+                match self.ingress.apply(RuntimeIngressInput::AdmitDeduplicated {
+                    work_id: input_id.clone(),
+                    existing_id: existing_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            input_id = ?input_id,
+                            existing_id = ?existing_id,
+                            error = %err,
+                            "ingress authority rejected AdmitDeduplicated"
+                        );
+                    }
+                }
                 self.emit_event(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Deduplicated {
                         input_id: input_id.clone(),
@@ -509,75 +1006,58 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         } else {
             self.ledger.accept(state.clone());
         }
-
-        // Resolve policy
-        let runtime_idle = self.state_machine.is_idle();
-        let policy = DefaultPolicyTable::resolve(&input, runtime_idle);
-
-        // Store policy snapshot
+        let runtime_idle = self.control.phase().is_idle_or_attached();
+        let mut policy = DefaultPolicyTable::resolve(&input, runtime_idle);
+        crate::silent_intent::apply_silent_intent_override(
+            &input,
+            &self.silent_comms_intents,
+            &mut policy,
+        );
         if let Some(s) = self.ledger.get_mut(&input_id) {
             s.policy = Some(PolicySnapshot {
                 version: policy.policy_version,
                 decision: policy.clone(),
             });
         }
-
-        // Emit accepted event
         self.emit_event(RuntimeEvent::InputLifecycle(
             InputLifecycleEvent::Accepted {
                 input_id: input_id.clone(),
             },
         ));
-
-        // Apply policy decision
-        match policy.apply_mode {
-            ApplyMode::Ignore => {
-                if policy.consume_point == ConsumePoint::OnAccept {
-                    // Immediately consume
-                    if let Some(s) = self.ledger.get_mut(&input_id) {
-                        let _ = InputStateMachine::transition(
-                            s,
-                            InputLifecycleState::Consumed,
-                            Some("Ignore+OnAccept".into()),
-                        );
-                    }
-                }
+        // --- Ingress authority: authority-owned classification ---
+        // All mechanical lookups done unconditionally; authority.admit() decides
+        // the admission path (queued vs consumed-on-accept) based on the policy.
+        // Zero policy branching in shell code.
+        let handling_mode = handling_mode_from_policy(&policy);
+        let content_shape = ContentShape(input.kind_id().to_string());
+        let is_prompt = matches!(input, Input::Prompt(_));
+        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
+        match self.ingress.admit(
+            input_id.clone(),
+            content_shape,
+            handling_mode,
+            is_prompt,
+            None, // request_id
+            None, // reservation_key
+            policy.clone(),
+            existing_superseded_id,
+        ) {
+            Ok(transition) => {
+                self.process_accept_effects(&transition.effects, &input);
             }
-            ApplyMode::InjectNow => {
-                // Queue for immediate processing
-                if let Some(s) = self.ledger.get_mut(&input_id) {
-                    s.persisted_input = Some(input.clone());
-                    let _ = InputStateMachine::transition(s, InputLifecycleState::Queued, None);
-                }
-                self.queue.enqueue(input_id.clone(), input);
-                self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
-                    input_id: input_id.clone(),
-                }));
-            }
-            ApplyMode::StageRunStart | ApplyMode::StageRunBoundary => {
-                // Queue for run boundary
-                if let Some(s) = self.ledger.get_mut(&input_id) {
-                    s.persisted_input = Some(input.clone());
-                    let _ = InputStateMachine::transition(s, InputLifecycleState::Queued, None);
-                }
-                self.queue.enqueue(input_id.clone(), input);
-                self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
-                    input_id: input_id.clone(),
-                }));
+            Err(err) => {
+                tracing::warn!(
+                    input_id = ?input_id,
+                    error = %err,
+                    "ingress authority rejected accept_input"
+                );
             }
         }
-
-        // Set wake flag
-        if runtime_idle && policy.wake_mode == WakeMode::WakeIfIdle {
-            self.wake_requested = true;
-        }
-        if runtime_idle && policy.apply_mode == ApplyMode::InjectNow {
-            self.process_requested = true;
-        }
-
-        // Get the final state
+        // Wake/process decisions are driven by the ingress authority effects
+        // (WakeRuntime / RequestImmediateProcessing). The authority respects
+        // WakeMode::None and only emits these effects when the policy allows.
+        // No shell-side override here — that would bypass the authority.
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or_else(|| state);
-
         Ok(AcceptOutcome::Accepted {
             input_id,
             policy,
@@ -589,7 +1069,6 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         &mut self,
         _event: RuntimeEventEnvelope,
     ) -> Result<(), RuntimeDriverError> {
-        // Ephemeral driver doesn't need to handle external runtime events
         Ok(())
     }
 
@@ -599,77 +1078,131 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 run_id,
                 consumed_input_ids,
             } => {
-                // Consume all contributing inputs
+                // Ingress authority: RunCompleted — always call; authority rejects if run doesn't match.
+                match self.ingress.apply(RuntimeIngressInput::RunCompleted {
+                    run_id: run_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %err,
+                            "ingress authority rejected RunCompleted"
+                        );
+                    }
+                }
+
                 self.consume_inputs(&consumed_input_ids, &run_id)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
-                // Complete the run in state machine
-                self.state_machine
-                    .complete_run()
+                self.control
+                    .apply(RuntimeControlInput::RunCompleted {
+                        run_id: run_id.clone(),
+                    })
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
-            RunEvent::RunFailed { .. } => {
-                // Rollback any staged inputs
+            RunEvent::RunFailed { ref run_id, .. } => {
+                // Ingress authority: RunFailed — always call; authority rejects if run doesn't match.
+                match self.ingress.apply(RuntimeIngressInput::RunFailed {
+                    run_id: run_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %err,
+                            "ingress authority rejected RunFailed"
+                        );
+                    }
+                }
+
                 let staged_ids: Vec<InputId> = self
                     .ledger
                     .iter()
-                    .filter(|(_, s)| s.current_state == InputLifecycleState::Staged)
+                    .filter(|(_, s)| s.current_state() == InputLifecycleState::Staged)
                     .map(|(id, _)| id.clone())
                     .collect();
                 self.rollback_staged(&staged_ids)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
-                if self.has_queued_input_outside(&staged_ids) {
-                    self.wake_requested = true;
-                }
-
-                // Return to idle
-                self.state_machine
-                    .complete_run()
+                // Wake decision is authority-driven: the ingress authority emits
+                // WakeRuntime when rolled-back inputs are re-enqueued (above).
+                self.control
+                    .apply(RuntimeControlInput::RunFailed {
+                        run_id: run_id.clone(),
+                    })
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
-            RunEvent::RunCancelled { .. } => {
-                // Same as failure — rollback staged
+            RunEvent::RunCancelled { ref run_id, .. } => {
+                // Ingress authority: RunCancelled — always call; authority rejects if run doesn't match.
+                match self.ingress.apply(RuntimeIngressInput::RunCancelled {
+                    run_id: run_id.clone(),
+                }) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = ?run_id,
+                            error = %err,
+                            "ingress authority rejected RunCancelled"
+                        );
+                    }
+                }
+
                 let staged_ids: Vec<InputId> = self
                     .ledger
                     .iter()
-                    .filter(|(_, s)| s.current_state == InputLifecycleState::Staged)
+                    .filter(|(_, s)| s.current_state() == InputLifecycleState::Staged)
                     .map(|(id, _)| id.clone())
                     .collect();
                 self.rollback_staged(&staged_ids)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
-                if self.has_queued_input_outside(&staged_ids) {
-                    self.wake_requested = true;
-                }
-
-                self.state_machine
-                    .complete_run()
+                // Wake decision is authority-driven: the ingress authority emits
+                // WakeRuntime when rolled-back inputs are re-enqueued (above).
+                self.control
+                    .apply(RuntimeControlInput::RunCancelled {
+                        run_id: run_id.clone(),
+                    })
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
             }
-            RunEvent::RunStarted { .. } => {
-                // Informational — no state change needed
-            }
+            RunEvent::RunStarted { .. } => {}
             RunEvent::BoundaryApplied {
                 run_id, receipt, ..
             } => {
-                // Transition contributing inputs to AppliedPendingConsumption
+                // Ingress authority: BoundaryApplied
+                if self.ingress.current_run() == Some(&run_id) {
+                    match self.ingress.apply(RuntimeIngressInput::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        boundary_sequence: receipt.sequence,
+                    }) {
+                        Ok(transition) => {
+                            self.process_ingress_effects(&transition.effects);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                run_id = ?run_id,
+                                boundary_sequence = receipt.sequence,
+                                error = %err,
+                                "ingress authority rejected BoundaryApplied"
+                            );
+                        }
+                    }
+                }
+
                 for input_id in &receipt.contributing_input_ids {
                     if let Some(state) = self.ledger.get_mut(input_id) {
-                        state.last_run_id = Some(run_id.clone());
-                        state.last_boundary_sequence = Some(receipt.sequence);
-                        // Only transition if Staged (not already Applied)
-                        if state.current_state == InputLifecycleState::Staged {
-                            let _ = InputStateMachine::transition(
-                                state,
-                                InputLifecycleState::Applied,
-                                None,
-                            );
-                            let _ = InputStateMachine::transition(
-                                state,
-                                InputLifecycleState::AppliedPendingConsumption,
-                                None,
-                            );
+                        let applied = state
+                            .apply(InputLifecycleInput::MarkApplied {
+                                run_id: run_id.clone(),
+                            })
+                            .is_ok();
+                        let _ = state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+                            boundary_sequence: receipt.sequence,
+                        });
+                        if applied {
                             self.events
                                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                                     InputLifecycleEvent::Applied {
@@ -681,9 +1214,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     }
                 }
             }
-            _ => {
-                // Forward-compatible: unknown RunEvent variants are ignored
-            }
+            _ => {}
         }
         Ok(())
     }
@@ -694,26 +1225,38 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         match command {
             RuntimeControlCommand::Stop => {
-                let from = self.state_machine.state();
-                self.state_machine
-                    .transition(RuntimeState::Stopped)
+                // Ingress authority: Destroy (Stop abandons everything)
+                match self.ingress.apply(RuntimeIngressInput::Destroy) {
+                    Ok(transition) => {
+                        self.process_ingress_effects(&transition.effects);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "ingress authority rejected Destroy on Stop"
+                        );
+                    }
+                }
+
+                let transition = self
+                    .control
+                    .apply(RuntimeControlInput::StopRequested)
                     .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
                 self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-                    from,
-                    to: RuntimeState::Stopped,
+                    from: transition.from_phase,
+                    to: transition.next_phase,
                 }));
-
-                // Terminal states must not persist active inputs
                 self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
                 self.queue.drain();
+                self.steer_queue.drain();
             }
             RuntimeControlCommand::Resume => {
-                // For ephemeral, resume just means ensure we're in Idle
-                if self.state_machine.state() == RuntimeState::Recovering {
-                    self.state_machine
-                        .transition(RuntimeState::Idle)
-                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+                match self.control.apply(RuntimeControlInput::ResumeRequested) {
+                    Ok(_) => {}
+                    Err(err) if err.from != RuntimeState::Recovering => {}
+                    Err(err) => {
+                        return Err(RuntimeDriverError::Internal(err.to_string()));
+                    }
                 }
             }
         }
@@ -723,594 +1266,25 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
         Ok(self.recover_ephemeral())
     }
-
     fn runtime_state(&self) -> RuntimeState {
-        self.state_machine.state()
+        self.control.phase()
     }
-
     async fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
         EphemeralRuntimeDriver::retire(self)
     }
-
     async fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
         EphemeralRuntimeDriver::reset(self)
     }
-
+    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+        let abandoned = EphemeralRuntimeDriver::destroy(self)?;
+        Ok(DestroyReport {
+            inputs_abandoned: abandoned,
+        })
+    }
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {
         self.ledger.get(input_id)
     }
-
     fn active_input_ids(&self) -> Vec<InputId> {
         self.ledger.active_input_ids()
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::input::*;
-    use crate::traits::RuntimeDriver;
-    use chrono::Utc;
-
-    fn make_prompt_input(text: &str) -> Input {
-        Input::Prompt(PromptInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::Operator,
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            text: text.into(),
-            blocks: None,
-            turn_metadata: None,
-        })
-    }
-
-    fn make_peer_terminal(body: &str) -> Input {
-        Input::Peer(PeerInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::Peer {
-                    peer_id: "peer-1".into(),
-                    runtime_id: None,
-                },
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            convention: Some(PeerConvention::ResponseTerminal {
-                request_id: "req-1".into(),
-                status: ResponseTerminalStatus::Completed,
-            }),
-            body: body.into(),
-            blocks: None,
-        })
-    }
-
-    fn make_peer_progress() -> Input {
-        Input::Peer(PeerInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::Peer {
-                    peer_id: "peer-1".into(),
-                    runtime_id: None,
-                },
-                durability: InputDurability::Ephemeral,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            convention: Some(PeerConvention::ResponseProgress {
-                request_id: "req-1".into(),
-                phase: ResponseProgressPhase::InProgress,
-            }),
-            body: "working...".into(),
-            blocks: None,
-        })
-    }
-
-    fn make_system_generated() -> Input {
-        Input::SystemGenerated(SystemGeneratedInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::System,
-                durability: InputDurability::Ephemeral,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            generator: "test".into(),
-            content: "system content".into(),
-        })
-    }
-
-    #[tokio::test]
-    async fn accept_prompt_idle_queues_and_wakes() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let input = make_prompt_input("hello");
-        let result = driver.accept_input(input).await.unwrap();
-
-        assert!(result.is_accepted());
-        assert!(driver.take_wake_requested());
-        assert_eq!(driver.queue().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn accept_prompt_running_queues_and_wakes() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.state_machine.start_run(RunId::new()).unwrap();
-
-        let input = make_prompt_input("hello");
-        let result = driver.accept_input(input).await.unwrap();
-
-        assert!(result.is_accepted());
-        // Prompt always wakes (but runtime is running so wake_mode is still WakeIfIdle,
-        // but runtime_idle=false so wake_requested should be false)
-        assert!(!driver.take_wake_requested());
-    }
-
-    #[tokio::test]
-    async fn accept_peer_terminal_idle_wakes() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let input = make_peer_terminal("done");
-        let result = driver.accept_input(input).await.unwrap();
-
-        assert!(result.is_accepted());
-        assert!(driver.take_wake_requested()); // Terminal peer wakes idle runtime
-    }
-
-    #[tokio::test]
-    async fn accept_peer_terminal_running_no_wake() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.state_machine.start_run(RunId::new()).unwrap();
-
-        let input = make_peer_terminal("done");
-        let result = driver.accept_input(input).await.unwrap();
-
-        assert!(result.is_accepted());
-        assert!(!driver.take_wake_requested()); // Running → no wake
-    }
-
-    #[tokio::test]
-    async fn accept_progress_no_wake() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let input = make_peer_progress();
-        let result = driver.accept_input(input).await.unwrap();
-
-        assert!(result.is_accepted());
-        assert!(!driver.take_wake_requested()); // Progress never wakes
-    }
-
-    #[tokio::test]
-    async fn accept_system_generated_no_wake_queued() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let input = make_system_generated();
-        let result = driver.accept_input(input).await.unwrap();
-
-        // InjectNow should request immediate processing without a normal wake.
-        assert!(result.is_accepted());
-        assert!(!driver.take_wake_requested());
-        assert!(driver.take_process_requested());
-        // InjectNow still queues (it will be applied immediately by the runtime loop)
-        assert_eq!(driver.queue().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn dedup_by_idempotency() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let key = crate::identifiers::IdempotencyKey::new("req-1");
-
-        let mut input1 = make_prompt_input("hello");
-        if let Input::Prompt(ref mut p) = input1 {
-            p.header.idempotency_key = Some(key.clone());
-        }
-        let result1 = driver.accept_input(input1).await.unwrap();
-        assert!(result1.is_accepted());
-
-        let mut input2 = make_prompt_input("hello again");
-        if let Input::Prompt(ref mut p) = input2 {
-            p.header.idempotency_key = Some(key);
-        }
-        let result2 = driver.accept_input(input2).await.unwrap();
-        assert!(result2.is_deduplicated());
-    }
-
-    #[tokio::test]
-    async fn reject_derived_prompt() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let input = Input::Prompt(PromptInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::System,
-                durability: InputDurability::Derived,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            text: "hi".into(),
-            blocks: None,
-            turn_metadata: None,
-        });
-        let result = driver.accept_input(input).await.unwrap();
-        assert!(result.is_rejected());
-    }
-
-    #[tokio::test]
-    async fn retire_preserves_queued_for_drain() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.accept_input(make_prompt_input("a")).await.unwrap();
-        driver.accept_input(make_prompt_input("b")).await.unwrap();
-
-        let report = driver.retire().unwrap();
-        assert_eq!(report.inputs_abandoned, 0);
-        assert_eq!(report.inputs_pending_drain, 2);
-        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
-        // Queue is still intact for drain
-        assert_eq!(driver.queue().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn reset_abandons_and_drains() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.accept_input(make_prompt_input("a")).await.unwrap();
-
-        let report = driver.reset().unwrap();
-        assert_eq!(report.inputs_abandoned, 1);
-        assert!(driver.queue().is_empty());
-    }
-
-    #[tokio::test]
-    async fn destroy_transitions_to_terminal() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.accept_input(make_prompt_input("a")).await.unwrap();
-
-        let abandoned = driver.destroy().unwrap();
-        assert_eq!(abandoned, 1);
-        assert!(driver.runtime_state().is_terminal());
-    }
-
-    #[tokio::test]
-    async fn on_run_completed_consumes() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        // Accept and manually transition to simulate run
-        let input = make_prompt_input("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-        driver.take_wake_requested();
-
-        // Simulate run start
-        let run_id = RunId::new();
-        driver.state_machine.start_run(run_id.clone()).unwrap();
-
-        // Stage and apply
-        driver.stage_input(&input_id, &run_id).unwrap();
-        driver.apply_input(&input_id, &run_id).unwrap();
-
-        // Run completed
-        driver
-            .on_run_event(RunEvent::RunCompleted {
-                run_id: run_id.clone(),
-                consumed_input_ids: vec![input_id.clone()],
-            })
-            .await
-            .unwrap();
-
-        // Input should be consumed
-        let state = driver.input_state(&input_id).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Consumed);
-        assert!(driver.state_machine.is_idle());
-    }
-
-    #[tokio::test]
-    async fn on_run_failed_rollbacks() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        let input = make_prompt_input("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        let run_id = RunId::new();
-        driver.state_machine.start_run(run_id.clone()).unwrap();
-        driver.stage_input(&input_id, &run_id).unwrap();
-
-        // Run failed
-        driver
-            .on_run_event(RunEvent::RunFailed {
-                run_id,
-                error: "LLM error".into(),
-                recoverable: true,
-            })
-            .await
-            .unwrap();
-
-        // Input should be rolled back to Queued
-        let state = driver.input_state(&input_id).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
-        assert!(driver.state_machine.is_idle());
-    }
-
-    #[tokio::test]
-    async fn on_run_failed_requests_wake_for_backlog() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        let input1 = make_prompt_input("first");
-        let input1_id = input1.id().clone();
-        let input2 = make_prompt_input("second");
-        driver.accept_input(input1).await.unwrap();
-        driver.accept_input(input2).await.unwrap();
-        let _ = driver.take_wake_requested();
-
-        let run_id = RunId::new();
-        let (dequeued_id, _) = driver.dequeue_next().unwrap();
-        assert_eq!(dequeued_id, input1_id);
-        driver.state_machine.start_run(run_id.clone()).unwrap();
-        driver.stage_input(&input1_id, &run_id).unwrap();
-
-        driver
-            .on_run_event(RunEvent::RunFailed {
-                run_id,
-                error: "LLM error".into(),
-                recoverable: true,
-            })
-            .await
-            .unwrap();
-
-        assert!(
-            driver.take_wake_requested(),
-            "queued work behind a failed run should request another wake"
-        );
-    }
-
-    #[tokio::test]
-    async fn reset_after_retire_returns_runtime_to_idle() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.retire().unwrap();
-        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
-
-        let report = driver.reset().unwrap();
-        assert_eq!(report.inputs_abandoned, 0);
-        assert_eq!(driver.runtime_state(), RuntimeState::Idle);
-
-        let accepted = driver
-            .accept_input(make_prompt_input("hello"))
-            .await
-            .unwrap();
-        assert!(
-            accepted.is_accepted(),
-            "reset runtime should accept new input"
-        );
-    }
-
-    #[tokio::test]
-    async fn recovery_counts_queued_as_recovered() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        // Accept an input — policy transitions it to Queued
-        let input = make_prompt_input("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        // After accept, state is Queued (policy applied immediately)
-        let state = driver.input_state(&input_id).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
-
-        // Drain the queue (simulating crash losing queue state)
-        driver.queue.drain();
-
-        // Recover
-        let report = driver.recover_ephemeral();
-        // Queued inputs are counted as recovered (already in correct state)
-        assert_eq!(report.inputs_recovered, 1);
-        assert_eq!(report.inputs_requeued, 0); // Already Queued, no transition needed
-    }
-
-    #[tokio::test]
-    async fn recovery_applied_stays_applied() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        let input = make_prompt_input("hello");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        let run_id = RunId::new();
-        driver.state_machine.start_run(run_id.clone()).unwrap();
-        driver.stage_input(&input_id, &run_id).unwrap();
-        driver.apply_input(&input_id, &run_id).unwrap();
-
-        // Recover
-        driver
-            .state_machine
-            .transition(RuntimeState::Recovering)
-            .unwrap();
-        let report = driver.recover_ephemeral();
-        assert_eq!(report.inputs_recovered, 1);
-
-        // Applied stays Applied (side effects already happened)
-        let state = driver.input_state(&input_id).unwrap();
-        assert_eq!(
-            state.current_state,
-            InputLifecycleState::AppliedPendingConsumption
-        );
-    }
-
-    #[tokio::test]
-    async fn retired_rejects_input() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.retire().unwrap();
-
-        let result = driver.accept_input(make_prompt_input("hello")).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn events_emitted_for_lifecycle() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver
-            .accept_input(make_prompt_input("hello"))
-            .await
-            .unwrap();
-
-        let events = driver.drain_events();
-        assert!(!events.is_empty());
-        // Should have Accepted and Queued events
-        let has_accepted = events.iter().any(|e| {
-            matches!(
-                &e.event,
-                RuntimeEvent::InputLifecycle(InputLifecycleEvent::Accepted { .. })
-            )
-        });
-        let has_queued = events.iter().any(|e| {
-            matches!(
-                &e.event,
-                RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued { .. })
-            )
-        });
-        assert!(has_accepted);
-        assert!(has_queued);
-    }
-
-    #[tokio::test]
-    async fn progress_peer_staged_boundary() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        let input = make_peer_progress();
-        let input_id = input.id().clone();
-        let result = driver.accept_input(input).await.unwrap();
-
-        assert!(result.is_accepted());
-        // Per §17: ResponseProgress → StageRunBoundary + NoWake + Coalesce + OnRunComplete
-        let state = driver.input_state(&input_id).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
-        assert!(!driver.take_wake_requested()); // Progress never wakes
-    }
-
-    #[tokio::test]
-    async fn destroy_after_retire_succeeds() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.retire().unwrap();
-        let abandoned = driver.destroy().unwrap();
-        assert_eq!(abandoned, 0);
-        assert_eq!(driver.runtime_state(), RuntimeState::Destroyed);
-    }
-
-    // ---- Phase 1: State machine hardening tests ----
-
-    #[tokio::test]
-    async fn retired_can_drain_queue_via_run_cycle() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        // Accept an input
-        let input = make_prompt_input("drain me");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-        let _ = driver.take_wake_requested();
-
-        // Retire — queue preserved for drain
-        let report = driver.retire().unwrap();
-        assert_eq!(report.inputs_abandoned, 0);
-        assert_eq!(report.inputs_pending_drain, 1);
-        assert_eq!(driver.queue().len(), 1);
-
-        // Can still dequeue and process (Retired → Running)
-        let (dequeued_id, _) = driver.dequeue_next().unwrap();
-        assert_eq!(dequeued_id, input_id);
-
-        let run_id = RunId::new();
-        driver.start_run(run_id.clone()).unwrap();
-        assert!(driver.state_machine_ref().is_running());
-
-        driver.stage_input(&input_id, &run_id).unwrap();
-        driver.apply_input(&input_id, &run_id).unwrap();
-
-        // Complete run → returns to Retired (not Idle)
-        driver
-            .on_run_event(RunEvent::RunCompleted {
-                run_id,
-                consumed_input_ids: vec![input_id],
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(driver.runtime_state(), RuntimeState::Retired);
-        assert!(driver.queue().is_empty());
-    }
-
-    #[tokio::test]
-    async fn retired_rejects_new_input_while_draining() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        driver
-            .accept_input(make_prompt_input("existing"))
-            .await
-            .unwrap();
-        driver.retire().unwrap();
-
-        // New input rejected
-        let result = driver.accept_input(make_prompt_input("rejected")).await;
-        assert!(result.is_err());
-
-        // But existing queue is intact
-        assert_eq!(driver.queue().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn reset_rejected_while_running() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        driver
-            .accept_input(make_prompt_input("hello"))
-            .await
-            .unwrap();
-        driver.start_run(RunId::new()).unwrap();
-
-        let result = driver.reset();
-        assert!(result.is_err());
-        assert!(driver.state_machine_ref().is_running());
-    }
-
-    #[tokio::test]
-    async fn stop_abandons_all_active_inputs() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-
-        let input = make_prompt_input("stop me");
-        let input_id = input.id().clone();
-        driver.accept_input(input).await.unwrap();
-
-        driver
-            .on_runtime_control(RuntimeControlCommand::Stop)
-            .await
-            .unwrap();
-
-        assert_eq!(driver.runtime_state(), RuntimeState::Stopped);
-        assert!(driver.queue().is_empty());
-
-        let state = driver.input_state(&input_id).unwrap();
-        assert!(state.is_terminal());
-    }
-
-    #[tokio::test]
-    async fn destroy_with_queued_inputs_abandons_all() {
-        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-        driver.accept_input(make_prompt_input("a")).await.unwrap();
-        driver.accept_input(make_prompt_input("b")).await.unwrap();
-
-        let abandoned = driver.destroy().unwrap();
-        assert_eq!(abandoned, 2);
-        assert!(driver.runtime_state().is_terminal());
-        assert!(driver.active_input_ids().is_empty());
     }
 }

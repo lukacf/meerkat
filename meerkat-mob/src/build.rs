@@ -1,7 +1,7 @@
 //! Profile to AgentBuildConfig compilation.
 //!
 //! Maps a mob [`Profile`] to an [`AgentBuildConfig`] with the correct
-//! flags for host-mode operation, comms naming, peer metadata, and
+//! flags for keep-alive operation, comms naming, peer metadata, and
 //! tool overrides. Bridges to [`CreateSessionRequest`] for session creation.
 
 use crate::definition::{MobDefinition, SkillSource};
@@ -10,7 +10,10 @@ use crate::ids::{MeerkatId, MobId, ProfileName};
 use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
 use meerkat_core::PeerMeta;
+use meerkat_core::Session;
 use meerkat_core::service::CreateSessionRequest;
+use meerkat_core::session::SessionMetadata;
+use meerkat_core::types::SessionId;
 use std::sync::Arc;
 
 /// Parameters for building an agent config from a mob profile.
@@ -27,14 +30,21 @@ pub struct BuildAgentConfigParams<'a> {
     pub shell_env: Option<std::collections::HashMap<String, String>>,
 }
 
+pub struct BuildResumedAgentConfigParams<'a> {
+    pub base: BuildAgentConfigParams<'a>,
+    pub expected_session_id: &'a SessionId,
+    pub resumed_session: Session,
+}
+
 /// Build an [`AgentBuildConfig`] from a mob profile.
 ///
 /// This is the first step in the construction chain:
 ///   Profile -> `build_agent_config()` -> `to_create_session_request()` -> `SessionService::create_session()`
 ///
-/// Mob-managed sessions are created with `host_mode=false` so spawn returns
-/// promptly from nested tool dispatch paths. Lifecycles are managed explicitly
-/// by mob runtime commands (`start_turn`, `retire`, etc.).
+/// Mob-managed sessions are created with `keep_alive=false` by default.
+/// Callers override `keep_alive` to `true` for `AutonomousHost` members
+/// so the agent loop blocks until interrupted. Lifecycles are managed
+/// explicitly by mob runtime commands (`start_turn`, `retire`, etc.).
 pub async fn build_agent_config(
     params: BuildAgentConfigParams<'_>,
 ) -> Result<AgentBuildConfig, MobError> {
@@ -82,7 +92,7 @@ pub async fn build_agent_config(
     let system_prompt = assemble_system_prompt(profile, definition).await?;
 
     let mut config = AgentBuildConfig::new(profile.model.clone());
-    config.host_mode = false;
+    config.keep_alive = false;
     config.comms_name = Some(comms_name);
     config.peer_meta = Some(peer_meta);
     config.realm_id = Some(realm_id);
@@ -109,10 +119,6 @@ pub async fn build_agent_config(
     config.override_builtins = Some(profile.tools.builtins);
     config.override_shell = Some(profile.tools.shell);
     config.override_memory = Some(profile.tools.memory);
-
-    // Let orchestrator-style mob profiles opt into sub-agents through the
-    // factory-level flag. Worker-style profiles still keep them off by default.
-    config.override_subagents = Some(profile.tools.mob);
 
     // External tools (mob tools, task tools, rust bundles composed externally)
     config.external_tools = external_tools;
@@ -142,6 +148,75 @@ pub async fn build_agent_config(
     Ok(config)
 }
 
+/// Build an [`AgentBuildConfig`] for a resumed mob member.
+///
+/// This preserves durable session identity from the stored session while still
+/// composing current runtime mechanics such as external tool dispatchers and
+/// realm attachment.
+pub async fn build_resumed_agent_config(
+    params: BuildResumedAgentConfigParams<'_>,
+) -> Result<AgentBuildConfig, MobError> {
+    let BuildResumedAgentConfigParams {
+        base,
+        expected_session_id,
+        resumed_session,
+    } = params;
+    if resumed_session.id() != expected_session_id {
+        return Err(MobError::Internal(format!(
+            "resume session id mismatch: expected '{}', got '{}'",
+            expected_session_id,
+            resumed_session.id()
+        )));
+    }
+    let mut config = build_agent_config(base).await?;
+    let metadata = resumed_session
+        .session_metadata()
+        .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
+    apply_resumed_session_metadata(&mut config, &metadata)?;
+    config.resume_session = Some(resumed_session);
+    // Preserve the durable session prompt/history exactly as stored.
+    config.system_prompt = None;
+    // Do not silently reapply prompt-affecting surface-local context on resume.
+    config.additional_instructions = None;
+    config.app_context = None;
+    config.shell_env = None;
+    Ok(config)
+}
+
+fn apply_resumed_session_metadata(
+    config: &mut AgentBuildConfig,
+    metadata: &SessionMetadata,
+) -> Result<(), MobError> {
+    let current_comms_name = config.comms_name.clone();
+    let Some(stored_comms_name) = metadata.comms_name.clone() else {
+        return Err(MobError::Internal(
+            "missing durable comms_name for resumed mob member".to_string(),
+        ));
+    };
+    if current_comms_name.as_deref() != Some(stored_comms_name.as_str()) {
+        return Err(MobError::Internal(format!(
+            "persisted comms_name '{}' does not match current mob identity '{}'",
+            stored_comms_name,
+            current_comms_name.unwrap_or_else(|| "<none>".to_string())
+        )));
+    }
+
+    config.model = metadata.model.clone();
+    config.max_tokens = Some(metadata.max_tokens);
+    config.provider = Some(metadata.provider);
+    config.provider_params = metadata.provider_params.clone();
+    config.override_builtins = Some(metadata.tooling.builtins);
+    config.override_shell = Some(metadata.tooling.shell);
+    config.override_memory = Some(metadata.tooling.memory);
+    config.override_mob = Some(metadata.tooling.mob);
+    config.preload_skills = metadata.tooling.active_skills.clone();
+    // keep_alive is NOT restored from metadata — mob runtime owns it
+    // (determined by runtime_mode == AutonomousHost). §1: one owner.
+    config.comms_name = Some(stored_comms_name);
+    config.peer_meta = metadata.peer_meta.clone();
+    Ok(())
+}
+
 /// Bridge an [`AgentBuildConfig`] to a [`CreateSessionRequest`].
 ///
 /// This is the second step: the config is converted to the service-level
@@ -155,10 +230,11 @@ pub fn to_create_session_request(
     CreateSessionRequest {
         model: config.model.clone(),
         prompt,
+        render_metadata: None,
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
         event_tx: None,
-        host_mode: config.host_mode,
+
         skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution
@@ -296,7 +372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_agent_config_non_host_mode() {
+    async fn test_build_agent_config_non_keep_alive() {
         let def = sample_definition();
         let profile = &def.profiles[&ProfileName::from("lead")];
         let config = build_agent_config(BuildAgentConfigParams {
@@ -314,7 +390,7 @@ mod tests {
         .await
         .expect("build_agent_config");
 
-        assert!(!config.host_mode, "host_mode must be false for mob spawn");
+        assert!(!config.keep_alive, "keep_alive must be false for mob spawn");
     }
 
     #[tokio::test]
@@ -424,8 +500,6 @@ mod tests {
         assert_eq!(config.override_builtins, Some(true));
         assert_eq!(config.override_shell, Some(true));
         assert_eq!(config.override_memory, Some(false));
-        assert_eq!(config.override_subagents, Some(true));
-
         // Worker profile has builtins=true, shell=false, memory=false
         let worker = &def.profiles[&ProfileName::from("worker")];
         let config = build_agent_config(BuildAgentConfigParams {
@@ -641,7 +715,6 @@ mod tests {
 
         let req = to_create_session_request(&config, "Hello mob".to_string().into());
         assert_eq!(req.model, "claude-opus-4-6");
-        assert!(!req.host_mode, "host_mode must carry through as false");
         assert_eq!(req.prompt.text_content(), "Hello mob");
         assert!(req.system_prompt.is_some());
 
@@ -651,7 +724,6 @@ mod tests {
         assert_eq!(build.realm_id.as_deref(), Some("mob:test-mob"));
         assert_eq!(build.override_builtins, Some(true));
         assert_eq!(build.override_shell, Some(true));
-        assert_eq!(build.override_subagents, Some(true));
     }
 
     #[tokio::test]
@@ -675,7 +747,6 @@ mod tests {
 
         let req = to_create_session_request(&config, "Start working".to_string().into());
         assert_eq!(req.model, "claude-sonnet-4-5");
-        assert!(!req.host_mode);
         let build = req.build.expect("build options");
         assert_eq!(build.override_shell, Some(false));
     }

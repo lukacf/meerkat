@@ -61,7 +61,7 @@ import type {
 
 ### RunResult
 
-The result returned by `createSession()`, `session.turn()`, and `session.invokeSkill()`. Also available as `stream.result` after an `EventStream` is fully consumed.
+The result returned by `session.turn()`, `session.invokeSkill()`, and `deferred.startTurn()`. Session creation returns runtime-backed `Session` or `DeferredSession` wrappers, and the latest `RunResult` remains available through `session.lastResult` or `stream.result` after an `EventStream` is fully consumed.
 
 ```typescript
 interface RunResult {
@@ -88,6 +88,37 @@ interface RunResult {
 | `structuredOutput` | `unknown \| undefined` | Parsed structured output when `outputSchema` was provided |
 | `schemaWarnings` | `SchemaWarning[] \| undefined` | Warnings emitted when structured output didn't fully match the schema |
 | `skillDiagnostics` | `SkillRuntimeDiagnostics \| undefined` | Runtime diagnostics from the skill subsystem |
+
+### Session
+
+`client.createSession()` returns a runtime-backed `Session` wrapper.
+
+```typescript
+class Session {
+  readonly id: string;
+  readonly ref?: string;
+  readonly text: string;
+  readonly usage: Usage;
+  readonly turns: number;
+  readonly toolCalls: number;
+  readonly structuredOutput?: unknown;
+  readonly lastResult: RunResult;
+}
+```
+
+The `Session` methods are thin conveniences over canonical runtime calls:
+
+- `await session.turn(...)`
+- `session.stream(...)`
+- `await session.history(...)`
+- `await session.archive()`
+- `await session.interrupt()`
+- `await session.invokeSkill(...)`
+- `await session.subscribeEvents()`
+
+### DeferredSession
+
+`client.createDeferredSession()` reserves session identity now and runs the first turn later through `await deferred.startTurn(...)`.
 
 ### Usage
 
@@ -139,19 +170,19 @@ Content blocks are used in multimodal prompts and tool results. Both `createSess
 ```typescript
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; mediaType: string; data: string };
+  | { type: "image"; media_type: string; data: string };
 ```
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
 | `text` | `text: string` | Plain text content |
-| `image` | `mediaType: string`, `data: string` | Base64-encoded image with MIME type (e.g. `"image/png"`) |
+| `image` | `media_type: string`, `data: string` | Base64-encoded image with MIME type (e.g. `"image/png"`) |
 
 ```typescript
 // Multimodal prompt example
 const session = await client.createSession([
   { type: "text", text: "Describe this image" },
-  { type: "image", mediaType: "image/png", data: base64Data },
+  { type: "image", media_type: "image/png", data: base64Data },
 ]);
 ```
 

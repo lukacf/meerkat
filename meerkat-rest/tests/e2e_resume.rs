@@ -54,6 +54,7 @@ async fn inner_test_rest_resume_metadata() {
         100,
         store.clone(),
         None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
     let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
     let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
@@ -91,6 +92,9 @@ async fn inner_test_rest_resume_metadata() {
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]
@@ -152,6 +156,7 @@ async fn inner_test_rest_resume_metadata() {
         100,
         store.clone(),
         None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
     ));
     let config_store_resume: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(MemoryConfigStore::new(config.clone()));
@@ -190,6 +195,9 @@ async fn inner_test_rest_resume_metadata() {
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
         #[cfg(feature = "mob")]
         mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
         #[cfg(feature = "mcp")]

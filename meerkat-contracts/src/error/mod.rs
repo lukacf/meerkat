@@ -26,6 +26,7 @@ pub enum ErrorCode {
     SessionNotFound,
     SessionBusy,
     SessionNotRunning,
+    RequestCancelled,
     ProviderError,
     BudgetExhausted,
     HookDenied,
@@ -45,6 +46,7 @@ impl ErrorCode {
             Self::SessionNotFound => -32001,
             Self::SessionBusy => -32002,
             Self::SessionNotRunning => -32003,
+            Self::RequestCancelled => -32005,
             Self::ProviderError => -32010,
             Self::BudgetExhausted => -32011,
             Self::HookDenied => -32012,
@@ -63,6 +65,7 @@ impl ErrorCode {
         match self {
             Self::SessionNotFound | Self::SkillNotFound => 404,
             Self::SessionBusy | Self::SessionNotRunning | Self::DuplicateInput => 409,
+            Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
             Self::HookDenied => 403,
@@ -79,6 +82,7 @@ impl ErrorCode {
             Self::SessionNotFound => 10,
             Self::SessionBusy => 11,
             Self::SessionNotRunning => 12,
+            Self::RequestCancelled => 14,
             Self::ProviderError => 20,
             Self::BudgetExhausted => 21,
             Self::HookDenied => 22,
@@ -111,6 +115,7 @@ impl ErrorCode {
 #[strum(serialize_all = "snake_case")]
 pub enum ErrorCategory {
     Session,
+    Request,
     Provider,
     Budget,
     Hook,
@@ -129,6 +134,7 @@ impl ErrorCode {
             | Self::SessionBusy
             | Self::SessionNotRunning
             | Self::DuplicateInput => ErrorCategory::Session,
+            Self::RequestCancelled => ErrorCategory::Request,
             Self::ProviderError => ErrorCategory::Provider,
             Self::BudgetExhausted => ErrorCategory::Budget,
             Self::HookDenied => ErrorCategory::Hook,
@@ -218,6 +224,7 @@ mod tests {
             ErrorCode::ProviderError,
             ErrorCode::InternalError,
             ErrorCode::SkillNotFound,
+            ErrorCode::RequestCancelled,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).unwrap_or_default();
@@ -241,6 +248,7 @@ mod tests {
             ErrorCode::SessionNotFound,
             ErrorCode::SessionBusy,
             ErrorCode::SessionNotRunning,
+            ErrorCode::RequestCancelled,
             ErrorCode::ProviderError,
             ErrorCode::BudgetExhausted,
             ErrorCode::HookDenied,

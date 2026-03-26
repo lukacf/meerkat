@@ -8,7 +8,7 @@ UDS, and in-process transports.
 - `Keypair` — Ed25519 identity for signing messages
 - `TrustedPeers` — allowlist of known peer public keys
 - Transport modes: `inproc`, `tcp`, `uds`
-- Host mode — agent stays alive to process incoming messages
+- Keep-alive sessions — runtime-backed sessions stay alive to process incoming messages
 - Comms tools: `send()`, `peers()`, `request()`
 
 ## Security Model

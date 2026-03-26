@@ -4,7 +4,7 @@ description: "Embed Meerkat as a Rust library: the full engine with no subproces
 icon: "code"
 ---
 
-The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API servers are thin wrappers over this same engine. Using it directly means no subprocess, no JSON-RPC overhead, and full control over every component.
+The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API servers are thin wrappers over this same engine. The default embedding path is runtime-backed `SessionService`, which keeps Rust aligned with the same session lifecycle semantics used by every other Meerkat surface while still avoiding subprocess or JSON-RPC overhead.
 
 ## Method overview
 
@@ -12,7 +12,9 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 |------|---------------|---------|
 | **Setup** | `Config::load()` | Load configuration from disk |
 | | `AgentFactory::new(store_root)` | Create a factory for building agents |
-| | `build_ephemeral_service(factory, config, cap)` | Build an in-memory session service |
+| | `open_realm_persistence_in(...)` | Open a realm-backed persistence bundle |
+| | `build_persistent_service(factory, config, cap, persistence)` | Build the runtime-backed persistent session substrate |
+| | `build_ephemeral_service(factory, config, cap)` | Build an in-memory Queue-only substrate |
 | **Sessions** | `service.create_session(req)` | Create a session and run the first turn |
 | | `service.start_turn(id, req)` | Continue an existing session |
 | | `service.read(id)` | Read session state |
@@ -28,7 +30,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.4"
+    meerkat = "0.4.13"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -37,7 +39,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "0.4"
+    meerkat = "0.4.13"
     ```
 
     ```toml Add persistence
@@ -49,7 +51,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     [dependencies]
     meerkat = { version = "0.4", features = [
         "sqlite-store", "session-store", "session-compaction",
-        "memory-store-session", "comms", "mcp", "sub-agents", "skills"
+        "memory-store-session", "comms", "mcp", "skills"
     ] }
     ```
 
@@ -76,7 +78,6 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | `memory-store-session` | Semantic memory indexing | No |
 | `comms` | Ed25519 inter-agent messaging | No |
 | `mcp` | MCP protocol client and tool routing | No |
-| `sub-agents` | Spawn/fork child agents | No |
 | `skills` | Composable knowledge packs | No |
 </Accordion>
 
@@ -84,28 +85,38 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 
 ## Quick start
 
-The recommended entry point is `SessionService` via `build_ephemeral_service`:
+Production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path where `SessionService` is substrate and `RuntimeSessionAdapter` owns keep-alive, Queue/Steer routing, and comms drain. See [`meerkat-rpc`](../rpc/overview.mdx) or [`meerkat-rest`](../rest/overview.mdx) for those entry points.
+
+For the main production embedding path, use the runtime-backed persistent flow:
 
 ```rust
-use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::{CreateSessionRequest, SessionService};
+use meerkat::{
+    AgentFactory, Config, CreateSessionRequest, SessionService,
+    build_persistent_service, open_realm_persistence_in,
+};
 use meerkat_core::service::InitialTurnPolicy;
-use meerkat_store;
+use meerkat_store::RealmBackend;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().await?;
-    let realm = meerkat_store::realm_paths("team-alpha");
-    let factory = AgentFactory::new(realm.root.clone()).runtime_root(realm.root);
-    let service = build_ephemeral_service(factory, config, 64);
+    let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
+    let (_manifest, persistence) = open_realm_persistence_in(
+        &realms_root,
+        "team-alpha",
+        Some(RealmBackend::Sqlite),
+        None,
+    ).await?;
+    let factory = AgentFactory::new(realms_root.clone()).runtime_root(realms_root);
+    let service = build_persistent_service(factory, config, 64, persistence);
 
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-5".into(),
         prompt: "What is the capital of France?".into(),
+        render_metadata: None,
         system_prompt: Some("You are a helpful assistant.".into()),
         max_tokens: Some(1024),
         event_tx: None,
-        host_mode: false,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -118,6 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For **testing or embedded use** where runtime semantics are intentionally not needed, `build_ephemeral_service` remains available as a direct Queue-only substrate.
+
 ---
 
 ## Sessions
@@ -128,18 +141,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::service::{InitialTurnPolicy, HandlingMode};
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-5".into(),
     prompt: "My name is Alice.".into(),
+    render_metadata: None,
     system_prompt: Some("You are a helpful assistant with memory.".into()),
     max_tokens: None,
     event_tx: None,
-    host_mode: false,
     skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
+    build: None,
+    labels: None,
 }).await?;
 
 let session_id = result.session_id;
@@ -147,8 +162,10 @@ let session_id = result.session_id;
 // Turn 2: agent remembers "Alice"
 let result = service.start_turn(&session_id, StartTurnRequest {
     prompt: "What's my name?".into(),
+    system_prompt: None,
+    render_metadata: None,
+    handling_mode: HandlingMode::Queue,
     event_tx: None,
-    host_mode: false,
     skill_references: None,
     flow_tool_overlay: None,
     additional_instructions: None,
@@ -161,6 +178,41 @@ println!("Messages: {}", view.state.message_count);
 // Archive when done
 service.archive(&session_id).await?;
 ```
+
+### Deferred first-turn system prompt override
+
+```rust
+use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat_core::service::{HandlingMode, InitialTurnPolicy};
+
+let created = service.create_session(CreateSessionRequest {
+    model: "claude-sonnet-4-5".into(),
+    prompt: "Let's wait before we run.".into(),
+    render_metadata: None,
+    system_prompt: Some("You are the original prompt.".into()),
+    max_tokens: None,
+    event_tx: None,
+    skill_references: None,
+    initial_turn: InitialTurnPolicy::Defer,
+    build: None,
+    labels: None,
+}).await?;
+
+let result = service.start_turn(&created.session_id, StartTurnRequest {
+    prompt: "Now run with the first-turn override.".into(),
+    system_prompt: Some("You are the deferred first-turn override.".into()),
+    render_metadata: None,
+    handling_mode: HandlingMode::Queue,
+    event_tx: None,
+    skill_references: None,
+    flow_tool_overlay: None,
+    additional_instructions: None,
+}).await?;
+```
+
+`system_prompt` on `StartTurnRequest` is only supported for a deferred session's
+first turn. Once the session has existing history/messages, turn-time
+`system_prompt` overrides are rejected.
 
 ### Error handling
 
@@ -177,7 +229,13 @@ match service.start_turn(&id, req).await {
 
 ---
 
-## Running agents
+## Direct agent APIs
+
+<Warning>
+`Agent::run(...)` and `AgentBuilder` are expert-level escape hatches. Prefer `SessionService` for normal embedding so your Rust code follows the same runtime-backed session semantics as CLI, REST, RPC, MCP, Python, and TypeScript.
+</Warning>
+
+## Running agents directly
 
 ### Basic run
 
@@ -384,5 +442,5 @@ println!("Tool calls: {}", result.tool_calls);
 ## See also
 
 - [Tools and stores](/rust/tools-and-stores) - tool system, session stores, MCP integration
-- [Advanced](/rust/advanced) - AgentBuilder, providers, budget, sub-agents
+- [Advanced](/rust/advanced) - expert-only direct agent construction, providers, budgets, and hooks
 - [API reference](/reference/api-reference) - quick-lookup type index

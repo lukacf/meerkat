@@ -10,10 +10,15 @@
 //! applies via CoreExecutor (which calls SessionService::start_turn()), and
 //! marks inputs as consumed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
+use meerkat_core::BlobStore;
+use meerkat_core::comms_drain_lifecycle_authority::{
+    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, DrainExitReason,
+};
+use meerkat_core::generated::{protocol_comms_drain_abort, protocol_comms_drain_spawn};
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -24,14 +29,17 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_machine::InputStateMachineError;
+use crate::input_lifecycle_authority::InputLifecycleError;
 use crate::input_state::InputState;
 use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
-use crate::traits::{ResetReport, RetireReport, RuntimeDriver, RuntimeDriverError};
+use crate::traits::{
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
+    RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
+};
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
@@ -57,19 +65,45 @@ impl DriverEntry {
         }
     }
 
-    /// Check if the runtime is idle.
-    pub(crate) fn is_idle(&self) -> bool {
+    /// Set the silent comms intents for the underlying driver.
+    pub(crate) fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
         match self {
-            DriverEntry::Ephemeral(d) => d.is_idle(),
-            DriverEntry::Persistent(d) => d.is_idle(),
+            DriverEntry::Ephemeral(d) => d.set_silent_comms_intents(intents),
+            DriverEntry::Persistent(d) => d.set_silent_comms_intents(intents),
         }
     }
 
-    /// Check if the runtime can process queued inputs (Idle or Retired).
+    /// Check if the runtime is idle or attached (quiescent with or without executor).
+    pub(crate) fn is_idle_or_attached(&self) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.is_idle_or_attached(),
+            DriverEntry::Persistent(d) => d.is_idle_or_attached(),
+        }
+    }
+
+    /// Attach an executor (Idle → Attached).
+    pub(crate) fn attach(&mut self) -> Result<(), RuntimeStateTransitionError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.attach(),
+            DriverEntry::Persistent(d) => d.attach(),
+        }
+    }
+
+    /// Detach an executor (Attached → Idle). No-op if not Attached.
+    pub(crate) fn detach(
+        &mut self,
+    ) -> Result<Option<crate::runtime_state::RuntimeState>, RuntimeStateTransitionError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.detach(),
+            DriverEntry::Persistent(d) => d.detach(),
+        }
+    }
+
+    /// Check if the runtime can process queued inputs (Idle, Attached, or Retired).
     pub(crate) fn can_process_queue(&self) -> bool {
         match self {
-            DriverEntry::Ephemeral(d) => d.state_machine_ref().can_process_queue(),
-            DriverEntry::Persistent(d) => d.inner_ref().state_machine_ref().can_process_queue(),
+            DriverEntry::Ephemeral(d) => d.control().can_process_queue(),
+            DriverEntry::Persistent(d) => d.inner_ref().control().can_process_queue(),
         }
     }
 
@@ -97,6 +131,29 @@ impl DriverEntry {
         }
     }
 
+    /// Dequeue a specific input by ID from whichever queue contains it.
+    pub(crate) fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, Input)> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.dequeue_by_id(input_id),
+            DriverEntry::Persistent(d) => d.dequeue_by_id(input_id),
+        }
+    }
+
+    /// Get a reference to the ingress authority.
+    pub(crate) fn ingress(&self) -> &crate::runtime_ingress_authority::RuntimeIngressAuthority {
+        match self {
+            DriverEntry::Ephemeral(d) => d.ingress(),
+            DriverEntry::Persistent(d) => d.inner_ref().ingress(),
+        }
+    }
+
+    pub(crate) fn has_queued_input_outside(&self, excluded: &[InputId]) -> bool {
+        match self {
+            DriverEntry::Ephemeral(d) => d.has_queued_input_outside(excluded),
+            DriverEntry::Persistent(d) => d.has_queued_input_outside(excluded),
+        }
+    }
+
     /// Start a new run (Idle → Running).
     pub(crate) fn start_run(&mut self, run_id: RunId) -> Result<(), RuntimeStateTransitionError> {
         match self {
@@ -118,48 +175,43 @@ impl DriverEntry {
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
             DriverEntry::Ephemeral(d) => d.stage_input(input_id, run_id),
             DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
         }
     }
 
-    /// Apply an input after successful immediate execution.
-    #[allow(dead_code)]
-    pub(crate) fn apply_input(
-        &mut self,
-        input_id: &InputId,
-        run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.apply_input(input_id, run_id),
-            DriverEntry::Persistent(d) => d.apply_input(input_id, run_id),
-        }
-    }
-
-    /// Consume an input after successful immediate execution.
-    #[allow(dead_code)]
-    pub(crate) fn consume_inputs(
+    /// Stage a batch of inputs atomically in a single `StageDrainSnapshot`.
+    pub(crate) fn stage_batch(
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
-            DriverEntry::Ephemeral(d) => d.consume_inputs(input_ids, run_id),
-            DriverEntry::Persistent(d) => d.consume_inputs(input_ids, run_id),
+            DriverEntry::Ephemeral(d) => d.stage_batch(input_ids, run_id),
+            DriverEntry::Persistent(d) => d.stage_batch(input_ids, run_id),
         }
     }
 
-    /// Roll back staged inputs after failed immediate execution.
-    #[allow(dead_code)]
+    /// Roll back staged inputs after a failed staging attempt.
     pub(crate) fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
-    ) -> Result<(), InputStateMachineError> {
+    ) -> Result<(), InputLifecycleError> {
         match self {
             DriverEntry::Ephemeral(d) => d.rollback_staged(input_ids),
             DriverEntry::Persistent(d) => d.rollback_staged(input_ids),
+        }
+    }
+
+    pub(crate) async fn abandon_pending_inputs(
+        &mut self,
+        reason: crate::input_state::InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => Ok(d.abandon_pending_inputs(reason)),
+            DriverEntry::Persistent(d) => d.abandon_pending_inputs(reason).await,
         }
     }
 }
@@ -171,14 +223,119 @@ pub(crate) type SharedCompletionRegistry = Arc<Mutex<crate::completion::Completi
 struct RuntimeSessionEntry {
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
     driver: SharedDriver,
+    /// Shared async-operation lifecycle registry for this runtime/session.
+    ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
     /// Completion waiters (accessed by accept_input_with_completion and RuntimeLoop).
     completions: SharedCompletionRegistry,
-    /// Wake signal sender (if a RuntimeLoop is attached).
-    wake_tx: Option<mpsc::Sender<()>>,
-    /// Run-control sender for cancelling the current run.
-    control_tx: Option<mpsc::Sender<RunControlCommand>>,
-    /// Loop task handle (dropped on unregister, which closes the channel).
-    _loop_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Runtime-loop capabilities. Presence means a loop is attached.
+    attachment: Option<RuntimeLoopAttachment>,
+}
+
+/// Capability bundle for an attached runtime loop.
+///
+/// Keep all loop-related handles together so "attached vs detached" cannot
+/// drift into partially-populated shell state.
+struct RuntimeLoopAttachment {
+    wake_tx: mpsc::Sender<()>,
+    control_tx: mpsc::Sender<RunControlCommand>,
+    _loop_handle: tokio::task::JoinHandle<()>,
+}
+
+impl RuntimeSessionEntry {
+    fn attachment_is_live(&self) -> bool {
+        self.attachment
+            .as_ref()
+            .map(|attachment| !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed())
+            .unwrap_or(false)
+    }
+
+    fn has_attachment(&self) -> bool {
+        self.attachment_is_live()
+    }
+
+    fn attach_runtime_loop(
+        &mut self,
+        wake_tx: mpsc::Sender<()>,
+        control_tx: mpsc::Sender<RunControlCommand>,
+        loop_handle: tokio::task::JoinHandle<()>,
+    ) {
+        self.attachment = Some(RuntimeLoopAttachment {
+            wake_tx,
+            control_tx,
+            _loop_handle: loop_handle,
+        });
+    }
+
+    fn clear_dead_attachment(&mut self) -> bool {
+        if self.attachment.is_some() && !self.attachment_is_live() {
+            self.attachment = None;
+            return true;
+        }
+        false
+    }
+
+    fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
+        if !self.attachment_is_live() {
+            return None;
+        }
+        self.attachment
+            .as_ref()
+            .map(|attachment| attachment.wake_tx.clone())
+    }
+
+    fn control_sender(&self) -> Option<mpsc::Sender<RunControlCommand>> {
+        if !self.attachment_is_live() {
+            return None;
+        }
+        self.attachment
+            .as_ref()
+            .map(|attachment| attachment.control_tx.clone())
+    }
+}
+
+/// Per-session comms drain slot, driven by `CommsDrainLifecycleAuthority`.
+///
+/// ALL state transitions go through the authority -- no manual
+/// `handle.is_finished()` checks in shell code.
+struct CommsDrainSlot {
+    authority: CommsDrainLifecycleAuthority,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CommsDrainSlot {
+    fn new() -> Self {
+        Self {
+            authority: CommsDrainLifecycleAuthority::new(),
+            handle: None,
+        }
+    }
+}
+
+fn apply_runtime_drain_effects(slot: &mut CommsDrainSlot, effects: &[CommsDrainLifecycleEffect]) {
+    for effect in effects {
+        if let CommsDrainLifecycleEffect::AbortDrainTask = effect
+            && let Some(handle) = slot.handle.take()
+        {
+            handle.abort();
+        }
+    }
+}
+
+fn abort_slot(slot: &mut CommsDrainSlot) {
+    match protocol_comms_drain_abort::execute_stop_requested(&mut slot.authority) {
+        Ok(result) => {
+            apply_runtime_drain_effects(slot, &result.effects);
+            // Under TerminalClosure policy, the abort obligation is implicitly
+            // satisfied when the machine reaches Stopped phase. Drop it.
+            let _ = result.obligation;
+        }
+        Err(_) => {
+            // Already stopped or inactive — just clean up the handle
+            if let Some(handle) = slot.handle.take() {
+                handle.abort();
+            }
+        }
+    }
 }
 
 /// Wraps a SessionService to provide v9 runtime capabilities.
@@ -194,6 +351,10 @@ pub struct RuntimeSessionAdapter {
     mode: RuntimeMode,
     /// Optional RuntimeStore for persistent drivers.
     store: Option<Arc<dyn RuntimeStore>>,
+    /// Blob store used by persistent drivers for durable input externalization.
+    blob_store: Option<Arc<dyn BlobStore>>,
+    /// Per-session comms drain lifecycle, driven by machine authority.
+    comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
 }
 
 impl RuntimeSessionAdapter {
@@ -203,35 +364,52 @@ impl RuntimeSessionAdapter {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: None,
+            blob_store: None,
+            comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
 
     /// Create a persistent adapter with a RuntimeStore.
-    pub fn persistent(store: Arc<dyn RuntimeStore>) -> Self {
+    pub fn persistent(store: Arc<dyn RuntimeStore>, blob_store: Arc<dyn BlobStore>) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
+            blob_store: Some(blob_store),
+            comms_drain_slots: RwLock::new(HashMap::new()),
         }
     }
 
     /// Create a driver entry for a session.
     fn make_driver(&self, session_id: &SessionId) -> DriverEntry {
         let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-        match &self.store {
-            Some(store) => {
-                DriverEntry::Persistent(PersistentRuntimeDriver::new(runtime_id, store.clone()))
+        match (&self.store, &self.blob_store) {
+            (Some(store), Some(blob_store)) => DriverEntry::Persistent(
+                PersistentRuntimeDriver::new(runtime_id, store.clone(), blob_store.clone()),
+            ),
+            (Some(_store), None) => {
+                tracing::warn!(
+                    %session_id,
+                    "persistent runtime store present but blob store missing; \
+                     falling back to ephemeral driver"
+                );
+                DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id))
             }
-            None => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id)),
+            _ => DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(runtime_id)),
         }
     }
 
     /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
     /// nothing processes them automatically). Useful for tests and legacy mode.
     pub async fn register_session(&self, session_id: SessionId) {
-        if self.contains_session(&session_id).await {
-            return;
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                existing.clear_dead_attachment();
+                return;
+            }
         }
+
         let mut entry = self.make_driver(&session_id);
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
@@ -239,13 +417,28 @@ impl RuntimeSessionAdapter {
         }
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
+            ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
-            wake_tx: None,
-            control_tx: None,
-            _loop_handle: None,
+            attachment: None,
         };
         let mut sessions = self.sessions.write().await;
-        sessions.entry(session_id).or_insert(session_entry);
+        if let Some(existing) = sessions.get_mut(&session_id) {
+            existing.clear_dead_attachment();
+        } else {
+            sessions.insert(session_id, session_entry);
+        }
+    }
+
+    /// Set the silent comms intents for a session's runtime driver.
+    ///
+    /// Peer requests whose intent matches one of these strings will be accepted
+    /// without triggering an LLM turn (ApplyMode::Ignore, WakeMode::None).
+    pub async fn set_session_silent_intents(&self, session_id: &SessionId, intents: Vec<String>) {
+        let sessions = self.sessions.read().await;
+        if let Some(entry) = sessions.get(session_id) {
+            let mut driver = entry.driver.lock().await;
+            driver.set_silent_comms_intents(intents);
+        }
     }
 
     /// Register a runtime driver for a session WITH a RuntimeLoop backed by a
@@ -271,117 +464,164 @@ impl RuntimeSessionAdapter {
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
-        let mut executor = Some(executor);
-        let upgrade = {
+        let existing = {
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(&session_id) {
-                if entry.wake_tx.is_some() && entry.control_tx.is_some() {
-                    return;
-                }
-
-                let driver = Arc::clone(&entry.driver);
-                let (wake_tx, wake_rx) = mpsc::channel(16);
-                let (control_tx, control_rx) = mpsc::channel(16);
-                let Some(executor) = executor.take() else {
-                    tracing::error!(%session_id, "executor missing while upgrading existing runtime session");
-                    return;
-                };
-                let handle = crate::runtime_loop::spawn_runtime_loop_with_completions(
-                    driver.clone(),
-                    executor,
-                    wake_rx,
-                    control_rx,
-                    Some(entry.completions.clone()),
-                );
-
-                entry.wake_tx = Some(wake_tx.clone());
-                entry.control_tx = Some(control_tx);
-                entry._loop_handle = Some(handle);
-                Some((driver, wake_tx))
-            } else {
-                None
-            }
+            sessions.get_mut(&session_id).map(|entry| {
+                entry.clear_dead_attachment();
+                (
+                    entry.has_attachment(),
+                    entry.driver.clone(),
+                    entry.completions.clone(),
+                )
+            })
         };
 
-        if let Some((driver, wake_tx)) = upgrade {
-            let should_wake = {
-                let driver = driver.lock().await;
-                !driver.as_driver().active_input_ids().is_empty()
-            };
-            if should_wake {
-                let _ = wake_tx.try_send(());
+        let (driver, completions) = if let Some((has_attachment, driver, completions)) = existing {
+            if has_attachment {
+                return;
             }
-            return;
-        }
+            (driver, completions)
+        } else {
+            let mut recovered_entry = self.make_driver(&session_id);
+            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+                tracing::error!(
+                    %session_id,
+                    error = %err,
+                    "failed to recover runtime driver during registration"
+                );
+                return;
+            }
 
-        let mut recovered_entry = self.make_driver(&session_id);
-        if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
-            return;
-        }
-
-        let driver = {
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get(&session_id) {
-                if entry.wake_tx.is_some() && entry.control_tx.is_some() {
+            if let Some(entry) = sessions.get_mut(&session_id) {
+                entry.clear_dead_attachment();
+                if entry.has_attachment() {
                     return;
                 }
-                entry.driver.clone()
+                (entry.driver.clone(), entry.completions.clone())
             } else {
                 let driver = Arc::new(Mutex::new(recovered_entry));
+                let completions =
+                    Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
                 sessions.insert(
                     session_id.clone(),
                     RuntimeSessionEntry {
                         driver: driver.clone(),
-                        completions: Arc::new(Mutex::new(
-                            crate::completion::CompletionRegistry::new(),
-                        )),
-                        wake_tx: None,
-                        control_tx: None,
-                        _loop_handle: None,
+                        ops_lifecycle: Arc::new(
+                            crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new(),
+                        ),
+                        completions: completions.clone(),
+                        attachment: None,
                     },
                 );
-                driver
+                (driver, completions)
             }
+        };
+
+        let should_wake = {
+            let mut driver_guard = driver.lock().await;
+            if let Err(error) = driver_guard.attach() {
+                let repaired = if error.from == RuntimeState::Attached
+                    && error.to == RuntimeState::Attached
+                {
+                    tracing::warn!(
+                        %session_id,
+                        error = %error,
+                        "runtime driver remained attached without a live published loop; detaching and retrying attachment"
+                    );
+                    match driver_guard.detach() {
+                        Ok(_) => match driver_guard.attach() {
+                            Ok(()) => true,
+                            Err(retry_error) => {
+                                tracing::warn!(
+                                    %session_id,
+                                    error = %retry_error,
+                                    "failed to re-attach runtime driver after repairing stale attachment state"
+                                );
+                                false
+                            }
+                        },
+                        Err(detach_error) => {
+                            tracing::warn!(
+                                %session_id,
+                                error = %detach_error,
+                                "failed to detach stale attached runtime driver before retrying attachment"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                if !repaired {
+                    tracing::warn!(
+                        %session_id,
+                        error = %error,
+                        "failed to attach runtime driver before publishing loop attachment"
+                    );
+                    return;
+                }
+            }
+            !driver_guard.as_driver().active_input_ids().is_empty()
         };
 
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
-        let Some(executor) = executor.take() else {
-            tracing::error!(%session_id, "executor missing while registering runtime session");
-            return;
+        let mut pending_loop_handle =
+            Some(crate::runtime_loop::spawn_runtime_loop_with_completions(
+                driver.clone(),
+                executor,
+                wake_rx,
+                control_rx,
+                Some(completions.clone()),
+            ));
+
+        let (published, detach_after_abort) = {
+            let mut sessions = self.sessions.write().await;
+            match sessions.get_mut(&session_id) {
+                None => (false, true),
+                Some(entry) => {
+                    entry.clear_dead_attachment();
+                    if entry.has_attachment() {
+                        (false, false)
+                    } else if !Arc::ptr_eq(&entry.driver, &driver)
+                        || !Arc::ptr_eq(&entry.completions, &completions)
+                    {
+                        tracing::warn!(
+                            %session_id,
+                            "runtime session entry changed while wiring executor; aborting stale loop attachment"
+                        );
+                        (false, true)
+                    } else {
+                        match pending_loop_handle.take() {
+                            Some(loop_handle) => {
+                                entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
+                                (true, false)
+                            }
+                            None => {
+                                tracing::error!(
+                                    %session_id,
+                                    "runtime loop handle missing during attachment publish"
+                                );
+                                (false, true)
+                            }
+                        }
+                    }
+                }
+            }
         };
 
-        // Get or create completions for this session
-        let completions = {
-            let sessions = self.sessions.read().await;
-            sessions.get(&session_id).map(|e| e.completions.clone())
-        };
-
-        let handle = crate::runtime_loop::spawn_runtime_loop_with_completions(
-            driver.clone(),
-            executor,
-            wake_rx,
-            control_rx,
-            completions,
-        );
-
-        let mut sessions = self.sessions.write().await;
-        let Some(entry) = sessions.get_mut(&session_id) else {
-            return;
-        };
-        if entry.wake_tx.is_some() && entry.control_tx.is_some() {
+        if !published {
+            if let Some(loop_handle) = pending_loop_handle.take() {
+                loop_handle.abort();
+            }
+            if detach_after_abort {
+                let mut driver_guard = driver.lock().await;
+                let _ = driver_guard.detach();
+            }
             return;
         }
-        entry.wake_tx = Some(wake_tx.clone());
-        entry.control_tx = Some(control_tx);
-        entry._loop_handle = Some(handle);
-        drop(sessions);
 
-        let should_wake = {
-            let driver = driver.lock().await;
-            !driver.as_driver().active_input_ids().is_empty()
-        };
         if should_wake {
             let _ = wake_tx.try_send(());
         }
@@ -389,9 +629,28 @@ impl RuntimeSessionAdapter {
 
     /// Unregister a session's runtime driver.
     ///
-    /// Drops the wake channel sender, which causes the RuntimeLoop to exit.
+    /// Detaches the executor (Attached → Idle) before removal, then drops
+    /// the wake channel sender, which causes the RuntimeLoop to exit.
     pub async fn unregister_session(&self, session_id: &SessionId) {
-        self.sessions.write().await.remove(session_id);
+        let entry = {
+            let mut sessions = self.sessions.write().await;
+            let mut slots = self.comms_drain_slots.write().await;
+            // Remove + abort drain slot before dropping session binding so
+            // slot keys remain a subset of registered-session keys.
+            if let Some(mut slot) = slots.remove(session_id) {
+                abort_slot(&mut slot);
+            }
+            sessions.remove(session_id)
+        };
+
+        if let Some(entry) = entry {
+            let mut driver = entry.driver.lock().await;
+            let _ = driver.detach(); // Attached → Idle (no-op if not Attached)
+            drop(driver);
+
+            let mut completions = entry.completions.lock().await;
+            completions.resolve_all_terminated("runtime session unregistered");
+        }
     }
 
     /// Check whether a runtime driver is already registered for a session.
@@ -404,16 +663,22 @@ impl RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let Some(control_tx) = &entry.control_tx else {
-            return Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            });
+        let (driver, control_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.control_sender())
+        };
+
+        let Some(control_tx) = control_tx else {
+            let state = {
+                let driver = driver.lock().await;
+                driver.as_driver().runtime_state()
+            };
+            return Err(RuntimeDriverError::NotReady { state });
         };
         control_tx
             .send(RunControlCommand::CancelCurrentRun {
@@ -421,6 +686,59 @@ impl RuntimeSessionAdapter {
             })
             .await
             .map_err(|err| RuntimeDriverError::Internal(format!("failed to send interrupt: {err}")))
+    }
+
+    /// Stop the attached runtime executor through the out-of-band control
+    /// channel. When no loop is attached yet, a stop command is applied directly
+    /// against the driver so queued work is still terminated consistently.
+    pub async fn stop_runtime_executor(
+        &self,
+        session_id: &SessionId,
+        command: RunControlCommand,
+    ) -> Result<(), RuntimeDriverError> {
+        let (driver, completions, control_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.completions.clone(),
+                entry.control_sender(),
+            )
+        };
+
+        if let Some(control_tx) = control_tx
+            && control_tx.send(command.clone()).await.is_ok()
+        {
+            return Ok(());
+        }
+
+        if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
+            let mut driver = driver.lock().await;
+            driver
+                .as_driver_mut()
+                .on_runtime_control(crate::traits::RuntimeControlCommand::Stop)
+                .await?;
+            drop(driver);
+            let mut completions = completions.lock().await;
+            completions.resolve_all_terminated("runtime stopped");
+            drop(completions);
+
+            // No live control sender was available for this stop path. Scrub any
+            // dead attachment capabilities that may still be published.
+            let mut sessions = self.sessions.write().await;
+            if let Some(entry) = sessions.get_mut(session_id) {
+                entry.clear_dead_attachment();
+            }
+            Ok(())
+        } else {
+            Err(RuntimeDriverError::Internal(
+                "failed to send stop: runtime loop is unavailable".into(),
+            ))
+        }
     }
 
     /// Accept an input and execute it synchronously through the runtime driver.
@@ -450,21 +768,52 @@ impl RuntimeSessionAdapter {
 
         let (input_id, run_id, primitive) = {
             let mut driver = driver.lock().await;
-            if !driver.is_idle() || !driver.as_driver().active_input_ids().is_empty() {
+            if !driver.is_idle_or_attached() {
                 return Err(RuntimeDriverError::NotReady {
                     state: driver.as_driver().runtime_state(),
                 });
             }
+
+            let active_input_ids = driver.as_driver().active_input_ids();
+            if !active_input_ids.is_empty() {
+                let duplicate_active_input =
+                    input.header().idempotency_key.as_ref().and_then(|key| {
+                        active_input_ids.iter().find(|active_id| {
+                            driver
+                                .as_driver()
+                                .input_state(active_id)
+                                .and_then(|state| state.idempotency_key.as_ref())
+                                == Some(key)
+                        })
+                    });
+                if let Some(existing_id) = duplicate_active_input {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                        ),
+                    });
+                }
+                return Err(RuntimeDriverError::NotReady {
+                    state: driver.as_driver().runtime_state(),
+                });
+            }
+
             let outcome = driver.as_driver_mut().accept_input(input).await?;
             let input_id = match outcome {
                 AcceptOutcome::Accepted { input_id, .. } => input_id,
-                AcceptOutcome::Deduplicated { existing_id, .. } => existing_id,
+                AcceptOutcome::Deduplicated { existing_id, .. } => {
+                    return Err(RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
+                        ),
+                    });
+                }
                 AcceptOutcome::Rejected { reason } => {
                     return Err(RuntimeDriverError::ValidationFailed { reason });
                 }
             };
 
-            if !driver.is_idle() {
+            if !driver.is_idle_or_attached() {
                 return Err(RuntimeDriverError::NotReady {
                     state: driver.as_driver().runtime_state(),
                 });
@@ -561,6 +910,7 @@ impl RuntimeSessionAdapter {
     ///
     /// Returns `(AcceptOutcome, Option<CompletionHandle>)`:
     /// - `(Accepted, Some(handle))` — await handle for result
+    /// - `(Accepted, None)` — input reached a terminal state during admission
     /// - `(Deduplicated, Some(handle))` — joined in-flight waiter
     /// - `(Deduplicated, None)` — input already terminal; no waiter needed
     /// - `(Rejected, _)` — returned as `Err(ValidationFailed)`
@@ -570,32 +920,48 @@ impl RuntimeSessionAdapter {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+        let (driver, completions, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.completions.clone(),
+                entry.wake_sender(),
+            )
+        };
 
         let (outcome, should_wake, should_process, handle) = {
-            let mut driver = entry.driver.lock().await;
+            let mut driver = driver.lock().await;
             let result = driver.as_driver_mut().accept_input(input).await?;
 
             match &result {
                 AcceptOutcome::Accepted { input_id, .. } => {
-                    let handle = {
-                        let mut completions = entry.completions.lock().await;
-                        completions.register(input_id.clone())
+                    let is_terminal = driver
+                        .as_driver()
+                        .input_state(input_id)
+                        .map(|state| state.current_state().is_terminal())
+                        .unwrap_or(true);
+                    let handle = if is_terminal {
+                        None
+                    } else {
+                        Some({
+                            let mut completions = completions.lock().await;
+                            completions.register(input_id.clone())
+                        })
                     };
                     let wake = driver.take_wake_requested();
                     let process_now = driver.take_process_requested();
-                    (result, wake, process_now, Some(handle))
+                    (result, wake, process_now, handle)
                 }
                 AcceptOutcome::Deduplicated { existing_id, .. } => {
                     // Check if the existing input is already terminal
                     let existing_state = driver.as_driver().input_state(existing_id);
                     let is_terminal = existing_state
-                        .map(|s| s.current_state.is_terminal())
+                        .map(|s| s.current_state().is_terminal())
                         .unwrap_or(true); // missing state = already cleaned up = terminal
 
                     if is_terminal {
@@ -604,7 +970,7 @@ impl RuntimeSessionAdapter {
                     } else {
                         // In-flight — join existing waiters via multi-waiter Vec
                         let handle = {
-                            let mut completions = entry.completions.lock().await;
+                            let mut completions = completions.lock().await;
                             completions.register(existing_id.clone())
                         };
                         (result, false, false, Some(handle))
@@ -619,7 +985,7 @@ impl RuntimeSessionAdapter {
         };
 
         if (should_wake || should_process)
-            && let Some(ref wake_tx) = entry.wake_tx
+            && let Some(ref wake_tx) = wake_tx
         {
             let _ = wake_tx.try_send(());
         }
@@ -627,16 +993,219 @@ impl RuntimeSessionAdapter {
         Ok((outcome, handle))
     }
 
-    /// Get the shared completion registry for a session.
+    /// Accept an input but intentionally do not wake the runtime loop.
     ///
-    /// Used by the runtime loop to resolve waiters on input consumption.
-    #[allow(dead_code)]
-    pub(crate) async fn completion_registry(
+    /// This is reserved for explicitly queued-only surface contracts that
+    /// stage work for the next turn boundary instead of waking an idle session
+    /// immediately.
+    pub async fn accept_input_without_wake(
         &self,
         session_id: &SessionId,
-    ) -> Option<SharedCompletionRegistry> {
+        input: Input,
+    ) -> Result<AcceptOutcome, RuntimeDriverError> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+
+        let outcome = {
+            let mut driver = driver.lock().await;
+            let result = driver.as_driver_mut().accept_input(input).await?;
+            let _ = driver.take_wake_requested();
+            let process_requested = driver.take_process_requested();
+            debug_assert!(
+                !process_requested,
+                "queue-only admission unexpectedly requested immediate processing"
+            );
+            result
+        };
+
+        Ok(outcome)
+    }
+
+    /// Get the shared ops lifecycle registry for a session/runtime instance.
+    pub async fn ops_lifecycle_registry(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>> {
         let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|e| e.completions.clone())
+        sessions
+            .get(session_id)
+            .map(|e| Arc::clone(&e.ops_lifecycle))
+    }
+
+    /// Manage the comms drain lifecycle for a session based on keep_alive intent.
+    ///
+    /// When `keep_alive` is true, spawns a drain if one is not already running.
+    /// When `keep_alive` is false, aborts any running drain for the session.
+    /// Returns `true` if a new drain was spawned.
+    ///
+    /// All state transitions go through `CommsDrainLifecycleAuthority`.
+    pub async fn maybe_spawn_comms_drain(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        keep_alive: bool,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    ) -> bool {
+        if !keep_alive {
+            // Explicit disable: stop any running drain for this session.
+            self.abort_comms_drain(session_id).await;
+            return false;
+        }
+
+        let mode = CommsDrainMode::PersistentHost;
+
+        let comms = match comms_runtime {
+            Some(c) => c,
+            None => return false,
+        };
+
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(session_id) {
+            tracing::warn!(
+                %session_id,
+                "refusing to spawn comms drain for unregistered session"
+            );
+            return false;
+        }
+        // Keep the session read guard while mutating drain slots so unregister
+        // cannot race between registration check and slot publication.
+        let mut slots = self.comms_drain_slots.write().await;
+        let slot = slots
+            .entry(session_id.clone())
+            .or_insert_with(CommsDrainSlot::new);
+
+        let result =
+            match protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::trace!(error = %e, "comms drain authority rejected EnsureRunning");
+                    return false;
+                }
+            };
+
+        // Execute effects from the transition
+        for effect in &result.effects {
+            match effect {
+                CommsDrainLifecycleEffect::SpawnDrainTask { mode: spawn_mode } => {
+                    let idle_timeout = match spawn_mode {
+                        CommsDrainMode::PersistentHost => Some(std::time::Duration::MAX),
+                        CommsDrainMode::Timed => None,
+                    };
+                    let handle = crate::comms_drain::spawn_comms_drain(
+                        Arc::clone(self),
+                        session_id.clone(),
+                        comms.clone(),
+                        idle_timeout,
+                    );
+                    slot.handle = Some(handle);
+                }
+                CommsDrainLifecycleEffect::AbortDrainTask => {
+                    if let Some(handle) = slot.handle.take() {
+                        handle.abort();
+                    }
+                }
+            }
+        }
+
+        let Some(obligation) = result.obligation else {
+            tracing::warn!(
+                %session_id,
+                "comms drain spawn transition emitted no obligation"
+            );
+            return false;
+        };
+
+        // The runtime spawns the drain task synchronously (as a tokio task
+        // above), so we immediately close the spawn obligation.
+        match protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, obligation) {
+            Ok(_effects) => {}
+            Err(e) => {
+                tracing::trace!(error = %e, "comms drain authority rejected TaskSpawned");
+            }
+        }
+        true
+    }
+
+    /// Notify the authority that a drain task has exited with the given reason.
+    ///
+    /// Called from drain task exit paths (or by wrappers that detect task
+    /// completion). The authority decides whether to enter ExitedRespawnable
+    /// (PersistentHost + Failed) or Stopped.
+    pub async fn notify_comms_drain_exited(&self, session_id: &SessionId, reason: DrainExitReason) {
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id) {
+            slot.handle.take(); // clean up finished handle
+            match protocol_comms_drain_spawn::notify_task_exited(&mut slot.authority, reason) {
+                Ok(_effects) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "comms drain authority rejected TaskExited");
+                }
+            }
+        }
+    }
+
+    /// Abort all active comms drain tasks.
+    pub async fn abort_comms_drains(&self) {
+        let mut slots = self.comms_drain_slots.write().await;
+        for (_, slot) in slots.iter_mut() {
+            abort_slot(slot);
+        }
+    }
+
+    /// Abort the comms drain task for a specific session.
+    pub async fn abort_comms_drain(&self, session_id: &SessionId) {
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id) {
+            abort_slot(slot);
+        }
+    }
+
+    /// Wait for a session's comms drain task to finish.
+    ///
+    /// Returns immediately if no drain is active for the session.
+    /// If the task already notified the authority (normal exit), this is a no-op
+    /// for authority state. If the task panicked without notifying, this submits
+    /// `TaskExited { Failed }` as a safety net.
+    pub async fn wait_comms_drain(&self, session_id: &SessionId) {
+        let handle = {
+            let mut slots = self.comms_drain_slots.write().await;
+            slots
+                .get_mut(session_id)
+                .and_then(|slot| slot.handle.take())
+        };
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        // Safety net: if the authority is still Running after the task exited,
+        // the task panicked without notifying. Submit Failed to prevent the
+        // authority from being stuck in Running forever.
+        let mut slots = self.comms_drain_slots.write().await;
+        if let Some(slot) = slots.get_mut(session_id)
+            && slot.authority.phase()
+                == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
+        {
+            tracing::warn!(
+                "comms_drain: task exited without notifying authority (likely panicked), \
+                 submitting Failed safety net"
+            );
+            match protocol_comms_drain_spawn::notify_task_exited(
+                &mut slot.authority,
+                DrainExitReason::Failed,
+            ) {
+                Ok(effects) => {
+                    apply_runtime_drain_effects(slot, &effects);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "comms drain authority rejected safety-net TaskExited");
+                }
+            }
+        }
     }
 }
 
@@ -652,16 +1221,19 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input: Input,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
+        let (driver, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.wake_sender())
+        };
 
         // Accept input and check wake under the driver lock
         let (outcome, should_wake, should_process) = {
-            let mut driver = entry.driver.lock().await;
+            let mut driver = driver.lock().await;
             let result = driver.as_driver_mut().accept_input(input).await?;
             let wake = driver.take_wake_requested();
             let process_now = driver.take_process_requested();
@@ -670,7 +1242,7 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
 
         // Signal the RuntimeLoop if wake or immediate processing was requested.
         if (should_wake || should_process)
-            && let Some(ref wake_tx) = entry.wake_tx
+            && let Some(ref wake_tx) = wake_tx
         {
             // Non-blocking: if the channel is full, the loop is already processing
             let _ = wake_tx.try_send(());
@@ -679,17 +1251,29 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         Ok(outcome)
     }
 
+    async fn accept_input_with_completion(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        RuntimeSessionAdapter::accept_input_with_completion(self, session_id, input).await
+    }
+
     async fn runtime_state(
         &self,
         session_id: &SessionId,
     ) -> Result<RuntimeState, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let driver = entry.driver.lock().await;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+        let driver = driver.lock().await;
         Ok(driver.as_driver().runtime_state())
     }
 
@@ -697,28 +1281,44 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<RetireReport, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let mut driver = entry.driver.lock().await;
-        let report = driver.as_driver_mut().retire().await?;
+        let (driver_handle, completions, wake_tx) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.completions.clone(),
+                entry.wake_sender(),
+            )
+        };
+        let mut driver = driver_handle.lock().await;
+        let mut report = driver.as_driver_mut().retire().await?;
         drop(driver); // Release driver lock before waking
 
         if report.inputs_pending_drain > 0 {
             // Wake the runtime loop so it drains already-queued inputs.
             // Retired state allows processing but rejects new accepts.
-            if let Some(ref wake_tx) = entry.wake_tx {
-                let _ = wake_tx.send(()).await;
+            if let Some(ref wake_tx) = wake_tx
+                && wake_tx.send(()).await.is_ok()
+            {
+                return Ok(report);
             }
-        }
 
-        // If no loop is attached, nothing will drain — resolve all pending waiters
-        if entry.wake_tx.is_none() {
-            let mut completions = entry.completions.lock().await;
+            // No live loop can drain this retired queue. Abandon the queued work
+            // now so later recovery/upgrade paths do not execute inputs whose
+            // waiters were already terminated.
+            let mut driver = driver_handle.lock().await;
+            let abandoned = driver
+                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
+                .await?;
+            drop(driver);
+            let mut completions = completions.lock().await;
             completions.resolve_all_terminated("retired without runtime loop");
+            report.inputs_abandoned += abandoned;
+            report.inputs_pending_drain = 0;
         }
 
         Ok(report)
@@ -728,22 +1328,26 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<ResetReport, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let mut driver = entry.driver.lock().await;
+        let (driver, completions) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.driver.clone(), entry.completions.clone())
+        };
+        let mut driver = driver.lock().await;
         if matches!(driver.as_driver().runtime_state(), RuntimeState::Running) {
             return Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Running,
             });
         }
         let report = driver.as_driver_mut().reset().await?;
+        drop(driver);
 
         // Resolve all pending completion waiters — reset discards all queued work
-        let mut completions = entry.completions.lock().await;
+        let mut completions = completions.lock().await;
         completions.resolve_all_terminated("runtime reset");
 
         Ok(report)
@@ -754,13 +1358,16 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         session_id: &SessionId,
         input_id: &InputId,
     ) -> Result<Option<InputState>, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let driver = entry.driver.lock().await;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+        let driver = driver.lock().await;
         Ok(driver.as_driver().input_state(input_id).cloned())
     }
 
@@ -768,1324 +1375,510 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<InputId>, RuntimeDriverError> {
-        let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        let driver = entry.driver.lock().await;
+        let driver = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.driver.clone()
+        };
+        let driver = driver.lock().await;
         Ok(driver.as_driver().active_input_ids())
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::input::*;
-    use crate::input_state::InputState;
-    use crate::runtime_state::RuntimeState;
-    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta};
-    use chrono::Utc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::Duration;
+// ---------------------------------------------------------------------------
+// RuntimeControlPlane implementation
+// ---------------------------------------------------------------------------
 
-    fn make_prompt(text: &str) -> Input {
-        Input::Prompt(PromptInput {
-            header: InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: InputOrigin::Operator,
-                durability: InputDurability::Durable,
-                visibility: InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
-            },
-            text: text.into(),
-            blocks: None,
-            turn_metadata: None,
+impl RuntimeSessionAdapter {
+    /// Resolve a LogicalRuntimeId to a SessionId for internal lookup.
+    ///
+    /// The adapter uses `LogicalRuntimeId::new(session_id.to_string())` when
+    /// creating drivers, so runtime IDs are UUID strings that parse back to
+    /// SessionId.
+    fn resolve_session_id(
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<SessionId, RuntimeControlPlaneError> {
+        runtime_id
+            .0
+            .parse::<uuid::Uuid>()
+            .map(SessionId)
+            .map_err(|_| RuntimeControlPlaneError::NotFound(runtime_id.clone()))
+    }
+
+    /// Look up the session entry for a runtime ID, returning a control-plane error
+    /// if not found.
+    async fn lookup_entry(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<
+        (
+            SessionId,
+            SharedDriver,
+            SharedCompletionRegistry,
+            Option<mpsc::Sender<()>>,
+        ),
+        RuntimeControlPlaneError,
+    > {
+        let session_id = Self::resolve_session_id(runtime_id)?;
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
+        Ok((
+            session_id,
+            entry.driver.clone(),
+            entry.completions.clone(),
+            entry.wake_sender(),
+        ))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl crate::traits::RuntimeControlPlane for RuntimeSessionAdapter {
+    async fn ingest(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input: Input,
+    ) -> Result<AcceptOutcome, RuntimeControlPlaneError> {
+        let (session_id, driver, _completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let _ = session_id;
+
+        let (outcome, should_wake, should_process) = {
+            let mut drv = driver.lock().await;
+            let result = drv
+                .as_driver_mut()
+                .accept_input(input)
+                .await
+                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            let wake = drv.take_wake_requested();
+            let process_now = drv.take_process_requested();
+            (result, wake, process_now)
+        };
+
+        if (should_wake || should_process)
+            && let Some(ref tx) = wake_tx
+        {
+            let _ = tx.try_send(());
+        }
+
+        Ok(outcome)
+    }
+
+    async fn publish_event(
+        &self,
+        event: crate::runtime_event::RuntimeEventEnvelope,
+    ) -> Result<(), RuntimeControlPlaneError> {
+        let runtime_id = event.runtime_id.clone();
+        let (_session_id, driver, _completions, _wake_tx) = self.lookup_entry(&runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        drv.as_driver_mut()
+            .on_runtime_event(event)
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))
+    }
+
+    async fn retire(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RetireReport, RuntimeControlPlaneError> {
+        let (session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+        let _ = session_id;
+
+        let mut drv = driver.lock().await;
+        let mut report = drv
+            .as_driver_mut()
+            .retire()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        if report.inputs_pending_drain > 0 {
+            if let Some(ref tx) = wake_tx
+                && tx.send(()).await.is_ok()
+            {
+                return Ok(report);
+            }
+
+            // No live loop — abandon queued work
+            let mut drv = driver.lock().await;
+            let abandoned = drv
+                .abandon_pending_inputs(crate::input_state::InputAbandonReason::Retired)
+                .await
+                .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            drop(drv);
+            let mut comp = completions.lock().await;
+            comp.resolve_all_terminated("retired without runtime loop");
+            report.inputs_abandoned += abandoned;
+            report.inputs_pending_drain = 0;
+        }
+
+        Ok(report)
+    }
+
+    async fn recycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RecycleReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let (transferred, active_after_recycle) = {
+            let mut drv = driver.lock().await;
+            let state = drv.as_driver().runtime_state();
+            if matches!(state, RuntimeState::Running) {
+                return Err(RuntimeControlPlaneError::InvalidState { state });
+            }
+            let should_restore_attached = matches!(state, RuntimeState::Attached);
+
+            let transferred = match &mut *drv {
+                DriverEntry::Ephemeral(driver) => driver
+                    .recycle_preserving_work()
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
+                DriverEntry::Persistent(driver) => driver
+                    .recycle_preserving_work()
+                    .await
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?,
+            };
+
+            if should_restore_attached
+                && matches!(drv.as_driver().runtime_state(), RuntimeState::Idle)
+            {
+                drv.attach()
+                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+            }
+
+            let active_after_recycle = drv.as_driver().active_input_ids();
+            (transferred, active_after_recycle)
+        };
+
+        // Reconcile existing waiters: keep waiting only for inputs that remain
+        // active after recycle; terminate stale waiters so they cannot hang.
+        {
+            let pending_after: HashSet<InputId> = active_after_recycle.into_iter().collect();
+            let mut comp = completions.lock().await;
+            comp.resolve_not_pending(
+                |input_id| pending_after.contains(input_id),
+                "recycled input no longer pending",
+            );
+        }
+
+        // Wake the runtime loop to process re-queued inputs
+        if let Some(ref tx) = wake_tx {
+            let _ = tx.try_send(());
+        }
+
+        Ok(RecycleReport {
+            inputs_transferred: transferred,
         })
     }
 
-    struct HarnessRuntimeStore {
-        inner: crate::store::InMemoryRuntimeStore,
-        fail_atomic_apply: bool,
-        /// Fail atomic_lifecycle_commit after N successful calls (None = never fail).
-        fail_atomic_lifecycle_commit_after: Option<usize>,
-        atomic_lifecycle_commit_calls: AtomicUsize,
-        load_input_states_delay: Duration,
-        fail_persist_input_state_after: Option<usize>,
-        persist_input_state_calls: AtomicUsize,
+    async fn reset(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<crate::traits::ResetReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        if matches!(drv.as_driver().runtime_state(), RuntimeState::Running) {
+            return Err(RuntimeControlPlaneError::InvalidState {
+                state: RuntimeState::Running,
+            });
+        }
+        let report = drv
+            .as_driver_mut()
+            .reset()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        let mut comp = completions.lock().await;
+        comp.resolve_all_terminated("runtime reset");
+
+        Ok(report)
     }
 
-    impl HarnessRuntimeStore {
-        fn failing_atomic_apply() -> Self {
+    async fn recover(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RecoveryReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, _completions, wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        let report = drv
+            .as_driver_mut()
+            .recover()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        if let Some(ref tx) = wake_tx {
+            let _ = tx.try_send(());
+        }
+
+        Ok(report)
+    }
+
+    async fn destroy(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<DestroyReport, RuntimeControlPlaneError> {
+        let (_session_id, driver, completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let mut drv = driver.lock().await;
+        let report = drv
+            .as_driver_mut()
+            .destroy()
+            .await
+            .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+        drop(drv);
+
+        let mut comp = completions.lock().await;
+        comp.resolve_all_terminated("runtime destroyed");
+
+        Ok(report)
+    }
+
+    async fn runtime_state(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<RuntimeState, RuntimeControlPlaneError> {
+        let (_session_id, driver, _completions, _wake_tx) = self.lookup_entry(runtime_id).await?;
+
+        let drv = driver.lock().await;
+        Ok(drv.as_driver().runtime_state())
+    }
+
+    async fn load_boundary_receipt(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<Option<meerkat_core::lifecycle::RunBoundaryReceipt>, RuntimeControlPlaneError> {
+        match &self.store {
+            Some(store) => store
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+                .map_err(|e| RuntimeControlPlaneError::StoreError(e.to_string())),
+            None => {
+                // Ephemeral mode — no persisted receipts
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
+    use meerkat_core::comms_drain_lifecycle_authority::{CommsDrainMode, CommsDrainPhase};
+    use tokio::sync::Notify;
+
+    struct FakeDrainRuntime {
+        notify: Arc<Notify>,
+        dismiss: AtomicBool,
+    }
+
+    impl FakeDrainRuntime {
+        fn dismissing() -> Self {
             Self {
-                inner: crate::store::InMemoryRuntimeStore::new(),
-                fail_atomic_apply: true,
-                fail_atomic_lifecycle_commit_after: None,
-                atomic_lifecycle_commit_calls: AtomicUsize::new(0),
-                load_input_states_delay: Duration::ZERO,
-                fail_persist_input_state_after: None,
-                persist_input_state_calls: AtomicUsize::new(0),
+                notify: Arc::new(Notify::new()),
+                dismiss: AtomicBool::new(true),
             }
         }
 
-        fn delayed_recover(delay: Duration) -> Self {
+        fn idle() -> Self {
             Self {
-                inner: crate::store::InMemoryRuntimeStore::new(),
-                fail_atomic_apply: false,
-                fail_atomic_lifecycle_commit_after: None,
-                atomic_lifecycle_commit_calls: AtomicUsize::new(0),
-                load_input_states_delay: delay,
-                fail_persist_input_state_after: None,
-                persist_input_state_calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn failing_terminal_snapshot() -> Self {
-            Self {
-                inner: crate::store::InMemoryRuntimeStore::new(),
-                fail_atomic_apply: false,
-                // Recovery calls atomic_lifecycle_commit once (call 0 succeeds),
-                // the terminal event call (call 1) fails.
-                fail_atomic_lifecycle_commit_after: Some(1),
-                atomic_lifecycle_commit_calls: AtomicUsize::new(0),
-                load_input_states_delay: Duration::ZERO,
-                fail_persist_input_state_after: None,
-                persist_input_state_calls: AtomicUsize::new(0),
+                notify: Arc::new(Notify::new()),
+                dismiss: AtomicBool::new(false),
             }
         }
     }
 
     #[async_trait::async_trait]
-    impl RuntimeStore for HarnessRuntimeStore {
-        async fn commit_session_boundary(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            session_delta: SessionDelta,
-            run_id: RunId,
-            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-            contributing_input_ids: Vec<InputId>,
-            input_updates: Vec<InputState>,
-        ) -> Result<meerkat_core::lifecycle::RunBoundaryReceipt, RuntimeStoreError> {
-            self.inner
-                .commit_session_boundary(
-                    runtime_id,
-                    session_delta,
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    input_updates,
-                )
-                .await
+    impl CommsRuntime for FakeDrainRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
         }
 
-        async fn atomic_apply(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            session_delta: Option<SessionDelta>,
-            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-            input_updates: Vec<InputState>,
-            session_store_key: Option<meerkat_core::types::SessionId>,
-        ) -> Result<(), RuntimeStoreError> {
-            if self.fail_atomic_apply {
-                return Err(RuntimeStoreError::WriteFailed(
-                    "synthetic atomic_apply failure".to_string(),
-                ));
-            }
-            self.inner
-                .atomic_apply(
-                    runtime_id,
-                    session_delta,
-                    receipt,
-                    input_updates,
-                    session_store_key,
-                )
-                .await
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
         }
 
-        async fn load_input_states(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-        ) -> Result<Vec<InputState>, RuntimeStoreError> {
-            if !self.load_input_states_delay.is_zero() {
-                tokio::time::sleep(self.load_input_states_delay).await;
-            }
-            self.inner.load_input_states(runtime_id).await
+        fn dismiss_received(&self) -> bool {
+            self.dismiss.load(Ordering::Acquire)
         }
 
-        async fn load_boundary_receipt(
+        async fn drain_classified_inbox_interactions(
             &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            run_id: &RunId,
-            sequence: u64,
-        ) -> Result<Option<meerkat_core::lifecycle::RunBoundaryReceipt>, RuntimeStoreError>
+        ) -> Result<Vec<meerkat_core::interaction::ClassifiedInboxInteraction>, CommsCapabilityError>
         {
-            self.inner
-                .load_boundary_receipt(runtime_id, run_id, sequence)
-                .await
+            Ok(Vec::new())
         }
+    }
 
-        async fn load_session_snapshot(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
-            self.inner.load_session_snapshot(runtime_id).await
-        }
+    async fn spawn_test_comms_drain(
+        adapter: &Arc<RuntimeSessionAdapter>,
+        session_id: &SessionId,
+        mode: CommsDrainMode,
+        comms_runtime: Arc<dyn CommsRuntime>,
+        idle_timeout: Duration,
+    ) {
+        adapter.register_session(session_id.clone()).await;
+        let mut slots = adapter.comms_drain_slots.write().await;
+        let slot = slots
+            .entry(session_id.clone())
+            .or_insert_with(CommsDrainSlot::new);
+        let result = protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode)
+            .expect("ensure running");
+        let obligation = result
+            .obligation
+            .expect("spawn obligation should be present");
 
-        async fn persist_input_state(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            state: &InputState,
-        ) -> Result<(), RuntimeStoreError> {
-            let call_index = self
-                .persist_input_state_calls
-                .fetch_add(1, Ordering::SeqCst);
-            if self
-                .fail_persist_input_state_after
-                .is_some_and(|fail_after| call_index >= fail_after)
-            {
-                return Err(RuntimeStoreError::WriteFailed(
-                    "synthetic persist_input_state failure".to_string(),
+        apply_runtime_drain_effects(slot, &result.effects);
+        for effect in &result.effects {
+            if let CommsDrainLifecycleEffect::SpawnDrainTask { .. } = effect {
+                slot.handle = Some(crate::comms_drain::spawn_comms_drain(
+                    Arc::clone(adapter),
+                    session_id.clone(),
+                    Arc::clone(&comms_runtime),
+                    Some(idle_timeout),
                 ));
             }
-            self.inner.persist_input_state(runtime_id, state).await
         }
 
-        async fn load_input_state(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            input_id: &InputId,
-        ) -> Result<Option<InputState>, RuntimeStoreError> {
-            self.inner.load_input_state(runtime_id, input_id).await
-        }
-
-        async fn persist_runtime_state(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            state: RuntimeState,
-        ) -> Result<(), RuntimeStoreError> {
-            self.inner.persist_runtime_state(runtime_id, state).await
-        }
-
-        async fn load_runtime_state(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-        ) -> Result<Option<RuntimeState>, RuntimeStoreError> {
-            self.inner.load_runtime_state(runtime_id).await
-        }
-
-        async fn atomic_lifecycle_commit(
-            &self,
-            runtime_id: &crate::identifiers::LogicalRuntimeId,
-            runtime_state: RuntimeState,
-            input_states: &[InputState],
-        ) -> Result<(), RuntimeStoreError> {
-            let call_index = self
-                .atomic_lifecycle_commit_calls
-                .fetch_add(1, Ordering::SeqCst);
-            if self
-                .fail_atomic_lifecycle_commit_after
-                .is_some_and(|fail_after| call_index >= fail_after)
-            {
-                return Err(RuntimeStoreError::WriteFailed(
-                    "synthetic atomic_lifecycle_commit failure".to_string(),
-                ));
-            }
-            self.inner
-                .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
-                .await
-        }
+        let feedback_effects =
+            protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, obligation)
+                .expect("task spawned");
+        apply_runtime_drain_effects(slot, &feedback_effects);
     }
 
-    #[tokio::test]
-    async fn ephemeral_adapter_accept_and_query() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let input = make_prompt("hello");
-        let outcome = adapter.accept_input(&sid, input).await.unwrap();
-        assert!(outcome.is_accepted());
-
-        let state = adapter.runtime_state(&sid).await.unwrap();
-        assert_eq!(state, RuntimeState::Idle);
-
-        let active = adapter.list_active_inputs(&sid).await.unwrap();
-        assert_eq!(active.len(), 1);
+    async fn current_phase(
+        adapter: &Arc<RuntimeSessionAdapter>,
+        session_id: &SessionId,
+    ) -> Option<CommsDrainPhase> {
+        let slots = adapter.comms_drain_slots.read().await;
+        slots.get(session_id).map(|slot| slot.authority.phase())
     }
 
-    #[tokio::test]
-    async fn persistent_adapter_accept() {
-        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
-        let adapter = RuntimeSessionAdapter::persistent(store);
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let input = make_prompt("hello");
-        let outcome = adapter.accept_input(&sid, input).await.unwrap();
-        assert!(outcome.is_accepted());
+    async fn handle_present(adapter: &Arc<RuntimeSessionAdapter>, session_id: &SessionId) -> bool {
+        let slots = adapter.comms_drain_slots.read().await;
+        slots
+            .get(session_id)
+            .and_then(|slot| slot.handle.as_ref())
+            .is_some()
     }
 
-    #[tokio::test]
-    async fn unregistered_session_errors() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        let result = adapter.accept_input(&sid, make_prompt("hi")).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn unregister_removes_driver() {
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-        adapter.unregister_session(&sid).await;
-
-        let result = adapter.runtime_state(&sid).await;
-        assert!(result.is_err());
-    }
-
-    /// Test that accept_input with a RuntimeLoop triggers input processing.
-    #[tokio::test]
-    async fn accept_with_executor_triggers_loop() {
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // Track whether apply was called
-        let apply_called = Arc::new(AtomicBool::new(false));
-        let apply_called_clone = apply_called.clone();
-
-        struct TestExecutor {
-            called: Arc<AtomicBool>,
-        }
-
-        #[async_trait::async_trait]
-        impl CoreExecutor for TestExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                self.called.store(true, Ordering::SeqCst);
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
-            }
-
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        let executor = Box::new(TestExecutor {
-            called: apply_called_clone,
-        });
-        adapter
-            .register_session_with_executor(sid.clone(), executor)
-            .await;
-
-        // Accept input — should trigger the loop
-        let input = make_prompt("hello from executor test");
-        let outcome = adapter.accept_input(&sid, input).await.unwrap();
-        assert!(outcome.is_accepted());
-
-        // Give the loop time to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        assert!(
-            apply_called.load(Ordering::SeqCst),
-            "CoreExecutor::apply() should have been called by the RuntimeLoop"
-        );
-
-        // After processing, the input should be consumed and the runtime back to Idle
-        let state = adapter.runtime_state(&sid).await.unwrap();
-        assert_eq!(state, RuntimeState::Idle);
-
-        // The input should be consumed (terminal)
-        let active = adapter.list_active_inputs(&sid).await.unwrap();
-        assert!(active.is_empty(), "All inputs should be consumed");
-    }
-
-    /// Test that a failed executor re-queues the input (not stranded in APC).
-    #[tokio::test]
-    async fn failed_executor_requeues_input() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::RunPrimitive;
-        struct FailingExecutor;
-
-        #[async_trait::async_trait]
-        impl CoreExecutor for FailingExecutor {
-            async fn apply(
-                &mut self,
-                _run_id: RunId,
-                _primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                Err(CoreExecutorError::ApplyFailed {
-                    reason: "LLM error".into(),
-                })
-            }
-
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter
-            .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
-            .await;
-
-        let input = make_prompt("hello failing");
-        let input_id = input.id().clone();
-        adapter.accept_input(&sid, input).await.unwrap();
-
-        // Give the loop time to process and fail
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Runtime should be back to Idle (not stuck in Running)
-        let state = adapter.runtime_state(&sid).await.unwrap();
-        assert_eq!(state, RuntimeState::Idle);
-
-        // Input should be rolled back to Queued (not stranded in APC)
-        let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-        assert_eq!(
-            is.current_state,
-            InputLifecycleState::Queued,
-            "Failed execution should roll input back to Queued, not strand in AppliedPendingConsumption"
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_executor_continues_processing_backlog() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        struct FailThenSucceedExecutor {
-            calls: Arc<AtomicUsize>,
-        }
-
-        #[async_trait::async_trait]
-        impl CoreExecutor for FailThenSucceedExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                let call = self.calls.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                if call == 0 {
-                    return Err(CoreExecutorError::ApplyFailed {
-                        reason: "first run fails".into(),
-                    });
+    async fn wait_for_phase(
+        adapter: &Arc<RuntimeSessionAdapter>,
+        session_id: &SessionId,
+        expected: CommsDrainPhase,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if current_phase(adapter, session_id).await == Some(expected) {
+                    break;
                 }
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
+        })
+        .await
+        .expect("phase transition");
+    }
 
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
+    #[tokio::test]
+    async fn dismiss_exit_updates_authority_before_join() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::dismissing());
 
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        let calls = Arc::new(AtomicUsize::new(0));
-        adapter
-            .register_session_with_executor(
-                sid.clone(),
-                Box::new(FailThenSucceedExecutor {
-                    calls: Arc::clone(&calls),
-                }),
-            )
-            .await;
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::PersistentHost,
+            comms_runtime,
+            Duration::from_millis(25),
+        )
+        .await;
 
-        let first = make_prompt("first");
-        let first_id = first.id().clone();
-        let second = make_prompt("second");
-        let second_id = second.id().clone();
-        adapter.accept_input(&sid, first).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        adapter.accept_input(&sid, second).await.unwrap();
+        wait_for_phase(&adapter, &session_id, CommsDrainPhase::Stopped).await;
+        assert!(
+            !handle_present(&adapter, &session_id).await,
+            "drain task should clear its slot before wait_comms_drain joins"
+        );
 
-        tokio::time::sleep(Duration::from_millis(220)).await;
-
-        let second_state = adapter
-            .input_state(&sid, &second_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(second_state.current_state, InputLifecycleState::Consumed);
+        adapter.wait_comms_drain(&session_id).await;
         assert_eq!(
-            adapter.runtime_state(&sid).await.unwrap(),
-            RuntimeState::Idle
-        );
-        assert!(
-            calls.load(Ordering::SeqCst) >= 2,
-            "the runtime loop should keep draining queued backlog after a failed run"
-        );
-        let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
-        assert!(
-            matches!(
-                first_state.current_state,
-                InputLifecycleState::Queued | InputLifecycleState::Consumed
-            ),
-            "the initially failed input should have been safely rolled back or retried after the backlog drained"
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Stopped)
         );
     }
 
     #[tokio::test]
-    async fn ensure_session_with_executor_upgrades_registered_session() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn idle_timeout_updates_authority_before_join() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
-        struct SuccessExecutor {
-            called: Arc<AtomicBool>,
-        }
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::Timed,
+            comms_runtime,
+            Duration::from_millis(25),
+        )
+        .await;
 
-        #[async_trait::async_trait]
-        impl CoreExecutor for SuccessExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                self.called.store(true, Ordering::SeqCst);
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
-            }
-
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let apply_called = Arc::new(AtomicBool::new(false));
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let input = make_prompt("upgrade me");
-        let input_id = input.id().clone();
-        let outcome = adapter.accept_input(&sid, input).await.unwrap();
-        assert!(outcome.is_accepted());
-
-        adapter
-            .ensure_session_with_executor(
-                sid.clone(),
-                Box::new(SuccessExecutor {
-                    called: Arc::clone(&apply_called),
-                }),
-            )
-            .await;
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
+        wait_for_phase(&adapter, &session_id, CommsDrainPhase::Stopped).await;
         assert!(
-            apply_called.load(Ordering::SeqCst),
-            "upgrading an already-registered session should attach a live loop"
+            !handle_present(&adapter, &session_id).await,
+            "drain task should clear its slot before wait_comms_drain joins"
         );
 
-        let state = adapter.runtime_state(&sid).await.unwrap();
-        assert_eq!(state, RuntimeState::Idle);
-
-        let active = adapter.list_active_inputs(&sid).await.unwrap();
-        assert!(active.is_empty(), "queued work should drain after upgrade");
-
-        let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
+        adapter.wait_comms_drain(&session_id).await;
         assert_eq!(
-            is.current_state,
-            InputLifecycleState::Consumed,
-            "the pre-upgrade queued input should be processed once the loop is attached"
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Stopped)
         );
     }
 
     #[tokio::test]
-    async fn ensure_session_with_executor_upgrades_racy_registration() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    async fn unregister_session_aborts_and_removes_drain_slot() {
+        let adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
+        let session_id = SessionId::new();
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
 
-        struct SuccessExecutor {
-            called: Arc<AtomicBool>,
-        }
+        adapter.register_session(session_id.clone()).await;
+        spawn_test_comms_drain(
+            &adapter,
+            &session_id,
+            CommsDrainMode::PersistentHost,
+            comms_runtime,
+            Duration::from_secs(60),
+        )
+        .await;
 
-        #[async_trait::async_trait]
-        impl CoreExecutor for SuccessExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                self.called.store(true, Ordering::SeqCst);
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
-            }
-
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let store = Arc::new(HarnessRuntimeStore::delayed_recover(Duration::from_millis(
-            75,
-        )));
-        let adapter = Arc::new(RuntimeSessionAdapter::persistent(store));
-        let sid = SessionId::new();
-        let apply_called = Arc::new(AtomicBool::new(false));
-
-        let ensure_task = {
-            let adapter = Arc::clone(&adapter);
-            let sid = sid.clone();
-            let apply_called = Arc::clone(&apply_called);
-            tokio::spawn(async move {
-                adapter
-                    .ensure_session_with_executor(
-                        sid,
-                        Box::new(SuccessExecutor {
-                            called: apply_called,
-                        }),
-                    )
-                    .await;
-            })
-        };
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        adapter.register_session(sid.clone()).await;
-        ensure_task.await.unwrap();
-
-        let input = make_prompt("race upgrade");
-        let input_id = input.id().clone();
-        adapter.accept_input(&sid, input).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
-        assert!(
-            apply_called.load(Ordering::SeqCst),
-            "the racy registration path should still attach a live runtime loop"
-        );
-        let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Consumed);
-    }
-
-    #[tokio::test]
-    async fn boundary_commit_failure_unwinds_sync_runtime_state() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-        use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-        let adapter = RuntimeSessionAdapter::persistent(store);
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let input = make_prompt("sync boundary failure");
-        let input_id = input.id().clone();
-        let result = adapter
-            .accept_input_and_run(&sid, input, move |run_id, primitive| async move {
-                Ok((
-                    (),
-                    CoreApplyOutput {
-                        receipt: RunBoundaryReceipt {
-                            run_id,
-                            boundary: RunApplyBoundary::RunStart,
-                            contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                            conversation_digest: None,
-                            message_count: 0,
-                            sequence: 0,
-                        },
-                        session_snapshot: None,
-                        run_result: None,
-                    },
-                ))
-            })
-            .await;
-        assert!(result.is_err(), "boundary commit failure should surface");
-        let Err(err) = result else {
-            unreachable!("asserted runtime boundary commit failure above");
-        };
-        assert!(
-            err.to_string().contains("runtime boundary commit failed"),
-            "unexpected error: {err}"
-        );
         assert_eq!(
-            adapter.runtime_state(&sid).await.unwrap(),
-            RuntimeState::Idle
+            current_phase(&adapter, &session_id).await,
+            Some(CommsDrainPhase::Running)
         );
-        let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
-    }
+        assert!(handle_present(&adapter, &session_id).await);
 
-    #[tokio::test]
-    async fn boundary_commit_failure_unwinds_runtime_loop_state() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+        adapter.unregister_session(&session_id).await;
 
-        struct SuccessExecutor {
-            stop_called: Arc<AtomicBool>,
-        }
-
-        #[async_trait::async_trait]
-        impl CoreExecutor for SuccessExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
-            }
-
-            async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                if matches!(cmd, RunControlCommand::StopRuntimeExecutor { .. }) {
-                    self.stop_called.store(true, Ordering::SeqCst);
-                }
-                Ok(())
-            }
-        }
-
-        let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-        let adapter = RuntimeSessionAdapter::persistent(store);
-        let sid = SessionId::new();
-        let stop_called = Arc::new(AtomicBool::new(false));
-        adapter
-            .register_session_with_executor(
-                sid.clone(),
-                Box::new(SuccessExecutor {
-                    stop_called: Arc::clone(&stop_called),
-                }),
-            )
-            .await;
-
-        let input = make_prompt("loop boundary failure");
-        let input_id = input.id().clone();
-        adapter.accept_input(&sid, input).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
+        let slots = adapter.comms_drain_slots.read().await;
         assert!(
-            stop_called.load(Ordering::SeqCst),
-            "boundary commit failures should stop the dead executor path"
+            !slots.contains_key(&session_id),
+            "unregister must remove the comms drain slot entirely"
         );
-        assert_eq!(
-            adapter.runtime_state(&sid).await.unwrap(),
-            RuntimeState::Idle
-        );
-        let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
-    }
-
-    #[tokio::test]
-    async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        struct SuccessExecutor {
-            adapter: Arc<RuntimeSessionAdapter>,
-            session_id: SessionId,
-            stop_called: Arc<AtomicBool>,
-        }
-
-        #[async_trait::async_trait]
-        impl CoreExecutor for SuccessExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
-            }
-
-            async fn control(&mut self, cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                if matches!(cmd, RunControlCommand::StopRuntimeExecutor { .. }) {
-                    self.stop_called.store(true, Ordering::SeqCst);
-                    self.adapter.unregister_session(&self.session_id).await;
-                }
-                Ok(())
-            }
-        }
-
-        let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-        let adapter = Arc::new(RuntimeSessionAdapter::persistent(store));
-        let sid = SessionId::new();
-        let stop_called = Arc::new(AtomicBool::new(false));
-        adapter
-            .register_session_with_executor(
-                sid.clone(),
-                Box::new(SuccessExecutor {
-                    adapter: Arc::clone(&adapter),
-                    session_id: sid.clone(),
-                    stop_called: Arc::clone(&stop_called),
-                }),
-            )
-            .await;
-
-        adapter
-            .accept_input(&sid, make_prompt("terminal snapshot failure"))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
-        assert!(
-            stop_called.load(Ordering::SeqCst),
-            "terminal snapshot persistence failures should stop the runtime loop"
-        );
-        let state_result = adapter.runtime_state(&sid).await;
-        assert!(
-            state_result.is_err(),
-            "stopped runtime sessions should be unregistered"
-        );
-        let Err(err) = state_result else {
-            unreachable!("asserted stopped runtime unregistration above");
-        };
-        assert!(matches!(
-            err,
-            RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
-        use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-        use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-        let adapter = RuntimeSessionAdapter::persistent(store);
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let result = adapter
-            .accept_input_and_run(
-                &sid,
-                make_prompt("sync terminal snapshot failure"),
-                move |run_id, primitive| async move {
-                    Ok((
-                        (),
-                        CoreApplyOutput {
-                            receipt: RunBoundaryReceipt {
-                                run_id,
-                                boundary: RunApplyBoundary::RunStart,
-                                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                                conversation_digest: None,
-                                message_count: 0,
-                                sequence: 0,
-                            },
-                            session_snapshot: None,
-                            run_result: None,
-                        },
-                    ))
-                },
-            )
-            .await;
-        assert!(
-            result.is_err(),
-            "terminal snapshot persistence failure should surface"
-        );
-        let Err(err) = result else {
-            unreachable!("asserted terminal snapshot failure above");
-        };
-
-        assert!(
-            err.to_string().contains("terminal event persist failed")
-                || err
-                    .to_string()
-                    .contains("failed to persist runtime completion snapshot"),
-            "unexpected error: {err}"
-        );
-        let runtime_state = adapter.runtime_state(&sid).await;
-        assert!(
-            matches!(
-                runtime_state,
-                Err(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed
-                })
-            ),
-            "sync path should unregister the broken runtime session"
-        );
-    }
-
-    // ─── Phase A gate tests ───
-
-    /// Gate A2: Dedup on terminal input returns (Deduplicated, None) — no hang.
-    #[tokio::test]
-    async fn dedup_terminal_input_returns_none_handle() {
-        use crate::identifiers::IdempotencyKey;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-        use meerkat_core::types::{RunResult, Usage};
-
-        struct ResultExecutor;
-        #[async_trait::async_trait]
-        impl CoreExecutor for ResultExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: Some(RunResult {
-                        text: "done".into(),
-                        session_id: SessionId::new(),
-                        usage: Usage::default(),
-                        turns: 1,
-                        tool_calls: 0,
-                        structured_output: None,
-                        schema_warnings: None,
-                        skill_diagnostics: None,
-                    }),
-                })
-            }
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter
-            .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
-            .await;
-
-        // Accept first input with idempotency key
-        let key = IdempotencyKey::new("gate-a2");
-        let mut input1 = make_prompt("first");
-        if let Input::Prompt(ref mut p) = input1 {
-            p.header.idempotency_key = Some(key.clone());
-        }
-        let (outcome1, handle1) = adapter
-            .accept_input_with_completion(&sid, input1)
-            .await
-            .unwrap();
-        assert!(outcome1.is_accepted());
-        assert!(handle1.is_some(), "accepted input should have a handle");
-
-        // Wait for it to complete
-        let result = handle1.unwrap().wait().await;
-        assert!(
-            matches!(result, crate::completion::CompletionOutcome::Completed(_)),
-            "first input should complete successfully"
-        );
-
-        // Now send duplicate — input is already terminal (Consumed)
-        let mut input2 = make_prompt("duplicate");
-        if let Input::Prompt(ref mut p) = input2 {
-            p.header.idempotency_key = Some(key);
-        }
-        let (outcome2, handle2) = adapter
-            .accept_input_with_completion(&sid, input2)
-            .await
-            .unwrap();
-        assert!(
-            outcome2.is_deduplicated(),
-            "second input with same key should be deduplicated"
-        );
-        assert!(
-            handle2.is_none(),
-            "dedup on terminal input should return None handle"
-        );
-    }
-
-    /// Gate A3: Dedup on in-flight input returns (Deduplicated, Some(handle))
-    /// that resolves when the original completes.
-    #[tokio::test]
-    async fn dedup_inflight_input_returns_handle_that_resolves() {
-        use crate::identifiers::IdempotencyKey;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-        use meerkat_core::types::{RunResult, Usage};
-
-        struct SlowExecutor;
-        #[async_trait::async_trait]
-        impl CoreExecutor for SlowExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                // Simulate slow execution so duplicate arrives while in-flight
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: Some(RunResult {
-                        text: "slow done".into(),
-                        session_id: SessionId::new(),
-                        usage: Usage::default(),
-                        turns: 1,
-                        tool_calls: 0,
-                        structured_output: None,
-                        schema_warnings: None,
-                        skill_diagnostics: None,
-                    }),
-                })
-            }
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter
-            .register_session_with_executor(sid.clone(), Box::new(SlowExecutor))
-            .await;
-
-        // Accept first input with idempotency key
-        let key = IdempotencyKey::new("gate-a3");
-        let mut input1 = make_prompt("original");
-        if let Input::Prompt(ref mut p) = input1 {
-            p.header.idempotency_key = Some(key.clone());
-        }
-        let (outcome1, handle1) = adapter
-            .accept_input_with_completion(&sid, input1)
-            .await
-            .unwrap();
-        assert!(outcome1.is_accepted());
-
-        // Wait briefly so the input is in-flight (Staged/Running), not yet terminal
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Send duplicate while original is still running
-        let mut input2 = make_prompt("duplicate");
-        if let Input::Prompt(ref mut p) = input2 {
-            p.header.idempotency_key = Some(key);
-        }
-        let (outcome2, handle2) = adapter
-            .accept_input_with_completion(&sid, input2)
-            .await
-            .unwrap();
-        assert!(
-            outcome2.is_deduplicated(),
-            "second input should be deduplicated"
-        );
-        assert!(
-            handle2.is_some(),
-            "dedup on in-flight input should return Some(handle)"
-        );
-
-        // Both handles should resolve when the original completes
-        let result1 = handle1.unwrap().wait().await;
-        let result2 = handle2.unwrap().wait().await;
-        assert!(
-            matches!(result1, crate::completion::CompletionOutcome::Completed(ref r) if r.text == "slow done"),
-            "original handle should complete with result"
-        );
-        assert!(
-            matches!(result2, crate::completion::CompletionOutcome::Completed(ref r) if r.text == "slow done"),
-            "duplicate handle should also complete with same result"
-        );
-    }
-
-    /// Gate A4 (part 1): resolve_without_result sends CompletedWithoutResult
-    /// when executor returns run_result: None.
-    #[tokio::test]
-    async fn completion_handle_resolves_without_result() {
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        struct NoResultExecutor;
-        #[async_trait::async_trait]
-        impl CoreExecutor for NoResultExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None, // No RunResult
-                })
-            }
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter
-            .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
-            .await;
-
-        let input = make_prompt("context append");
-        let (outcome, handle) = adapter
-            .accept_input_with_completion(&sid, input)
-            .await
-            .unwrap();
-        assert!(outcome.is_accepted());
-
-        let result = handle.unwrap().wait().await;
-        assert!(
-            matches!(
-                result,
-                crate::completion::CompletionOutcome::CompletedWithoutResult
-            ),
-            "executor returning run_result: None should resolve as CompletedWithoutResult, got {result:?}"
-        );
-    }
-
-    /// Gate A5: reset_runtime resolves all pending waiters.
-    #[tokio::test]
-    async fn reset_runtime_resolves_pending_waiters() {
-        // Register without executor so inputs queue but don't process
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let input = make_prompt("pending");
-        let (outcome, handle) = adapter
-            .accept_input_with_completion(&sid, input)
-            .await
-            .unwrap();
-        assert!(outcome.is_accepted());
-        assert!(handle.is_some());
-
-        // Reset the runtime
-        adapter.reset_runtime(&sid).await.unwrap();
-
-        // Handle should resolve as terminated
-        let result = handle.unwrap().wait().await;
-        assert!(
-            matches!(
-                result,
-                crate::completion::CompletionOutcome::RuntimeTerminated(_)
-            ),
-            "reset should resolve pending waiters as terminated, got {result:?}"
-        );
-    }
-
-    /// Gate A6: retire_runtime without loop resolves waiters.
-    #[tokio::test]
-    async fn retire_without_loop_resolves_waiters() {
-        // Register without executor (no RuntimeLoop)
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter.register_session(sid.clone()).await;
-
-        let input = make_prompt("will be retired");
-        let (outcome, handle) = adapter
-            .accept_input_with_completion(&sid, input)
-            .await
-            .unwrap();
-        assert!(outcome.is_accepted());
-        assert!(handle.is_some());
-
-        // Retire without loop attached
-        adapter.retire_runtime(&sid).await.unwrap();
-
-        // Handle should resolve as terminated since no loop will drain
-        let result = handle.unwrap().wait().await;
-        assert!(
-            matches!(
-                result,
-                crate::completion::CompletionOutcome::RuntimeTerminated(_)
-            ),
-            "retire without loop should resolve pending waiters as terminated, got {result:?}"
-        );
-    }
-
-    /// Test that BoundaryApplied fires with correct receipt on success.
-    #[tokio::test]
-    async fn successful_execution_fires_boundary_applied() {
-        use crate::input_state::InputLifecycleState;
-        use meerkat_core::lifecycle::RunId;
-        use meerkat_core::lifecycle::core_executor::{
-            CoreApplyOutput, CoreExecutor, CoreExecutorError,
-        };
-        use meerkat_core::lifecycle::run_control::RunControlCommand;
-        use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
-        use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-
-        struct SuccessExecutor;
-
-        #[async_trait::async_trait]
-        impl CoreExecutor for SuccessExecutor {
-            async fn apply(
-                &mut self,
-                run_id: RunId,
-                primitive: RunPrimitive,
-            ) -> Result<CoreApplyOutput, CoreExecutorError> {
-                Ok(CoreApplyOutput {
-                    receipt: RunBoundaryReceipt {
-                        run_id,
-                        boundary: RunApplyBoundary::RunStart,
-                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                        conversation_digest: None,
-                        message_count: 0,
-                        sequence: 0,
-                    },
-                    session_snapshot: None,
-                    run_result: None,
-                })
-            }
-
-            async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
-                Ok(())
-            }
-        }
-
-        let adapter = RuntimeSessionAdapter::ephemeral();
-        let sid = SessionId::new();
-        adapter
-            .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
-            .await;
-
-        let input = make_prompt("hello success");
-        let input_id = input.id().clone();
-        adapter.accept_input(&sid, input).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Input should have gone through full lifecycle: Queued → Staged → Applied → APC → Consumed
-        let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-        assert_eq!(
-            is.current_state,
-            InputLifecycleState::Consumed,
-            "Successful execution should consume the input"
-        );
-
-        // Runtime should be back to Idle
-        let state = adapter.runtime_state(&sid).await.unwrap();
-        assert_eq!(state, RuntimeState::Idle);
     }
 }

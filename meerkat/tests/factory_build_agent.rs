@@ -19,6 +19,7 @@ use meerkat_core::{
     UserMessage,
 };
 use meerkat_store::{SessionFilter, SessionStore, StoreError};
+use serde_json::json;
 
 // ---------------------------------------------------------------------------
 // Mock LLM client (returns a simple text response)
@@ -192,13 +193,12 @@ async fn build_agent_sets_session_metadata() {
     assert!(metadata.tooling.builtins);
     assert!(metadata.tooling.shell);
     assert!(!metadata.tooling.comms);
-    assert!(!metadata.tooling.subagents);
     // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
     assert!(metadata.tooling.active_skills.is_none());
     #[cfg(not(feature = "skills"))]
     assert!(metadata.tooling.active_skills.is_none());
-    assert!(!metadata.host_mode);
+    assert!(!metadata.keep_alive);
     assert!(metadata.comms_name.is_none());
 }
 
@@ -273,19 +273,27 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     let original_metadata = SessionMetadata {
         model: "claude-sonnet-4-5".to_string(),
         max_tokens: 4096,
+        structured_output_retries: 2,
         provider: Provider::Anthropic,
+        provider_params: Some(json!({
+            "reasoning": { "budget_tokens": 2048 }
+        })),
         tooling: SessionTooling {
             builtins: true,
             shell: false,
             comms: false,
-            subagents: false,
             mob: false,
             memory: false,
             active_skills: None,
         },
-        host_mode: false,
-        comms_name: None,
-        peer_meta: None,
+        keep_alive: false,
+        comms_name: Some("persisted-resume-name".to_string()),
+        peer_meta: Some(
+            meerkat_core::PeerMeta::default()
+                .with_label("mob_id", "mob-a")
+                .with_label("role", "worker")
+                .with_label("meerkat_id", "w-1"),
+        ),
         realm_id: None,
         instance_id: None,
         backend: None,
@@ -297,8 +305,10 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         resume_session: Some(session),
-        max_tokens: Some(4096),
-        ..AgentBuildConfig::new("claude-sonnet-4-5")
+        provider: Some(Provider::OpenAI),
+        max_tokens: Some(1024),
+        provider_params: Some(json!({ "temperature": 0.1 })),
+        ..AgentBuildConfig::new("gpt-5.2")
     };
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
@@ -310,6 +320,295 @@ async fn build_agent_with_resume_uses_stored_metadata() {
     assert_eq!(metadata.model, "claude-sonnet-4-5");
     assert_eq!(metadata.max_tokens, 4096);
     assert_eq!(metadata.provider, Provider::Anthropic);
+    assert_eq!(
+        metadata.provider_params,
+        Some(json!({
+            "reasoning": { "budget_tokens": 2048 }
+        }))
+    );
+    assert_eq!(
+        metadata.comms_name.as_deref(),
+        Some("persisted-resume-name"),
+        "resumed durable comms identity should win over current build defaults"
+    );
+    assert_eq!(
+        metadata
+            .peer_meta
+            .as_ref()
+            .and_then(|meta| meta.labels.get("meerkat_id")),
+        Some(&"w-1".to_string()),
+        "resumed durable peer metadata should be preserved"
+    );
+}
+
+#[tokio::test]
+async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: Some(json!({
+                "reasoning": { "budget_tokens": 2048 }
+            })),
+            tooling: SessionTooling {
+                builtins: false,
+                shell: false,
+                comms: false,
+                mob: false,
+                memory: false,
+                active_skills: None,
+            },
+            keep_alive: true,
+            comms_name: Some("persisted-name".to_string()),
+            peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "persisted")),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session),
+        provider: Some(Provider::OpenAI),
+        max_tokens: Some(1024),
+        provider_params: Some(json!({ "temperature": 0.1 })),
+        keep_alive: false,
+        comms_name: Some("explicit-name".to_string()),
+        peer_meta: Some(meerkat_core::PeerMeta::default().with_label("role", "explicit")),
+        ..AgentBuildConfig::new("gpt-5.2")
+    };
+    build_config.resume_override_mask.provider = true;
+    build_config.resume_override_mask.max_tokens = true;
+    build_config.resume_override_mask.provider_params = true;
+    build_config.resume_override_mask.keep_alive = true;
+    build_config.resume_override_mask.comms_name = true;
+    build_config.resume_override_mask.peer_meta = true;
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session should have metadata");
+
+    assert_eq!(metadata.model, "claude-sonnet-4-5");
+    assert_eq!(metadata.provider, Provider::OpenAI);
+    assert_eq!(metadata.max_tokens, 1024);
+    assert_eq!(
+        metadata.provider_params,
+        Some(json!({ "temperature": 0.1 }))
+    );
+    assert!(!metadata.keep_alive);
+    assert_eq!(metadata.comms_name.as_deref(), Some("explicit-name"));
+    assert_eq!(
+        metadata
+            .peer_meta
+            .as_ref()
+            .and_then(|meta| meta.labels.get("role")),
+        Some(&"explicit".to_string())
+    );
+}
+
+#[tokio::test]
+async fn build_agent_with_resume_preserves_persisted_system_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.agent.system_prompt = Some("Current config prompt should not be applied".to_string());
+
+    let mut session = Session::new();
+    session.set_system_prompt("Persisted system prompt".to_string());
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: true,
+                shell: false,
+                comms: false,
+                mob: false,
+                memory: false,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session),
+        ..AgentBuildConfig::new("gpt-5.2")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+
+    match agent.session().messages().first() {
+        Some(meerkat_core::Message::System(system)) => {
+            assert_eq!(
+                system.content, "Persisted system prompt",
+                "resume should preserve the persisted system prompt instead of silently composing the current one"
+            );
+        }
+        other => panic!("expected persisted system prompt, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).runtime_root(temp.path());
+    let mut config = Config::default();
+    config.comms.mode = meerkat_core::CommsRuntimeMode::Inproc;
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: true,
+                shell: false,
+                comms: true,
+                mob: false,
+                memory: false,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: Some("resume-peer".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session.clone()),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let peer_id = agent
+        .comms_arc()
+        .and_then(|runtime| runtime.public_key())
+        .expect("resumed agent should have inproc comms identity");
+    drop(agent);
+
+    let rebuilt = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                resume_session: Some(session),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+    let rebuilt_peer_id = rebuilt
+        .comms_arc()
+        .and_then(|runtime| runtime.public_key())
+        .expect("rebuilt resumed agent should have inproc comms identity");
+
+    assert_eq!(
+        rebuilt_peer_id, peer_id,
+        "same resumed session_id should preserve the inproc comms peer_id"
+    );
+}
+
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_runtime_roots() {
+    let identity_home = tempfile::tempdir().unwrap();
+    let temp_a = tempfile::tempdir().unwrap();
+    let factory_a = temp_factory(&temp_a)
+        .runtime_root(temp_a.path())
+        .user_config_root(identity_home.path());
+    let temp_b = tempfile::tempdir().unwrap();
+    let factory_b = temp_factory(&temp_b)
+        .runtime_root(temp_b.path())
+        .user_config_root(identity_home.path());
+    let mut config = Config::default();
+    config.comms.mode = meerkat_core::CommsRuntimeMode::Inproc;
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 4096,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: true,
+                shell: false,
+                comms: true,
+                mob: false,
+                memory: false,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: Some("resume-peer".to_string()),
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let build = |session: Session| AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        resume_session: Some(session),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let agent_a = factory_a
+        .build_agent(build(session.clone()), &config)
+        .await
+        .unwrap();
+    let peer_id_a = agent_a
+        .comms_arc()
+        .and_then(|runtime| runtime.public_key())
+        .expect("first resumed agent should have inproc comms identity");
+    drop(agent_a);
+
+    let agent_b = factory_b
+        .build_agent(build(session), &config)
+        .await
+        .unwrap();
+    let peer_id_b = agent_b
+        .comms_arc()
+        .and_then(|runtime| runtime.public_key())
+        .expect("second resumed agent should have inproc comms identity");
+
+    assert_eq!(
+        peer_id_b, peer_id_a,
+        "same resumed session_id should preserve peer_id even when runtime roots differ"
+    );
 }
 
 /// 8. `build_agent` applies system_prompt override.
@@ -342,17 +641,17 @@ async fn build_agent_applies_system_prompt_override() {
     }
 }
 
-/// 9. `build_agent` with host_mode but no comms_name fails.
+/// 9. `build_agent` with keep_alive but no comms_name fails.
 #[cfg(feature = "comms")]
 #[tokio::test]
-async fn build_agent_host_mode_without_comms_name_fails() {
+async fn build_agent_keep_alive_without_comms_name_fails() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
 
     let build_config = AgentBuildConfig {
         llm_client_override: Some(Arc::new(MockLlmClient)),
-        host_mode: true,
+        keep_alive: true,
         comms_name: None,
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
@@ -360,11 +659,11 @@ async fn build_agent_host_mode_without_comms_name_fails() {
     let result = factory.build_agent(build_config, &config).await;
     let err = match result {
         Err(e) => e,
-        Ok(_) => panic!("Expected HostModeRequiresCommsName error"),
+        Ok(_) => panic!("Expected KeepAliveRequiresCommsName error"),
     };
     assert!(
-        matches!(err, BuildAgentError::HostModeRequiresCommsName),
-        "Should be HostModeRequiresCommsName, got: {err:?}"
+        matches!(err, BuildAgentError::KeepAliveRequiresCommsName),
+        "Should be KeepAliveRequiresCommsName, got: {err:?}"
     );
 }
 
@@ -567,7 +866,8 @@ async fn test_mixed_validity_skills_quarantine_preserves_valid_preload() {
 
 #[cfg(feature = "skills")]
 #[tokio::test]
-async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surface() {
+async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surface_cannot_load_them()
+{
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
@@ -580,19 +880,20 @@ async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surf
         .set_session_metadata(SessionMetadata {
             model: "claude-sonnet-4-5".into(),
             max_tokens: 2048,
+            structured_output_retries: 2,
             provider: Provider::Anthropic,
+            provider_params: None,
             tooling: SessionTooling {
                 builtins: false,
                 shell: false,
                 comms: false,
-                subagents: false,
                 mob: false,
                 memory: false,
                 active_skills: Some(vec![meerkat_core::skills::SkillId(
-                    "mob-communication".into(),
+                    "nonexistent-legacy-skill".into(),
                 )]),
             },
-            host_mode: false,
+            keep_alive: false,
             comms_name: None,
             peer_meta: None,
             realm_id: None,
@@ -616,13 +917,12 @@ async fn test_resume_filters_persisted_active_skills_unavailable_on_current_surf
         .session()
         .session_metadata()
         .expect("session should have metadata");
-    assert!(
-        metadata
-            .tooling
-            .active_skills
-            .as_ref()
-            .is_none_or(Vec::is_empty),
-        "resume should not keep persisted active skills that are unavailable on the current surface"
+    assert_eq!(
+        metadata.tooling.active_skills,
+        Some(vec![meerkat_core::skills::SkillId(
+            "nonexistent-legacy-skill".into(),
+        )]),
+        "resume may drop unavailable skills from the live surface projection, but it must not rewrite durable session behavior truth"
     );
 }
 

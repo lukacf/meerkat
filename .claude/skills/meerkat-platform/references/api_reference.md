@@ -1,5 +1,9 @@
 # Meerkat Platform API Reference
 
+For upgrade and terminology changes, also load:
+
+- `references/migration_0_5.md`
+
 ## Realm scope (all surfaces)
 
 Use explicit realm to control sharing/isolation.
@@ -67,6 +71,11 @@ rkat capabilities
 rkat-rpc
 ```
 
+CLI keep-alive terminology:
+
+- use `--keep-alive`
+- do not use `--host`
+
 Flow command details:
 
 ```bash
@@ -128,6 +137,7 @@ Core endpoints:
 - `POST /sessions/{id}/messages` — continue an existing session
 - `GET /sessions/{id}/events` — SSE stream for agent events
 - `POST /sessions/{id}/event` — (legacy) push external event
+- `POST /requests/{request_id}/cancel` — cancel uncommitted in-flight work when `X-Meerkat-Request-Id` is supplied
 - `GET /skills` — list skills with provenance
 - `GET /skills/{id}` — inspect a skill's full body
 - `GET /health`
@@ -317,7 +327,7 @@ Mob methods:
 - `Mob.id` (property) / `Mob.status()` / `Mob.lifecycle(action)`
 - `Mob.spawn(...)` / `Mob.retire(meerkat_id)` / `Mob.respawn(meerkat_id)`
 - `Mob.wire(a, b)` / `Mob.unwire(a, b)`
-- `Mob.members()` / `Mob.send_message(meerkat_id, message)`
+- `Mob.members()` / `Mob.member(meerkat_id).send(content, handling_mode=...)`
 - `Mob.flows()` / `Mob.run_flow(flow_id, params)` / `Mob.flow_status(run_id)` / `Mob.cancel_flow(run_id)`
 - `Mob.subscribe_member_events(meerkat_id)` → `EventSubscription`
 - `Mob.subscribe_events()` → `EventSubscription`
@@ -398,7 +408,7 @@ Type/parsing notes:
 ## Rust SDK
 
 **AgentFactory vs AgentBuilder**: `AgentFactory` (facade crate) is the opinionated composition layer that
-wires all tool categories (builtins, shell, sub-agents, comms, memory, mob, skills) into the dispatcher.
+wires all tool categories (builtins, shell, comms, memory, mob, skills) into the dispatcher.
 `AgentBuilder` (meerkat-core) is lower-level — it takes pre-built components and has no tool opinions.
 All surfaces go through `AgentFactory`; direct `AgentBuilder` usage means manual dispatcher composition.
 
@@ -415,7 +425,6 @@ let factory = AgentFactory::new(realm.root.clone())
     .runtime_root(realm.root)
     .builtins(true)
     .shell(true)
-    .subagents(true)
     .mob(true);  // opt-in mob orchestration tools
 
 let build = AgentBuildConfig::new("claude-sonnet-4-5");
@@ -439,13 +448,13 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await {
 
 ---
 
-## Comms, hooks, skills, sub-agents
+## Comms, hooks, skills, multi-agent
 
 - Inproc comms is namespace-scoped; realm namespace isolates peer discovery/sends.
-- **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` suppresses LLM turns for informational intents. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`.
+- **Silent comms intents**: `AgentBuildConfig.silent_comms_intents` suppresses LLM turns for informational intents. Mob meerkats default to `["mob.peer_added", "mob.peer_retired"]`. Runtime policy enforces this canonically via silent intent override.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
 - **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills; `load_from_source()` bypasses first-wins.
-- Sub-agents with comms enabled inherit parent realm namespace for inproc communication.
+- Multi-agent orchestration uses mobs exclusively. `MemberLaunchMode::Fork` provides history branching via `Session::fork()`. `spawn_helper()`/`fork_helper()` provide one-call convenience.
 
 ---
 

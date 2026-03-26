@@ -1,144 +1,149 @@
 ---- MODULE model ----
-EXTENDS Naturals, TLC
+EXTENDS TLC, Naturals, Sequences, FiniteSets
 
-\* Abstract, architecture-level model of MobOrchestratorMachine.
+\* Generated semantic machine model for MobOrchestratorMachine.
 
-CONSTANTS
-    MaxPendingSpawns,
-    MaxActiveFlows,
-    MaxTopologyRevisions
+None == [tag |-> "none", value |-> "none"]
+Some(v) == [tag |-> "some", value |-> v]
 
-ASSUME MaxPendingSpawns \in Nat
-ASSUME MaxActiveFlows \in Nat
-ASSUME MaxTopologyRevisions \in Nat
+MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
+MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
+StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
+SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
+RECURSIVE SeqRemove(_, _)
+SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THEN SeqRemove(Tail(seq), value) ELSE <<Head(seq)>> \o SeqRemove(Tail(seq), value)
+RECURSIVE SeqRemoveAll(_, _)
+SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-States == {"creating", "running", "stopped", "completed", "destroyed"}
+VARIABLES phase, model_step_count, coordinator_bound, pending_spawn_count, active_flow_count, topology_revision, supervisor_active
 
-VARIABLES
-    orchestratorState,
-    coordinatorBound,
-    pendingSpawnCount,
-    activeFlowCount,
-    topologyRevision,
-    supervisorActive
-
-vars ==
-    << orchestratorState, coordinatorBound, pendingSpawnCount,
-       activeFlowCount, topologyRevision, supervisorActive >>
+vars == << phase, model_step_count, coordinator_bound, pending_spawn_count, active_flow_count, topology_revision, supervisor_active >>
 
 Init ==
-    /\ orchestratorState = "creating"
-    /\ coordinatorBound = FALSE
-    /\ pendingSpawnCount = 0
-    /\ activeFlowCount = 0
-    /\ topologyRevision = 0
-    /\ supervisorActive = FALSE
+    /\ phase = "Creating"
+    /\ model_step_count = 0
+    /\ coordinator_bound = FALSE
+    /\ pending_spawn_count = 0
+    /\ active_flow_count = 0
+    /\ topology_revision = 0
+    /\ supervisor_active = FALSE
+
+TerminalStutter ==
+    /\ phase = "Destroyed"
+    /\ UNCHANGED vars
 
 InitializeOrchestrator ==
-    /\ orchestratorState = "creating"
-    /\ orchestratorState' = "running"
-    /\ coordinatorBound' = TRUE
-    /\ supervisorActive' = TRUE
-    /\ UNCHANGED << pendingSpawnCount, activeFlowCount, topologyRevision >>
+    /\ phase = "Creating"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ supervisor_active' = TRUE
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, topology_revision >>
+
 
 BindCoordinator ==
-    /\ orchestratorState \in {"creating", "running", "stopped", "completed"}
-    /\ ~coordinatorBound
-    /\ coordinatorBound' = TRUE
-    /\ supervisorActive' =
-        IF orchestratorState = "running" THEN TRUE ELSE supervisorActive
-    /\ UNCHANGED << orchestratorState, pendingSpawnCount,
-                   activeFlowCount, topologyRevision >>
+    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ (coordinator_bound = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = TRUE
+    /\ topology_revision' = (topology_revision) + 1
+    /\ UNCHANGED << pending_spawn_count, active_flow_count, supervisor_active >>
+
 
 UnbindCoordinator ==
-    /\ orchestratorState \in {"running", "stopped", "completed"}
-    /\ coordinatorBound
-    /\ coordinatorBound' = FALSE
-    /\ pendingSpawnCount' = 0
-    /\ activeFlowCount' = 0
-    /\ supervisorActive' = FALSE
-    /\ UNCHANGED << orchestratorState, topologyRevision >>
+    /\ phase = "Running" \/ phase = "Stopped" \/ phase = "Completed"
+    /\ (coordinator_bound = TRUE)
+    /\ (pending_spawn_count = 0)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = FALSE
+    /\ topology_revision' = (topology_revision) + 1
+    /\ UNCHANGED << pending_spawn_count, active_flow_count, supervisor_active >>
+
 
 StageSpawn ==
-    /\ orchestratorState = "running"
-    /\ coordinatorBound
-    /\ pendingSpawnCount < MaxPendingSpawns
-    /\ pendingSpawnCount' = pendingSpawnCount + 1
-    /\ UNCHANGED << orchestratorState, coordinatorBound,
-                   activeFlowCount, topologyRevision, supervisorActive >>
+    /\ phase = "Running"
+    /\ (coordinator_bound = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_spawn_count' = (pending_spawn_count) + 1
+    /\ topology_revision' = (topology_revision) + 1
+    /\ UNCHANGED << coordinator_bound, active_flow_count, supervisor_active >>
+
 
 CompleteSpawn ==
-    /\ pendingSpawnCount > 0
-    /\ pendingSpawnCount' = pendingSpawnCount - 1
-    /\ UNCHANGED << orchestratorState, coordinatorBound,
-                   activeFlowCount, topologyRevision, supervisorActive >>
+    /\ phase = "Running" \/ phase = "Stopped"
+    /\ (pending_spawn_count > 0)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ pending_spawn_count' = (pending_spawn_count) - 1
+    /\ topology_revision' = (topology_revision) + 1
+    /\ UNCHANGED << coordinator_bound, active_flow_count, supervisor_active >>
 
-StartFlowOwnership ==
-    /\ orchestratorState = "running"
-    /\ coordinatorBound
-    /\ activeFlowCount < MaxActiveFlows
-    /\ activeFlowCount' = activeFlowCount + 1
-    /\ UNCHANGED << orchestratorState, coordinatorBound,
-                   pendingSpawnCount, topologyRevision, supervisorActive >>
 
-FinishFlowOwnership ==
-    /\ activeFlowCount > 0
-    /\ activeFlowCount' = activeFlowCount - 1
-    /\ UNCHANGED << orchestratorState, coordinatorBound,
-                   pendingSpawnCount, topologyRevision, supervisorActive >>
+StartFlow ==
+    /\ phase = "Running" \/ phase = "Completed"
+    /\ (coordinator_bound = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_flow_count' = (active_flow_count) + 1
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, topology_revision, supervisor_active >>
 
-AdvanceTopology ==
-    /\ orchestratorState \in {"running", "stopped", "completed"}
-    /\ topologyRevision < MaxTopologyRevisions
-    /\ topologyRevision' = topologyRevision + 1
-    /\ UNCHANGED << orchestratorState, coordinatorBound,
-                   pendingSpawnCount, activeFlowCount, supervisorActive >>
 
-StopOrchestration ==
-    /\ orchestratorState = "running"
-    /\ orchestratorState' = "stopped"
-    /\ pendingSpawnCount' = 0
-    /\ activeFlowCount' = 0
-    /\ supervisorActive' = FALSE
-    /\ UNCHANGED << coordinatorBound, topologyRevision >>
+CompleteFlow ==
+    /\ phase = "Running" \/ phase = "Completed"
+    /\ (active_flow_count > 0)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_flow_count' = (active_flow_count) - 1
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, topology_revision, supervisor_active >>
 
-ResumeOrchestration ==
-    /\ orchestratorState = "stopped"
-    /\ coordinatorBound
-    /\ orchestratorState' = "running"
-    /\ supervisorActive' = TRUE
-    /\ UNCHANGED << coordinatorBound, pendingSpawnCount,
-                   activeFlowCount, topologyRevision >>
 
-CompleteOrchestration ==
-    /\ orchestratorState = "running"
-    /\ pendingSpawnCount = 0
-    /\ activeFlowCount = 0
-    /\ orchestratorState' = "completed"
-    /\ supervisorActive' = FALSE
-    /\ UNCHANGED << coordinatorBound, pendingSpawnCount,
-                   activeFlowCount, topologyRevision >>
+StopOrchestrator ==
+    /\ phase = "Running" \/ phase = "Completed"
+    /\ (active_flow_count = 0)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ supervisor_active' = FALSE
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, topology_revision >>
 
-DestroyOrchestration ==
-    /\ orchestratorState \in {"creating", "running", "stopped", "completed"}
-    /\ orchestratorState' = "destroyed"
-    /\ coordinatorBound' = FALSE
-    /\ pendingSpawnCount' = 0
-    /\ activeFlowCount' = 0
-    /\ supervisorActive' = FALSE
-    /\ UNCHANGED topologyRevision
 
-ResetOrchestration ==
-    /\ orchestratorState \in {"running", "stopped", "completed"}
-    /\ orchestratorState' = "running"
-    /\ pendingSpawnCount' = 0
-    /\ activeFlowCount' = 0
-    /\ supervisorActive' = coordinatorBound
-    /\ UNCHANGED << coordinatorBound, topologyRevision >>
+ResumeOrchestrator ==
+    /\ phase = "Stopped"
+    /\ (coordinator_bound = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ supervisor_active' = TRUE
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, topology_revision >>
 
-DestroyedStutter ==
-    /\ orchestratorState = "destroyed"
-    /\ UNCHANGED vars
+
+MarkCompleted ==
+    /\ phase = "Running" \/ phase = "Stopped"
+    /\ (active_flow_count = 0)
+    /\ (pending_spawn_count = 0)
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, topology_revision, supervisor_active >>
+
+
+DestroyOrchestrator ==
+    /\ phase = "Stopped" \/ phase = "Completed"
+    /\ (pending_spawn_count = 0)
+    /\ (active_flow_count = 0)
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = FALSE
+    /\ supervisor_active' = FALSE
+    /\ UNCHANGED << pending_spawn_count, active_flow_count, topology_revision >>
+
+
+ForceCancelMember ==
+    /\ phase = "Running"
+    /\ (coordinator_bound = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << coordinator_bound, pending_spawn_count, active_flow_count, topology_revision, supervisor_active >>
+
 
 Next ==
     \/ InitializeOrchestrator
@@ -146,50 +151,22 @@ Next ==
     \/ UnbindCoordinator
     \/ StageSpawn
     \/ CompleteSpawn
-    \/ StartFlowOwnership
-    \/ FinishFlowOwnership
-    \/ AdvanceTopology
-    \/ StopOrchestration
-    \/ ResumeOrchestration
-    \/ CompleteOrchestration
-    \/ DestroyOrchestration
-    \/ ResetOrchestration
-    \/ DestroyedStutter
+    \/ StartFlow
+    \/ CompleteFlow
+    \/ StopOrchestrator
+    \/ ResumeOrchestrator
+    \/ MarkCompleted
+    \/ DestroyOrchestrator
+    \/ ForceCancelMember
+    \/ TerminalStutter
 
-DestroyedImpliesDrained ==
-    orchestratorState = "destroyed" =>
-        /\ ~coordinatorBound
-        /\ pendingSpawnCount = 0
-        /\ activeFlowCount = 0
-        /\ ~supervisorActive
+destroyed_is_terminal == ((phase # "Destroyed") \/ (supervisor_active # TRUE))
 
-ActiveFlowsRequireBoundRunningCoordinator ==
-    activeFlowCount > 0 =>
-        /\ orchestratorState = "running"
-        /\ coordinatorBound
-
-PendingSpawnsRequireBoundRunningCoordinator ==
-    pendingSpawnCount > 0 =>
-        /\ orchestratorState = "running"
-        /\ coordinatorBound
-
-SupervisorRequiresBoundRunningCoordinator ==
-    supervisorActive =>
-        /\ orchestratorState = "running"
-        /\ coordinatorBound
-
-CompletedIsQuiescent ==
-    orchestratorState = "completed" =>
-        /\ pendingSpawnCount = 0
-        /\ activeFlowCount = 0
-        /\ ~supervisorActive
+CiStateConstraint == /\ model_step_count <= 6
+DeepStateConstraint == /\ model_step_count <= 8
 
 Spec == Init /\ [][Next]_vars
 
-THEOREM Spec => []DestroyedImpliesDrained
-THEOREM Spec => []ActiveFlowsRequireBoundRunningCoordinator
-THEOREM Spec => []PendingSpawnsRequireBoundRunningCoordinator
-THEOREM Spec => []SupervisorRequiresBoundRunningCoordinator
-THEOREM Spec => []CompletedIsQuiescent
+THEOREM Spec => []destroyed_is_terminal
 
 =============================================================================

@@ -5,7 +5,7 @@ export class EventSubscription<T> {
   private readonly closeSource: () => void;
   private readonly parseEvents: (raw: unknown) => T[];
 
-  /** @internal — use Session.subscribe(), Mob.subscribe(), or Mob.subscribeAll(). */
+  /** @internal — use Session.subscribe(), Member.subscribe(), Mob.subscribeMemberEvents(), or Mob.subscribeEvents(). */
   constructor(
     pollSource: () => string,
     parseEvents: (raw: unknown) => T[],

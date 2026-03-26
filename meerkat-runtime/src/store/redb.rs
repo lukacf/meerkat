@@ -153,8 +153,9 @@ mod inner {
                 };
                 let mut input_updates = input_updates;
                 for state in &mut input_updates {
-                    state.last_run_id = Some(receipt.run_id.clone());
-                    state.last_boundary_sequence = Some(receipt.sequence);
+                    state
+                        .authority_mut()
+                        .stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
                 }
                 let input_jsons: Vec<(Vec<u8>, Vec<u8>)> = input_updates
                     .iter()

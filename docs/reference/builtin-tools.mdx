@@ -16,11 +16,6 @@ icon: "wrench"
 | `shell_jobs` | Shell | No | -- | List background shell jobs |
 | `shell_job_status` | Shell | No | -- | Check background job status |
 | `shell_job_cancel` | Shell | No | -- | Cancel a background job |
-| `agent_spawn` | Sub-Agent | No | `sub-agents` | Spawn a new sub-agent |
-| `agent_fork` | Sub-Agent | No | `sub-agents` | Fork with continued context |
-| `agent_status` | Sub-Agent | No | `sub-agents` | Get sub-agent status |
-| `agent_cancel` | Sub-Agent | No | `sub-agents` | Cancel a sub-agent |
-| `agent_list` | Sub-Agent | No | `sub-agents` | List all sub-agents |
 | `memory_search` | Memory | N/A | `memory-store-session` | Search semantic memory |
 | `wait` | Utility | Yes | -- | Pause execution |
 | `datetime` | Utility | Yes | -- | Get current date/time |
@@ -38,7 +33,6 @@ icon: "wrench"
 |------|---------------|---------|----------|
 | `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`wait`, `datetime`, `apply_patch`) |
 | `enable_shell` | `.shell(bool)` | `false` | All shell tools (`shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`) |
-| `enable_subagents` | `.subagents(bool)` | `false` | All sub-agent tools (requires `sub-agents` feature) |
 | `enable_memory` | `.memory(bool)` | `false` | `memory_search` (requires `memory-store-session` feature) |
 | `enable_comms` | `.comms(bool)` | `false` | All comms tools (requires `comms` feature) |
 | `enable_mob` | `.mob(bool)` | `false` | Mob orchestration tools (`mob_*`, `meerkat_*`) |
@@ -55,7 +49,6 @@ Each `AgentBuildConfig` can override factory-level flags for a single agent buil
 |---------------|------|--------|
 | `override_builtins` | `Option<bool>` | Takes precedence over `enable_builtins` when `Some` |
 | `override_shell` | `Option<bool>` | Takes precedence over `enable_shell` when `Some` |
-| `override_subagents` | `Option<bool>` | Takes precedence over `enable_subagents` when `Some` |
 | `override_memory` | `Option<bool>` | Takes precedence over `enable_memory` when `Some` |
 | `override_mob` | `Option<bool>` | Takes precedence over `enable_mob` when `Some` |
 
@@ -65,7 +58,7 @@ All default to `None` (use factory-level setting).
 </Accordion>
 
 <Accordion title="ToolPolicyLayer">
-Individual tools can be enabled or disabled via `ToolPolicyLayer` in `BuiltinToolConfig`. When shell is enabled, a `ToolPolicyLayer` is applied that activates the four shell tools (which have `default_enabled: false`). The same mechanism applies to sub-agent tools.
+Individual tools can be enabled or disabled via `ToolPolicyLayer` in `BuiltinToolConfig`. When shell is enabled, a `ToolPolicyLayer` is applied that activates the four shell tools (which have `default_enabled: false`).
 </Accordion>
 
 <Accordion title="Capability registrations">
@@ -73,7 +66,6 @@ Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.
 
 - **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `wait`, `datetime`, `apply_patch`, `view_image`. Controlled by `config.tools.builtins_enabled`.
 - **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`. Controlled by `config.tools.shell_enabled`.
-- **SubAgents** (`CapabilityId::SubAgents`): `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list`. Requires `sub-agents` feature.
 </Accordion>
 
 ## Runtime tool scoping
@@ -454,197 +446,6 @@ Cancel a running background shell job.
 **Source:** `meerkat-tools/src/builtin/shell/types.rs`
 </Accordion>
 
-## Sub-agent tools
-
-Sub-agent tools allow spawning, forking, monitoring, and cancelling child agents. They are all `default_enabled: false` and require both the `sub-agents` Cargo feature and the factory-level `enable_subagents` flag.
-
-<Accordion title="Shared types">
-**ToolAccessInput** (tagged union, `"policy"` discriminator):
-
-| Variant | Fields | Description |
-|---------|--------|-------------|
-| `inherit` | -- | Inherit all tools from parent |
-| `allow_list` | `tools: String[]` | Only allow the listed tools |
-| `deny_list` | `tools: String[]` | Block the listed tools |
-
-Example: `{"policy": "allow_list", "tools": ["shell", "task_list"]}`
-
-**BudgetInput** (used in `agent_spawn`):
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `max_tokens` | `u64` | No | Maximum tokens for the sub-agent |
-| `max_turns` | `u32` | No | Maximum turns for the sub-agent |
-| `max_tool_calls` | `u32` | No | Maximum tool calls for the sub-agent |
-</Accordion>
-
-<Accordion title="agent_spawn">
-Spawn a new sub-agent with clean context. The sub-agent starts fresh with only the provided prompt.
-
-**Default enabled:** No (requires `sub-agents` feature + subagents enabled)
-
-<ParamField body="prompt" type="String" required>
-  Initial prompt/task for the sub-agent.
-</ParamField>
-
-<ParamField body="provider" type="String" default="Parent's provider">
-  LLM provider: `"anthropic"`, `"openai"`, or `"gemini"`.
-</ParamField>
-
-<ParamField body="model" type="String" default="Provider's default">
-  Model name (provider-specific).
-</ParamField>
-
-<ParamField body="tool_access" type="ToolAccessInput" default="inherit">
-  Tool access policy (see shared types).
-</ParamField>
-
-<ParamField body="budget" type="BudgetInput" default="Inherited">
-  Budget limits (see shared types).
-</ParamField>
-
-<ParamField body="system_prompt" type="String" default="null">
-  Override system prompt for the sub-agent.
-</ParamField>
-
-<ParamField body="host_mode" type="bool" default="false">
-  Agent stays alive processing comms after initial prompt (only with `comms` feature).
-</ParamField>
-
-<Note>
-The `host_mode` parameter is only present when the `comms` feature is enabled. Without `comms`, `SpawnParamsNoComms` is used which omits this field.
-</Note>
-
-```json
-{
-  "agent_id": "<uuid>",
-  "name": "agent-<name>",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-5",
-  "state": "running",
-  "message": "Sub-agent spawned successfully"
-}
-```
-
-When `comms` is enabled and `host_mode` is active, additional `comms` field is included with connection details.
-
-**Source:** `meerkat-tools/src/builtin/sub_agent/spawn.rs`
-</Accordion>
-
-<Accordion title="agent_fork">
-Fork the current agent with continued context. The forked agent inherits the parent's conversation history.
-
-**Default enabled:** No (requires `sub-agents` feature + subagents enabled)
-
-<ParamField body="prompt" type="String" required>
-  Additional prompt/instruction appended to inherited conversation history.
-</ParamField>
-
-<ParamField body="provider" type="String" default="Parent's provider">
-  `"anthropic"`, `"openai"`, or `"gemini"`.
-</ParamField>
-
-<ParamField body="model" type="String" default="Provider's default">
-  Model name (provider-specific).
-</ParamField>
-
-<ParamField body="tool_access" type="ToolAccessInput" default="inherit">
-  Tool access policy (see shared types).
-</ParamField>
-
-<ParamField body="budget_policy" type="String" default="null">
-  Budget allocation: `"equal"`, `"remaining"`, `"proportional"`, or `"fixed:N"`.
-</ParamField>
-
-```json
-{
-  "agent_id": "<uuid>",
-  "name": "fork-<name>",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-5",
-  "state": "running",
-  "messages_inherited": 12,
-  "message": "Agent forked successfully"
-}
-```
-
-**Source:** `meerkat-tools/src/builtin/sub_agent/fork.rs`
-</Accordion>
-
-<Accordion title="agent_status">
-Get status and output of a sub-agent by ID. Use this to poll for completion.
-
-**Default enabled:** No (requires `sub-agents` feature + subagents enabled)
-
-<ParamField body="agent_id" type="String" required>
-  UUID of the sub-agent.
-</ParamField>
-
-```json
-{
-  "agent_id": "<uuid>",
-  "state": "completed",
-  "output": "The agent's final text output",
-  "is_final": true,
-  "duration_ms": 5432,
-  "tokens_used": 1500
-}
-```
-
-When the agent is still running, `is_final` is `false` and `output`/`duration_ms`/`tokens_used` may be absent. If the agent failed, an `error` field is present instead of `output`.
-
-**Source:** `meerkat-tools/src/builtin/sub_agent/status.rs`
-</Accordion>
-
-<Accordion title="agent_cancel">
-Cancel a running sub-agent.
-
-**Default enabled:** No (requires `sub-agents` feature + subagents enabled)
-
-<ParamField body="agent_id" type="String" required>
-  UUID of the sub-agent to cancel.
-</ParamField>
-
-```json
-{
-  "agent_id": "<uuid>",
-  "success": true,
-  "previous_state": "running",
-  "message": "Agent cancelled"
-}
-```
-
-**Source:** `meerkat-tools/src/builtin/sub_agent/cancel.rs`
-</Accordion>
-
-<Accordion title="agent_list">
-List all sub-agents spawned by this agent.
-
-**Default enabled:** No (requires `sub-agents` feature + subagents enabled)
-
-**Parameters:** None (empty object).
-
-```json
-{
-  "agents": [
-    {
-      "id": "<uuid>",
-      "name": "agent-<name>",
-      "state": "running",
-      "depth": 1,
-      "running_ms": 3200
-    }
-  ],
-  "running_count": 1,
-  "completed_count": 0,
-  "failed_count": 0,
-  "total_count": 1
-}
-```
-
-**Source:** `meerkat-tools/src/builtin/sub_agent/list.rs`
-</Accordion>
-
 ## Memory tool
 
 The memory search tool lives in the `meerkat-memory` crate and is composed into the tool dispatcher as a separate `MemorySearchDispatcher` (implementing `AgentToolDispatcher`). It is NOT part of `CompositeDispatcher` -- it is wired via `ToolGateway` when the `memory-store-session` feature is enabled and `enable_memory` is `true`.
@@ -845,7 +646,6 @@ Tool availability depends on compile-time features in the `meerkat-tools` crate:
 
 | Feature | Default | Dependencies | Tools unlocked |
 |---------|---------|-------------|----------------|
-| `sub-agents` | Yes | `dep:meerkat-client` | `agent_spawn`, `agent_fork`, `agent_status`, `agent_cancel`, `agent_list` |
 | `comms` | Yes | `dep:meerkat-comms` | `send`, `peers` |
 | `mcp` | Yes | `dep:meerkat-mcp` | External MCP tool routing (not builtin tools) |
 

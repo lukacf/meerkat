@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-34 fully functional examples covering every Meerkat surface and feature,
+33 examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -83,11 +83,10 @@ branch.
 | 014 | [semantic-memory-rs](014-semantic-memory-rs/) | Rust | Persistent, searchable memory across sessions |
 | 015 | [session-persistence-rs](015-session-persistence-rs/) | Rust | Session persistence patterns and store implementations, including JSONL, in-memory, and redb-backed stores |
 
-### Multi-Agent — Sub-Agents, Comms & Mobs
+### Multi-Agent — Comms & Mobs
 
 | # | Example | Surface | Description |
 |---|---------|---------|-------------|
-| 016 | [sub-agent-orchestration-rs](016-sub-agent-orchestration-rs/) | Rust | Delegate subtasks to independent child agents |
 | 017 | [mob-coding-swarm-rs](017-mob-coding-swarm-rs/) | Rust | Orchestrator + worker mob for coding tasks |
 | 018 | [mob-research-team-rs](018-mob-research-team-rs/) | Rust | Diverge/converge research with specialized profiles |
 | 019 | [mob-pipeline-rs](019-mob-pipeline-rs/) | Rust | Sequential CI/CD pipeline with stage handoffs |
@@ -100,7 +99,7 @@ branch.
 | 021 | [multi-provider-routing-py](021-multi-provider-routing-py/) | Python | Route to Anthropic, OpenAI, Gemini with provider-specific params |
 | 022 | [rest-api-client-py](022-rest-api-client-py/) | Python | HTTP REST API integration (no SDK required) |
 | 023 | [rpc-ide-integration-ts](023-rpc-ide-integration-ts/) | TypeScript | JSON-RPC for IDE extensions and desktop apps |
-| 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Reactive agents processing incoming events |
+| 024 | [host-mode-event-mesh-rs](024-host-mode-event-mesh-rs/) | Rust | Multi-turn keep-alive event mesh (reactive agents processing incoming events) |
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Reference architecture with all features combined |
 | 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
 | 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `session.invokeSkill()` with canonical `SkillKey` refs |
@@ -116,7 +115,7 @@ branch.
 | Feature | Examples |
 |---------|----------|
 | **Custom Tools** | 006, 025 |
-| **Built-in Tools** | 016, 025 |
+| **Built-in Tools** | 025 |
 | **Streaming** | 005, 007 |
 | **Sessions** | 004, 007, 015, 022, 023 |
 | **Budget & Retry** | 009 |
@@ -126,12 +125,11 @@ branch.
 | **Compaction** | 013 |
 | **Semantic Memory** | 014 |
 | **Persistence** | 015 |
-| **Sub-Agents** | 016 |
 | **Mobs** | 017, 018, 019, 028, 029, 030, 031, 032, 034 |
 | **Mobpack** | 028, 029, 030, 031, 034 |
 | **WASM Web Build** | 029, 030, 031, 032 |
 | **Comms** | 020, 024, 032, 034 |
-| **Host Mode** | 024, 032, 034 |
+| **Keep-alive / long-lived sessions** | 024, 032, 034 |
 | **Multi-Provider** | 021, 032, 034 |
 | **MCP Server** | 034 |
 | **Flow Engine** | 034 |
@@ -188,11 +186,12 @@ export GEMINI_API_KEY=...           # Optional (examples 021, 034)
 │  Surfaces:  CLI (rkat)  │  REST API  │  JSON-RPC  │  MCP Server │
 │             Python SDK  │  TypeScript SDK  │  Rust SDK           │
 │                                                                 │
-│  Agent:     AgentBuilder → Agent Loop → RunResult               │
+│  Runtime:   SessionService → AgentFactory::build_agent()        │
+│             → Agent Loop → RunResult                            │
 │             LLM ↔ Tools ↔ Events ↔ Budget ↔ Retry              │
 │                                                                 │
 │  Features:  Skills  │  Hooks  │  Sessions  │  Memory            │
-│             Comms   │  Sub-Agents  │  Mobs  │  MCP              │
+│             Comms   │  Mobs  │  MCP  │  WASM Web Build         │
 │                                                                 │
 │  Providers: Anthropic  │  OpenAI  │  Gemini                     │
 │                                                                 │

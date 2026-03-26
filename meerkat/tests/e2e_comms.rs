@@ -156,6 +156,10 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     fn provider(&self) -> &'static str {
         self.client.provider()
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 #[derive(Debug, Default)]

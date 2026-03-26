@@ -11,7 +11,7 @@
 //!
 //! - **Comms-based** (`flow_step_count() == 0`): Autonomous agents communicate
 //!   freely via peer messaging. The deliberate handler injects the task via
-//!   `mob_send_message` and monitors the event stream for quiescence.
+//!   `mob_member_send` and monitors the event stream for quiescence.
 
 pub mod advisor;
 pub mod architect;
@@ -28,6 +28,7 @@ use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 use meerkat_mob::profile::{Profile, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
+use meerkat_core::types::ContentInput;
 use serde_json::Value;
 
 // ── Pack trait ───────────────────────────────────────────────────────────────
@@ -115,7 +116,9 @@ pub fn format_context(context: &str) -> String {
     }
 }
 
-/// Build a turn-driven profile (no tools except comms). Used by most flow-based packs.
+/// Build a turn-driven profile with file-reading builtins and comms.
+/// Used by most flow-based packs so agents can read repository files
+/// during code review, architecture, and deliberation tasks.
 pub fn turn_driven_profile(
     model: String,
     skill: &str,
@@ -126,6 +129,8 @@ pub fn turn_driven_profile(
         model,
         skills: vec![skill.to_string()],
         tools: ToolConfig {
+            builtins: true,
+            shell: true,
             comms: true,
             ..ToolConfig::default()
         },
@@ -143,7 +148,7 @@ pub fn turn_driven_profile(
 pub fn flow_step(role: &str, message: String, depends_on: &[&str], timeout_ms: u64) -> FlowStepSpec {
     FlowStepSpec {
         role: ProfileName::from(role),
-        message,
+        message: ContentInput::from(message),
         depends_on: depends_on.iter().map(|s| StepId::from(*s)).collect(),
         dispatch_mode: DispatchMode::default(),
         collection_policy: CollectionPolicy::default(),

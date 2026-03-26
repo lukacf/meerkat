@@ -30,6 +30,11 @@ impl InputQueue {
         self.queue.push_back(QueuedInput { input_id, input });
     }
 
+    /// Enqueue an input at the front of the queue.
+    pub fn enqueue_front(&mut self, input_id: InputId, input: Input) {
+        self.queue.push_front(QueuedInput { input_id, input });
+    }
+
     /// Dequeue the next input (FIFO).
     pub fn dequeue(&mut self) -> Option<QueuedInput> {
         self.queue.pop_front()
@@ -48,6 +53,13 @@ impl InputQueue {
     /// Number of entries in the queue.
     pub fn len(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Remove a specific input by ID and return it as (InputId, Input).
+    ///
+    /// Used by the batching policy to dequeue specific IDs determined by the authority.
+    pub fn dequeue_by_id(&mut self, input_id: &InputId) -> Option<(InputId, crate::input::Input)> {
+        self.remove(input_id).map(|q| (q.input_id, q.input))
     }
 
     /// Remove a specific input by ID (e.g., for supersession).
@@ -154,5 +166,18 @@ mod tests {
         let drained = queue.drain();
         assert_eq!(drained.len(), 2);
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn enqueue_front_wins_ordering() {
+        let mut queue = InputQueue::new();
+        let back = InputId::new();
+        let front = InputId::new();
+
+        queue.enqueue(back.clone(), make_prompt(back.clone()));
+        queue.enqueue_front(front.clone(), make_prompt(front.clone()));
+
+        assert_eq!(queue.dequeue().unwrap().input_id, front);
+        assert_eq!(queue.dequeue().unwrap().input_id, back);
     }
 }

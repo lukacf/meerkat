@@ -13,7 +13,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_core::ToolCallView;
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use schemars::JsonSchema;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -150,6 +150,10 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
     fn provider(&self) -> &'static str {
         self.client.provider()
     }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 #[derive(Debug, Default)]
@@ -215,7 +219,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
         Arc::from([])
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }
@@ -249,13 +253,13 @@ impl AgentToolDispatcher for MockToolDispatcher {
         self.tools.iter().map(Arc::clone).collect::<Vec<_>>().into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         let content = self
             .results
             .get(call.name)
             .cloned()
             .ok_or_else(|| ToolError::not_found(call.name))?;
-        Ok(ToolResult::new(call.id.to_string(), content, false))
+        Ok(ToolResult::new(call.id.to_string(), content, false).into())
     }
 }
 
@@ -497,12 +501,14 @@ mod tool_invocation {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let args: Value = serde_json::from_str(call.args.get())
                 .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
             // Call the tool through the router
             match self.router.call_tool(call.name, &args).await {
-                Ok(blocks) => Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false)),
+                Ok(blocks) => {
+                    Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
+                }
                 Err(e) => Err(ToolError::execution_failed(e.to_string())),
             }
         }
@@ -1028,7 +1034,7 @@ mod parallel_tools {
             Arc::clone(&self.tools)
         }
 
-        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
             let start = std::time::Instant::now();
 
             // Simulate network/processing delay
@@ -1069,7 +1075,7 @@ mod parallel_tools {
                 Value::String(s) => s.clone(),
                 _ => serde_json::to_string(&value).unwrap_or_default(),
             };
-            Ok(ToolResult::new(call.id.to_string(), content, false))
+            Ok(ToolResult::new(call.id.to_string(), content, false).into())
         }
     }
 
@@ -1254,7 +1260,10 @@ mod parallel_tools {
                 .into()
             }
 
-            async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
                 // Simulate some processing time
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -1275,7 +1284,7 @@ mod parallel_tools {
                     Value::String(s) => s.clone(),
                     _ => serde_json::to_string(&value).unwrap_or_default(),
                 };
-                Ok(ToolResult::new(call.id.to_string(), content, false))
+                Ok(ToolResult::new(call.id.to_string(), content, false).into())
             }
         }
 
@@ -1334,217 +1343,10 @@ mod parallel_tools {
 // E2E: SUB-AGENT OPERATIONS
 // ============================================================================
 
-/// E2E: Sub-agent fork/spawn operations
-/// Tests fork, spawn, context strategies, tool access policies, and depth limits
-mod sub_agent_fork {
-    use super::*;
-    use meerkat::{ConcurrencyLimits, ForkBranch, ForkBudgetPolicy, SpawnSpec, SubAgentManager};
+// TODO(0.5): mob member e2e tests need rewrite against SessionService + mob API.
+// The pre-0.5 Agent::fork/spawn/depth APIs no longer exist.
 
-    #[tokio::test]
-    #[ignore = "integration-real: live API"]
-    async fn e2e_sub_agent_fork_and_return() {
-        let Some(api_key) = anthropic_api_key() else {
-            eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
-            return;
-        };
-
-        // Create a parent agent
-        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
-        let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
-        let tools = Arc::new(EmptyToolDispatcher);
-        let (_store, store, _temp_dir) = create_temp_store().await;
-
-        let mut agent = AgentBuilder::new()
-            .model(anthropic_model())
-            .system_prompt("You are a helpful assistant.")
-            .max_tokens_per_turn(1024)
-            .concurrency_limits(ConcurrencyLimits {
-                max_depth: 3,
-                max_concurrent_ops: 10,
-                max_concurrent_agents: 5,
-                max_children_per_agent: 3,
-            })
-            .build(client, tools, store)
-            .await;
-
-        // Test fork operation
-        let branches = vec![
-            ForkBranch {
-                name: "branch_a".to_string(),
-                prompt: "Analyze option A".to_string(),
-                tool_access: None,
-            },
-            ForkBranch {
-                name: "branch_b".to_string(),
-                prompt: "Analyze option B".to_string(),
-                tool_access: Some(ToolAccessPolicy::Inherit),
-            },
-        ];
-
-        // Fork should succeed (creates operation IDs but actual sub-agents run async)
-        let op_ids = agent.fork(branches, ForkBudgetPolicy::Equal).await.unwrap();
-        assert_eq!(op_ids.len(), 2);
-
-        // Verify depth is tracked
-        assert_eq!(agent.depth(), 0);
-
-        // Run the parent agent - it should work independently
-        let result = agent.run("Say hello briefly.".into()).await.unwrap();
-        assert!(!result.text.is_empty());
-    }
-
-    #[tokio::test]
-    #[ignore = "integration-real: live API"]
-    async fn e2e_sub_agent_spawn() {
-        let Some(api_key) = anthropic_api_key() else {
-            eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
-            return;
-        };
-
-        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
-        let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
-        let tools = Arc::new(EmptyToolDispatcher);
-        let (_store, store, _temp_dir) = create_temp_store().await;
-
-        let agent = AgentBuilder::new()
-            .model(anthropic_model())
-            .system_prompt("You are a helpful assistant.")
-            .max_tokens_per_turn(1024)
-            .build(client, tools, store)
-            .await;
-
-        // Test spawn with ContextStrategy::LastTurns
-        let spec = SpawnSpec {
-            prompt: "Summarize what we discussed".to_string(),
-            context: ContextStrategy::LastTurns(2),
-            tool_access: ToolAccessPolicy::Inherit,
-            budget: BudgetLimits {
-                max_tokens: Some(500),
-                max_duration: None,
-                max_tool_calls: Some(3),
-            },
-            allow_spawn: false,
-            system_prompt: Some("You are a summarizer.".to_string()),
-        };
-
-        // Spawn should succeed
-        let op_id = agent.spawn(spec).await.unwrap();
-        assert!(!op_id.to_string().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_context_strategy_application() {
-        // Test ContextStrategy without API (unit test style)
-        let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
-
-        let mut session = Session::new();
-        session.set_system_prompt("System prompt".to_string());
-        session.push(Message::User(meerkat::UserMessage::text(
-            "Turn 1".to_string(),
-        )));
-        session.push(Message::User(meerkat::UserMessage::text(
-            "Turn 2".to_string(),
-        )));
-        session.push(Message::User(meerkat::UserMessage::text(
-            "Turn 3".to_string(),
-        )));
-        session.push(Message::User(meerkat::UserMessage::text(
-            "Turn 4".to_string(),
-        )));
-
-        // FullHistory should include everything
-        let full = manager.apply_context_strategy(&session, &ContextStrategy::FullHistory);
-        assert_eq!(full.len(), 5); // system + 4 messages
-
-        // LastTurns(1) should include system + last 2 messages
-        let last = manager.apply_context_strategy(&session, &ContextStrategy::LastTurns(1));
-        assert_eq!(last.len(), 3); // system + 2 messages
-    }
-
-    #[tokio::test]
-    async fn test_tool_access_policy_enforcement() {
-        let manager = SubAgentManager::new(ConcurrencyLimits::default(), 0);
-
-        let tools = vec![
-            Arc::new(ToolDef {
-                name: "read_file".to_string(),
-                description: "Read a file".to_string(),
-                input_schema: meerkat_tools::empty_object_schema(),
-            }),
-            Arc::new(ToolDef {
-                name: "write_file".to_string(),
-                description: "Write a file".to_string(),
-                input_schema: meerkat_tools::empty_object_schema(),
-            }),
-            Arc::new(ToolDef {
-                name: "execute".to_string(),
-                description: "Execute command".to_string(),
-                input_schema: meerkat_tools::empty_object_schema(),
-            }),
-        ];
-
-        // Inherit should keep all tools
-        let inherit = manager.apply_tool_access_policy(&tools, &ToolAccessPolicy::Inherit);
-        assert_eq!(inherit.len(), 3);
-
-        // AllowList should filter to only allowed
-        let allow = manager.apply_tool_access_policy(
-            &tools,
-            &ToolAccessPolicy::AllowList(vec!["read_file".to_string()]),
-        );
-        assert_eq!(allow.len(), 1);
-        assert_eq!(allow[0].name, "read_file");
-
-        // DenyList should exclude denied
-        let deny = manager.apply_tool_access_policy(
-            &tools,
-            &ToolAccessPolicy::DenyList(vec!["execute".to_string()]),
-        );
-        assert_eq!(deny.len(), 2);
-        assert!(deny.iter().all(|t| t.name != "execute"));
-    }
-
-    #[tokio::test]
-    #[ignore = "integration-real: live API"]
-    async fn e2e_depth_limit_enforced() {
-        let Some(api_key) = anthropic_api_key() else {
-            eprintln!("Skipping: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)");
-            return;
-        };
-
-        let llm_client = Arc::new(AnthropicClient::new(api_key).unwrap());
-        let client = Arc::new(LlmClientAdapter::new(llm_client, anthropic_model()));
-        let tools = Arc::new(EmptyToolDispatcher);
-        let (_store, store, _temp_dir) = create_temp_store().await;
-
-        // Create agent with max_depth=0 - no children allowed
-        let agent = AgentBuilder::new()
-            .model(anthropic_model())
-            .concurrency_limits(ConcurrencyLimits {
-                max_depth: 0,
-                max_concurrent_ops: 10,
-                max_concurrent_agents: 5,
-                max_children_per_agent: 3,
-            })
-            .build(client, tools, store)
-            .await;
-
-        // Spawn should fail because child would be at depth 1 > max_depth (0)
-        let spec = SpawnSpec {
-            prompt: "Test".to_string(),
-            context: ContextStrategy::FullHistory,
-            tool_access: ToolAccessPolicy::Inherit,
-            budget: BudgetLimits::default(),
-            allow_spawn: false,
-            system_prompt: None,
-        };
-
-        let result = agent.spawn(spec).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, AgentError::DepthLimitExceeded { .. }));
-    }
-}
+// ============================================================================
 
 // ============================================================================
 // BASIC SANITY CHECKS (non-API tests)
@@ -1600,6 +1402,10 @@ mod sanity {
 
         fn provider(&self) -> &'static str {
             "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
         }
     }
 

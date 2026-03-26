@@ -7,7 +7,7 @@ use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
-use meerkat_core::{ContentBlock, Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -85,7 +85,8 @@ impl GeminiClient {
                                     "text": text
                                 }),
                                 ContentBlock::Image {
-                                    media_type, data, ..
+                                    media_type,
+                                    data: ImageData::Inline { data },
                                 } => serde_json::json!({
                                     "inlineData": {
                                         "mimeType": media_type,
@@ -200,16 +201,20 @@ impl GeminiClient {
 
                         if r.has_images() {
                             for block in &r.content {
-                                if let ContentBlock::Image {
-                                    media_type, data, ..
-                                } = block
-                                {
-                                    parts.push(serde_json::json!({
-                                        "inlineData": {
-                                            "mimeType": media_type,
-                                            "data": data
+                                if let ContentBlock::Image { media_type, data } = block {
+                                    match data {
+                                        ImageData::Inline { data } => {
+                                            parts.push(serde_json::json!({
+                                                "inlineData": {
+                                                    "mimeType": media_type,
+                                                    "data": data
+                                                }
+                                            }));
                                         }
-                                    }));
+                                        ImageData::Blob { .. } => parts.push(serde_json::json!({
+                                            "text": block.text_projection()
+                                        })),
+                                    }
                                 }
                             }
                         }
@@ -836,8 +841,9 @@ impl LlmClient for GeminiClient {
             let stream_result = if (200..=299).contains(&status_code) {
                 Ok(response.bytes_stream())
             } else {
+                let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                Err(LlmError::from_http_status(status_code, text))
+                Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
             let mut buffer = String::with_capacity(512);
@@ -2293,8 +2299,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "iVBOR...".to_string(),
-                    source_path: Some("/tmp/img.png".to_string()),
+                    data: "iVBOR...".into(),
                 },
             ]))],
         );
@@ -2377,8 +2382,7 @@ mod tests {
                             },
                             ContentBlock::Image {
                                 media_type: "image/png".to_string(),
-                                data: "iVBOR...".to_string(),
-                                source_path: None,
+                                data: "iVBOR...".into(),
                             },
                         ],
                         false,

@@ -1,6 +1,9 @@
 # Meerkat cargo configuration
 
 [alias]
+# Machine-authority workflow entrypoint
+xtask = "run -p xtask --features machine-authority --"
+
 # Fast test suite (unit + integration-fast, skips doctests)
 fast = "nextest run --workspace --show-progress none --status-level none --final-status-level fail"
 rct = "nextest run --workspace --show-progress none --status-level none --final-status-level fail"
@@ -22,3 +25,9 @@ test-minimal = "!make test-minimal"
 test-feature-matrix-lib = "!make test-feature-matrix-lib"
 test-feature-matrix-surface = "!make test-feature-matrix-surface"
 test-feature-matrix = "!make test-feature-matrix"
+
+# Do not set a global wasm32 test runner here. Clean environments generally do
+# not have `wasm-bindgen-test-runner` installed, so repository-wide Cargo
+# config must not make raw `cargo test --target wasm32-unknown-unknown` depend
+# on an external binary. Use explicit wasm test tooling when needed, and keep
+# bare Cargo wasm lanes compile-only (`--no-run`).

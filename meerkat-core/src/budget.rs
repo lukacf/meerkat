@@ -201,7 +201,7 @@ impl Clone for Budget {
     }
 }
 
-/// Budget pool for allocating resources to sub-agents
+/// Budget pool for allocating resources to delegated branches
 #[derive(Debug)]
 pub struct BudgetPool {
     /// Total budget limits
@@ -225,7 +225,7 @@ impl BudgetPool {
         }
     }
 
-    /// Reserve budget for a sub-agent
+    /// Reserve budget for a delegated branch
     pub fn reserve(&self, request: &BudgetLimits) -> Result<BudgetLimits, AgentError> {
         // Calculate available budget
         let available_tokens = self.available_tokens();

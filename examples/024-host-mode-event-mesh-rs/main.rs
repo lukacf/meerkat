@@ -1,33 +1,29 @@
-//! # 024 — Host Mode & Event Mesh (Rust)
+//! # 024 — Keep-Alive Event Mesh (Rust)
 //!
-//! Host mode keeps an agent alive to receive and process incoming messages
-//! between turns. Combined with event streaming, it enables reactive systems
-//! where agents respond to external events in real time.
+//! Demonstrates multi-turn event-driven processing using `EphemeralSessionService`
+//! as substrate. The session stays alive between turns, accumulating context as
+//! new events arrive.
 //!
 //! ## What this example demonstrates
-//! - `EphemeralSessionService`: the same session infrastructure used by all
-//!   Meerkat surfaces (CLI, REST, RPC, MCP Server)
-//! - Multi-turn event-driven processing: the agent stays alive between turns
+//! - `EphemeralSessionService`: in-memory session lifecycle (substrate for
+//!   testing/embedded use — production surfaces use runtime-backed paths)
+//! - Multi-turn event-driven processing via repeated `start_turn()` calls
 //! - Event streaming via `AgentEvent` across multiple injected turns
 //! - Reading session state to observe accumulating context
 //!
-//! ## How host mode works
-//! Under the hood, `EphemeralSessionService` spawns a dedicated tokio task per
-//! session. That task exclusively owns the `Agent` and processes commands via
-//! channels. `create_session()` runs the first turn; subsequent `start_turn()`
-//! calls inject new prompts as if they were external events. The agent retains
-//! full conversation history across turns -- each new message builds on prior
-//! context.
+//! ## How it works
+//! `EphemeralSessionService` spawns a dedicated tokio task per session. That task
+//! exclusively owns the `Agent` and processes commands via channels.
+//! `create_session()` runs the first turn; subsequent `start_turn()` calls inject
+//! new prompts. The agent retains full conversation history across turns.
 //!
-//! With the `comms` feature, the agent loop (`run_host_mode_inner`) goes
-//! further: after the initial prompt it enters a poll loop, draining its comms
-//! inbox and processing peer messages/requests as they arrive, until the budget
-//! is exhausted or a DISMISS signal is received. This example demonstrates the
-//! multi-turn pattern without requiring the comms infrastructure.
+//! For production keep-alive with comms (peer messaging, event mesh), use the
+//! runtime-backed path (`rkat --keep-alive --comms-name "processor"`). The runtime
+//! owns the comms drain lifecycle, Queue/Steer routing, and ingress admission.
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 024-host-mode-event-mesh --features jsonl-store
+//! ANTHROPIC_API_KEY=... cargo run --example 024-host-mode-event-mesh
 //! ```
 
 use std::sync::Arc;
@@ -48,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Architecture overview ──────────────────────────────────────────────
 
     println!(
-        r#"=== Host Mode & Event Mesh ===
+        r#"=== Multi-Turn Event Mesh ===
 
-Standard mode:
+Single-turn mode:
   User prompt --> Agent runs --> Agent stops
 
-Host mode (via SessionService):
+Multi-turn via SessionService (this example):
   create_session() --> Agent runs turn 1 --> Session task STAYS ALIVE
                                                 |
   start_turn("event 1") -----> Agent processes --> Session task stays alive
@@ -61,16 +57,12 @@ Host mode (via SessionService):
   ...                          (full history retained across turns)
   archive()            -----> Session task exits
 
-With comms (--host-mode --comms-name "processor"):
-  Initial prompt --> Agent runs --> Enters host loop
-                                      |
-  Peer message arrives  --> Agent processes --> Stays in loop
-  Webhook POST          --> Agent processes --> Stays in loop
-  Budget exhausted / DISMISS --> Agent exits loop
+Production keep-alive with comms (rkat --keep-alive --comms-name "processor"):
+  Runtime owns comms drain --> inbox poll --> accept_input --> policy table
+  Peer messages and external events route through runtime ingress.
 
-This example uses EphemeralSessionService -- the same infrastructure backing
-CLI, REST, RPC, and MCP Server surfaces. Each session gets a dedicated tokio
-task that owns the Agent exclusively (no mutex needed).
+This example uses EphemeralSessionService (substrate) for simplicity.
+Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
 "#
     );
 
@@ -113,6 +105,7 @@ task that owns the Agent exclusively (no mutex needed).
                      5 minutes.' Acknowledge the alert and describe your initial triage \
                      steps. Keep your response to 2-3 sentences."
                 .into(),
+            render_metadata: None,
             system_prompt: Some(
                 "You are a concise incident-response coordinator. \
                  You maintain context across multiple event injections, building an \
@@ -123,7 +116,6 @@ task that owns the Agent exclusively (no mutex needed).
             ),
             max_tokens: Some(256),
             event_tx: Some(event_tx),
-            host_mode: false,
             skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             build: None,
@@ -143,9 +135,9 @@ task that owns the Agent exclusively (no mutex needed).
     let event_collector = spawn_event_collector(event_rx);
 
     // start_turn injects a new prompt into the live session. The agent has
-    // full access to the prior conversation history. This is exactly how
-    // host-mode agents receive events in production: webhooks, peer messages,
-    // and CLI input all flow through start_turn on the SessionService.
+    // full access to the prior conversation history. In production,
+    // runtime-backed keep-alive sessions admit webhooks, peer messages, and
+    // CLI input as future turn work through the runtime layer.
     let result = service
         .start_turn(
             &session_id,
@@ -154,8 +146,10 @@ task that owns the Agent exclusively (no mutex needed).
                          Three other nodes in the cluster show normal metrics. \
                          The deployment log shows a new release was pushed 12 minutes ago."
                     .into(),
+                system_prompt: None,
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -189,8 +183,10 @@ task that owns the Agent exclusively (no mutex needed).
                          CPU is back to 40%, memory at 52%. All health checks passing. \
                          Summarize the full incident timeline and close it out."
                     .into(),
+                system_prompt: None,
+                render_metadata: None,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                host_mode: false,
                 skill_references: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -237,7 +233,7 @@ The event mesh connects agents, external systems, and users:
 |  +----------+    +----------+    +----------+                |
 +--------------------------------------------------------------+
 
-Event sources that feed into a host-mode agent:
+Event sources that feed into a keep-alive agent:
   1. Peer messages (agent-to-agent via comms, Ed25519-signed)
   2. External webhooks (REST POST -> agent inbox)
   3. Timer events (scheduled processing)
@@ -246,32 +242,32 @@ Event sources that feed into a host-mode agent:
 
 Configuration:
 
-  # CLI: Start agent in host mode
-  rkat run --host-mode --comms-name "processor" "Process incoming events"
+  # CLI: Start agent in keep-alive mode
+  rkat run --keep-alive --comms-name "processor" "Process incoming events"
 
   # Python SDK
   result = await client.create_session(
       "Process incoming events",
-      host_mode=True,
+      keep_alive=True,
       comms_name="processor",
   )
 
   # TypeScript SDK
   const result = await client.createSession({{
       prompt: "Process incoming events",
-      host_mode: true,
-      comms_name: "processor",
+      keepAlive: true,
+      commsName: "processor",
   }});
 
   # Inject events via REST
-  curl -X POST http://localhost:8000/sessions/{{id}}/turn \
+  curl -X POST http://localhost:8080/sessions/{{id}}/external-events \
     -H "Content-Type: application/json" \
-    -d '{{"prompt": "New order received"}}'
+    -d '{{"event_type": "order.received", "body": "New order received"}}'
 
   # Or via JSON-RPC
   {{"method": "turn/start", "params": {{"session_id": "...", "prompt": "..."}}}}
 
-Host mode is essential for:
+Keep-alive sessions are essential for:
   - Mob orchestrators (need to receive worker reports)
   - Chat interfaces (bidirectional communication)
   - Event processors (react to webhooks/triggers)

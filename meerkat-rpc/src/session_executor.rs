@@ -150,7 +150,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .turn_metadata()
                     .and_then(|meta| meta.additional_instructions.clone()),
                 Some(crate::handlers::turn::TurnOverrides {
-                    host_mode: primitive.turn_metadata().and_then(|meta| meta.host_mode),
+                    keep_alive: primitive.turn_metadata().and_then(|meta| meta.keep_alive),
                     model: primitive
                         .turn_metadata()
                         .and_then(|meta| meta.model.clone()),
@@ -224,11 +224,10 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         let req = meerkat_core::service::StartTurnRequest {
             prompt,
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx),
-            host_mode: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.host_mode)
-                .unwrap_or(false),
             skill_references: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.skill_references.clone()),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FILE = REPO_ROOT / "tests" / "live_smoke" / "scenarios.toml"
 STATE_FILE = REPO_ROOT / "artifacts" / "live_smoke_last_failures.json"
+REPO_CARGO = REPO_ROOT / "scripts" / "repo-cargo"
 
 
 @dataclass
@@ -113,11 +115,30 @@ def load_registry() -> list[Scenario]:
     return sorted(scenarios, key=lambda scenario: scenario.id)
 
 
+@functools.lru_cache(maxsize=1)
+def repo_cargo_env() -> dict[str, str]:
+    completed = subprocess.run(
+        [str(REPO_CARGO), "--print-env"],
+        cwd=REPO_ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    env: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env[key] = value
+    return env
+
+
 def cargo_target_dir() -> Path:
     override = os.environ.get("CARGO_TARGET_DIR")
     if override:
         return Path(override)
-    return REPO_ROOT / "target"
+    return Path(repo_cargo_env()["CARGO_TARGET_DIR"])
 
 
 def platform_binary_name(bin_name: str) -> str:
@@ -128,6 +149,9 @@ def platform_binary_name(bin_name: str) -> str:
 
 def scenario_env(scenario: Scenario) -> dict[str, str]:
     env = os.environ.copy()
+    repo_env = repo_cargo_env()
+    env["CARGO_HOME"] = repo_env["CARGO_HOME"]
+    env["CARGO_TARGET_DIR"] = repo_env["CARGO_TARGET_DIR"]
 
     for key, value in scenario.raw.get("env", {}).items():
         env[str(key)] = str(value).format(
@@ -207,7 +231,7 @@ def scenario_commands(scenario: Scenario) -> tuple[list[list[str]], list[str], P
         return pre_commands, command, cwd
 
     if runner == "cargo":
-        command = ["cargo", "test", "-p", scenario.raw["package"]]
+        command = [str(REPO_CARGO), "test", "-p", scenario.raw["package"]]
         if scenario.raw.get("all_features"):
             command.append("--all-features")
         features = scenario.raw.get("features", [])
@@ -244,7 +268,10 @@ def prereq_failures(scenario: Scenario) -> list[str]:
         if not os.environ.get(env_name):
             failures.append(f"missing env {env_name}")
     for binary in scenario.required_bins:
-        if shutil.which(binary) is None:
+        if binary == "cargo":
+            if not REPO_CARGO.exists():
+                failures.append(f"missing repo cargo wrapper {REPO_CARGO}")
+        elif shutil.which(binary) is None:
             failures.append(f"missing binary {binary}")
     return failures
 
@@ -283,6 +310,13 @@ def run_process(
         if isinstance(output, bytes):
             output = output.decode(errors="replace")
         return None, output, True
+
+
+def normalize_cargo_command(command: list[str]) -> list[str]:
+    actual_command = list(command)
+    if actual_command and actual_command[0] == "cargo":
+        actual_command[0] = str(REPO_CARGO)
+    return actual_command
 
 
 def analyze_success_output(scenario: Scenario, output: str) -> str | None:
@@ -369,8 +403,8 @@ def main() -> int:
         print(f"[RUN ] {scenario.id:02d} {scenario.title}")
         print(f"       cwd={cwd}")
         for pre_command in pre_commands:
-            print(f"       pre={' '.join(pre_command)}")
-        print(f"       cmd={' '.join(command)}")
+            print(f"       pre={' '.join(normalize_cargo_command(pre_command))}")
+        print(f"       cmd={' '.join(normalize_cargo_command(command))}")
 
         if args.dry_run:
             continue
@@ -382,8 +416,9 @@ def main() -> int:
             pre_key = (str(cwd), tuple(pre_command))
             if pre_key in completed_pre_commands:
                 continue
+            actual_pre_command = normalize_cargo_command(pre_command)
             pre_returncode, pre_output, pre_timed_out = run_process(
-                pre_command,
+                actual_pre_command,
                 cwd,
                 env,
                 scenario.timeout_secs,
@@ -404,8 +439,9 @@ def main() -> int:
             else:
                 completed_pre_commands.add(pre_key)
         if not scenario_failed:
+            actual_command = normalize_cargo_command(command)
             returncode, output, timed_out = run_process(
-                command,
+                actual_command,
                 cwd,
                 env,
                 scenario.timeout_secs,

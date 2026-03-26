@@ -1,4 +1,8 @@
 use super::*;
+use meerkat_core::SessionId;
+use meerkat_core::agent::OpsLifecycleBindError;
+use meerkat_core::ops::AsyncOpRef;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 
 // ---------------------------------------------------------------------------
 // Mob tool dispatcher
@@ -48,6 +52,8 @@ pub(super) fn compose_external_tools_for_profile(
 struct MobToolDispatcher {
     handle: MobHandle,
     tools: Arc<[Arc<ToolDef>]>,
+    owner_session_id: Option<SessionId>,
+    ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
 }
 
 impl MobToolDispatcher {
@@ -56,15 +62,29 @@ impl MobToolDispatcher {
         if enable_mob {
             defs.push(tool_def(
                 TOOL_SPAWN_MEERKAT,
-                "Spawn a meerkat from a profile",
+                "Spawn a meerkat from a profile. Supports fresh, resume, or fork launch modes.",
                 json!({
                     "type": "object",
                     "properties": {
                         "profile": {"type": "string"},
                         "meerkat_id": {"type": "string"},
-                        "initial_message": {"type": "string"},
-                        "backend": {"type": "string", "enum": ["subagent", "external"]},
-                        "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
+                        "initial_message": content_input_schema(),
+                        "resume_session_id": {"type": "string", "description": "Deprecated: use launch_mode.resume instead"},
+                        "backend": {"type": "string", "enum": ["session", "external"]},
+                        "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
+                        "launch_mode": {
+                            "type": "object",
+                            "description": "Launch mode: fresh (default), resume {session_id}, or fork {source_member_id, fork_context}",
+                        },
+                        "tool_access_policy": {
+                            "type": "object",
+                            "description": "Tool access policy: inherit (default), allow_list, or deny_list"
+                        },
+                        "budget_split_policy": {
+                            "type": "object",
+                            "description": "Budget split policy: equal, proportional, remaining, or fixed"
+                        },
+                        "auto_wire_parent": {"type": "boolean", "description": "Auto-wire to spawner after spawn"}
                     },
                     "required": ["profile", "meerkat_id"]
                 }),
@@ -82,8 +102,9 @@ impl MobToolDispatcher {
                                 "properties": {
                                     "profile": {"type": "string"},
                                     "meerkat_id": {"type": "string"},
-                                    "initial_message": {"type": "string"},
-                                    "backend": {"type": "string", "enum": ["subagent", "external"]},
+                                    "initial_message": content_input_schema(),
+                                    "resume_session_id": {"type": "string"},
+                                    "backend": {"type": "string", "enum": ["session", "external"]},
                                     "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]}
                                 },
                                 "required": ["profile", "meerkat_id"]
@@ -122,7 +143,7 @@ impl MobToolDispatcher {
             ));
             defs.push(tool_def(
                 TOOL_LIST_MEERKATS,
-                "List all active meerkats. Response includes meerkat_id, profile, member_ref, session_id, wired_to.",
+                "List all active meerkats. Response includes meerkat_id, profile, member_ref, peer_id, session_id, wired_to, external_peer_specs.",
                 json!({
                     "type": "object",
                     "properties": {}
@@ -168,6 +189,28 @@ impl MobToolDispatcher {
                         "run_id": {"type": "string"}
                     },
                     "required": ["run_id"]
+                }),
+            ));
+            defs.push(tool_def(
+                TOOL_FORCE_CANCEL_MEERKAT,
+                "Force-cancel a meerkat's in-flight turn. Does not retire the member.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "meerkat_id": {"type": "string"}
+                    },
+                    "required": ["meerkat_id"]
+                }),
+            ));
+            defs.push(tool_def(
+                TOOL_MEERKAT_STATUS,
+                "Get a meerkat's execution status snapshot including output preview and token usage.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "meerkat_id": {"type": "string"}
+                    },
+                    "required": ["meerkat_id"]
                 }),
             ));
         }
@@ -223,6 +266,8 @@ impl MobToolDispatcher {
         Self {
             handle,
             tools: defs.into(),
+            owner_session_id: None,
+            ops_registry: None,
         }
     }
 
@@ -233,10 +278,21 @@ impl MobToolDispatcher {
     fn encode_result(
         call: ToolCallView<'_>,
         value: serde_json::Value,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        Self::encode_result_with_async_ops(call, value, Vec::new())
+    }
+
+    fn encode_result_with_async_ops(
+        call: ToolCallView<'_>,
+        value: serde_json::Value,
+        async_ops: Vec<AsyncOpRef>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
-        Ok(ToolResult::new(call.id.to_string(), content, false))
+        Ok(meerkat_core::ToolDispatchOutcome {
+            result: ToolResult::new(call.id.to_string(), content, false),
+            async_ops,
+        })
     }
 }
 
@@ -248,16 +304,68 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
     })
 }
 
+fn content_input_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "text" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["type", "text"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "image" },
+                                "media_type": { "type": "string" },
+                                "data": { "type": "string" }
+                            },
+                            "required": ["type", "media_type", "data"]
+                        }
+                    ]
+                }
+            }
+        ]
+    })
+}
+
 #[derive(Deserialize)]
 struct SpawnMeerkatArgs {
     profile: String,
     meerkat_id: String,
     #[serde(default)]
-    initial_message: Option<String>,
+    initial_message: Option<ContentInput>,
+    #[serde(default)]
+    resume_session_id: Option<meerkat_core::types::SessionId>,
     #[serde(default)]
     backend: Option<MobBackendKind>,
     #[serde(default)]
     runtime_mode: Option<crate::MobRuntimeMode>,
+    #[serde(default)]
+    launch_mode: Option<crate::launch::MemberLaunchMode>,
+    #[serde(default)]
+    tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    #[serde(default)]
+    budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
+    #[serde(default)]
+    auto_wire_parent: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ForceCancelArgs {
+    meerkat_id: String,
+}
+
+#[derive(Deserialize)]
+struct MeerkatStatusArgs {
+    meerkat_id: String,
 }
 
 #[derive(Deserialize)]
@@ -315,30 +423,75 @@ impl AgentToolDispatcher for MobToolDispatcher {
         Arc::clone(&self.tools)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         match call.name {
             TOOL_SPAWN_MEERKAT => {
                 let args: SpawnMeerkatArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                let member_ref = self
-                    .handle
-                    .spawn_with_options(
-                        ProfileName::from(args.profile),
-                        MeerkatId::from(args.meerkat_id),
-                        args.initial_message.map(ContentInput::from),
-                        args.runtime_mode,
-                        args.backend,
-                    )
-                    .await
-                    .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result(
-                    call,
-                    json!({
-                        "member_ref": member_ref,
-                        "session_id": member_ref.session_id(),
-                    }),
-                )
+                let mut spec = SpawnMemberSpec::from_wire(
+                    args.profile,
+                    args.meerkat_id,
+                    args.initial_message,
+                    args.runtime_mode,
+                    args.backend,
+                );
+                // Resolve launch mode: explicit launch_mode takes precedence,
+                // then legacy resume_session_id, then default (Fresh).
+                if let Some(launch_mode) = args.launch_mode {
+                    spec = spec.with_launch_mode(launch_mode);
+                } else if let Some(session_id) = args.resume_session_id {
+                    spec = spec.with_resume_session_id(session_id);
+                }
+                if let Some(policy) = args.tool_access_policy {
+                    spec = spec.with_tool_access_policy(policy);
+                }
+                if let Some(policy) = args.budget_split_policy {
+                    spec = spec.with_budget_split_policy(policy);
+                }
+                if let Some(auto_wire) = args.auto_wire_parent {
+                    spec = spec.with_auto_wire_parent(auto_wire);
+                }
+                let (result, async_ops) = match (&self.owner_session_id, &self.ops_registry) {
+                    (Some(owner_session_id), Some(ops_registry)) => {
+                        let receipt = self
+                            .handle
+                            .spawn_spec_receipt_with_owner_context(
+                                spec,
+                                super::handle::CanonicalOpsOwnerContext {
+                                    owner_session_id: owner_session_id.clone(),
+                                    ops_registry: Arc::clone(ops_registry),
+                                },
+                            )
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
+                        (
+                            json!({
+                                "member_ref": receipt.member_ref,
+                                "session_id": receipt.member_ref.session_id(),
+                            }),
+                            vec![AsyncOpRef::detached(receipt.operation_id)],
+                        )
+                    }
+                    _ => {
+                        let member_ref = self
+                            .handle
+                            .spawn_spec(spec)
+                            .await
+                            .map_err(|error| Self::map_mob_error(call, error))?;
+                        (
+                            json!({
+                                "member_ref": member_ref,
+                                "session_id": member_ref.session_id(),
+                            }),
+                            Vec::new(),
+                        )
+                    }
+                };
+                Self::encode_result_with_async_ops(call, result, async_ops)
             }
             TOOL_SPAWN_MANY_MEERKATS => {
                 let args: SpawnManyMeerkatsArgs = call
@@ -348,31 +501,85 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .specs
                     .into_iter()
                     .map(|spec| {
-                        SpawnMemberSpec::from_wire(
+                        let mut spawn_spec = SpawnMemberSpec::from_wire(
                             spec.profile,
                             spec.meerkat_id,
                             spec.initial_message,
                             spec.runtime_mode,
                             spec.backend,
-                        )
+                        );
+                        if let Some(launch_mode) = spec.launch_mode {
+                            spawn_spec = spawn_spec.with_launch_mode(launch_mode);
+                        } else if let Some(session_id) = spec.resume_session_id {
+                            spawn_spec = spawn_spec.with_resume_session_id(session_id);
+                        }
+                        if let Some(policy) = spec.tool_access_policy {
+                            spawn_spec = spawn_spec.with_tool_access_policy(policy);
+                        }
+                        if let Some(policy) = spec.budget_split_policy {
+                            spawn_spec = spawn_spec.with_budget_split_policy(policy);
+                        }
+                        if let Some(auto_wire) = spec.auto_wire_parent {
+                            spawn_spec = spawn_spec.with_auto_wire_parent(auto_wire);
+                        }
+                        spawn_spec
                     })
                     .collect::<Vec<_>>();
-                let results = self.handle.spawn_many(specs).await;
-                let results = results
-                    .into_iter()
-                    .map(|result| match result {
-                        Ok(member_ref) => json!({
-                            "ok": true,
-                            "member_ref": member_ref,
-                            "session_id": member_ref.session_id(),
-                        }),
-                        Err(error) => json!({
-                            "ok": false,
-                            "error": error.to_string(),
-                        }),
-                    })
-                    .collect::<Vec<_>>();
-                Self::encode_result(call, json!({ "results": results }))
+                let (results, async_ops) = match (&self.owner_session_id, &self.ops_registry) {
+                    (Some(owner_session_id), Some(ops_registry)) => {
+                        let receipts = self
+                            .handle
+                            .spawn_many_receipts_with_owner_context(
+                                specs,
+                                super::handle::CanonicalOpsOwnerContext {
+                                    owner_session_id: owner_session_id.clone(),
+                                    ops_registry: Arc::clone(ops_registry),
+                                },
+                            )
+                            .await;
+                        let async_ops = receipts
+                            .iter()
+                            .filter_map(|result| result.as_ref().ok())
+                            .map(|receipt| AsyncOpRef::detached(receipt.operation_id.clone()))
+                            .collect::<Vec<_>>();
+                        let results = receipts
+                            .into_iter()
+                            .map(|result| match result {
+                                Ok(receipt) => json!({
+                                    "ok": true,
+                                    "member_ref": receipt.member_ref,
+                                    "session_id": receipt.member_ref.session_id(),
+                                }),
+                                Err(error) => json!({
+                                    "ok": false,
+                                    "error": error.to_string(),
+                                }),
+                            })
+                            .collect::<Vec<_>>();
+                        (results, async_ops)
+                    }
+                    _ => {
+                        let results = self
+                            .handle
+                            .spawn_many(specs)
+                            .await
+                            .into_iter()
+                            .map(|result| match result {
+                                Ok(member_ref) => json!({
+                                    "ok": true,
+                                    "member_ref": member_ref,
+                                    "session_id": member_ref.session_id(),
+                                }),
+                                Err(error) => json!({
+                                    "ok": false,
+                                    "error": error.to_string(),
+                                }),
+                            })
+                            .collect::<Vec<_>>();
+                        (results, Vec::new())
+                    }
+                };
+                Self::encode_result_with_async_ops(call, json!({ "results": results }), async_ops)
             }
             TOOL_RETIRE_MEERKAT => {
                 let args: RetireMeerkatArgs = call
@@ -414,8 +621,14 @@ impl AgentToolDispatcher for MobToolDispatcher {
                             "profile": entry.profile,
                             "runtime_mode": entry.runtime_mode,
                             "member_ref": entry.member_ref,
+                            "peer_id": entry.peer_id,
                             "session_id": entry.session_id(),
                             "wired_to": entry.wired_to,
+                            "external_peer_specs": entry.external_peer_specs,
+                            "status": entry.status,
+                            "error": entry.error,
+                            "is_final": entry.is_final,
+                            "current_session_id": entry.current_session_id,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -503,14 +716,58 @@ impl AgentToolDispatcher for MobToolDispatcher {
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 Self::encode_result(call, json!({ "task": task }))
             }
+            TOOL_FORCE_CANCEL_MEERKAT => {
+                let args: ForceCancelArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                self.handle
+                    .force_cancel_member(MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!({"ok": true}))
+            }
+            TOOL_MEERKAT_STATUS => {
+                let args: MeerkatStatusArgs = call
+                    .parse_args()
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let snapshot = self
+                    .handle
+                    .member_status(&MeerkatId::from(args.meerkat_id))
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?;
+                Self::encode_result(call, json!(snapshot))
+            }
             _ => Err(ToolError::not_found(call.name)),
         }
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        if Arc::strong_count(&self) != 1 {
+            return Err(OpsLifecycleBindError::SharedOwnership);
+        }
+        let this = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        Ok(Arc::new(Self {
+            handle: this.handle,
+            tools: this.tools,
+            owner_session_id: Some(owner_session_id),
+            ops_registry: Some(registry),
+        }))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        true
     }
 }
 
 const TOOL_SPAWN_MEERKAT: &str = "spawn_meerkat";
 const TOOL_SPAWN_MANY_MEERKATS: &str = "spawn_many_meerkats";
 const TOOL_RETIRE_MEERKAT: &str = "retire_meerkat";
+const TOOL_FORCE_CANCEL_MEERKAT: &str = "force_cancel_meerkat";
+const TOOL_MEERKAT_STATUS: &str = "meerkat_status";
 const TOOL_WIRE_PEERS: &str = "wire_peers";
 const TOOL_UNWIRE_PEERS: &str = "unwire_peers";
 const TOOL_LIST_MEERKATS: &str = "list_meerkats";

@@ -18,6 +18,7 @@ use meerkat_core::service::SessionHistoryQuery;
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::error;
@@ -25,12 +26,23 @@ use crate::handlers;
 use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
+use meerkat::surface::RequestContext;
+
+#[cfg(feature = "comms")]
+fn is_transport_internal(message: &str) -> bool {
+    message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionOwner {
     Runtime,
     #[cfg(feature = "mob")]
     Mob,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlobGetParams {
+    blob_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +94,7 @@ impl NotificationSink {
     ///
     /// When `scope_id` and `scope_path` are provided, they are included as
     /// additional fields on the notification params alongside the event. This
-    /// allows SDKs to distinguish sub-agent and mob-member scoped events from
+    /// allows SDKs to distinguish delegated-branch and mob-member scoped events from
     /// direct session events.
     async fn emit_session_stream_event(
         &self,
@@ -420,6 +432,27 @@ impl MethodRouter {
         Ok(())
     }
 
+    async fn handle_blob_get(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: BlobGetParams = match handlers::parse_params(params) {
+            Ok(params) => params,
+            Err(response) => return response.with_id(id),
+        };
+        let blob_id = meerkat_core::BlobId::new(params.blob_id);
+        match self.runtime.blob_store().get(&blob_id).await {
+            Ok(payload) => RpcResponse::success(id, payload),
+            Err(meerkat_core::BlobStoreError::NotFound(missing)) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("blob not found: {missing}"),
+            ),
+            Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+        }
+    }
+
     #[cfg(feature = "mob")]
     pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
@@ -528,6 +561,17 @@ impl MethodRouter {
     /// require a response.
     #[allow(clippy::if_not_else)]
     pub async fn dispatch(&self, request: RpcRequest) -> Option<RpcResponse> {
+        self.dispatch_with_request_context(request, None).await
+    }
+
+    /// Dispatch a request with optional host-level request context for
+    /// long-running cancel/publish coordination.
+    #[allow(clippy::if_not_else)]
+    pub async fn dispatch_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RpcResponse> {
         // Notifications (no id) are fire-and-forget
         if request.is_notification() {
             // Handle known notification methods silently
@@ -555,13 +599,18 @@ impl MethodRouter {
                     self.runtime.clone(),
                     &self.notification_sink,
                     &self.runtime_adapter,
+                    request_context.clone(),
                 )
                 .await
             }
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            "blob/get" => self.handle_blob_get(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
+            "session/external_event" => {
+                handlers::event::handle_external_event(id, params, self.runtime.clone()).await
+            }
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
@@ -572,6 +621,7 @@ impl MethodRouter {
                     self.runtime.clone(),
                     &self.notification_sink,
                     &self.runtime_adapter,
+                    request_context.clone(),
                 )
                 .await
             }
@@ -641,6 +691,26 @@ impl MethodRouter {
                 handlers::mob::handle_flow_cancel(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/spawn_helper" => {
+                handlers::mob::handle_spawn_helper(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/fork_helper" => {
+                handlers::mob::handle_fork_helper(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/force_cancel" => {
+                handlers::mob::handle_force_cancel(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/member_status" => {
+                handlers::mob::handle_member_status(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/wait_kickoff" => {
+                handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/stream_open" => self.handle_mob_stream_open(id, params).await,
             #[cfg(feature = "mob")]
             "mob/stream_close" => self.handle_mob_stream_close(id, params).await,
@@ -648,7 +718,6 @@ impl MethodRouter {
             "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]
             "comms/peers" => self.handle_comms_peers(id, params).await,
-            // M12: event/push removed. Use comms/send instead.
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
             "skills/inspect" => {
                 handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
@@ -1104,11 +1173,17 @@ impl MethodRouter {
         let cmd = match handlers::comms::build_comms_command(&params, &session_id) {
             Ok(cmd) => cmd,
             Err(details) => {
-                return RpcResponse::error(id, error::INVALID_PARAMS, serde_json::json!({
+                let normalized = serde_json::json!({
                     "code": "invalid_command",
                     "message": "Command validation failed",
                     "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&details),
-                }).to_string())
+                });
+                return RpcResponse::error_with_data(
+                    id,
+                    error::INVALID_PARAMS,
+                    "Command validation failed",
+                    normalized,
+                );
             }
         };
         match comms.send(cmd).await {
@@ -1139,7 +1214,46 @@ impl MethodRouter {
                 };
                 RpcResponse::success(id, result)
             }
-            Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, e.to_string()),
+            Err(e) => {
+                let normalized = match &e {
+                    meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
+                        "code": "peer_not_found_or_not_trusted",
+                        "peer": peer,
+                        "message": format!("peer '{peer}' is not found or not trusted"),
+                    }),
+                    meerkat_core::comms::SendError::PeerOffline => {
+                        let peer = params.to.as_deref().unwrap_or("<unknown>");
+                        json!({
+                            "code": "peer_unreachable",
+                            "peer": peer,
+                            "reason": "offline_or_no_ack",
+                            "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
+                        })
+                    }
+                    meerkat_core::comms::SendError::Internal(details)
+                        if params.to.is_some() && is_transport_internal(details) =>
+                    {
+                        let peer = params.to.as_deref().unwrap_or("<unknown>");
+                        json!({
+                            "code": "peer_unreachable",
+                            "peer": peer,
+                            "reason": "transport_error",
+                            "message": format!("peer '{peer}' is unreachable: transport_error"),
+                            "details": details,
+                        })
+                    }
+                    _ => json!({
+                        "code": "send_failed",
+                        "message": e.to_string(),
+                    }),
+                };
+                let message = normalized
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Comms send failed")
+                    .to_string();
+                RpcResponse::error_with_data(id, error::INTERNAL_ERROR, message, normalized)
+            }
         }
     }
 
@@ -1199,6 +1313,9 @@ impl MethodRouter {
                     "source": format!("{:?}", p.source),
                     "sendable_kinds": p.sendable_kinds,
                     "capabilities": p.capabilities,
+                    "reachability": p.reachability,
+                    "last_unreachable_reason": p.last_unreachable_reason,
+                    "meta": p.meta,
                 })
             })
             .collect();
@@ -1777,10 +1894,12 @@ mod tests {
 
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures::stream;
     use meerkat::AgentFactory;
+    use meerkat::surface::{RequestContext, SurfaceRequestExecutor, noop_request_action};
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::skills::{
         SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
@@ -1902,6 +2021,10 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
+    fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
+        Arc::new(meerkat_store::MemoryBlobStore::new())
+    }
+
     async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
@@ -1911,7 +2034,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -1932,6 +2055,7 @@ mod tests {
         let (router, notif_rx) = test_router().await;
         let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
         ));
         (router.with_runtime_adapter(runtime_adapter), notif_rx)
     }
@@ -1947,7 +2071,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -1976,7 +2100,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2005,7 +2129,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2033,7 +2157,7 @@ mod tests {
             factory,
             config,
             10,
-            meerkat::PersistenceBundle::new(store, None),
+            meerkat::PersistenceBundle::new(store, None, memory_blob_store()),
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -2049,6 +2173,40 @@ mod tests {
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
         (router, notif_rx)
+    }
+
+    #[tokio::test]
+    async fn blob_get_returns_payload() {
+        let (router, _rx) = test_router().await;
+        let blob_ref = router
+            .runtime
+            .blob_store()
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+
+        let response = router
+            .dispatch(crate::protocol::RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(crate::protocol::RpcId::Num(1)),
+                method: "blob/get".to_string(),
+                params: Some(
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({ "blob_id": blob_ref.blob_id.as_str() }),
+                    )
+                    .expect("raw value"),
+                ),
+            })
+            .await;
+
+        let response = response.expect("response");
+        assert!(response.error.is_none(), "blob/get should succeed");
+        let result: serde_json::Value =
+            serde_json::from_str(response.result.expect("blob payload").get())
+                .expect("valid blob payload");
+        assert_eq!(result["blob_id"], blob_ref.blob_id.as_str());
+        assert_eq!(result["media_type"], "image/png");
+        assert_eq!(result["data"], "aGVsbG8=");
     }
 
     fn source_uuid(raw: &str) -> SourceUuid {
@@ -2153,6 +2311,15 @@ mod tests {
         resp.error.as_ref().expect("Expected error response").code
     }
 
+    async fn cancelled_request_context(id: &RpcId) -> RequestContext {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let key = serde_json::to_string(id).expect("request id should serialize");
+        let context = executor.begin_request(key.clone(), noop_request_action());
+        let cancelled = executor.cancel_request(&key).await;
+        assert!(cancelled, "pre-cancel should mark request cancelled");
+        context
+    }
+
     fn error_message(resp: &RpcResponse) -> String {
         resp.error
             .as_ref()
@@ -2216,6 +2383,7 @@ mod tests {
         assert!(method_names.contains(&"initialize"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/history"));
+        assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
         assert!(
@@ -2225,6 +2393,10 @@ mod tests {
         #[cfg(feature = "mob")]
         {
             assert!(method_names.contains(&"mob/prefabs"));
+            assert!(method_names.contains(&"mob/spawn_helper"));
+            assert!(method_names.contains(&"mob/fork_helper"));
+            assert!(method_names.contains(&"mob/force_cancel"));
+            assert!(method_names.contains(&"mob/member_status"));
             assert!(method_names.contains(&"mob/tools"));
             assert!(method_names.contains(&"mob/call"));
             assert!(method_names.contains(&"mob/stream_open"));
@@ -3484,7 +3656,7 @@ mod tests {
                 serde_json::json!({
                     "mob_id": &mob_id,
                     "meerkat_id": "lead-1",
-                    "message": "do work while retiring"
+                    "content": "do work while retiring"
                 }),
             ))
             .await
@@ -3834,6 +4006,69 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_send_rejects_legacy_message_shape() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "mob/send",
+            serde_json::json!({
+                "mob_id": "mob-1",
+                "meerkat_id": "worker-1",
+                "message": "legacy payload"
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("unknown field `message`"),
+            "legacy mob/send payloads should be rejected after the 0.5 clean cut"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_wait_kickoff_rejects_empty_mob_id() {
+        let (router, _notif_rx) = test_router().await;
+        let resp = router
+            .dispatch(make_request(
+                "mob/wait_kickoff",
+                serde_json::json!({
+                    "mob_id": "",
+                    "timeout_ms": 1000
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("mob_id must not be empty"),
+            "empty mob_id should be rejected before dispatching to mob state"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_wire_rejects_legacy_endpoint_shapes() {
+        let (router, _notif_rx) = test_router().await;
+        let req = make_request(
+            "mob/wire",
+            serde_json::json!({
+                "mob_id": "mob-1",
+                "local": "worker-a",
+                "target": { "local": "worker-b" }
+            }),
+        );
+
+        let resp = router.dispatch(req).await.unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+        assert!(
+            error_message(&resp).contains("unknown field `local`"),
+            "legacy mob/wire payloads should be rejected after the 0.5 clean cut"
+        );
+    }
+
     #[tokio::test]
     async fn deferred_session_runtime_endpoints_register_pending_session() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
@@ -3861,9 +4096,11 @@ mod tests {
             .await
             .unwrap();
         let state = result_value(&state_resp);
+        // RPC surface eagerly attaches an executor for all sessions (including
+        // deferred ones), so the runtime state is Attached, not Idle.
         assert_eq!(
             state["state"].as_str(),
-            Some("idle"),
+            Some("attached"),
             "deferred sessions should be routable through runtime/state before their first turn"
         );
 
@@ -4482,6 +4719,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn turn_start_returns_request_cancelled_when_pre_cancelled() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Hello",
+                "initial_turn": "deferred"
+            }),
+        );
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let mut turn_req = make_request(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "Follow up"
+            }),
+        );
+        turn_req.id = Some(RpcId::Num(42));
+        let context = cancelled_request_context(turn_req.id.as_ref().unwrap()).await;
+
+        let turn_resp = router
+            .dispatch_with_request_context(turn_req, Some(context))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&turn_resp), error::REQUEST_CANCELLED);
+    }
+
     /// 8. `turn/start` emits notifications via the notification sink.
     #[tokio::test]
     async fn turn_start_emits_notifications() {
@@ -4643,6 +4913,40 @@ mod tests {
         let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
         let interrupt_result = result_value(&interrupt_resp);
         assert_eq!(interrupt_result["interrupted"], true);
+    }
+
+    #[tokio::test]
+    async fn session_create_returns_request_cancelled_and_rolls_back_when_pre_cancelled() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+
+        let mut create_req = make_request(
+            "session/create",
+            serde_json::json!({
+                "prompt": "Hello"
+            }),
+        );
+        create_req.id = Some(RpcId::Num(77));
+        let context = cancelled_request_context(create_req.id.as_ref().unwrap()).await;
+
+        let create_resp = router
+            .dispatch_with_request_context(create_req, Some(context))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&create_resp), error::REQUEST_CANCELLED);
+
+        let list_resp = router
+            .dispatch(make_request("session/list", serde_json::json!({})))
+            .await
+            .unwrap();
+        let listed = result_value(&list_resp);
+        let sessions = listed["sessions"]
+            .as_array()
+            .expect("session/list should return an array");
+        assert!(
+            sessions.is_empty(),
+            "pre-start cancelled create should not leave a live session behind: {sessions:?}"
+        );
     }
 
     /// 10. `config/get` returns the default config.

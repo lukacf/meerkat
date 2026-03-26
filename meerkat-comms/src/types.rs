@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
 use ciborium::value::{CanonicalValue, Value};
-use meerkat_core::types::ContentBlock;
+use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Response status for Request messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -26,7 +26,7 @@ pub enum MessageKind {
     Message {
         body: String,
         /// Optional multimodal content blocks. When present, carries full
-        /// multimodal content; `body` remains as text projection for backwards compat.
+        /// multimodal content; `body` remains the canonical text projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
     },
@@ -138,16 +138,12 @@ impl Envelope {
 pub enum InboxItem {
     /// A message received from an external peer (signed CBOR envelope).
     External { envelope: Envelope },
-    /// A result from a completed subagent.
-    SubagentResult {
-        subagent_id: Uuid,
-        result: JsonValue,
-        summary: String,
-    },
     /// A plain-text event from an external (unauthenticated) source.
     PlainEvent {
         body: String,
         source: meerkat_core::PlainEventSource,
+        #[serde(default)]
+        handling_mode: HandlingMode,
         /// Optional interaction ID for subscription correlation.
         /// Set by `inject_with_subscription`, `None` for untracked events.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +151,9 @@ pub enum InboxItem {
         /// Optional multimodal content blocks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
+        /// Optional normalized rendering metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render_metadata: Option<RenderMetadata>,
     },
 }
 
@@ -327,27 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn test_inbox_item_subagent_fields() {
-        let item = InboxItem::SubagentResult {
-            subagent_id: Uuid::new_v4(),
-            result: serde_json::json!({"done": true}),
-            summary: "Task completed".to_string(),
-        };
-        if let InboxItem::SubagentResult {
-            subagent_id,
-            result,
-            summary,
-        } = item
-        {
-            assert!(subagent_id != Uuid::nil());
-            assert_eq!(result["done"], true);
-            assert_eq!(summary, "Task completed");
-        } else {
-            panic!("Expected SubagentResult variant");
-        }
-    }
-
-    #[test]
     fn test_inbox_item_cbor_roundtrip() {
         let items = vec![
             InboxItem::External {
@@ -361,10 +339,13 @@ mod tests {
                     sig: Signature::new([0u8; 64]),
                 },
             },
-            InboxItem::SubagentResult {
-                subagent_id: Uuid::new_v4(),
-                result: serde_json::json!({}),
-                summary: "done".to_string(),
+            InboxItem::PlainEvent {
+                body: "event".to_string(),
+                source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: HandlingMode::Queue,
+                interaction_id: Some(Uuid::new_v4()),
+                blocks: None,
+                render_metadata: None,
             },
         ];
         for item in items {
@@ -465,6 +446,168 @@ mod tests {
         assert!(envelope.verify(), "signed envelope should verify");
     }
 
+    #[test]
+    fn test_rct_contracts_envelope_signable_bytes_are_canonical() {
+        let envelope = Envelope {
+            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            from: PubKey::new([1u8; 32]),
+            to: PubKey::new([2u8; 32]),
+            kind: MessageKind::Message {
+                body: "hello".to_string(),
+                blocks: None,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+
+        let bytes = envelope.signable_bytes();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&[
+            0x84, 0x50, 0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66,
+            0x55, 0x44, 0x00, 0x00, 0x58, 0x20,
+        ]);
+        expected.extend(std::iter::repeat_n(0x01, 32));
+        expected.extend_from_slice(&[0x58, 0x20]);
+        expected.extend(std::iter::repeat_n(0x02, 32));
+        expected.extend_from_slice(&[
+            0xa2, 0x64, b'b', b'o', b'd', b'y', 0x65, b'h', b'e', b'l', b'l', b'o', 0x64, b't',
+            b'y', b'p', b'e', 0x67, b'm', b'e', b's', b's', b'a', b'g', b'e',
+        ]);
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_regression_ack_must_match_sent_message() {
+        use crate::identity::Keypair;
+
+        let sender_keypair = Keypair::generate();
+        let receiver_keypair = Keypair::generate();
+
+        let sent_id = Uuid::new_v4();
+        let sent_envelope = Envelope {
+            id: sent_id,
+            from: sender_keypair.public_key(),
+            to: receiver_keypair.public_key(),
+            kind: MessageKind::Message {
+                body: "hello".to_string(),
+                blocks: None,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+
+        let mut valid_ack = Envelope {
+            id: Uuid::new_v4(),
+            from: receiver_keypair.public_key(),
+            to: sender_keypair.public_key(),
+            kind: MessageKind::Ack {
+                in_reply_to: sent_id,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        valid_ack.sign(&receiver_keypair);
+
+        assert!(valid_ack.verify(), "valid ACK should verify");
+        assert_eq!(
+            valid_ack.from, sent_envelope.to,
+            "ACK from should match sent to"
+        );
+        if let MessageKind::Ack { in_reply_to } = valid_ack.kind {
+            assert_eq!(in_reply_to, sent_id, "ACK in_reply_to should match sent id");
+        }
+    }
+
+    #[test]
+    fn test_regression_ack_wrong_in_reply_to_is_invalid() {
+        use crate::identity::Keypair;
+
+        let sender_keypair = Keypair::generate();
+        let receiver_keypair = Keypair::generate();
+
+        let sent_id = Uuid::new_v4();
+        let wrong_id = Uuid::new_v4();
+
+        let mut wrong_ack = Envelope {
+            id: Uuid::new_v4(),
+            from: receiver_keypair.public_key(),
+            to: sender_keypair.public_key(),
+            kind: MessageKind::Ack {
+                in_reply_to: wrong_id,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        wrong_ack.sign(&receiver_keypair);
+
+        assert!(wrong_ack.verify(), "signature should still verify");
+        if let MessageKind::Ack { in_reply_to } = wrong_ack.kind {
+            assert_ne!(
+                in_reply_to, sent_id,
+                "wrong ACK in_reply_to should not match sent id"
+            );
+        }
+    }
+
+    #[test]
+    fn test_regression_ack_from_wrong_peer_is_invalid() {
+        use crate::identity::Keypair;
+
+        let sender_keypair = Keypair::generate();
+        let receiver_keypair = Keypair::generate();
+        let imposter_keypair = Keypair::generate();
+
+        let sent_id = Uuid::new_v4();
+        let sent_to = receiver_keypair.public_key();
+
+        let mut imposter_ack = Envelope {
+            id: Uuid::new_v4(),
+            from: imposter_keypair.public_key(),
+            to: sender_keypair.public_key(),
+            kind: MessageKind::Ack {
+                in_reply_to: sent_id,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        imposter_ack.sign(&imposter_keypair);
+
+        assert!(imposter_ack.verify(), "imposter signature should verify");
+        assert_ne!(
+            imposter_ack.from, sent_to,
+            "imposter ACK from should not match sent to"
+        );
+    }
+
+    #[test]
+    fn test_regression_ack_to_wrong_recipient_is_invalid() {
+        use crate::identity::Keypair;
+
+        let sender_keypair = Keypair::generate();
+        let receiver_keypair = Keypair::generate();
+        let wrong_recipient_keypair = Keypair::generate();
+
+        let sent_id = Uuid::new_v4();
+
+        let mut misrouted_ack = Envelope {
+            id: Uuid::new_v4(),
+            from: receiver_keypair.public_key(),
+            to: wrong_recipient_keypair.public_key(),
+            kind: MessageKind::Ack {
+                in_reply_to: sent_id,
+            },
+            sig: Signature::new([0u8; 64]),
+        };
+        misrouted_ack.sign(&receiver_keypair);
+
+        assert!(
+            misrouted_ack.verify(),
+            "misrouted ACK signature should verify"
+        );
+        assert_ne!(
+            misrouted_ack.to,
+            sender_keypair.public_key(),
+            "misrouted ACK 'to' should not match sender's public key"
+        );
+    }
+
     // === PlainEvent tests ===
 
     #[test]
@@ -474,8 +617,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "New email from john@example.com".to_string(),
             source: PlainEventSource::Tcp,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
 
         // JSON round-trip
@@ -498,26 +643,34 @@ mod tests {
             InboxItem::PlainEvent {
                 body: "hello".to_string(),
                 source: PlainEventSource::Tcp,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
             InboxItem::PlainEvent {
                 body: r#"{"event":"email"}"#.to_string(),
                 source: PlainEventSource::Stdin,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
             InboxItem::PlainEvent {
                 body: "webhook payload".to_string(),
                 source: PlainEventSource::Webhook,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
             InboxItem::PlainEvent {
                 body: "rpc event".to_string(),
                 source: PlainEventSource::Rpc,
+                handling_mode: HandlingMode::Queue,
                 interaction_id: None,
                 blocks: None,
+                render_metadata: None,
             },
         ];
         for item in items {
@@ -537,13 +690,16 @@ mod tests {
             InboxItem::PlainEvent {
                 body,
                 source,
+                handling_mode: _,
                 interaction_id,
                 blocks,
+                render_metadata,
             } => {
                 assert_eq!(body, "hello");
                 assert_eq!(source, meerkat_core::PlainEventSource::Tcp);
                 assert_eq!(interaction_id, None);
                 assert_eq!(blocks, None);
+                assert_eq!(render_metadata, None);
             }
             other => panic!("Expected PlainEvent, got {other:?}"),
         }
@@ -555,8 +711,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
+            handling_mode: HandlingMode::Queue,
             interaction_id: Some(id),
             blocks: None,
+            render_metadata: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();
@@ -574,8 +732,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "tracked event".to_string(),
             source: meerkat_core::PlainEventSource::Rpc,
+            handling_mode: HandlingMode::Queue,
             interaction_id: Some(id),
             blocks: None,
+            render_metadata: None,
         };
 
         let mut buf = Vec::new();
@@ -589,8 +749,10 @@ mod tests {
         let item = InboxItem::PlainEvent {
             body: "untracked".to_string(),
             source: meerkat_core::PlainEventSource::Tcp,
+            handling_mode: HandlingMode::Queue,
             interaction_id: None,
             blocks: None,
+            render_metadata: None,
         };
 
         let json = serde_json::to_string(&item).unwrap();
@@ -614,8 +776,7 @@ mod tests {
                 },
                 ContentBlock::Image {
                     media_type: "image/png".to_string(),
-                    data: "iVBORw0KGgo=".to_string(),
-                    source_path: None,
+                    data: "iVBORw0KGgo=".into(),
                 },
             ]),
         };

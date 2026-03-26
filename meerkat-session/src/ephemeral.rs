@@ -16,7 +16,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
-use meerkat_core::{PendingSystemContextAppend, SessionSystemContextState};
+use meerkat_core::{PendingSystemContextAppend, SessionLlmIdentity, SessionSystemContextState};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,7 +66,8 @@ pub struct SessionSnapshot {
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
-        host_mode: bool,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        handling_mode: meerkat_core::types::HandlingMode,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
@@ -76,12 +77,14 @@ enum SessionCommand {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
         reply_tx: oneshot::Sender<()>,
     },
+    HotSwapLlmIdentity {
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     StageToolFilter {
         filter: meerkat_core::ToolFilter,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
-    },
-    ReadSnapshot {
-        reply_tx: oneshot::Sender<SessionSnapshot>,
     },
     /// Export the full session (messages + metadata) for persistence.
     ExportSession {
@@ -91,14 +94,26 @@ enum SessionCommand {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
     },
+    /// Update the keep_alive flag in durable session metadata.
+    UpdateKeepAlive {
+        keep_alive: bool,
+        reply_tx: oneshot::Sender<()>,
+    },
+    UpdateSystemPrompt {
+        system_prompt: String,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
     Shutdown,
 }
 
 /// Lightweight summary updated after each turn, readable without querying the task.
+#[derive(Clone)]
 struct SessionSummaryCache {
     updated_at: SystemTime,
     message_count: usize,
     total_tokens: u64,
+    usage: Usage,
+    last_assistant_text: Option<String>,
 }
 
 /// Handle stored in the sessions map.
@@ -106,6 +121,7 @@ struct SessionHandle {
     command_tx: mpsc::Sender<SessionCommand>,
     state_rx: watch::Receiver<SessionState>,
     summary_rx: watch::Receiver<SessionSummaryCache>,
+    llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
     /// Atomic turn-admission lock. Set to `true` by the caller before sending
     /// `StartTurn`, guaranteeing that only one turn is admitted at a time.
     /// Reset to `false` by the session task after the turn completes.
@@ -119,7 +135,7 @@ struct SessionHandle {
     event_injector: Option<Arc<dyn meerkat_core::EventInjector>>,
     /// Internal runtime injector for interaction-scoped streaming.
     interaction_event_injector: Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>>,
-    /// Optional comms runtime for host-mode commands and stream attachment.
+    /// Optional comms runtime for keep-alive commands and stream attachment.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
@@ -134,6 +150,7 @@ struct SessionHandle {
 struct SessionTaskControl {
     state_tx: watch::Sender<SessionState>,
     summary_tx: watch::Sender<SessionSummaryCache>,
+    llm_identity_tx: watch::Sender<SessionLlmIdentity>,
     turn_lock: Arc<AtomicBool>,
     interrupt_requested: Arc<AtomicBool>,
     interrupt_notify: Arc<tokio::sync::Notify>,
@@ -173,13 +190,36 @@ pub trait SessionAgent: Send {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError>;
 
-    /// Run the agent in host mode: process prompt then stay alive for comms.
+    /// Run the next turn.
     ///
-    /// Event streaming should use the agent's build-time configured event channel.
-    async fn run_host_mode(
+    /// `handling_mode` and `render_metadata` are runtime-owned semantics:
+    /// the runtime routes Queue/Steer BEFORE calling the executor, so by
+    /// the time this method runs the routing decision is already made.
+    /// These parameters are present on the trait because the session task
+    /// forwards them from `StartTurnRequest`, but implementations should
+    /// not act on them — the runtime is the canonical owner.
+    ///
+    /// The default rejects non-Queue handling_mode and non-None render_metadata
+    /// to prevent silent flattening on paths that can't honor them (§5).
+    async fn run_turn_with_events(
         &mut self,
         prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError>;
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if handling_mode != meerkat_core::types::HandlingMode::Queue {
+            return Err(meerkat_core::error::AgentError::ConfigError(format!(
+                "handling_mode {handling_mode:?} requires a runtime-backed surface",
+            )));
+        }
+        if render_metadata.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "render_metadata requires a runtime-backed surface".to_string(),
+            ));
+        }
+        self.run_with_events(prompt, event_tx).await
+    }
 
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
@@ -192,6 +232,13 @@ pub trait SessionAgent: Send {
 
     /// Replace the LLM client for subsequent turns.
     fn replace_client(&mut self, _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {}
+
+    /// Atomically update the live client and the session's durable LLM identity.
+    fn hot_swap_llm_identity(
+        &mut self,
+        client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError>;
 
     /// Stage an external tool visibility filter for subsequent turns.
     fn stage_external_tool_filter(
@@ -216,6 +263,23 @@ pub trait SessionAgent: Send {
     /// full message history. Only called by `PersistentSessionService`
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
+
+    /// Update the `keep_alive` flag in the session's durable metadata.
+    ///
+    /// Called by the session task when the runtime overrides keep-alive on a
+    /// live session. This ensures subsequent inheriting calls observe the
+    /// updated value.
+    fn update_keep_alive(&mut self, _keep_alive: bool) {}
+
+    /// Update the session system prompt before the first turn starts.
+    fn update_system_prompt(
+        &mut self,
+        _system_prompt: String,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "system_prompt override is not supported by this session agent".to_string(),
+        ))
+    }
 
     /// Apply runtime-owned system-context blocks immediately to the canonical session.
     fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]);
@@ -270,6 +334,24 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    fn llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
+        let provider = req
+            .build
+            .as_ref()
+            .and_then(|build| build.provider)
+            .or_else(|| meerkat_core::Provider::infer_from_model(&req.model))
+            .unwrap_or(meerkat_core::Provider::Other);
+        let provider_params = req
+            .build
+            .as_ref()
+            .and_then(|build| build.provider_params.clone());
+        SessionLlmIdentity {
+            model: req.model.clone(),
+            provider,
+            provider_params,
+        }
+    }
+
     /// Create a new ephemeral session service.
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
@@ -284,6 +366,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
     fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
         let cache = handle.summary_rx.borrow();
+        let llm_identity = handle.llm_identity_rx.borrow().clone();
         SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
@@ -291,12 +374,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 updated_at: cache.updated_at,
                 message_count: cache.message_count,
                 is_active: false,
-                last_assistant_text: None,
+                model: llm_identity.model,
+                provider: llm_identity.provider,
+                last_assistant_text: cache.last_assistant_text.clone(),
                 labels: handle.labels.clone(),
             },
             billing: SessionUsage {
                 total_tokens: cache.total_tokens,
-                usage: Usage::default(),
+                usage: cache.usage.clone(),
             },
         }
     }
@@ -407,6 +492,20 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         sessions
             .get(session_id)
             .map(|h| Arc::clone(&h.system_context_state))
+    }
+
+    /// Get the current live durable LLM identity for a session.
+    pub async fn live_session_llm_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionLlmIdentity, SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(session_id)
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        Ok(handle.llm_identity_rx.borrow().clone())
     }
 
     /// Get the comms runtime for a session, if available.
@@ -526,6 +625,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .builder
             .build_agent(&req, agent_event_tx.clone())
             .await?;
+        let llm_identity = Self::llm_identity_from_create_request(&req);
 
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
@@ -544,7 +644,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             updated_at: created_at,
             message_count: 0,
             total_tokens: 0,
+            usage: Usage::default(),
+            last_assistant_text: None,
         });
+        let (llm_identity_tx, llm_identity_rx) = watch::channel(llm_identity);
         let (session_event_tx, session_event_rx) =
             tokio::sync::broadcast::channel::<EventEnvelope<AgentEvent>>(EVENT_CHANNEL_CAPACITY);
         drop(session_event_rx);
@@ -561,6 +664,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             SessionTaskControl {
                 state_tx,
                 summary_tx,
+                llm_identity_tx,
                 turn_lock: task_turn_lock,
                 interrupt_requested: interrupt_requested.clone(),
                 interrupt_notify: interrupt_notify.clone(),
@@ -573,6 +677,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             command_tx: command_tx.clone(),
             state_rx,
             summary_rx,
+            llm_identity_rx,
             turn_lock: turn_lock.clone(),
             _capacity_permit: capacity_permit,
             created_at,
@@ -625,12 +730,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         turn_lock.store(true, Ordering::Release);
 
         // Run the first turn
-        let host_mode = req.host_mode;
         let (result_tx, result_rx) = oneshot::channel();
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
-                host_mode,
+                render_metadata: req.render_metadata,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: caller_event_tx,
                 result_tx,
                 skill_references: req.skill_references,
@@ -704,11 +809,46 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             // point of admission — if two callers race, exactly one wins.
             Self::try_acquire_turn(id, handle)?;
 
+            if let Some(system_prompt) = req.system_prompt {
+                if handle.summary_rx.borrow().message_count > 0 {
+                    handle.turn_lock.store(false, Ordering::Release);
+                    return Err(SessionError::Unsupported(
+                        "system_prompt override is only allowed on a deferred session's first turn"
+                            .to_string(),
+                    ));
+                }
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .command_tx
+                    .send(SessionCommand::UpdateSystemPrompt {
+                        system_prompt,
+                        reply_tx,
+                    })
+                    .await
+                    .map_err(|_| {
+                        handle.turn_lock.store(false, Ordering::Release);
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            "Session task has exited".to_string(),
+                        ))
+                    })?;
+                let update_result = reply_rx.await.map_err(|_| {
+                    handle.turn_lock.store(false, Ordering::Release);
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "Session task dropped reply channel".to_string(),
+                    ))
+                })?;
+                update_result.map_err(|error| {
+                    handle.turn_lock.store(false, Ordering::Release);
+                    SessionError::Agent(error)
+                })?;
+            }
+
             handle
                 .command_tx
                 .send(SessionCommand::StartTurn {
                     prompt,
-                    host_mode: req.host_mode,
+                    render_metadata: req.render_metadata,
+                    handling_mode: req.handling_mode,
                     event_tx: req.event_tx,
                     result_tx,
                     skill_references: req.skill_references,
@@ -756,6 +896,40 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 "Session task dropped reply channel".to_string(),
             ))
         })
+    }
+
+    async fn hot_swap_session_llm_identity(
+        &self,
+        id: &SessionId,
+        client: Arc<dyn meerkat_core::AgentLlmClient>,
+        identity: SessionLlmIdentity,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::HotSwapLlmIdentity {
+                client,
+                identity,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     async fn set_session_tool_filter(
@@ -822,37 +996,26 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             }
         };
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::ReadSnapshot { reply_tx })
-            .await
-            .map_err(|_| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    "Session task has exited".to_string(),
-                ))
-            })?;
-
-        let snapshot = reply_rx.await.map_err(|_| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                "Session task dropped the reply channel".to_string(),
-            ))
-        })?;
-
-        let is_active = *handle.state_rx.borrow() == SessionState::Running;
+        // Serve live reads from the service-owned summary/watch state instead
+        // of round-tripping through the session task. This keeps read-side
+        // snapshots responsive on sync surfaces such as wasm exports.
+        let state = *handle.state_rx.borrow();
+        let summary = handle.summary_rx.borrow().clone();
         Ok(SessionView {
             state: SessionInfo {
                 session_id: id.clone(),
-                created_at: snapshot.created_at,
-                updated_at: snapshot.updated_at,
-                message_count: snapshot.message_count,
-                is_active,
-                last_assistant_text: snapshot.last_assistant_text,
+                created_at: handle.created_at,
+                updated_at: summary.updated_at,
+                message_count: summary.message_count,
+                is_active: state == SessionState::Running,
+                model: handle.llm_identity_rx.borrow().model.clone(),
+                provider: handle.llm_identity_rx.borrow().provider,
+                last_assistant_text: summary.last_assistant_text,
                 labels: handle.labels.clone(),
             },
             billing: SessionUsage {
-                total_tokens: snapshot.total_tokens,
-                usage: snapshot.usage,
+                total_tokens: summary.total_tokens,
+                usage: summary.usage,
             },
         })
     }
@@ -899,6 +1062,10 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         Ok(summaries)
     }
 
+    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
+        Ok(self.sessions.read().await.contains_key(id))
+    }
+
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
         let mut sessions = self.sessions.write().await;
         let handle = sessions
@@ -913,6 +1080,35 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         let _ = handle.command_tx.send(SessionCommand::Shutdown).await;
         Ok(())
+    }
+
+    async fn update_session_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped reply channel".to_string(),
+            ))
+        })
     }
 
     async fn subscribe_session_events(
@@ -1034,11 +1230,28 @@ async fn session_task<A: SessionAgent>(
 ) {
     let mut next_seq: u64 = 0;
     let source_id = format!("session:{}", agent.session_id());
-    while let Some(cmd) = commands.recv().await {
+
+    loop {
+        let Some(cmd) = commands.recv().await else {
+            break;
+        };
+
         match cmd {
             SessionCommand::ReplaceClient { client, reply_tx } => {
                 agent.replace_client(client);
                 let _ = reply_tx.send(());
+                continue;
+            }
+            SessionCommand::HotSwapLlmIdentity {
+                client,
+                identity,
+                reply_tx,
+            } => {
+                let result = agent.hot_swap_llm_identity(client, identity.clone());
+                if result.is_ok() {
+                    control.llm_identity_tx.send_replace(identity);
+                }
+                let _ = reply_tx.send(result);
                 continue;
             }
             SessionCommand::StageToolFilter { filter, reply_tx } => {
@@ -1047,7 +1260,8 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StartTurn {
                 prompt,
-                host_mode,
+                render_metadata,
+                handling_mode,
                 event_tx,
                 result_tx,
                 skill_references,
@@ -1083,11 +1297,12 @@ async fn session_task<A: SessionAgent>(
                                 > + 'a,
                         >,
                     >;
-                    let run_fut: RunFut<'_> = if host_mode {
-                        Box::pin(agent.run_host_mode(prompt))
-                    } else {
-                        Box::pin(agent.run_with_events(prompt, agent_event_tx.clone()))
-                    };
+                    let run_fut: RunFut<'_> = Box::pin(agent.run_turn_with_events(
+                        prompt,
+                        handling_mode,
+                        render_metadata,
+                        agent_event_tx.clone(),
+                    ));
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
                     let mut interrupted = false;
@@ -1144,6 +1359,8 @@ async fn session_task<A: SessionAgent>(
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
                 });
 
                 control.state_tx.send_replace(SessionState::Idle);
@@ -1162,9 +1379,6 @@ async fn session_task<A: SessionAgent>(
                 control.interrupt_requested.store(false, Ordering::Release);
                 let _ = result_tx.send(result);
             }
-            SessionCommand::ReadSnapshot { reply_tx } => {
-                let _ = reply_tx.send(agent.snapshot());
-            }
             SessionCommand::ExportSession { reply_tx } => {
                 let _ = reply_tx.send(agent.session_clone());
             }
@@ -1175,8 +1389,23 @@ async fn session_task<A: SessionAgent>(
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
+                    usage: snap.usage,
+                    last_assistant_text: snap.last_assistant_text,
                 });
                 let _ = reply_tx.send(());
+            }
+            SessionCommand::UpdateKeepAlive {
+                keep_alive,
+                reply_tx,
+            } => {
+                agent.update_keep_alive(keep_alive);
+                let _ = reply_tx.send(());
+            }
+            SessionCommand::UpdateSystemPrompt {
+                system_prompt,
+                reply_tx,
+            } => {
+                let _ = reply_tx.send(agent.update_system_prompt(system_prompt));
             }
             SessionCommand::Shutdown => {
                 control.state_tx.send_replace(SessionState::ShuttingDown);

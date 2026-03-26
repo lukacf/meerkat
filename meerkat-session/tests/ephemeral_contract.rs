@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use meerkat_core::compact::{CompactionContext, CompactionResult, Compactor};
 use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{
@@ -14,7 +15,7 @@ use meerkat_core::service::{
     SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+    AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
@@ -79,16 +80,6 @@ impl SessionAgent for MockAgent {
         })
     }
 
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        // Mock host mode delegates to regular run for testing purposes.
-        // Session task forwards events from the shared internal channel.
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        self.run_with_events(prompt, event_tx).await
-    }
-
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
         // No-op for mock
     }
@@ -111,6 +102,14 @@ impl SessionAgent for MockAgent {
 
     fn cancel(&mut self) {
         // No-op for mock
+    }
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
     }
 
     fn session_id(&self) -> SessionId {
@@ -283,7 +282,10 @@ impl AgentToolDispatcher for StaticToolDispatcher {
         Arc::clone(&self.tools)
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         Err(ToolError::not_found(call.name))
     }
 }
@@ -391,9 +393,15 @@ impl AgentLlmClient for RecordingLlmClient {
     fn provider(&self) -> &'static str {
         "recording-mock"
     }
+
+    fn model(&self) -> &'static str {
+        "mock-model"
+    }
 }
 
 type RealInnerAgent = Agent<RecordingLlmClient, StaticToolDispatcher, NoopSessionStore>;
+type CompactionInnerAgent =
+    Agent<CompactionTrackingLlmClient, StaticToolDispatcher, NoopSessionStore>;
 
 struct RealSessionAgent {
     agent: RealInnerAgent,
@@ -407,13 +415,6 @@ impl SessionAgent for RealSessionAgent {
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         self.agent.run_with_events(prompt, event_tx).await
-    }
-
-    async fn run_host_mode(
-        &mut self,
-        prompt: meerkat_core::types::ContentInput,
-    ) -> Result<RunResult, meerkat_core::error::AgentError> {
-        self.agent.run_host_mode(prompt).await
     }
 
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
@@ -431,6 +432,89 @@ impl SessionAgent for RealSessionAgent {
 
     fn cancel(&mut self) {
         self.agent.cancel();
+    }
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    fn session_id(&self) -> SessionId {
+        self.agent.session().id().clone()
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        let session = self.agent.session();
+        SessionSnapshot {
+            created_at: session.created_at(),
+            updated_at: session.updated_at(),
+            message_count: session.messages().len(),
+            total_tokens: session.total_tokens(),
+            usage: session.total_usage(),
+            last_assistant_text: session.last_assistant_text(),
+        }
+    }
+
+    fn session_clone(&self) -> meerkat_core::Session {
+        self.agent.session_with_system_context_state()
+    }
+
+    fn apply_runtime_system_context(
+        &mut self,
+        appends: &[meerkat_core::PendingSystemContextAppend],
+    ) {
+        self.agent
+            .session_mut()
+            .append_system_context_blocks(appends);
+    }
+
+    fn system_context_state(
+        &self,
+    ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+        self.agent.system_context_state()
+    }
+}
+
+struct CompactionSessionAgent {
+    agent: CompactionInnerAgent,
+}
+
+#[async_trait]
+impl SessionAgent for CompactionSessionAgent {
+    async fn run_with_events(
+        &mut self,
+        prompt: meerkat_core::types::ContentInput,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.agent.run_with_events(prompt, event_tx).await
+    }
+
+    fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>) {
+        self.agent.pending_skill_references = refs;
+    }
+
+    fn set_flow_tool_overlay(
+        &mut self,
+        overlay: Option<TurnToolOverlay>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .set_flow_tool_overlay(overlay)
+            .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))
+    }
+
+    fn cancel(&mut self) {
+        self.agent.cancel();
+    }
+
+    fn hot_swap_llm_identity(
+        &mut self,
+        _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>,
+        _identity: meerkat_core::SessionLlmIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
     }
 
     fn session_id(&self) -> SessionId {
@@ -476,6 +560,141 @@ struct RealAgentBuilder {
     hook_engine: Option<Arc<dyn HookEngine>>,
 }
 
+struct CompactionTrackingLlmClient {
+    seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl AgentLlmClient for CompactionTrackingLlmClient {
+    async fn stream_response(
+        &self,
+        messages: &[meerkat_core::types::Message],
+        _tools: &[Arc<ToolDef>],
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<&Value>,
+    ) -> Result<LlmStreamResult, meerkat_core::error::AgentError> {
+        let last_user = messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                meerkat_core::types::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.seen_last_user_messages
+            .lock()
+            .expect("seen_last_user_messages lock poisoned")
+            .push(last_user.clone());
+
+        let text = if last_user == "COMPACT NOW" {
+            "summary".to_string()
+        } else {
+            "ok".to_string()
+        };
+
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text { text, meta: None }],
+            StopReason::EndTurn,
+            Usage::default(),
+        ))
+    }
+
+    fn provider(&self) -> &'static str {
+        "compaction-mock"
+    }
+
+    fn model(&self) -> &'static str {
+        "mock-model"
+    }
+}
+
+struct TrackingCompactor {
+    compact_on_boundary: Option<u64>,
+    seen_contexts: Arc<std::sync::Mutex<Vec<CompactionContext>>>,
+}
+
+impl TrackingCompactor {
+    fn new(compact_on_boundary: Option<u64>) -> Self {
+        Self {
+            compact_on_boundary,
+            seen_contexts: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn seen_boundaries(&self) -> Vec<u64> {
+        self.seen_contexts
+            .lock()
+            .expect("seen_contexts lock poisoned")
+            .iter()
+            .map(|ctx| ctx.session_boundary_index)
+            .collect()
+    }
+}
+
+impl Compactor for TrackingCompactor {
+    fn should_compact(&self, ctx: &CompactionContext) -> bool {
+        self.seen_contexts
+            .lock()
+            .expect("seen_contexts lock poisoned")
+            .push(ctx.clone());
+        self.compact_on_boundary == Some(ctx.session_boundary_index)
+    }
+
+    fn compaction_prompt(&self) -> &'static str {
+        "COMPACT NOW"
+    }
+
+    fn max_summary_tokens(&self) -> u32 {
+        32
+    }
+
+    fn rebuild_history(
+        &self,
+        messages: &[meerkat_core::types::Message],
+        _summary: &str,
+    ) -> CompactionResult {
+        CompactionResult {
+            messages: messages.to_vec(),
+            discarded: Vec::new(),
+        }
+    }
+}
+
+struct CompactionAgentBuilder {
+    seen_last_user_messages: Arc<std::sync::Mutex<Vec<String>>>,
+    compactor: Arc<TrackingCompactor>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for CompactionAgentBuilder {
+    type Agent = CompactionSessionAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<CompactionSessionAgent, SessionError> {
+        let mut builder = AgentBuilder::new()
+            .model(req.model.clone())
+            .compactor(self.compactor.clone());
+        if let Some(max_tokens) = req.max_tokens {
+            builder = builder.max_tokens_per_turn(max_tokens);
+        }
+        if let Some(system_prompt) = &req.system_prompt {
+            builder = builder.system_prompt(system_prompt.clone());
+        }
+
+        let client = Arc::new(CompactionTrackingLlmClient {
+            seen_last_user_messages: Arc::clone(&self.seen_last_user_messages),
+        });
+        let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
+        let store = Arc::new(NoopSessionStore);
+        let agent = builder.build(client, tools, store).await;
+        Ok(CompactionSessionAgent { agent })
+    }
+}
+
 #[async_trait]
 impl SessionAgentBuilder for RealAgentBuilder {
     type Agent = RealSessionAgent;
@@ -517,10 +736,11 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
+        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        host_mode: false,
+
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: None,
@@ -532,6 +752,20 @@ fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         initial_turn: InitialTurnPolicy::Defer,
         ..create_req(prompt)
+    }
+}
+
+fn turn_req(prompt: &str) -> StartTurnRequest {
+    StartTurnRequest {
+        prompt: prompt.to_string().into(),
+        system_prompt: None,
+        render_metadata: None,
+        handling_mode: HandlingMode::Queue,
+        event_tx: None,
+
+        skill_references: None,
+        flow_tool_overlay: None,
+        additional_instructions: None,
     }
 }
 
@@ -573,17 +807,7 @@ async fn test_create_session_can_defer_initial_turn() {
     assert!(!view.state.is_active);
 
     let started = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "now run".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("now run"))
         .await
         .expect("start_turn should run after deferred create");
     assert!(started.text.contains("Hello from mock"));
@@ -604,17 +828,7 @@ async fn test_subscribe_session_events_available_before_first_turn() {
         .expect("session stream should attach immediately after registration");
 
     service
-        .start_turn(
-            &sid,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "trigger".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&sid, turn_req("trigger"))
         .await
         .expect("start turn");
 
@@ -644,20 +858,46 @@ async fn test_start_turn_on_existing_session() {
 
     // Start another turn
     let result2 = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "Follow up".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("Follow up"))
         .await
         .unwrap();
     assert!(result2.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
+async fn test_follow_up_start_turn_can_compact_before_first_llm_call() {
+    let seen_last_user_messages = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let compactor = Arc::new(TrackingCompactor::new(Some(1)));
+    let service = Arc::new(EphemeralSessionService::new(
+        CompactionAgentBuilder {
+            seen_last_user_messages: Arc::clone(&seen_last_user_messages),
+            compactor: Arc::clone(&compactor),
+        },
+        10,
+    ));
+
+    let created = service
+        .create_session(create_req("first"))
+        .await
+        .expect("initial session run should succeed");
+
+    service
+        .start_turn(&created.session_id, turn_req("follow up"))
+        .await
+        .expect("follow-up start_turn should succeed");
+
+    assert_eq!(compactor.seen_boundaries(), vec![0, 1]);
+    assert_eq!(
+        seen_last_user_messages
+            .lock()
+            .expect("seen_last_user_messages lock poisoned")
+            .clone(),
+        vec![
+            "first".to_string(),
+            "COMPACT NOW".to_string(),
+            "follow up".to_string()
+        ]
+    );
 }
 
 #[tokio::test]
@@ -750,17 +990,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
     service.archive(&session_id).await.unwrap();
 
     let result = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "After archive".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("After archive"))
         .await;
 
     assert!(result.is_err());
@@ -806,39 +1036,14 @@ async fn test_concurrent_turns_return_busy() {
     // Start a slow turn in the background
     let service_clone = service.clone();
     let sid_clone = session_id.clone();
-    let _handle = tokio::spawn(async move {
-        service_clone
-            .start_turn(
-                &sid_clone,
-                StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "Slow".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
-                },
-            )
-            .await
-    });
+    let _handle =
+        tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
 
     // Give the turn time to start running
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Try to start another turn
-    let result = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "Fast".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
-        .await;
+    let result = service.start_turn(&session_id, turn_req("Fast")).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -860,21 +1065,8 @@ async fn test_interrupt_cancels_inflight_turn() {
     // Start a slow turn
     let service_clone = service.clone();
     let sid_clone = session_id.clone();
-    let _handle = tokio::spawn(async move {
-        service_clone
-            .start_turn(
-                &sid_clone,
-                StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "Slow".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
-                },
-            )
-            .await
-    });
+    let _handle =
+        tokio::spawn(async move { service_clone.start_turn(&sid_clone, turn_req("Slow")).await });
 
     // Give the turn time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -917,12 +1109,8 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
             .start_turn(
                 &sid_clone,
                 StartTurnRequest {
-                    host_mode: false,
-                    skill_references: None,
                     flow_tool_overlay: Some(overlay),
-                    prompt: "Slow with overlay".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
+                    ..turn_req("Slow with overlay")
                 },
             )
             .await
@@ -972,32 +1160,18 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
         .start_turn(
             &session_id,
             StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
                 flow_tool_overlay: Some(TurnToolOverlay {
                     allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
                     blocked_tools: Some(vec!["beta".to_string()]),
                 }),
-                prompt: "overlayed turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
+                ..turn_req("overlayed turn")
             },
         )
         .await
         .expect("turn with overlay should run");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "baseline turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("baseline turn"))
         .await
         .expect("turn without overlay should run");
 
@@ -1041,15 +1215,11 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
         .start_turn(
             &session_id,
             StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
                 flow_tool_overlay: Some(TurnToolOverlay {
                     allowed_tools: Some(vec!["alpha".to_string()]),
                     blocked_tools: None,
                 }),
-                prompt: "overlay clear fails".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
+                ..turn_req("overlay clear fails")
             },
         )
         .await;
@@ -1187,17 +1357,7 @@ async fn test_staged_system_context_applies_at_next_llm_boundary() {
     );
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "apply staged context".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("apply staged context"))
         .await
         .expect("turn should run");
 
@@ -1277,32 +1437,12 @@ async fn test_staged_system_context_is_not_replayed_on_later_turns() {
         .expect("append system context");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "apply staged context".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("apply staged context"))
         .await
         .expect("first turn should run");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "follow-up turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("follow-up turn"))
         .await
         .expect("second turn should run");
 
@@ -1353,17 +1493,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
         let session_id = session_id.clone();
         tokio::spawn(async move {
             service
-                .start_turn(
-                    &session_id,
-                    StartTurnRequest {
-                        host_mode: false,
-                        skill_references: None,
-                        flow_tool_overlay: None,
-                        prompt: "first turn".to_string().into(),
-                        event_tx: None,
-                        additional_instructions: None,
-                    },
-                )
+                .start_turn(&session_id, turn_req("first turn"))
                 .await
         })
     };
@@ -1387,17 +1517,7 @@ async fn test_staged_system_context_appended_during_active_turn_waits_for_next_t
         .expect("first turn should finish");
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "second turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("second turn"))
         .await
         .expect("second turn should run");
 
@@ -1456,17 +1576,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
         .expect("append system context");
 
     let denied = service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "denied turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("denied turn"))
         .await;
     assert!(denied.is_err(), "pre-llm hook should deny the first turn");
 
@@ -1480,17 +1590,7 @@ async fn test_pre_llm_denied_turn_does_not_consume_staged_system_context() {
     );
 
     service
-        .start_turn(
-            &session_id,
-            StartTurnRequest {
-                host_mode: false,
-                skill_references: None,
-                flow_tool_overlay: None,
-                prompt: "eligible turn".to_string().into(),
-                event_tx: None,
-                additional_instructions: None,
-            },
-        )
+        .start_turn(&session_id, turn_req("eligible turn"))
         .await
         .expect("next eligible turn should run");
 
@@ -1521,47 +1621,6 @@ async fn test_interrupt_when_idle_returns_not_running() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert_eq!(err.code(), "SESSION_NOT_RUNNING");
-}
-
-#[tokio::test]
-async fn test_interrupt_host_mode_returns_without_waiting_for_ack() {
-    let service = Arc::new(EphemeralSessionService::new(
-        MockAgentBuilder::with_delay(600),
-        10,
-    ));
-    let _ = service.create_session(create_req("Hello")).await.unwrap();
-
-    let sessions = service.list(SessionQuery::default()).await.unwrap();
-    let session_id = sessions[0].session_id.clone();
-
-    let service_clone = service.clone();
-    let sid_clone = session_id.clone();
-    let host_turn = tokio::spawn(async move {
-        service_clone
-            .start_turn(
-                &sid_clone,
-                StartTurnRequest {
-                    host_mode: true,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    prompt: "host turn".to_string().into(),
-                    event_tx: None,
-                    additional_instructions: None,
-                },
-            )
-            .await
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    let started = std::time::Instant::now();
-    service.interrupt(&session_id).await.unwrap();
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < tokio::time::Duration::from_millis(200),
-        "interrupt should return promptly for host_mode turns (elapsed={elapsed:?})"
-    );
-
-    let _ = host_turn.await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

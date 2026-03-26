@@ -1,3 +1,6 @@
+import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
+import type { AgentEvent, Usage } from './generated/events.js';
+
 // ─── Bootstrap config ───────────────────────────────────────────
 
 /** Configuration for {@link MeerkatRuntime.init}. */
@@ -54,8 +57,8 @@ export interface SessionConfig {
   geminiBaseUrl?: string;
   /** Enable comms for this session. */
   commsName?: string;
-  /** Whether this session runs in host mode. */
-  hostMode?: boolean;
+  /** Whether this session runs in keep-alive mode. */
+  keepAlive?: boolean;
   /** Application-defined labels. */
   labels?: Record<string, string>;
   /** Additional instruction sections appended to the system prompt. */
@@ -68,6 +71,34 @@ export interface SessionConfig {
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; media_type: string; data: string };
+
+/** Canonical ordinary content input. */
+export type ContentInput = string | ContentBlock[];
+
+/** Runtime handling mode for ordinary work. */
+export type HandlingMode = 'queue' | 'steer';
+
+/** Standardized rendering class for injected ordinary work. */
+export type RenderClass =
+  | 'user_prompt'
+  | 'peer_message'
+  | 'peer_request'
+  | 'peer_response'
+  | 'external_event'
+  | 'flow_step'
+  | 'continuation'
+  | 'system_notice'
+  | 'tool_scope_notice'
+  | 'ops_progress';
+
+/** Normalized rendering salience for injected work. */
+export type RenderSalience = 'background' | 'normal' | 'important' | 'urgent';
+
+/** Normalized rendering metadata for injected work. */
+export interface RenderMetadata {
+  class: RenderClass;
+  salience?: RenderSalience;
+}
 
 /** Options for a single turn. */
 export interface TurnOptions {
@@ -91,12 +122,46 @@ export interface AppendSystemContextResult {
   status: 'staged' | 'duplicate';
 }
 
+/** Runtime-backed state for a direct browser session façade. */
+export interface SessionState {
+  handle: number;
+  session_id: string;
+  mob_id: string;
+  model: string;
+  usage: Usage;
+  run_counter: number;
+  message_count: number;
+  is_active: boolean;
+  last_assistant_text?: string | null;
+}
+
 /** Result of appending runtime system context to a mob member session. */
 export interface MobAppendSystemContextResult {
   mob_id: string;
   meerkat_id: string;
   session_id: string;
   status: 'staged' | 'duplicate';
+}
+
+/** Delivery receipt for a direct mob member turn. */
+export interface MemberDeliveryReceipt {
+  member_id: string;
+  session_id: string;
+  handling_mode: HandlingMode;
+}
+
+/** Respawn receipt for a mob member. */
+export interface MemberRespawnReceipt {
+  member_id: string;
+  old_session_id?: string | null;
+  new_session_id?: string | null;
+}
+
+/** Result envelope for a member respawn operation. */
+export interface MobRespawnResult {
+  status: 'completed' | 'topology_restore_failed';
+  receipt: MemberRespawnReceipt;
+  failed_peer_ids?: string[];
 }
 
 /** Result of a turn execution. */
@@ -112,10 +177,55 @@ export interface TurnResult {
   status?: string;
 }
 
-export interface Usage {
-  input_tokens: number;
-  output_tokens: number;
-}
+export type {
+  AgentEvent,
+  BudgetType,
+  HookId,
+  HookPatch,
+  HookPatchEnvelope,
+  HookPoint,
+  HookReasonCode,
+  HookRevision,
+  InteractionId,
+  KnownAgentEventType,
+  ReasoningCompleteEvent,
+  ReasoningDeltaEvent,
+  RunCompletedEvent,
+  RunFailedEvent,
+  RunStartedEvent,
+  SessionId,
+  SkillId,
+  SkillsResolvedEvent,
+  SkillResolutionFailedEvent,
+  StopReason,
+  StreamTruncatedEvent,
+  TextCompleteEvent,
+  TextDeltaEvent,
+  ToolCallRequestedEvent,
+  ToolConfigChangeOperation,
+  ToolConfigChangedEvent,
+  ToolConfigChangedPayload,
+  ToolExecutionCompletedEvent,
+  ToolExecutionStartedEvent,
+  ToolExecutionTimedOutEvent,
+  ToolResultReceivedEvent,
+  TurnCompletedEvent,
+  TurnStartedEvent,
+  Usage,
+  HookStartedEvent,
+  HookCompletedEvent,
+  HookFailedEvent,
+  HookDeniedEvent,
+  HookRewriteAppliedEvent,
+  HookPatchPublishedEvent,
+  CompactionStartedEvent,
+  CompactionCompletedEvent,
+  CompactionFailedEvent,
+  BudgetWarningEvent,
+  RetryingEvent,
+  InteractionCompleteEvent,
+  InteractionFailedEvent,
+} from './generated/events.js';
 
 // ─── Mob types (matches meerkat-mob Rust wire format) ───────────
 
@@ -225,11 +335,27 @@ export interface MobMember {
   meerkat_id: string;
   profile: string;
   member_ref: Record<string, unknown>;
+  peer_id?: string;
+  external_peer_specs?: Record<string, Record<string, unknown>>;
   runtime_mode?: string;
   state?: string;
   wired_to?: string[];
   labels?: Record<string, string>;
+  status?: string;
+  error?: string;
+  is_final?: boolean;
+  current_session_id?: string;
 }
+
+export interface ExternalPeerTarget {
+  external: {
+    name: string;
+    peer_id: string;
+    address: string;
+  };
+}
+
+export type MobPeerTarget = string | ExternalPeerTarget;
 
 /** Mob status. */
 export interface MobStatus {
@@ -237,8 +363,39 @@ export interface MobStatus {
   state: string;
 }
 
+/** Unreachable peer entry from a live member connectivity snapshot. */
+export interface MobUnreachablePeer {
+  peer: string;
+  reason?: string;
+}
+
+/** Live peer connectivity projection for a mob member snapshot. */
+export interface MobPeerConnectivitySnapshot {
+  reachable_peer_count: number;
+  unknown_peer_count: number;
+  unreachable_peers: MobUnreachablePeer[];
+}
+
+/** Point-in-time execution snapshot for a mob member. */
+export interface MobMemberSnapshot {
+  status: string;
+  output_preview?: string;
+  error?: string;
+  tokens_used: number;
+  is_final: boolean;
+  current_session_id?: string;
+  peer_connectivity?: MobPeerConnectivitySnapshot;
+}
+
+/** Result envelope for helper-style mob flows. */
+export interface MobHelperResult {
+  output?: string;
+  tokens_used: number;
+  session_id?: string;
+}
+
 /** Mob lifecycle actions. */
-export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'destroy';
+export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────
 
@@ -250,12 +407,27 @@ export interface EventEnvelope {
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
 
+/** Poll/subscribe lag sentinel emitted by the browser runtime. */
+export interface SubscriptionLaggedEvent {
+  type: 'lagged';
+  skipped: number;
+}
+
+/** Direct-session event item. */
+export type SessionEvent = AgentEvent | SubscriptionLaggedEvent;
+
+/** Member subscription item from the browser runtime. */
+export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
+
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
   source: string;
   profile: string;
   envelope: EventEnvelope;
 }
+
+/** Mob-wide subscription item from the browser runtime. */
+export type AttributedEventItem = AttributedEvent | SubscriptionLaggedEvent;
 
 /** Structural mob event from the mob event log. */
 export interface MobEvent {
@@ -265,46 +437,11 @@ export interface MobEvent {
   kind: Record<string, unknown>;
 }
 
-/**
- * Known agent event types (discriminated union on `type`).
- *
- * Matches Rust `AgentEvent` with `#[serde(tag = "type", rename_all = "snake_case")]`.
- */
-export type AgentEvent =
-  | TextDeltaEvent
-  | TextCompleteEvent
-  | ToolCallRequestedEvent
-  | ToolResultReceivedEvent
-  | TurnStartedEvent
-  | TurnCompletedEvent
-  | RunCompletedEvent
-  | RunFailedEvent
-  | ToolExecutionStartedEvent
-  | ToolExecutionCompletedEvent
-  | ReasoningDeltaEvent
-  | ReasoningCompleteEvent;
-
-export interface TextDeltaEvent { type: 'text_delta'; delta: string }
-export interface TextCompleteEvent { type: 'text_complete'; content: string }
-export interface ToolCallRequestedEvent { type: 'tool_call_requested'; id: string; name: string; args: unknown }
-export interface ToolResultReceivedEvent { type: 'tool_result_received'; id: string; name: string; is_error: boolean }
-export interface TurnStartedEvent { type: 'turn_started'; turn_number: number }
-export interface TurnCompletedEvent { type: 'turn_completed'; stop_reason: string; usage: Usage }
-export interface RunCompletedEvent { type: 'run_completed'; session_id: string; result: string; usage: Usage }
-export interface RunFailedEvent { type: 'run_failed'; session_id: string; error: string }
-export interface ToolExecutionStartedEvent { type: 'tool_execution_started'; id: string; name: string }
-export interface ToolExecutionCompletedEvent { type: 'tool_execution_completed'; id: string; name: string; result: string; is_error: boolean; duration_ms: number }
-export interface ReasoningDeltaEvent { type: 'reasoning_delta'; delta: string }
-export interface ReasoningCompleteEvent { type: 'reasoning_complete'; content: string }
+export { KNOWN_AGENT_EVENT_TYPES };
 
 /** Type guard for known event types. */
 export function isKnownEvent(event: { type: string }): event is AgentEvent {
-  return [
-    'text_delta', 'text_complete', 'tool_call_requested', 'tool_result_received',
-    'turn_started', 'turn_completed', 'run_completed', 'run_failed',
-    'tool_execution_started', 'tool_execution_completed',
-    'reasoning_delta', 'reasoning_complete',
-  ].includes(event.type);
+  return (KNOWN_AGENT_EVENT_TYPES as readonly string[]).includes(event.type);
 }
 
 // ─── Tool callback types ────────────────────────────────────────

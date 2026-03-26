@@ -5,6 +5,21 @@
 //! live in `meerkat-session` (behind the `session-compaction` feature).
 
 use crate::types::Message;
+use serde::{Deserialize, Serialize};
+
+/// Metadata key used to persist compaction cadence across session reuse.
+pub const SESSION_COMPACTION_CADENCE_KEY: &str = "session_compaction_cadence";
+
+/// Durable session-scoped cadence state for compaction decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCompactionCadence {
+    /// Monotonic index of pre-LLM boundaries seen in this session.
+    pub session_boundary_index: u64,
+    /// Boundary index where compaction last completed successfully.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction_boundary_index: Option<u64>,
+}
 
 /// Context provided to `Compactor::should_compact` for trigger decisions.
 #[derive(Debug, Clone)]
@@ -15,10 +30,10 @@ pub struct CompactionContext {
     pub message_count: usize,
     /// Estimated history tokens (JSON bytes / 4).
     pub estimated_history_tokens: u64,
-    /// Turn number when compaction last occurred, if ever.
-    pub last_compaction_turn: Option<u32>,
-    /// The current turn number (0-indexed).
-    pub current_turn: u32,
+    /// Session-scoped pre-LLM boundary index where compaction last occurred, if ever.
+    pub last_compaction_boundary_index: Option<u64>,
+    /// Current session-scoped pre-LLM boundary index.
+    pub session_boundary_index: u64,
 }
 
 /// Result of a compaction rebuild.
@@ -39,7 +54,7 @@ pub struct CompactionConfig {
     pub recent_turn_budget: usize,
     /// Maximum tokens for the compaction summary LLM response.
     pub max_summary_tokens: u32,
-    /// Minimum turns between consecutive compactions (loop guard).
+    /// Minimum session-scoped LLM boundaries between consecutive compactions.
     pub min_turns_between_compactions: u32,
 }
 

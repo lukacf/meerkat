@@ -13,9 +13,10 @@ use std::sync::Arc;
 use meerkat::AgentFactory;
 use meerkat_client::LlmClient;
 use meerkat_contracts::WireRunResult;
-use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore};
+use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore};
 use meerkat_rpc::server::RpcServer;
 use meerkat_rpc::session_runtime::SessionRuntime;
+use meerkat_store::FsBlobStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
@@ -39,6 +40,7 @@ fn spawn_test_server(
     let runtime_store =
         Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(store.database()).unwrap())
             as Arc<dyn meerkat_runtime::RuntimeStore>;
+    let blob_store: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(temp.path().join("blobs")));
     let mut runtime = SessionRuntime::new(
         factory,
         config,
@@ -46,6 +48,7 @@ fn spawn_test_server(
         meerkat::PersistenceBundle::new(
             store as Arc<dyn meerkat::SessionStore>,
             Some(runtime_store),
+            blob_store,
         ),
         meerkat_rpc::router::NotificationSink::noop(),
     );
@@ -479,7 +482,9 @@ async fn e2e_scenario_16_kitchen_sink() {
         resp["error"].is_null(),
         "runtime/state failed for deferred session: {resp}"
     );
-    assert_eq!(resp["result"]["state"].as_str(), Some("idle"));
+    // RPC surface eagerly attaches an executor for all sessions (including
+    // deferred ones), so the runtime state is Attached, not Idle.
+    assert_eq!(resp["result"]["state"].as_str(), Some("attached"));
 
     let id = next_id();
     send_request(

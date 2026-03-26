@@ -261,6 +261,7 @@ mod tests {
     use crate::ids::{FlowId, MobId, ProfileName, StepId};
     use crate::profile::{Profile, ToolConfig};
     use indexmap::IndexMap;
+    use meerkat_core::types::ContentInput;
 
     fn profile() -> Profile {
         Profile {
@@ -302,7 +303,7 @@ mod tests {
     fn step(role: &str, message: &str) -> FlowStepSpec {
         FlowStepSpec {
             role: ProfileName::from(role),
-            message: message.to_string(),
+            message: ContentInput::from(message),
             depends_on: Vec::new(),
             dispatch_mode: DispatchMode::FanOut,
             collection_policy: CollectionPolicy::All,

@@ -20,26 +20,31 @@ The comms system provides:
 - **Trust-based peer model**: Agents only accept messages from explicitly trusted peers
 - **External event ingestion**: Push plain-text events from stdin, webhooks, RPC, or TCP/UDS listeners
 - **Auth-optional mode**: Signed listeners for agent-to-agent comms; separate plain listeners for external events when `auth = "none"`
-- **Host mode**: An agent processes its initial prompt then stays alive waiting for incoming comms messages and external events
-- **Inbox with notification**: Incoming messages and events are queued and drained at turn boundaries
+- **Keep-alive**: A runtime-backed session processes its initial prompt, then remains alive waiting for future admitted work
+- **Runtime-backed queueing**: Incoming messages and external events are queued once and admitted through runtime ingress
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph agent["Agent loop (meerkat-core)"]
-        DRAIN["drain_comms_inbox()"]
-        HOST["run_host_mode()"]
+    subgraph rt["Runtime (meerkat-runtime)"]
+        DRAIN["comms_drain"]
+        BRIDGE["comms_bridge"]
+        INGRESS["RuntimeIngressAuthority"]
+        POLICY["PolicyTable (Queue/Steer)"]
     end
 
-    subgraph runtime["CommsRuntime (meerkat-comms)"]
+    subgraph comms["CommsRuntime (meerkat-comms)"]
         ROUTER["Router"]
         INBOX["Inbox"]
         KP["Keypair"]
         TP["TrustedPeers"]
     end
 
-    agent --> runtime
+    DRAIN -->|"poll inbox"| INBOX
+    DRAIN -->|"classify"| BRIDGE
+    BRIDGE -->|"accept_input"| INGRESS
+    INGRESS --> POLICY
 
     subgraph signed["Signed listeners (agent-to-agent)"]
         UDS["UDS Listener"]
@@ -55,7 +60,7 @@ graph TD
         RPC_EVT["RPC comms/send"]
     end
 
-    runtime --> signed
+    comms --> signed
     plain -->|"EventInjector"| INBOX
 ```
 
@@ -63,7 +68,7 @@ graph TD
 |-------|------|
 | `meerkat-comms` | Core comms: identity, trust, transport, router, inbox, runtime, MCP tools, agent integration |
 | `meerkat-tools` (`builtin::comms`) | `CommsToolSurface`, `CommsToolSet`, individual `BuiltinTool` implementations |
-| `meerkat-core` | `CommsRuntime` trait, `CommsRuntimeConfig`, `CommsRuntimeMode` enum, agent host-mode impl |
+| `meerkat-core` | `CommsRuntime` trait, `CommsRuntimeConfig`, `CommsRuntimeMode` enum, substrate integration points |
 | `meerkat` (facade) | `build_comms_runtime_from_config()`, `compose_tools_with_comms()`, factory wiring |
 
 ## Setup
@@ -176,7 +181,7 @@ All transports use a length-prefixed CBOR framing protocol implemented by `Trans
 |--------|--------|----------|
 | `uds://` | `uds:///path/to/socket.sock` | Same-machine, lowest latency |
 | `tcp://` | `tcp://host:port` | Cross-machine |
-| `inproc://` | `inproc://agent-name` | In-process sub-agent communication |
+| `inproc://` | `inproc://agent-name` | In-process peer communication |
 
 <Accordion title="Transport details">
 **UDS transport**: Unix Domain Socket listeners are spawned by `spawn_uds_listener()`. The socket file is created at the configured path (existing files are removed first). Parent directories are created automatically.
@@ -353,6 +358,13 @@ The `Inbox` (`meerkat-comms/src/inbox.rs`) is a bounded MPSC channel (default ca
 
 When converting to `CommsMessage` for the agent loop, ACKs and messages from unknown peers are filtered out.
 
+Queueing an inbox item and consuming it are separate truths:
+
+- queueing is transport/inbox work
+- consumption is runtime-backed admission work
+
+This avoids the old assumption that turn-boundary drain is always the only real consumer.
+
 ## Configuration
 
 <Accordion title="Config file (realm config.toml)">
@@ -362,7 +374,6 @@ mode = "inproc"                    # "inproc", "tcp", or "uds"
 address = "0.0.0.0:4200"          # Required when mode = "tcp" or "uds"
 auth = "none"                      # "none" (open) or "ed25519"
 event_address = "127.0.0.1:4201"  # Plain-text event listener (requires auth = "none")
-auto_enable_for_subagents = false
 ```
 
 | Field | Type | Default | Description |
@@ -371,7 +382,6 @@ auto_enable_for_subagents = false
 | `address` | `Option<String>` | `None` | Listen address for signed agent-to-agent comms |
 | `auth` | `CommsAuthMode` | `Open` | Auth mode: `"none"` (open) or `"ed25519"` |
 | `event_address` | `Option<String>` | `None` | Plain-text event listener address (requires `auth = "none"`) |
-| `auto_enable_for_subagents` | `bool` | `false` | Whether to auto-enable comms for spawned sub-agents |
 </Accordion>
 
 <Accordion title="CoreCommsConfig (internal)">
@@ -403,8 +413,8 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--agent-label key=value` | Metadata label (repeatable). Shown to peers via `peers()` |
 | `--comms-listen-tcp <ADDR>` | TCP address to listen on for signed comms (e.g., `"0.0.0.0:4200"`) |
 | `--no-comms` | Disable inter-agent communication entirely |
-| `--host` | Run in host mode (stay alive for comms messages and events after initial prompt) |
-| `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--host`) |
+| `--keep-alive` | Run in keep-alive mode (stay alive for comms messages and events after initial prompt) |
+| `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--keep-alive`) |
 
 <Note>
 All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
@@ -420,7 +430,7 @@ rkat run --comms-name reviewer \
   --agent-description "Reviews pull requests for style issues" \
   --agent-label lang=rust \
   --agent-label team=infra \
-  --host "You review code when asked."
+  --keep-alive "You review code when asked."
 ```
 
 Via the Rust SDK:
@@ -429,7 +439,7 @@ Via the Rust SDK:
 use meerkat_core::PeerMeta;
 
 let build_config = AgentBuildConfig {
-    host_mode: true,
+    keep_alive: true,
     comms_name: Some("reviewer".to_string()),
     peer_meta: Some(PeerMeta::default()
         .with_description("Reviews pull requests for style issues")
@@ -452,27 +462,27 @@ When another agent calls `peers()`, the output includes the metadata:
 }
 ```
 
-### Host mode
+### Keep-alive mode
 
-Host mode keeps the agent alive after processing the initial prompt, listening for incoming comms messages and external events:
+Keep-alive keeps the agent alive after processing the initial prompt, waiting for runtime-backed comms messages and external events to be admitted as future turns:
 
 ```bash
-# Host mode with comms only
-rkat run --comms-name orchestrator --host "You are a project coordinator."
+# Keep-alive with comms only
+rkat run --comms-name orchestrator --keep-alive "You are a project coordinator."
 
-# Host mode with stdin events
-rkat run --comms-name monitor --host --stdin "You are a monitoring agent."
+# Keep-alive with stdin events
+rkat run --comms-name monitor --keep-alive --stdin "You are a monitoring agent."
 ```
 
 <Steps>
   <Step title="Process initial prompt">
     The agent processes the initial prompt normally.
   </Step>
-  <Step title="Enter wait loop">
-    After the first run completes, the agent enters a wait loop.
+  <Step title="Enter idle runtime-backed session">
+    After the first run completes, the session remains alive in keep-alive mode and waits for future admitted work.
   </Step>
   <Step title="Handle incoming messages and events">
-    When comms messages or external events arrive (via the inbox), they are injected as user messages and the agent runs again. Events from stdin, webhooks, RPC, or plain TCP/UDS listeners all flow into the same inbox.
+    When comms messages or external events arrive, runtime ingress queues them and admits them as later turns. External events are queue-only runtime-backed inputs; they do not create a second direct execution loop.
   </Step>
   <Step title="Exit conditions">
     The agent exits when it receives a `DISMISS` message, its budget is exhausted, or it encounters a graceful error.
@@ -513,17 +523,17 @@ let factory = AgentFactory::new(store_path)
 
 let build_config = AgentBuildConfig {
     model: "claude-sonnet-4-5".to_string(),
-    host_mode: true,
+    keep_alive: true,
     comms_name: Some("my-agent".to_string()),
     peer_meta: Some(PeerMeta::default()
-        .with_description("Coordinates sub-agents")),
+        .with_description("Coordinates peer agents")),
     ..AgentBuildConfig::new("claude-sonnet-4-5")
 };
 
 let agent = factory.build_agent(build_config, &config).await?;
 ```
 
-The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `host_mode` and `peer_meta` in `SessionMetadata`.
+The factory validates `comms_name`, creates the runtime, composes tools, attaches the runtime to the agent, and records `keep_alive` and `peer_meta` in `SessionMetadata`.
 </Accordion>
 
 <Accordion title="Using CommsAgent directly">
@@ -552,13 +562,13 @@ let result = comms_agent.run_stay_alive("You are a coordinator.".to_string(), No
 ```
 </Accordion>
 
-<Accordion title="CommsBootstrap (sub-agent integration)">
+<Accordion title="CommsBootstrap (nested runtime integration)">
 ```rust
 // Standalone
 let bootstrap = CommsBootstrap::from_config(config, base_dir);
 let prepared = bootstrap.prepare().await?;
 
-// Child sub-agent (inproc, auto-trusts parent)
+// Child runtime (inproc, auto-trusts parent)
 let bootstrap = CommsBootstrap::for_child_inproc(
     "child-agent".to_string(),
     ParentCommsContext {
@@ -578,12 +588,15 @@ let prepared = bootstrap.prepare().await?;
 
 ## Agent loop integration
 
-### Turn-boundary inbox draining
+### Inbox consumption
 
-The agent loop calls `drain_comms_inbox()` at turn boundaries:
-1. Calls `comms_runtime.drain_messages()` to get formatted message strings
-2. If messages exist, combines them and pushes a `UserMessage` into the session
-3. Returns `true` if any messages were injected
+The important architectural split is:
+
+1. `CommsRuntime` and the inbox own **delivery**
+2. the active keep-alive/drain lifecycle path owns **consumption**
+3. formatted message injection into the session is a projection of that lifecycle truth
+
+Historically this was sometimes described as "turn-boundary inbox draining." That is not the primary 0.5 mental model. The canonical model is runtime-backed queueing and admission.
 
 ### Message injection format
 
@@ -629,17 +642,15 @@ Inline summaries show up to 10 peer names per category (`connected` / `retired`)
 
 ## External event ingestion
 
-External systems can push plain-text events into a running agent's inbox without Ed25519 authentication. Events are drained at turn boundaries (or continuously in host mode) and injected as user messages.
-
-All events flow through the `EventInjector` trait into the bounded inbox, regardless of source.
+External systems can push events into a running agent without Ed25519 authentication. Surface-level convenience routes now admit those events through runtime-owned `ExternalEvent` inputs instead of a separate injector-owned execution path.
 
 ### Event sources
 
 | Source | Surface | How to use | Auth |
 |--------|---------|-----------|------|
-| Stdin | CLI | `--stdin` flag (with `--host`) | None |
-| Webhook | REST | `POST /sessions/{id}/event` | `RKAT_WEBHOOK_SECRET` env var |
-| RPC | JSON-RPC | `comms/send` method | None (implicit) |
+| Stdin | CLI | `--stdin` flag (with `--keep-alive`) | None |
+| Webhook | REST | `POST /sessions/{id}/external-events` | `RKAT_WEBHOOK_SECRET` env var |
+| RPC | JSON-RPC | `session/external_event` method | None (implicit) |
 | TCP listener | Comms | Configure `event_address` in config | `auth = "none"` required |
 | UDS listener | Comms | Configure `event_address` in config | `auth = "none"` required |
 
@@ -648,10 +659,10 @@ All events flow through the `EventInjector` trait into the bounded inbox, regard
 Read newline-delimited events from stdin. Each line is parsed as JSON (extracting `body` field if present) or treated as plain text.
 
 ```bash
-# Host mode with stdin events
+# Keep-alive with stdin events
 rkat run "You are a monitoring agent." \
   --comms-name monitor \
-  --host --stdin \
+  --keep-alive --stdin \
   --enable-builtins
 
 # Then type or pipe events:
@@ -664,39 +675,38 @@ Push events to a running session via HTTP. Auth is optional via `RKAT_WEBHOOK_SE
 
 ```bash
 # Without auth (localhost only)
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -d '{"alert": "CPU spike", "host": "web-03"}'
 
 # With webhook secret
 RKAT_WEBHOOK_SECRET=my-secret  # set on server
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: my-secret" \
   -d '{"alert": "deployment failed"}'
 ```
 
-Returns `202 Accepted` with `{"queued": true}`. Returns `503` if inbox full, `404` if session not found.
+Returns `202 Accepted` with `{"queued": true}`. Runtime admission failures are returned as ordinary REST errors.
 
-### RPC comms/send
+### RPC session/external_event
 
-Send a comms command to a running session via JSON-RPC.
+Queue a runtime-backed external event for a running session via JSON-RPC.
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "method": "comms/send",
+  "method": "session/external_event",
   "params": {
     "session_id": "sid_abc123",
-    "kind": "input",
-    "body": "{\"alert\": \"build failed\"}",
+    "payload": {"alert": "build failed"},
     "source": "rpc"
   }
 }
 ```
 
-The optional `source` field is prepended as `[source: ci-pipeline]` metadata. Returns `{"queued": true}` on success.
+The optional `source` field becomes the runtime external-event source. The method returns a runtime acceptance envelope on success.
 
 ### TCP/UDS plain event listeners
 
@@ -745,14 +755,14 @@ injector.inject(
 **Observation** — subscribe at the scope you need:
 
 - **session-scoped**: use the session's primary `event_tx` or `session/stream_open` (RPC) / `Session.subscribe()` (Web SDK) / `session.subscribe_events()` (Python SDK) / `session.subscribeEvents()` (TypeScript SDK)
-- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribe(meerkatId)` (Web SDK) / `mob.subscribe_member_events(meerkat_id)` (Python/TypeScript SDK)
-- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeAll()` (Web SDK) / `mob.subscribe_events()` (Python/TypeScript SDK)
+- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Member.subscribe()` or `Mob.subscribeMemberEvents(meerkatId)` (Web SDK) / `mob.subscribe_member_events(meerkat_id)` (Python/TypeScript SDK)
+- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeEvents()` (Web SDK) / `mob.subscribe_events()` (Python/TypeScript SDK)
 
 This makes the public contract explicit: comms delivers work, and observability chooses scope.
 
 **Requirements:**
 
-- The agent must be running in **host mode** if you expect inbox events to be drained promptly.
+- The agent must be running in **keep-alive mode** if you expect inbox events to be drained promptly.
 - **Comms must be enabled.** Without comms, `event_injector()` returns `None`.
 - Observation subscriptions are independent of delivery — configure them separately.
 
@@ -773,4 +783,4 @@ The current implementation does not include nonce-based replay prevention.
 
 - [Built-in tools reference](/reference/builtin-tools) - comms tool parameter details
 - [Configuration: comms](/concepts/configuration) - config file settings
-- [Examples: comms](/examples/comms) - host mode, messaging, sub-agents across surfaces
+- [Examples: comms](/examples/comms) - keep-alive mode and messaging across surfaces

@@ -37,6 +37,7 @@ meerkat-mob-mcp = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "memory-store", "anthropic", "openai", "gemini"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["sync"] }
@@ -46,6 +47,9 @@ tokio_with_wasm = { workspace = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tracing-wasm = "0.2"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [package.metadata.cargo-machete]
 ignored = [

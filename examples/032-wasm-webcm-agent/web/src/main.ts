@@ -2,7 +2,7 @@
  * 032 — Meerkat WebCM Agent (TUI)
  *
  * Claude Code-inspired coding agent mob running entirely in the browser.
- * Left: orchestrator stream. Right: three sub-agent panels (planner/coder/reviewer).
+ * Left: orchestrator stream. Right: three specialist panels (planner/coder/reviewer).
  * All agents communicate via comms (send/peers). No custom delegation tools.
  */
 
@@ -59,7 +59,7 @@ const mainStreamEl = document.getElementById("main-stream") as HTMLDivElement;
 const promptInput = document.getElementById("prompt") as HTMLInputElement;
 const promptSigil = document.getElementById("prompt-sigil") as HTMLSpanElement;
 
-// Sub-agent panel elements
+// Specialist panel elements
 const panelEls = {
   planner: {
     stream: document.getElementById("stream-planner") as HTMLDivElement,
@@ -118,14 +118,11 @@ async function boot() {
     bootStatus.textContent = "Loading Meerkat WASM runtime...";
     const runtime = await loadWasmRuntime();
 
-    // Step 3: Register WebCM tools (before init_runtime_from_config)
-    registerWebCMTools(runtime as ToolRuntime, vm);
-
-    // Step 4: Init mob runtime
+    // Step 3: Init mob runtime
     bootStatus.textContent = "Initializing mob runtime...";
     const mobRuntime = runtime as unknown as MobRuntime;
 
-    // Build panel state for sub-agents (orchestrator goes to main stream)
+    // Build panel state for specialist members (orchestrator goes to main stream)
     const panelStates = new Map<string, any>();
 
     // Orchestrator events → main stream
@@ -151,19 +148,21 @@ async function boot() {
       });
     }
 
-    // Step 5: Create mob (orchestrator + planner + coder + reviewer)
+    // Step 4: Create mob (orchestrator + planner + coder + reviewer)
     mob = new MobOrchestrator(mobRuntime, panelStates);
-    await mob.init(keys, models, PROXY_URL ?? undefined);
+    await mob.init(keys, models, PROXY_URL ?? undefined, () => {
+      registerWebCMTools(runtime as ToolRuntime, vm);
+    });
 
-    // Step 6: Show workspace
+    // Step 5: Show workspace
     setupOverlay.classList.add("hidden");
     workspace.classList.remove("hidden");
     mainStream.appendBanner(models);
 
-    // Step 7: Start event polling for all agents
+    // Step 6: Start event polling for all agents
     mob.startPolling();
 
-    // Step 8: Focus prompt
+    // Step 7: Focus prompt
     promptInput.focus();
 
   } catch (err: any) {
@@ -210,7 +209,7 @@ async function send() {
   setRunning(true);
 
   try {
-    // Inject user message into the orchestrator mob member via mob_send_message
+    // Inject user message into the orchestrator mob member via mob_member_send
     await mob.sendToOrchestrator(text);
   } catch (err: any) {
     mainStream?.appendError(err.message);

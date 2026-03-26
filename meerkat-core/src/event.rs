@@ -89,6 +89,7 @@ pub fn compare_event_envelopes<T>(a: &EventEnvelope<T>, b: &EventEnvelope<T>) ->
 }
 
 /// Payload for tool configuration change notifications.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolConfigChangedPayload {
     pub operation: ToolConfigChangeOperation,
@@ -100,6 +101,7 @@ pub struct ToolConfigChangedPayload {
 }
 
 /// Operation kind for live tool configuration changes.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolConfigChangeOperation {
@@ -108,9 +110,105 @@ pub enum ToolConfigChangeOperation {
     Reload,
 }
 
+/// Canonical lifecycle phase for external-tool boundary deltas.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalToolDeltaPhase {
+    Pending,
+    Applied,
+    Draining,
+    Forced,
+    Failed,
+}
+
+impl ExternalToolDeltaPhase {
+    #[must_use]
+    pub fn as_status(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applied => "applied",
+            Self::Draining => "draining",
+            Self::Forced => "forced",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Canonical outward lifecycle delta for external-tool surface changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalToolDelta {
+    pub target: String,
+    pub operation: ToolConfigChangeOperation,
+    pub phase: ExternalToolDeltaPhase,
+    pub persisted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_at_turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ExternalToolDelta {
+    #[must_use]
+    pub fn new(
+        target: impl Into<String>,
+        operation: ToolConfigChangeOperation,
+        phase: ExternalToolDeltaPhase,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            operation,
+            phase,
+            persisted: !matches!(
+                phase,
+                ExternalToolDeltaPhase::Pending | ExternalToolDeltaPhase::Draining
+            ),
+            applied_at_turn: None,
+            tool_count: None,
+            detail: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_tool_count(mut self, tool_count: Option<usize>) -> Self {
+        self.tool_count = tool_count;
+        self
+    }
+
+    #[must_use]
+    pub fn with_detail(mut self, detail: Option<String>) -> Self {
+        self.detail = detail;
+        self
+    }
+
+    #[must_use]
+    pub fn status_text(&self) -> String {
+        let mut status = self.phase.as_status().to_string();
+        if self.phase == ExternalToolDeltaPhase::Failed
+            && let Some(detail) = &self.detail
+        {
+            status = format!("{status}: {detail}");
+        }
+        status
+    }
+
+    #[must_use]
+    pub fn to_tool_config_changed_payload(&self) -> ToolConfigChangedPayload {
+        ToolConfigChangedPayload {
+            operation: self.operation.clone(),
+            target: self.target.clone(),
+            status: self.status_text(),
+            persisted: self.persisted,
+            applied_at_turn: self.applied_at_turn,
+        }
+    }
+}
+
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -310,6 +408,7 @@ pub enum AgentEvent {
 }
 
 /// Scope attribution frame for multi-agent streaming.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -322,17 +421,10 @@ pub enum StreamScopeFrame {
         member_ref: String,
         session_id: String,
     },
-    /// Sub-agent scope nested under a parent scope.
-    SubAgent {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_call_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
 }
 
 /// Attributed stream event wrapper for multi-agent streaming.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopedAgentEvent {
     pub scope_id: String,
@@ -378,8 +470,6 @@ impl ScopedAgentEvent {
     /// Formats:
     /// - `primary`
     /// - `mob:<member_ref>`
-    /// - `primary/sub:<agent_id>`
-    /// - `mob:<member_ref>/sub:<agent_id>`
     pub fn scope_id_from_path(path: &[StreamScopeFrame]) -> String {
         if path.is_empty() {
             return "primary".to_string();
@@ -391,9 +481,6 @@ impl ScopedAgentEvent {
                 StreamScopeFrame::MobMember { member_ref, .. } => {
                     segments.push(format!("mob:{member_ref}"));
                 }
-                StreamScopeFrame::SubAgent { agent_id, .. } => {
-                    segments.push(format!("sub:{agent_id}"));
-                }
             }
         }
         segments.join("/")
@@ -401,6 +488,7 @@ impl ScopedAgentEvent {
 }
 
 /// Type of budget being tracked
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetType {
@@ -648,6 +736,177 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_event_type_mapping_is_total_for_all_variants() {
+        let events = vec![
+            AgentEvent::RunStarted {
+                session_id: SessionId::new(),
+                prompt: "Hello".to_string(),
+            },
+            AgentEvent::RunCompleted {
+                session_id: SessionId::new(),
+                result: "Done".to_string(),
+                usage: Usage::default(),
+            },
+            AgentEvent::RunFailed {
+                session_id: SessionId::new(),
+                error: "failed".to_string(),
+            },
+            AgentEvent::HookStarted {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+            },
+            AgentEvent::HookCompleted {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                duration_ms: 1,
+            },
+            AgentEvent::HookFailed {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                error: "failed".to_string(),
+            },
+            AgentEvent::HookDenied {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                reason_code: HookReasonCode::PolicyViolation,
+                message: "nope".to_string(),
+                payload: None,
+            },
+            AgentEvent::HookRewriteApplied {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                patch: HookPatch::AssistantText {
+                    text: "patched".to_string(),
+                },
+            },
+            AgentEvent::HookPatchPublished {
+                hook_id: "hook-1".to_string(),
+                point: HookPoint::RunStarted,
+                envelope: HookPatchEnvelope {
+                    revision: crate::hooks::HookRevision(1),
+                    hook_id: crate::hooks::HookId("hook-1".to_string()),
+                    point: HookPoint::RunStarted,
+                    patch: HookPatch::AssistantText {
+                        text: "patched".to_string(),
+                    },
+                    published_at: chrono::Utc::now(),
+                },
+            },
+            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::ReasoningDelta {
+                delta: "think".to_string(),
+            },
+            AgentEvent::ReasoningComplete {
+                content: "done".to_string(),
+            },
+            AgentEvent::TextDelta {
+                delta: "chunk".to_string(),
+            },
+            AgentEvent::TextComplete {
+                content: "done".to_string(),
+            },
+            AgentEvent::ToolCallRequested {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                args: serde_json::json!({}),
+            },
+            AgentEvent::ToolResultReceived {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                is_error: false,
+            },
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+            AgentEvent::ToolExecutionStarted {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+            },
+            AgentEvent::ToolExecutionCompleted {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                result: "ok".to_string(),
+                is_error: false,
+                duration_ms: 1,
+                has_images: false,
+            },
+            AgentEvent::ToolExecutionTimedOut {
+                id: "tool-1".to_string(),
+                name: "search".to_string(),
+                timeout_ms: 1000,
+            },
+            AgentEvent::CompactionStarted {
+                input_tokens: 1,
+                estimated_history_tokens: 2,
+                message_count: 3,
+            },
+            AgentEvent::CompactionCompleted {
+                summary_tokens: 1,
+                messages_before: 3,
+                messages_after: 1,
+            },
+            AgentEvent::CompactionFailed {
+                error: "failed".to_string(),
+            },
+            AgentEvent::BudgetWarning {
+                budget_type: BudgetType::Time,
+                used: 1,
+                limit: 2,
+                percent: 50.0,
+            },
+            AgentEvent::Retrying {
+                attempt: 1,
+                max_attempts: 2,
+                error: "retry".to_string(),
+                delay_ms: 100,
+            },
+            AgentEvent::SkillsResolved {
+                skills: vec![],
+                injection_bytes: 0,
+            },
+            AgentEvent::SkillResolutionFailed {
+                reference: "skill".to_string(),
+                error: "missing".to_string(),
+            },
+            AgentEvent::InteractionComplete {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                result: "ok".to_string(),
+            },
+            AgentEvent::InteractionFailed {
+                interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                error: "failed".to_string(),
+            },
+            AgentEvent::StreamTruncated {
+                reason: "lag".to_string(),
+            },
+            AgentEvent::ToolConfigChanged {
+                payload: ToolConfigChangedPayload {
+                    operation: ToolConfigChangeOperation::Reload,
+                    target: "external".to_string(),
+                    status: "applied".to_string(),
+                    persisted: true,
+                    applied_at_turn: Some(1),
+                },
+            },
+        ];
+
+        let mut kinds = std::collections::BTreeSet::new();
+        for event in events {
+            let kind = agent_event_type(&event);
+            assert!(
+                !kind.is_empty(),
+                "event type mapping returned empty discriminator"
+            );
+            kinds.insert(kind);
+        }
+        assert!(
+            kinds.len() >= 31,
+            "expected at least one discriminator per covered event variant"
+        );
+    }
+
+    #[test]
     fn test_budget_type_serialization() {
         assert_eq!(serde_json::to_value(BudgetType::Tokens).unwrap(), "tokens");
         assert_eq!(serde_json::to_value(BudgetType::Time).unwrap(), "time");
@@ -660,28 +919,21 @@ mod tests {
     #[test]
     fn test_scoped_agent_event_roundtrip() {
         let event = ScopedAgentEvent::new(
-            vec![
-                StreamScopeFrame::MobMember {
-                    flow_run_id: "run_123".to_string(),
-                    member_ref: "writer".to_string(),
-                    session_id: "sid_1".to_string(),
-                },
-                StreamScopeFrame::SubAgent {
-                    agent_id: "op_abc".to_string(),
-                    tool_call_id: Some("tool_1".to_string()),
-                    label: Some("fork-op_abc".to_string()),
-                },
-            ],
+            vec![StreamScopeFrame::MobMember {
+                flow_run_id: "run_123".to_string(),
+                member_ref: "writer".to_string(),
+                session_id: "sid_1".to_string(),
+            }],
             AgentEvent::TextDelta {
                 delta: "hello".to_string(),
             },
         );
 
-        assert_eq!(event.scope_id, "mob:writer/sub:op_abc");
+        assert_eq!(event.scope_id, "mob:writer");
 
         let json = serde_json::to_value(&event).unwrap();
         let roundtrip: ScopedAgentEvent = serde_json::from_value(json).unwrap();
-        assert_eq!(roundtrip.scope_id, "mob:writer/sub:op_abc");
+        assert_eq!(roundtrip.scope_id, "mob:writer");
         assert!(matches!(
             roundtrip.event,
             AgentEvent::TextDelta { ref delta } if delta == "hello"
@@ -695,37 +947,12 @@ mod tests {
         }];
         assert_eq!(ScopedAgentEvent::scope_id_from_path(&primary), "primary");
 
-        let primary_sub = vec![
-            StreamScopeFrame::Primary {
-                session_id: "sid_x".to_string(),
-            },
-            StreamScopeFrame::SubAgent {
-                agent_id: "op_1".to_string(),
-                tool_call_id: None,
-                label: None,
-            },
-        ];
-        assert_eq!(
-            ScopedAgentEvent::scope_id_from_path(&primary_sub),
-            "primary/sub:op_1"
-        );
-
-        let mob_sub = vec![
-            StreamScopeFrame::MobMember {
-                flow_run_id: "run_1".to_string(),
-                member_ref: "planner".to_string(),
-                session_id: "sid_m".to_string(),
-            },
-            StreamScopeFrame::SubAgent {
-                agent_id: "op_2".to_string(),
-                tool_call_id: None,
-                label: None,
-            },
-        ];
-        assert_eq!(
-            ScopedAgentEvent::scope_id_from_path(&mob_sub),
-            "mob:planner/sub:op_2"
-        );
+        let mob = vec![StreamScopeFrame::MobMember {
+            flow_run_id: "run_1".to_string(),
+            member_ref: "planner".to_string(),
+            session_id: "sid_m".to_string(),
+        }];
+        assert_eq!(ScopedAgentEvent::scope_id_from_path(&mob), "mob:planner");
     }
 
     #[test]

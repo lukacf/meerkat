@@ -12,6 +12,7 @@ use futures::FutureExt;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
+use meerkat_core::types::ContentInput;
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -274,7 +275,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         run_id: &RunId,
         step_id: &StepId,
         target: &MeerkatId,
-        message: String,
+        message: ContentInput,
         flow_tool_overlay: Option<TurnToolOverlay>,
     ) -> Result<FlowTurnTicket, MobError> {
         let entry = self
@@ -317,7 +318,12 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         ))
                     })?;
                 let subscription = injector
-                    .inject_with_subscription(message, meerkat_core::PlainEventSource::Rpc)
+                    .inject_with_subscription(
+                        message,
+                        meerkat_core::PlainEventSource::Rpc,
+                        meerkat_core::types::HandlingMode::Queue,
+                        None,
+                    )
                     .map_err(|error| {
                         MobError::Internal(format!(
                             "autonomous flow dispatch inject failed for '{target}': {error}"
@@ -346,9 +352,11 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         run_id,
                         step_id,
                         StartTurnRequest {
-                            prompt: message.into(),
+                            prompt: message,
+                            system_prompt: None,
+                            render_metadata: None,
+                            handling_mode: meerkat_core::types::HandlingMode::Queue,
                             event_tx: Some(event_tx),
-                            host_mode: false,
                             skill_references: None,
                             flow_tool_overlay,
                             additional_instructions: None,
@@ -430,6 +438,152 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 "flow turn timeout with exhausted orphan budget or per-flow orphan limit"
                     .to_string(),
             ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CoreExecutor for mob AutonomousHost comms drain
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::lifecycle::{RunControlCommand, RunId as CoreRunId};
+
+#[cfg(not(target_arch = "wasm32"))]
+/// CoreExecutor for mob sessions — routes runtime primitives back to
+/// the session service's `start_turn` / `apply_runtime_turn`.
+///
+/// Not available on wasm32 (mob actors use tokio tasks that require Send).
+///
+/// Created by the mob actor when spawning a comms drain for an AutonomousHost
+/// member. Ensures that peer messages accepted by the drain have an executor
+/// to deliver them to the session.
+pub struct MobActorCoreExecutor {
+    session_service: Arc<dyn crate::MobSessionService>,
+    session_id: meerkat_core::SessionId,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MobActorCoreExecutor {
+    pub fn new(
+        session_service: Arc<dyn crate::MobSessionService>,
+        session_id: meerkat_core::SessionId,
+    ) -> Self {
+        Self {
+            session_service,
+            session_id,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl CoreExecutor for MobActorCoreExecutor {
+    async fn apply(
+        &mut self,
+        run_id: CoreRunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let (prompt, boundary, contributing_input_ids) = match &primitive {
+            RunPrimitive::StagedInput(staged) => {
+                // Preserve multimodal blocks — images must not be text-projected.
+                let mut all_blocks = Vec::new();
+                for append in &staged.appends {
+                    match &append.content {
+                        meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
+                            all_blocks.push(meerkat_core::types::ContentBlock::Text {
+                                text: text.clone(),
+                            });
+                        }
+                        meerkat_core::lifecycle::run_primitive::CoreRenderable::Blocks {
+                            blocks,
+                        } => {
+                            all_blocks.extend(blocks.iter().cloned());
+                        }
+                        _ => {}
+                    }
+                }
+                let prompt = if all_blocks.len() == 1 {
+                    if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
+                        ContentInput::Text(text.clone())
+                    } else {
+                        ContentInput::Blocks(all_blocks)
+                    }
+                } else if all_blocks.is_empty() {
+                    ContentInput::Text(String::new())
+                } else {
+                    ContentInput::Blocks(all_blocks)
+                };
+                (
+                    prompt,
+                    staged.boundary,
+                    staged.contributing_input_ids.clone(),
+                )
+            }
+            _ => (
+                ContentInput::Text(String::new()),
+                meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                vec![],
+            ),
+        };
+
+        let req = StartTurnRequest {
+            prompt,
+            system_prompt: None,
+            render_metadata: primitive
+                .turn_metadata()
+                .and_then(|m| m.render_metadata.clone()),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            event_tx: None,
+            skill_references: primitive
+                .turn_metadata()
+                .and_then(|m| m.skill_references.clone()),
+            flow_tool_overlay: primitive
+                .turn_metadata()
+                .and_then(|m| m.flow_tool_overlay.clone()),
+            additional_instructions: primitive
+                .turn_metadata()
+                .and_then(|m| m.additional_instructions.clone()),
+        };
+
+        let result = self
+            .session_service
+            .apply_runtime_turn(
+                &self.session_id,
+                run_id,
+                req,
+                boundary,
+                contributing_input_ids,
+            )
+            .await
+            .map_err(|err| CoreExecutorError::ApplyFailed {
+                reason: err.to_string(),
+            })?;
+        Ok(result)
+    }
+
+    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } => self
+                .session_service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|err| CoreExecutorError::ControlFailed {
+                    reason: err.to_string(),
+                }),
+            RunControlCommand::StopRuntimeExecutor { reason } => {
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    reason = %reason,
+                    "mob executor received stop command"
+                );
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 }

@@ -37,6 +37,28 @@ fn make_message(from: &str, body: &str) -> InboxInteraction {
             blocks: None,
         },
         rendered_text: format!("[{from}]: {body}"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
+    }
+}
+
+fn make_message_with_blocks(from: &str, body: &str) -> InboxInteraction {
+    InboxInteraction {
+        id: iid(),
+        from: from.into(),
+        content: InteractionContent::Message {
+            body: body.into(),
+            blocks: Some(vec![
+                meerkat_core::types::ContentBlock::Text { text: body.into() },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                },
+            ]),
+        },
+        rendered_text: format!("[{from}]: {body}"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 
@@ -51,6 +73,8 @@ fn make_response(from: &str, status: ResponseStatus) -> InboxInteraction {
             result: serde_json::json!({"ok": true}),
         },
         rendered_text: format!("[{from}]: response ({status:?})"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 
@@ -63,6 +87,8 @@ fn make_request(from: &str, intent: &str) -> InboxInteraction {
             params: serde_json::json!({}),
         },
         rendered_text: format!("[{from}]: request ({intent})"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
     }
 }
 
@@ -142,7 +168,7 @@ async fn accepted_response_no_wake() {
     // Input should be queued (StageRunBoundary queues for boundary application)
     if let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = &outcome {
         let state = driver.input_state(input_id).unwrap();
-        assert_eq!(state.current_state, InputLifecycleState::Queued);
+        assert_eq!(state.current_state(), InputLifecycleState::Queued);
     }
 }
 
@@ -205,11 +231,8 @@ async fn response_after_completed_turn_wakes() {
 
     // Simulate a completed run by starting and completing
     let run_id = meerkat_core::lifecycle::RunId::new();
-    driver
-        .state_machine_mut()
-        .start_run(run_id.clone())
-        .unwrap();
-    driver.state_machine_mut().complete_run().unwrap();
+    driver.start_run(run_id.clone()).unwrap();
+    driver.complete_run().unwrap();
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);
@@ -342,6 +365,45 @@ async fn request_triggers_wake() {
     assert!(driver.take_wake_requested());
 }
 
+#[tokio::test]
+async fn request_prompt_uses_rendered_text_projection() {
+    let interaction = make_request("peer-1", "custom.action");
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    if let Input::Peer(peer) = input {
+        assert_eq!(peer.body, interaction.rendered_text);
+    } else {
+        panic!("Expected PeerInput");
+    }
+}
+
+#[tokio::test]
+async fn response_prompt_uses_rendered_text_projection() {
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    if let Input::Peer(peer) = input {
+        assert_eq!(peer.body, interaction.rendered_text);
+    } else {
+        panic!("Expected PeerInput");
+    }
+}
+
+#[tokio::test]
+async fn message_blocks_survive_bridge() {
+    let interaction = make_message_with_blocks("peer-1", "look");
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    if let Input::Peer(peer) = input {
+        assert!(peer.blocks.is_some());
+        // peer.body is the canonical rendered projection, while blocks preserve
+        // the original multimodal content.
+        assert_eq!(peer.body, interaction.rendered_text);
+    } else {
+        panic!("Expected PeerInput");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // §12: Empty inbox — no turns
 // ---------------------------------------------------------------------------
@@ -362,7 +424,6 @@ async fn message_while_running_checkpoint_no_wake() {
 
     // Start a run
     driver
-        .state_machine_mut()
         .start_run(meerkat_core::lifecycle::RunId::new())
         .unwrap();
 
@@ -390,7 +451,6 @@ async fn terminal_response_while_running_no_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     driver
-        .state_machine_mut()
         .start_run(meerkat_core::lifecycle::RunId::new())
         .unwrap();
 

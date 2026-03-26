@@ -52,6 +52,7 @@ meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 thiserror = { workspace = true }
@@ -68,7 +69,7 @@ async-trait = { workspace = true }
 nix = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "sub-agents", "skills", "comms", "mcp"]
+default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]
@@ -88,7 +89,6 @@ memory-store-session = ["meerkat/memory-store-session"]
 # Subsystems
 comms = ["dep:meerkat-comms", "meerkat/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat/mcp"]
-sub-agents = ["meerkat/sub-agents"]
 skills = ["meerkat/skills"]
 
 integration-real-tests = []

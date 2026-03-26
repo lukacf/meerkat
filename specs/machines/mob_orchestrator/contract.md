@@ -1,302 +1,148 @@
 # MobOrchestratorMachine
 
-Status: normative `0.5` machine contract, first formal-spec draft
+_Generated from the Rust machine catalog. Do not edit by hand._
 
-## Purpose
+- Version: `2`
+- Rust owner: `meerkat-mob` / `generated::mob_orchestrator`
 
-`MobOrchestratorMachine` owns top-level orchestration authority for one mob.
+## State
+- Phase enum: `Creating | Running | Stopped | Completed | Destroyed`
+- `coordinator_bound`: `Bool`
+- `pending_spawn_count`: `u32`
+- `active_flow_count`: `u32`
+- `topology_revision`: `u32`
+- `supervisor_active`: `Bool`
 
-It is the authoritative owner of:
-
-- orchestration-owner readiness and coordinator binding
-- orchestration-owned pending spawn bookkeeping
-- orchestration-owned active flow bookkeeping
-- supervisor activation at the orchestration layer
-- topology revision ownership
-- ownership composition over `MobLifecycleMachine` and `FlowRunMachine`
-
-It is **not** the owner of:
-
-- durable per-run flow state
-- top-level mob lifecycle transitions themselves
-- member peer traffic
-- task board mutation
-- spawn policy evaluation logic
-
-## Scope Boundary
-
-This machine exists above `MobLifecycleMachine` and `FlowRunMachine`.
-
-It coordinates orchestration ownership and cross-concern policy:
-
-- who is currently acting as coordinator/orchestrator
-- whether orchestration may start new flows/spawns
-- whether supervision is active
-
-It does not replace the submachines it owns.
-
-## Authoritative State Model
-
-For one mob instance, the machine state is the tuple:
-
-- `orchestrator_state: OrchestratorState`
-- `coordinator_bound: Bool`
-- `pending_spawn_count: u32`
-- `active_flow_count: u32`
-- `topology_revision: u32`
-- `supervisor_active: Bool`
-
-`OrchestratorState` is the closed state set:
-
-- `Creating`
-- `Running`
-- `Stopped`
-- `Completed`
-- `Destroyed`
-
-Terminal state:
-
-- `Destroyed`
-
-## Input Alphabet
-
-The closed external input/command alphabet for this machine is:
-
+## Inputs
 - `InitializeOrchestrator`
 - `BindCoordinator`
 - `UnbindCoordinator`
 - `StageSpawn`
 - `CompleteSpawn`
-- `StartFlowOwnership`
-- `FinishFlowOwnership`
-- `AdvanceTopology`
-- `StopOrchestration`
-- `ResumeOrchestration`
-- `CompleteOrchestration`
-- `DestroyOrchestration`
-- `ResetOrchestration`
+- `StartFlow`
+- `CompleteFlow`
+- `StopOrchestrator`
+- `ResumeOrchestrator`
+- `MarkCompleted`
+- `DestroyOrchestrator`
+- `ForceCancelMember`
 
-Notes:
-
-- `BindCoordinator` / `UnbindCoordinator` exist because current code derives
-  the orchestrator identity from definition + roster rather than a dedicated
-  persisted owner
-- this machine therefore makes that owner-semantics boundary explicit in `0.5`
-
-## Effect Family
-
-The closed machine-boundary effect family is:
-
-- `DriveMobLifecycle(command)`
-- `DriveFlowRun(command)`
-- `EmitOrchestratorNotice(kind)`
-- `ApplyTopologyRevision(revision)`
+## Effects
 - `ActivateSupervisor`
 - `DeactivateSupervisor`
-
-Architecture rule:
-
-- `MobOrchestratorMachine` coordinates submachines and services; it does not
-  collapse them back into one mega-actor loop
-
-## Transition Relation
-
-### Initialization and coordinator binding
-
-1. `InitializeOrchestrator`
-
-Preconditions:
-
-- `orchestrator_state = Creating`
-
-State updates:
-
-- `Creating -> Running`
-- `coordinator_bound := TRUE`
-- `supervisor_active := TRUE`
-
-2. `BindCoordinator`
-
-Preconditions:
-
-- `orchestrator_state ∈ {Creating, Running, Stopped, Completed}`
-- `coordinator_bound = FALSE`
-
-State updates:
-
-- `coordinator_bound := TRUE`
-- if `orchestrator_state = Running`, then `supervisor_active := TRUE`
-
-3. `UnbindCoordinator`
-
-Preconditions:
-
-- `orchestrator_state ∈ {Running, Stopped, Completed}`
-- `coordinator_bound = TRUE`
-
-State updates:
-
-- `coordinator_bound := FALSE`
-- `pending_spawn_count := 0`
-- `active_flow_count := 0`
-- `supervisor_active := FALSE`
-
-### Orchestration-owned work tracking
-
-4. `StageSpawn`
-
-Preconditions:
-
-- `orchestrator_state = Running`
-- `coordinator_bound = TRUE`
-
-State updates:
-
-- `pending_spawn_count += 1`
-
-5. `CompleteSpawn`
-
-Preconditions:
-
-- `pending_spawn_count > 0`
-
-State updates:
-
-- `pending_spawn_count -= 1`
-
-6. `StartFlowOwnership`
-
-Preconditions:
-
-- `orchestrator_state = Running`
-- `coordinator_bound = TRUE`
-
-State updates:
-
-- `active_flow_count += 1`
-
-7. `FinishFlowOwnership`
-
-Preconditions:
-
-- `active_flow_count > 0`
-
-State updates:
-
-- `active_flow_count -= 1`
-
-8. `AdvanceTopology`
-
-Preconditions:
-
-- `orchestrator_state ∈ {Running, Stopped, Completed}`
-
-State updates:
-
-- `topology_revision += 1`
-
-### Lifecycle-like orchestration control
-
-9. `StopOrchestration`
-
-Preconditions:
-
-- `orchestrator_state = Running`
-
-State updates:
-
-- `Running -> Stopped`
-- `pending_spawn_count := 0`
-- `active_flow_count := 0`
-- `supervisor_active := FALSE`
-
-10. `ResumeOrchestration`
-
-Preconditions:
-
-- `orchestrator_state = Stopped`
-- `coordinator_bound = TRUE`
-
-State updates:
-
-- `Stopped -> Running`
-- `supervisor_active := TRUE`
-
-11. `CompleteOrchestration`
-
-Preconditions:
-
-- `orchestrator_state = Running`
-- `pending_spawn_count = 0`
-- `active_flow_count = 0`
-
-State updates:
-
-- `Running -> Completed`
-- `supervisor_active := FALSE`
-
-12. `DestroyOrchestration`
-
-Preconditions:
-
-- `orchestrator_state ∈ {Creating, Running, Stopped, Completed}`
-
-State updates:
-
-- `-> Destroyed`
-- `coordinator_bound := FALSE`
-- `pending_spawn_count := 0`
-- `active_flow_count := 0`
-- `supervisor_active := FALSE`
-
-13. `ResetOrchestration`
-
-Preconditions:
-
-- `orchestrator_state ∈ {Running, Stopped, Completed}`
-
-State updates:
-
-- `-> Running`
-- `pending_spawn_count := 0`
-- `active_flow_count := 0`
-- `supervisor_active := coordinator_bound`
-
-Hard rule:
-
-- `Destroyed` rejects all further transitions
+- `FlowActivated`
+- `FlowDeactivated`
+- `EmitOrchestratorNotice`
+- `MemberForceCancelled`
 
 ## Invariants
+- `destroyed_is_terminal`
 
-The machine must maintain:
+## Transitions
+### `InitializeOrchestrator`
+- From: `Creating`
+- On: `InitializeOrchestrator`()
+- Emits: `ActivateSupervisor`
+- To: `Running`
 
-1. destroyed orchestrators are drained
+### `BindCoordinator`
+- From: `Running`, `Stopped`, `Completed`
+- On: `BindCoordinator`()
+- Guards:
+  - `coordinator_is_not_bound`
+- Emits: `EmitOrchestratorNotice`
+- To: `Running`
 
-- `Destroyed` implies no coordinator binding, no pending spawns, no active
-  flows, and no active supervisor
+### `UnbindCoordinator`
+- From: `Running`, `Stopped`, `Completed`
+- On: `UnbindCoordinator`()
+- Guards:
+  - `coordinator_is_bound`
+  - `no_pending_spawns`
+- Emits: `EmitOrchestratorNotice`
+- To: `Stopped`
 
-2. active flow ownership requires a running, bound coordinator
+### `StageSpawn`
+- From: `Running`
+- On: `StageSpawn`()
+- Guards:
+  - `coordinator_is_bound`
+- Emits: `EmitOrchestratorNotice`
+- To: `Running`
 
-- `active_flow_count > 0` implies `Running` and `coordinator_bound = TRUE`
+### `CompleteSpawn`
+- From: `Running`, `Stopped`
+- On: `CompleteSpawn`()
+- Guards:
+  - `has_pending_spawns`
+- Emits: `EmitOrchestratorNotice`
+- To: `Running`
 
-3. pending spawn ownership requires a running, bound coordinator
+### `StartFlow`
+- From: `Running`, `Completed`
+- On: `StartFlow`()
+- Guards:
+  - `coordinator_is_bound`
+- Emits: `FlowActivated`, `EmitOrchestratorNotice`
+- To: `Running`
 
-- `pending_spawn_count > 0` implies `Running` and `coordinator_bound = TRUE`
+### `CompleteFlow`
+- From: `Running`, `Completed`
+- On: `CompleteFlow`()
+- Guards:
+  - `has_active_flows`
+- Emits: `FlowDeactivated`, `EmitOrchestratorNotice`
+- To: `Running`
 
-4. supervisor activation requires a running, bound coordinator
+### `StopOrchestrator`
+- From: `Running`, `Completed`
+- On: `StopOrchestrator`()
+- Guards:
+  - `no_active_flows`
+- Emits: `DeactivateSupervisor`
+- To: `Stopped`
 
-- `supervisor_active = TRUE` implies `Running` and `coordinator_bound = TRUE`
+### `ResumeOrchestrator`
+- From: `Stopped`
+- On: `ResumeOrchestrator`()
+- Guards:
+  - `coordinator_is_bound`
+- Emits: `ActivateSupervisor`
+- To: `Running`
 
-5. completed orchestration is quiescent
+### `MarkCompleted`
+- From: `Running`, `Stopped`
+- On: `MarkCompleted`()
+- Guards:
+  - `no_active_flows`
+  - `no_pending_spawns`
+- Emits: `EmitOrchestratorNotice`
+- To: `Completed`
 
-- `Completed` implies no pending spawns, no active flows, and no active
-  supervisor
+### `DestroyOrchestrator`
+- From: `Stopped`, `Completed`
+- On: `DestroyOrchestrator`()
+- Guards:
+  - `no_pending_spawns`
+  - `no_active_flows`
+- Emits: `DeactivateSupervisor`, `EmitOrchestratorNotice`
+- To: `Destroyed`
 
-## Model-check candidates
+### `ForceCancelMember`
+- From: `Running`
+- On: `ForceCancelMember`()
+- Guards:
+  - `coordinator_is_bound`
+- Emits: `MemberForceCancelled`, `EmitOrchestratorNotice`
+- To: `Running`
 
-Best candidates for formal checking:
+## Coverage
+### Code Anchors
+- `meerkat-mob/src/runtime/actor.rs` — orchestration owner precursor
+- `meerkat-mob/src/runtime/builder.rs` — runtime-mode/builder orchestration precursor
+- `meerkat-mob/src/definition.rs` — definition-level coordinator/topology precursor
 
-- destroyed/quiescent cleanup of orchestration-owned trackers
-- impossibility of active flows or pending spawns while coordinator is absent
-- supervisor activation legality
-
+### Scenarios
+- `coordinator-bind-and-supervise` — orchestrator binds coordinator authority and supervision
+- `pending-spawn-ledger` — pending spawn and completion semantics remain explicit
+- `topology-revision` — topology/orchestration revisions remain monotonic and owned

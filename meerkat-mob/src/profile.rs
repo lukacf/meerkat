@@ -70,7 +70,7 @@ pub struct Profile {
     pub backend: Option<MobBackendKind>,
     /// Runtime mode for members spawned from this profile.
     ///
-    /// Defaults to autonomous host-mode behavior when omitted.
+    /// Defaults to autonomous keep-alive behavior when omitted.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
     /// Maximum peer-count threshold for inline peer lifecycle context injection.

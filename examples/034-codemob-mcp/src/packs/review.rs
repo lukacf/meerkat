@@ -45,13 +45,13 @@ impl Pack for ReviewPack {
         let review_msg = format!("Review the following:\n\n{task}{ctx}");
 
         let mut steps = IndexMap::new();
-        steps.insert(StepId::from("general_review"),  flow_step("reviewer",  review_msg.clone(), &[], 120_000));
-        steps.insert(StepId::from("security_review"), flow_step("security",  format!("Focus on security aspects:\n\n{task}{ctx}"), &[], 120_000));
-        steps.insert(StepId::from("perf_review"),     flow_step("perf",      format!("Focus on performance aspects:\n\n{task}{ctx}"), &[], 120_000));
+        steps.insert(StepId::from("general_review"),  flow_step("reviewer",  review_msg.clone(), &[], 300_000));
+        steps.insert(StepId::from("security_review"), flow_step("security",  format!("Focus on security aspects:\n\n{task}{ctx}"), &[], 300_000));
+        steps.insert(StepId::from("perf_review"),     flow_step("perf",      format!("Focus on performance aspects:\n\n{task}{ctx}"), &[], 300_000));
         steps.insert(StepId::from("synthesize"), flow_step("synthesizer",
             "Synthesize all review findings below into a unified assessment. Include: summary, critical issues, recommendations, verdict (approve/request changes/reject).\n\n\
              ## General Review\n{{ steps.general_review }}\n\n## Security Review\n{{ steps.security_review }}\n\n## Performance Review\n{{ steps.perf_review }}".into(),
-            &["general_review", "security_review", "perf_review"], 120_000));
+            &["general_review", "security_review", "perf_review"], 300_000));
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec { description: Some("Parallel code review with synthesis".into()), steps });

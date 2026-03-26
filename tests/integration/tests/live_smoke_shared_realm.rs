@@ -21,6 +21,17 @@ fn workspace_root() -> PathBuf {
 }
 
 fn binary_path(name: &str) -> Option<PathBuf> {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let candidates = [
+            target_dir.join(format!("debug/{name}")),
+            target_dir.join(format!("release/{name}")),
+        ];
+        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
+            return Some(candidate);
+        }
+    }
+
     let root = workspace_root();
     [
         root.join(format!("target/debug/{name}")),
@@ -51,7 +62,9 @@ fn smoke_model() -> String {
 
 fn skip_if_missing_binary(path: &Option<PathBuf>, name: &str) -> bool {
     if path.is_none() {
-        eprintln!("Skipping: binary '{name}' not found under target/debug or target/release");
+        eprintln!(
+            "Skipping: binary '{name}' not found under CARGO_TARGET_DIR or repo target/debug|release"
+        );
         return true;
     }
     false
@@ -68,7 +81,7 @@ async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::err
     for slug in [
         "task-workflow",
         "shell-patterns",
-        "sub-agent-orchestration",
+        "mob-workflows",
         "multi-agent-comms",
         "mcp-server-setup",
         "hook-authoring",
@@ -1401,7 +1414,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     rpc_send_line(
         &mut rpc,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":4,"method":"mob/wire","params":{{"mob_id":"{mob_id}","a":"lead-1","b":"worker-1"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":4,"method":"mob/wire","params":{{"mob_id":"{mob_id}","member":"lead-1","peer":{{"local":"worker-1"}}}}}}"#
         ),
     )
     .await?;
@@ -1414,7 +1427,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     rpc_send_line(
         &mut rpc,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":5,"method":"mob/unwire","params":{{"mob_id":"{mob_id}","a":"lead-1","b":"worker-1"}}}}"#
+            r#"{{"jsonrpc":"2.0","id":5,"method":"mob/unwire","params":{{"mob_id":"{mob_id}","member":"lead-1","peer":{{"local":"worker-1"}}}}}}"#
         ),
     )
     .await?;
@@ -1463,6 +1476,10 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ordinary_init["error"].is_null(),
         "ordinary rpc surface should initialize cleanly: {ordinary_init}"
     );
+    // Intentionally agentic stress smoke: this ordinary create can take many
+    // real model turns while still validating the shared-realm routing
+    // invariant we care about here. Treat it as a correctness smoke, not a
+    // performance benchmark.
     rpc_send_line(
         &mut ordinary_rpc,
         &format!(
@@ -1471,7 +1488,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let ordinary = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 20).await?)?;
+    let ordinary = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 120).await?)?;
     assert!(
         ordinary["error"].is_null()
             && ordinary["result"]["text"]

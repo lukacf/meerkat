@@ -57,10 +57,10 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
+| `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
 | `POST` | `/sessions/{id}/interrupt` | Interrupt an in-flight turn |
 | `DELETE` | `/sessions/{id}` | Archive (remove) a session |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
-| `POST` | `/sessions/{id}/event` | Push an external event into a session (legacy) |
 | `POST` | `/sessions/{id}/mcp/add` | Stage live MCP server addition (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
@@ -78,12 +78,27 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/config` | Read config |
 | `PUT` | `/config` | Replace config |
 | `PATCH` | `/config` | Merge-patch config (RFC 7396) |
+| `POST` | `/requests/{request_id}/cancel` | Cancel an uncommitted in-flight request |
 
 <Note>
 Mob capability on REST is exposed through the same session endpoints by composing
 `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into
 `SessionBuildOptions.external_tools` in the host runtime.
 </Note>
+
+## Request cancellation
+
+REST request cancellation is opt-in and request-ID based.
+
+- send `X-Meerkat-Request-Id: <id>` on `POST /sessions` or `POST /sessions/{id}/messages`
+- call `POST /requests/{request_id}/cancel` to cancel uncommitted in-flight work
+- duplicate in-flight request IDs are rejected
+
+Cancellation only affects uncommitted work:
+
+- pre-start / pre-commit work may return cancelled
+- committed success is not rewritten to cancellation
+- post-commit create failures still return session identity and remain resumable
 
 ## Configuration
 
@@ -148,13 +163,12 @@ Create and run a new session.
   },
   "structured_output_retries": 2,
   "verbose": false,
-  "host_mode": false,
+  "keep_alive": null,
   "comms_name": null,
   "peer_meta": null,
   "hooks_override": null,
   "enable_builtins": null,
   "enable_shell": null,
-  "enable_subagents": null,
   "enable_memory": null
 }
 ```
@@ -202,16 +216,16 @@ Create and run a new session.
   JSON schema for structured output extraction (wrapper or raw schema).
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null">
+  Max retries for structured output validation. `null`/omitted uses the server default on create and inherits the persisted session value on continue.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
   Enable verbose event logging (server-side).
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Run in host mode for inter-agent comms (requires `comms_name`).
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep session alive after turn for comms. On create, `null`/omitted uses the create default (`false`), `true` enables, and `false` explicitly disables. Requires `comms_name` when enabled.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -258,10 +272,6 @@ History is returned oldest-to-newest and reflects the last committed session sna
 
 <ParamField body="enable_shell" type="bool | null" default="null (factory default)">
   Enable shell tool (requires `enable_builtins`). Omit to use factory defaults.
-</ParamField>
-
-<ParamField body="enable_subagents" type="bool | null" default="null (factory default)">
-  Enable sub-agent tools. Omit to use factory defaults.
 </ParamField>
 
 <ParamField body="enable_memory" type="bool | null" default="null (factory default)">
@@ -451,16 +461,16 @@ Continue an existing session.
   Structured output schema for this turn.
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null">
+  Max retries for structured output validation. Omit / `null` to inherit the persisted session value on continue.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
   Enable verbose event logging.
 </ParamField>
 
-<ParamField body="host_mode" type="bool" default="false">
-  Enable host mode for this turn.
+<ParamField body="keep_alive" type="bool | null" default="null">
+  Keep-alive override for this turn. `null` = inherit persisted session intent, `true` = enable, `false` = disable.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="from session">
@@ -483,6 +493,14 @@ Interrupt an in-flight turn. No-op if the session is idle.
 {"interrupted": true}
 ```
 
+### POST /requests/\{request_id\}/cancel
+
+Cancel an uncommitted in-flight request that previously supplied `X-Meerkat-Request-Id`.
+
+```json Response
+{"cancelled": true}
+```
+
 Returns `404` if the session is not found, `409` if the session is not running.
 
 ### DELETE /sessions/\{id\}
@@ -495,19 +513,19 @@ Archive (remove) a session.
 
 Returns `404` if the session is not found.
 
-### POST /sessions/\{id\}/event
+### POST /sessions/\{id\}/external-events
 
-Push an external event into a running session's inbox. The event is queued and processed at the next turn boundary.
+Queue an external event through the runtime-backed admission path.
 
 <CodeGroup>
 ```bash Without auth (localhost only)
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -d '{"alert": "CPU spike", "host": "web-03"}'
 ```
 
 ```bash With webhook secret
-curl -X POST http://localhost:8080/sessions/sid_abc/event \
+curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: my-secret" \
   -d '{"alert": "deployment failed"}'
@@ -517,6 +535,12 @@ curl -X POST http://localhost:8080/sessions/sid_abc/event \
 {"queued": true}
 ```
 </CodeGroup>
+
+<Note>
+This route keeps the optional `RKAT_WEBHOOK_SECRET` header auth used for webhook
+delivery, but the admitted event now flows through runtime input acceptance
+instead of a surface-local injector path.
+</Note>
 
 <ParamField body="(body)" type="any JSON" required>
   Any JSON payload. Pretty-printed and injected as an event into the agent's inbox.
@@ -688,7 +712,7 @@ Returns runtime capabilities with status resolved against config.
 }
 ```
 
-The full response includes all capabilities: `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `sub_agents`, `memory_store`, `session_store`, `session_compaction`, `skills`, `mcp_live`. See the [RPC capabilities endpoint](/api/rpc#capabilitiesget) for the complete example.
+The full response includes all capabilities: `sessions`, `streaming`, `structured_output`, `hooks`, `builtins`, `shell`, `comms`, `memory_store`, `session_store`, `session_compaction`, `skills`, `mcp_live`. See the [RPC capabilities endpoint](/api/rpc#capabilitiesget) for the complete example.
 
 ### GET /config
 
@@ -792,9 +816,9 @@ Push a canonical comms command into a running session. Requires the `comms` feat
 </ParamField>
 
 <Note>
-Unlike `POST /sessions/{id}/event` (which uses `RKAT_WEBHOOK_SECRET` header auth),
-`/comms/send` has **no authentication**. It is intended for trusted internal callers
-that already know the session ID.
+Unlike `POST /sessions/{id}/external-events` (which uses `RKAT_WEBHOOK_SECRET`
+header auth), `/comms/send` has **no authentication**. It is intended for
+trusted internal callers that already know the session ID.
 </Note>
 
 ### GET /comms/peers
@@ -827,7 +851,7 @@ All errors are returned as JSON with an HTTP status code:
 
 | HTTP Status | Code | When |
 |-------------|------|------|
-| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, host_mode without comms |
+| 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, keep_alive without comms |
 | 403 | `HOOK_DENIED` | Hook blocked the operation |
 | 404 | `SESSION_NOT_FOUND` | Session does not exist |
 | 404 | `SKILL_NOT_FOUND` | Requested skill does not exist |
@@ -859,9 +883,13 @@ All errors are returned as JSON with an HTTP status code:
 ## Notes
 
 <Note>
-Host mode requires `host_mode: true` and a `comms_name`. If `host_mode` is
+Keep-alive mode requires `keep_alive: true` and a `comms_name`. If `keep_alive` is
 requested but the binary was not compiled with comms support, the server
 returns a `BAD_REQUEST` error.
+</Note>
+
+<Note>
+`POST /sessions/{id}/external-events` queues a runtime-backed external event. It is a queue-only admission path, not a second direct execution loop.
 </Note>
 
 <Note>

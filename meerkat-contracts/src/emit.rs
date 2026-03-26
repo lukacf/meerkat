@@ -6,6 +6,7 @@
 #[cfg(feature = "schema")]
 pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use schemars::schema_for;
+    use serde_json::{Map, Value};
     use std::fs;
 
     fs::create_dir_all(output_dir)?;
@@ -27,6 +28,26 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
         "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
+        "WireTrustedPeerSpec": schema_for!(crate::wire::WireTrustedPeerSpec),
+        "MobPeerTarget": schema_for!(crate::wire::MobPeerTarget),
+        "WireHandlingMode": schema_for!(crate::wire::WireHandlingMode),
+        "WireRenderClass": schema_for!(crate::wire::WireRenderClass),
+        "WireRenderSalience": schema_for!(crate::wire::WireRenderSalience),
+        "WireRenderMetadata": schema_for!(crate::wire::WireRenderMetadata),
+        "MobSendResult": schema_for!(crate::wire::MobSendResult),
+        "MobWireResult": schema_for!(crate::wire::MobWireResult),
+        "MobUnwireResult": schema_for!(crate::wire::MobUnwireResult),
+        "WireRuntimeState": schema_for!(crate::wire::WireRuntimeState),
+        "RuntimeStateResult": schema_for!(crate::wire::RuntimeStateResult),
+        "RuntimeAcceptOutcomeType": schema_for!(crate::wire::RuntimeAcceptOutcomeType),
+        "WireInputLifecycleState": schema_for!(crate::wire::WireInputLifecycleState),
+        "WireInputStateHistoryEntry": schema_for!(crate::wire::WireInputStateHistoryEntry),
+        "WireInputState": schema_for!(crate::wire::WireInputState),
+        "InputStateResult": schema_for!(crate::wire::InputStateResult),
+        "RuntimeAcceptResult": schema_for!(crate::wire::RuntimeAcceptResult),
+        "RuntimeRetireResult": schema_for!(crate::wire::RuntimeRetireResult),
+        "RuntimeResetResult": schema_for!(crate::wire::RuntimeResetResult),
+        "InputListResult": schema_for!(crate::wire::InputListResult),
         "WireContentBlock": schema_for!(crate::wire::WireContentBlock),
         "WireContentInput": schema_for!(crate::wire::WireContentInput),
         "WireToolResultContent": schema_for!(crate::wire::WireToolResultContent),
@@ -53,6 +74,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "McpAddParams": schema_for!(crate::wire::McpAddParams),
         "McpRemoveParams": schema_for!(crate::wire::McpRemoveParams),
         "McpReloadParams": schema_for!(crate::wire::McpReloadParams),
+        "MobSendParams": schema_for!(crate::wire::MobSendParams),
+        "MobWireParams": schema_for!(crate::wire::MobWireParams),
+        "MobUnwireParams": schema_for!(crate::wire::MobUnwireParams),
+        "RuntimeStateParams": schema_for!(crate::wire::RuntimeStateParams),
+        "RuntimeAcceptParams": schema_for!(crate::wire::RuntimeAcceptParams),
+        "RuntimeRetireParams": schema_for!(crate::wire::RuntimeRetireParams),
+        "RuntimeResetParams": schema_for!(crate::wire::RuntimeResetParams),
+        "InputStateParams": schema_for!(crate::wire::InputStateParams),
+        "InputListParams": schema_for!(crate::wire::InputListParams),
     });
     fs::write(
         output_dir.join("params.json"),
@@ -96,13 +126,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         serde_json::to_string_pretty(&models)?,
     )?;
 
-    // Events — WireEvent embeds AgentEvent which lacks JsonSchema.
-    // Emit a structural description, NOT a consumable JSON Schema.
-    // Codegen should not parse these for type generation.
+    // Events — includes canonical event type inventory plus schema-ready
+    // payload definitions where available.
     let events = serde_json::json!({
+        "AgentEvent": schema_for!(meerkat_core::AgentEvent),
+        "ScopedAgentEvent": schema_for!(meerkat_core::ScopedAgentEvent),
         "WireEvent": {
             "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
-            "note": "AgentEvent is a large enum; full JSON Schema requires schemars derives on meerkat-core types",
+            "known_event_types": crate::KNOWN_AGENT_EVENT_TYPES,
             "known_payloads": {
                 "tool_config_changed": {
                     "type": "object",
@@ -121,7 +152,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                         }
                     }
                 }
-            }
+            },
+            "note": "AgentEvent schema is emitted above. known_event_types stays as a lightweight canonical inventory for surface drift checks."
         }
     });
     fs::write(
@@ -132,84 +164,50 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     // RPC methods — structural description of the method surface.
     // This is documentation, not a consumable schema for codegen.
     let rpc_methods = serde_json::json!({
-        "methods": [
-            {"name": "initialize", "description": "Handshake, returns server capabilities"},
-            {"name": "session/create", "description": "Create session + run first turn"},
-            {"name": "session/list", "description": "List active sessions"},
-            {"name": "session/read", "description": "Get session state"},
-            {"name": "session/history", "description": "Get full session history"},
-            {"name": "session/archive", "description": "Remove session"},
-            {"name": "turn/start", "description": "Start a new turn on existing session"},
-            {"name": "turn/interrupt", "description": "Cancel in-flight turn"},
-            {"name": "capabilities/get", "description": "Get runtime capabilities"},
-            {"name": "models/catalog", "description": "Get the compiled-in model catalog", "result_type": "ModelsCatalogResponse"},
-            {"name": "config/get", "description": "Read config"},
-            {"name": "config/set", "description": "Replace config"},
-            {"name": "config/patch", "description": "Merge-patch config"},
-            {
-                "name": "mcp/add",
-                "description": "Stage live MCP server add for a session",
-                "params_type": "McpAddParams",
-                "result_type": "McpLiveOpResponse"
-            },
-            {
-                "name": "mcp/remove",
-                "description": "Stage live MCP server remove for a session",
-                "params_type": "McpRemoveParams",
-                "result_type": "McpLiveOpResponse"
-            },
-            {
-                "name": "mcp/reload",
-                "description": "Optional skeleton for live MCP reload",
-                "params_type": "McpReloadParams",
-                "result_type": "McpLiveOpResponse"
-            },
-        ],
-        "notifications": [
-            {"name": "initialized", "description": "Client notification acknowledged silently (no response)"},
-            {"name": "session/event", "description": "AgentEvent payload during turns"},
-        ]
+        "methods": crate::rpc_method_catalog(crate::RpcMethodCatalogOptions::documented_surface()),
+        "notifications": crate::rpc_notification_catalog(
+            crate::RpcMethodCatalogOptions::documented_surface()
+        )
     });
     fs::write(
         output_dir.join("rpc-methods.json"),
         serde_json::to_string_pretty(&rpc_methods)?,
     )?;
 
-    // REST OpenAPI — stub endpoint listing, not a full OpenAPI spec.
-    // No request/response body schemas included.
+    // REST OpenAPI — endpoint listing snapshot, not a full OpenAPI spec.
+    // Request/response body schemas are intentionally omitted, but the path
+    // inventory should stay aligned with the live router surface.
+    let rest_paths: Map<String, Value> = crate::rest_path_catalog()
+        .into_iter()
+        .map(|path| {
+            let operations = path
+                .operations
+                .into_iter()
+                .map(|operation| {
+                    let mut operation_map = Map::new();
+                    operation_map.insert(
+                        "summary".to_string(),
+                        Value::String(operation.summary.to_string()),
+                    );
+                    if let Some(description) = operation.description {
+                        operation_map.insert(
+                            "description".to_string(),
+                            Value::String(description.to_string()),
+                        );
+                    }
+                    (operation.method.to_string(), Value::Object(operation_map))
+                })
+                .collect();
+            (path.path.to_string(), Value::Object(operations))
+        })
+        .collect();
     let rest_openapi = serde_json::json!({
         "openapi": "3.0.0",
         "info": {
             "title": "Meerkat REST API",
             "version": crate::version::ContractVersion::CURRENT.to_string(),
         },
-        "paths": {
-            "/sessions": {"post": {"summary": "Create and run a new session"}},
-            "/sessions/{id}": {"get": {"summary": "Get session details"}},
-            "/sessions/{id}/history": {"get": {"summary": "Get full session history"}},
-            "/sessions/{id}/messages": {"post": {"summary": "Continue session with new message"}},
-            "/sessions/{id}/events": {"get": {"summary": "SSE event stream"}},
-            "/sessions/{id}/mcp/add": {"post": {
-                "summary": "Stage live MCP server addition",
-                "description": "Requires mcp_live capability. Check GET /capabilities.",
-            }},
-            "/sessions/{id}/mcp/remove": {"post": {
-                "summary": "Stage live MCP server removal",
-                "description": "Requires mcp_live capability. Check GET /capabilities.",
-            }},
-            "/sessions/{id}/mcp/reload": {"post": {
-                "summary": "Stage live MCP server reload",
-                "description": "Requires mcp_live capability. Check GET /capabilities.",
-            }},
-            "/capabilities": {"get": {"summary": "Get runtime capabilities"}},
-            "/models/catalog": {"get": {"summary": "Get the compiled-in model catalog"}},
-            "/config": {
-                "get": {"summary": "Get config"},
-                "put": {"summary": "Replace config"},
-                "patch": {"summary": "Patch config"},
-            },
-            "/health": {"get": {"summary": "Health check"}},
-        }
+        "paths": Value::Object(rest_paths),
     });
     fs::write(
         output_dir.join("rest-openapi.json"),

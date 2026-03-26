@@ -1,12 +1,12 @@
 # 001 — Hello Meerkat (Rust)
 
-The simplest possible Meerkat agent. Send one prompt, get one response.
+The simplest possible Meerkat Rust example. Create a `SessionService`, run one session turn, and read the result.
 
 ## Concepts
-- `AgentFactory` — shared wiring for agent components
-- `AgentBuilder` — fluent API for constructing agents
-- `AnthropicClient` — LLM provider implementation
-- `RunResult` — structured output from an agent turn
+- `AgentFactory` — shared wiring for runtime components
+- `build_ephemeral_service` — simple in-memory `SessionService` constructor for example/test or embedded usage
+- `CreateSessionRequest` — canonical first-turn request shape
+- `RunResult` — structured output from a session turn
 
 ## Run
 ```bash

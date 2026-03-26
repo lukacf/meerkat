@@ -2,8 +2,8 @@
 //!
 //! [`PendingProvision`] wraps a provisioned [`MemberRef`] and enforces at the
 //! type level that the resource is either **committed** (added to the roster)
-//! or **rolled back** (session archived). Dropping without consuming is a bug:
-//! debug builds panic, release builds log an error.
+//! or **rolled back** (session archived). Dropping without consuming is a bug
+//! and always panics.
 //!
 //! The `#[must_use]` attribute on the type ensures the compiler warns if the
 //! value is discarded.
@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 /// A provisioned member that must be explicitly committed or rolled back.
 ///
-/// Dropping without consuming is a bug -- debug builds panic, release builds
-/// log an error. The async `rollback()` method performs the actual cleanup;
+/// Dropping without consuming is a bug and always panics. The async
+/// `rollback()` method performs the actual cleanup;
 /// the synchronous `Drop` can only detect the mistake, not fix it.
 #[must_use = "provisioned member must be committed or rolled back"]
 pub(super) struct PendingProvision {
@@ -52,18 +52,30 @@ impl PendingProvision {
 
     /// Roll back the provision, archiving the session.
     pub(super) async fn rollback(mut self) -> Result<(), MobError> {
-        self.committed = true; // prevent Drop from double-reporting
         let member_ref = self.take_member_ref("rollback")?;
-        self.provisioner.retire_member(&member_ref).await
+        match self.provisioner.retire_member(&member_ref).await {
+            Ok(()) => {
+                self.committed = true;
+                Ok(())
+            }
+            Err(error) => {
+                // Preserve drop-time invariant checking and diagnostics when
+                // rollback fails by restoring the member ref.
+                self.member_ref = Some(member_ref);
+                self.committed = false;
+                Err(error)
+            }
+        }
     }
 
     /// Access the member ref without consuming.
     pub(super) fn member_ref(&self) -> &MemberRef {
-        // Safety: `member_ref` is `Some` from construction until `commit()` or
+        // `member_ref` is `Some` from construction until `commit()` or
         // `rollback()` consume `self`. Borrowing through `&self` cannot happen
-        // after consumption. The `unwrap_or` branch is structurally unreachable.
-        #[allow(clippy::unwrap_used)]
-        self.member_ref.as_ref().unwrap()
+        // after consumption.
+        self.member_ref
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("PendingProvision::member_ref consumed before access"))
     }
 
     /// The meerkat ID associated with this provision.
@@ -102,10 +114,13 @@ impl Drop for PendingProvision {
 mod tests {
     use super::*;
     use crate::ids::MeerkatId;
+    use crate::runtime::handle::MemberSpawnReceipt;
     use crate::runtime::provisioner::ProvisionMemberRequest;
     use async_trait::async_trait;
     use meerkat_core::comms::TrustedPeerSpec;
     use meerkat_core::event_injector::SubscribableInjector;
+    use meerkat_core::ops::OperationId;
+    use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::service::StartTurnRequest;
     use meerkat_core::types::SessionId;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,16 +142,25 @@ mod tests {
         async fn provision_member(
             &self,
             _req: ProvisionMemberRequest,
-        ) -> Result<MemberRef, MobError> {
-            Ok(MemberRef::from_session_id(SessionId::new()))
+        ) -> Result<MemberSpawnReceipt, MobError> {
+            Ok(MemberSpawnReceipt {
+                member_ref: MemberRef::from_session_id(SessionId::new()),
+                operation_id: meerkat_core::ops::OperationId::new(),
+            })
         }
 
-        async fn retire_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
+        async fn abort_member_provision(
+            &self,
+            _member_ref: &MemberRef,
+            _operation_id: &OperationId,
+            _reason: &str,
+        ) -> Result<(), MobError> {
             self.retired.store(true, Ordering::Release);
             Ok(())
         }
 
-        async fn reset_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
+        async fn retire_member(&self, _member_ref: &MemberRef) -> Result<(), MobError> {
+            self.retired.store(true, Ordering::Release);
             Ok(())
         }
 
@@ -180,6 +204,22 @@ mod tests {
             _fallback_peer_id: &str,
         ) -> Result<TrustedPeerSpec, MobError> {
             Err(MobError::Internal("not implemented".into()))
+        }
+
+        async fn active_operation_id_for_member(
+            &self,
+            _member_ref: &MemberRef,
+        ) -> Option<OperationId> {
+            None
+        }
+
+        async fn bind_member_owner_context(
+            &self,
+            _member_ref: &MemberRef,
+            _owner_session_id: SessionId,
+            _ops_registry: Arc<dyn OpsLifecycleRegistry>,
+        ) -> Result<(), MobError> {
+            Ok(())
         }
     }
 

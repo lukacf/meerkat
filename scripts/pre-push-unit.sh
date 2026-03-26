@@ -5,6 +5,9 @@
 # - retries nextest once if discovery hangs
 set -euo pipefail
 
+ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
+
 CACHE_VERSION="v2"
 NEXTEST_TIMEOUT_SECS="${MEERKAT_PRE_PUSH_NEXTEST_TIMEOUT_SECS:-120}"
 LOCK_WAIT_SECS="${MEERKAT_PRE_PUSH_UNIT_LOCK_WAIT_SECS:-180}"
@@ -103,7 +106,7 @@ run_with_timeout() {
 
 retry_nextest() {
   local nextest_cmd=(
-    cargo nextest run --workspace --lib
+    "$CARGO" nextest run --workspace --lib
     --show-progress none
     --status-level none
     --final-status-level fail

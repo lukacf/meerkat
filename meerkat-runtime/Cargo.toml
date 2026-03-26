@@ -42,6 +42,7 @@ sqlite-store = ["dep:rusqlite", "dep:meerkat-store", "meerkat-store/sqlite"]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
 redb = { workspace = true }
+meerkat-store = { workspace = true, features = ["memory"] }
 
 [lints]
 workspace = true

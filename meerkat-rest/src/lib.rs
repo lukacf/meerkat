@@ -287,13 +287,27 @@ impl AppState {
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
-        let session_service = Arc::new(PersistentSessionService::new(
+        let mut session_service = PersistentSessionService::new(
             builder,
             100,
             session_store,
             runtime_store,
             blob_store,
-        ));
+        );
+        {
+            let adapter = runtime_adapter.clone();
+            session_service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+                let adapter = adapter.clone();
+                let session_id = session_id.clone();
+                Box::pin(async move {
+                    adapter
+                        .ops_lifecycle_registry(&session_id)
+                        .await
+                        .map(|r| r as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
+                })
+            }));
+        }
+        let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
 
@@ -2428,6 +2442,8 @@ async fn create_session_inner(
     let create_result = match state.session_service.create_session(svc_req).await {
         Ok(result) => result,
         Err(err) => {
+            #[cfg(feature = "mcp")]
+            cleanup_mcp_session(state, &session_id).await;
             state.runtime_adapter.unregister_session(&session_id).await;
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
@@ -2480,6 +2496,17 @@ async fn create_session_inner(
             },
         ),
     ));
+
+    // Final cancel recheck before submitting input — interrupt() is a no-op
+    // when no turn is running, so cancel between the last recheck and here
+    // would be lost without this gate.
+    if let Some(ctx) = req_ctx.as_ref() {
+        if ctx.cancel_requested() {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
+        }
+    }
 
     let (outcome, handle) = match adapter
         .accept_input_with_completion(&create_result.session_id, input)
@@ -3051,6 +3078,16 @@ async fn continue_session_inner(
                     },
                 ),
             ));
+        // Final cancel recheck before submitting input.
+        if let Some(ctx) = req_ctx.as_ref() {
+            if ctx.cancel_requested() {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
+                    details: None,
+                }));
+            }
+        }
         let (_outcome, handle) = match adapter
             .accept_input_with_completion(&create_result.session_id, input)
             .await
@@ -3152,6 +3189,16 @@ async fn continue_session_inner(
                     },
                 ),
             ));
+        // Final cancel recheck before submitting input.
+        if let Some(ctx) = req_ctx.as_ref() {
+            if ctx.cancel_requested() {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
+                    details: None,
+                }));
+            }
+        }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
             .await

@@ -1652,7 +1652,7 @@ impl MobHandle {
                     pending.remove(&id);
                 }
                 futures::future::Either::Left((None, _)) => break,
-                futures::future::Either::Right((_, _)) => {
+                futures::future::Either::Right(((), _)) => {
                     let pending_member_ids = target_ids
                         .iter()
                         .filter(|id| pending.contains(*id))

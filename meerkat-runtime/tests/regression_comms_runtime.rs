@@ -396,9 +396,9 @@ async fn message_blocks_survive_bridge() {
 
     if let Input::Peer(peer) = input {
         assert!(peer.blocks.is_some());
-        // peer.body is the raw message body, not the rendered_text (which
-        // includes the "[peer-name]: " prefix).
-        assert_eq!(peer.body, "look");
+        // peer.body is the canonical rendered projection, while blocks preserve
+        // the original multimodal content.
+        assert_eq!(peer.body, interaction.rendered_text);
     } else {
         panic!("Expected PeerInput");
     }

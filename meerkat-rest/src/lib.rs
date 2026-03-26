@@ -983,7 +983,8 @@ fn extract_request_context(
     };
     let request_id = header_value
         .to_str()
-        .map_err(|_| ApiError::BadRequest("X-Meerkat-Request-Id must be valid UTF-8".into()))?;
+        .map_err(|_| ApiError::BadRequest("X-Meerkat-Request-Id must be valid UTF-8".into()))?
+        .trim();
     if request_id.is_empty() {
         return Err(ApiError::BadRequest(
             "X-Meerkat-Request-Id must not be empty".into(),
@@ -2439,15 +2440,22 @@ async fn create_session_inner(
         }
     };
 
-    // Register executor for the new session
+    // Register executor for the new session.
+    // Session is already committed — failure here must use Published(Err) to
+    // preserve the session for resumption.
     if let Err(_resp) = ensure_runtime_session_registered(state, &create_result.session_id).await {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        #[cfg(feature = "mcp")]
-        cleanup_mcp_session(state, &session_id).await;
-        return RequestOutcome::Unpublished(Err(ApiError::Internal(
-            "failed to register runtime executor".to_string(),
-        )));
+        return RequestOutcome::Published(Err(ApiError::InternalWithData {
+            message: "failed to register runtime executor".to_string(),
+            code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
+            details: json!({
+                "session_id": session_id.to_string(),
+                "session_ref": format_session_ref(&state.realm_id, &session_id),
+                "session_created": true,
+                "resumable": true,
+            }),
+        }));
     }
 
     // Spawn comms drain for keep_alive sessions.
@@ -2481,7 +2489,16 @@ async fn create_session_inner(
         Err(err) => {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestOutcome::Unpublished(Err(ApiError::Internal(err.to_string())));
+            return RequestOutcome::Published(Err(ApiError::InternalWithData {
+                message: err.to_string(),
+                code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
+                details: json!({
+                    "session_id": session_id.to_string(),
+                    "session_ref": format_session_ref(&state.realm_id, &session_id),
+                    "session_created": true,
+                    "resumable": true,
+                }),
+            }));
         }
     };
 
@@ -2519,12 +2536,9 @@ async fn create_session_inner(
             &state.realm_id,
         )))),
         Err(err) => {
-            // SESSION_CREATED_WITH_TURN_FAILURE: session exists and is preserved.
-            // This is a Published error — cleanup must NOT run.
-            #[cfg(feature = "mcp")]
-            cleanup_mcp_session(state, &session_id).await;
-            #[cfg(feature = "comms")]
-            state.runtime_adapter.abort_comms_drain(&session_id).await;
+            // SESSION_CREATED_WITH_TURN_FAILURE: session exists and is preserved
+            // for resumption. Do NOT tear down MCP or comms sidecars — they belong
+            // to the live session.
             let message = match err {
                 ApiError::Internal(msg) => msg,
                 other => return RequestOutcome::Published(Err(other)),
@@ -2981,8 +2995,22 @@ async fn continue_session_inner(
             }
         };
 
-        // Install cancel action: interrupt the session.
+        // Rebuilt session now exists — install cleanup to archive it if cancel
+        // fires before the turn starts, and interrupt as the running cancel action.
         if let Some(ctx) = req_ctx.as_ref() {
+            let cleanup_svc = state.session_service.clone();
+            let cleanup_adapter = state.runtime_adapter.clone();
+            let cleanup_sid = session_id.clone();
+            ctx.set_unpublished_cleanup(request_action(move || {
+                let svc = cleanup_svc.clone();
+                let adapter = cleanup_adapter.clone();
+                let sid = cleanup_sid.clone();
+                async move {
+                    let _ = svc.archive(&sid).await;
+                    adapter.unregister_session(&sid).await;
+                }
+            }));
+
             let cancel_svc = state.session_service.clone();
             let cancel_sid = session_id.clone();
             ctx.replace_cancel_action(request_action(move || {

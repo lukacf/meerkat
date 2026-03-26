@@ -178,9 +178,13 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
             blocks: f.blocks.clone().unwrap_or_default(),
         },
-        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: e.blocks.clone().unwrap_or_default(),
-        },
+        Input::ExternalEvent(e) if e.blocks.is_some() => {
+            let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                text: external_event_projection_text(e),
+            }];
+            blocks.extend(e.blocks.clone().unwrap_or_default());
+            CoreRenderable::Blocks { blocks }
+        }
         Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
             CoreRenderable::Text {
                 text: input_to_prompt(input),
@@ -193,6 +197,21 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         role: ConversationAppendRole::User,
         content,
     })
+}
+
+fn external_event_projection_text(event: &crate::input::ExternalEventInput) -> String {
+    let label = format!("[External Event: {}]", event.event_type);
+    let body = event
+        .payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|body| !body.is_empty());
+
+    match body {
+        Some(body) => format!("{label} {body}"),
+        None => label,
+    }
 }
 
 pub(crate) fn inputs_to_primitive_with_boundary(
@@ -726,9 +745,62 @@ mod tests {
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
             CoreRenderable::Blocks { blocks: got } => {
+                assert_eq!(got.len(), 3);
+                assert_eq!(
+                    got[0],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "[External Event: webhook] see this event".into(),
+                    }
+                );
+                assert_eq!(got[1], blocks[0]);
+                assert_eq!(got[2], blocks[1]);
+            }
+            other => return Err(format!("expected blocks content, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn external_event_with_image_only_blocks_keeps_event_identity() -> Result<(), String> {
+        let blocks = vec![meerkat_core::types::ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "abc123".into(),
+        }];
+        let input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "webhook".into(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "webhook".into(),
+            payload: serde_json::json!({"body": "see attached screenshot"}),
+            blocks: Some(blocks.clone()),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        });
+        let primitive = input_to_primitive(&input, input.id().clone());
+
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => {
                 assert_eq!(got.len(), 2);
-                assert_eq!(got[0], blocks[0]);
-                assert_eq!(got[1], blocks[1]);
+                assert_eq!(
+                    got[0],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "[External Event: webhook] see attached screenshot".into(),
+                    }
+                );
+                assert_eq!(got[1], blocks[0]);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }

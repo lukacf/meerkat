@@ -121,7 +121,12 @@ fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
     match &interaction.content {
-        InteractionContent::Message { body, .. } => body.clone(),
+        InteractionContent::Message { body, .. } => {
+            if !interaction.rendered_text.is_empty() {
+                return interaction.rendered_text.clone();
+            }
+            body.clone()
+        }
         InteractionContent::Request { params, .. } => {
             if !interaction.rendered_text.is_empty() {
                 return interaction.rendered_text.clone();
@@ -299,7 +304,7 @@ mod tests {
             classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
         match input {
             Input::Peer(peer) => {
-                assert_eq!(peer.body, "hello");
+                assert_eq!(peer.body, "[COMMS MESSAGE from event:webhook]\nhello");
                 match peer.header.source {
                     InputOrigin::Peer { peer_id, .. } => assert_eq!(peer_id, "event:webhook"),
                     other => panic!("Expected peer source, got {other:?}"),
@@ -358,7 +363,7 @@ mod tests {
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "see image");
+            assert_eq!(peer.body, "[COMMS MESSAGE from peer-1]\nsee image");
             assert_eq!(peer.blocks, Some(blocks));
         } else {
             panic!("Expected PeerInput");
@@ -366,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_message_prefers_raw_body_over_rendered_projection() {
+    fn multimodal_message_uses_rendered_projection_while_preserving_blocks() {
         let blocks = vec![
             meerkat_core::types::ContentBlock::Text {
                 text: "caption text".into(),
@@ -389,7 +394,10 @@ mod tests {
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "please inspect this image");
+            assert_eq!(
+                peer.body,
+                "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]"
+            );
         } else {
             panic!("Expected PeerInput");
         }

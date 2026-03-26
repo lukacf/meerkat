@@ -28,8 +28,6 @@ const sentimentSchema = {
     },
     confidence: {
       type: "number" as const,
-      minimum: 0,
-      maximum: 1,
       description: "Confidence score between 0 and 1",
     },
     key_phrases: {

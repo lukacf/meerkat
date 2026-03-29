@@ -1582,7 +1582,10 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
             .get(step_id)
             .ok_or_else(|| {
                 MobError::Internal(format!(
-                    "FlowTurnExecutorAdapter: no FlowStepSpec for step_id '{step_id}'"
+                    "FlowTurnExecutorAdapter: no FlowStepSpec found for step '{step_id}'. \
+                     Frame-based flows (root: Some(...)) must define step execution parameters \
+                     (role, message, timeout_ms) in flow_spec.steps, keyed by the same StepId \
+                     used in FrameStepSpec.step_id."
                 ))
             })?
             .clone();

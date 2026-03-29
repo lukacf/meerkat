@@ -9,13 +9,33 @@ use crate::ids::{FlowNodeId, FrameId, LoopId, RunId, StepId};
 use crate::run::FrameSnapshot;
 use crate::store::MobRunStore;
 use meerkat_machine_kernels::generated::{flow_frame, flow_run};
-use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelValue};
+use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelValue, TransitionRefusal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 mod sealed {
     pub trait Sealed {}
 }
+
+// ─── StepCompletionOpts ──────────────────────────────────────────────────────
+
+/// Options for completing a step node and recording its output.
+pub struct StepCompletionOpts<'a> {
+    /// The frame node that was admitted as a step.
+    pub node_id: &'a FlowNodeId,
+    /// The step ID used to store the output.
+    pub step_id: &'a StepId,
+    /// The output value produced by the step executor.
+    pub output: serde_json::Value,
+    /// `None` for root frame steps (stored in `root_step_outputs`).
+    /// `Some((loop_id, iteration))` for loop body steps (stored in
+    /// `loop_iteration_outputs[loop_id][iteration]`).
+    pub loop_context: Option<(&'a LoopId, u64)>,
+    /// Maximum number of CAS retries before returning an error.
+    pub max_retries: usize,
+}
+
+// ─── FlowFrameMutator ────────────────────────────────────────────────────────
 
 /// Sealed mutator trait for FlowFrame state transitions.
 ///
@@ -43,7 +63,9 @@ pub trait FlowFrameMutator: sealed::Sealed {
     ) -> Result<Option<Vec<KernelEffect>>, MobError>;
 
     /// Admit the next ready node with up to `max_retries` CAS retries.
-    /// Returns effects on success, None if queue empty or all retries exhausted.
+    ///
+    /// Returns `Ok(Some(effects))` on success, `Ok(None)` if the queue is
+    /// genuinely empty, or `Err` if every attempt lost the CAS (contention).
     async fn admit_next_ready_node_with_retry(
         &self,
         run_id: &RunId,
@@ -51,20 +73,12 @@ pub trait FlowFrameMutator: sealed::Sealed {
         max_retries: usize,
     ) -> Result<Option<Vec<KernelEffect>>, MobError>;
 
-    /// Complete a node and record its output with CAS retry.
-    ///
-    /// `loop_context` is `None` for root frame steps (output stored in `root_step_outputs`),
-    /// or `Some((loop_id, iteration))` for loop body steps (stored in `loop_iteration_outputs`).
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_node_with_output(
+    /// Complete a step node and record its output, with CAS retry.
+    async fn complete_step(
         &self,
         run_id: &RunId,
         frame_id: &FrameId,
-        node_id: &FlowNodeId,
-        step_id: &StepId,
-        output: serde_json::Value,
-        loop_context: Option<(&LoopId, u64)>,
-        max_retries: usize,
+        opts: StepCompletionOpts<'_>,
     ) -> Result<(), MobError>;
 
     /// Mark a node as completed. Returns `true` if the CAS succeeded.
@@ -95,6 +109,8 @@ pub trait FlowFrameMutator: sealed::Sealed {
     async fn terminalize_frame(&self, run_id: &RunId, frame_id: &FrameId)
     -> Result<bool, MobError>;
 }
+
+// ─── FlowFrameKernel ─────────────────────────────────────────────────────────
 
 /// Concrete implementation of `FlowFrameMutator`.
 pub struct FlowFrameKernel {
@@ -216,7 +232,7 @@ impl FlowFrameMutator for FlowFrameKernel {
                 _ => true,
             };
             if queue_empty {
-                return Ok(None);
+                return Ok(None); // genuinely nothing to admit
             }
 
             let admit_input = KernelInput {
@@ -228,15 +244,16 @@ impl FlowFrameMutator for FlowFrameKernel {
             let next_snap = FrameSnapshot {
                 kernel_state: outcome.next_state,
             };
-            // Use cas_grant_node_slot to atomically update BOTH the run's
-            // scheduler state (via PumpNodeScheduler which increments
-            // active_node_count and pops ready_frames) and the frame state
-            // (via AdmitNextReadyNode which pops the ready_queue).
+
+            // Use cas_grant_node_slot to atomically update BOTH the run's scheduler
+            // state (PumpNodeScheduler: active_node_count++) and the frame state
+            // (AdmitNextReadyNode: pops ready_queue).
             //
-            // PumpNodeScheduler requires max_active_nodes > 0 and the frame
-            // to be in ready_frames. When the run scheduler is not configured
-            // (e.g. sequential FlowFrameEngine with default limits of 0 = unlimited),
-            // we fall back to cas_frame_state so only frame state is updated.
+            // PumpNodeScheduler requires max_active_nodes > 0 and the frame to be
+            // in ready_frames. When the run scheduler is not configured (e.g.
+            // sequential FlowFrameEngine with default max_active_nodes = 0 =
+            // unlimited), the pump guard fails with NoMatchingTransition — in that
+            // case we fall back to cas_frame_state for frame-only update.
             let run = self
                 .run_store
                 .get_run(run_id)
@@ -248,7 +265,7 @@ impl FlowFrameMutator for FlowFrameKernel {
             };
             let won = match flow_run::transition(&run.flow_state, &pump_input) {
                 Ok(run_outcome) => {
-                    // Run scheduler is active — atomically update run + frame state.
+                    // Run scheduler active — atomically update run + frame state.
                     self.run_store
                         .cas_grant_node_slot(
                             run_id,
@@ -260,31 +277,47 @@ impl FlowFrameMutator for FlowFrameKernel {
                         )
                         .await?
                 }
-                Err(_) => {
-                    // Run scheduler not configured (max_active_nodes=0 or frame not
-                    // registered in ready_frames) — update frame state only.
+                Err(TransitionRefusal::NoMatchingTransition { .. }) => {
+                    // Run scheduler not configured — update frame state only.
                     self.run_store
                         .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
                         .await?
+                }
+                // Propagate genuine machine errors (evaluation error, unknown variant, etc.)
+                Err(e) => {
+                    return Err(MobError::Internal(format!(
+                        "PumpNodeScheduler evaluation error: {e:?}"
+                    )));
                 }
             };
             if won {
                 return Ok(Some(outcome.effects));
             }
+            // CAS lost — retry with a fresh snapshot read
         }
-        Ok(None)
+
+        // All retries exhausted due to CAS contention (queue was non-empty each
+        // time but another writer kept winning). This is distinct from "queue
+        // empty" and indicates a liveness issue rather than normal termination.
+        Err(MobError::Internal(format!(
+            "admit_next_ready_node: CAS exhausted {max_retries} retries for frame '{frame_id}' \
+             — queue was non-empty but every attempt lost the CAS"
+        )))
     }
 
-    async fn complete_node_with_output(
+    async fn complete_step(
         &self,
         run_id: &RunId,
         frame_id: &FrameId,
-        node_id: &FlowNodeId,
-        step_id: &StepId,
-        output: serde_json::Value,
-        loop_context: Option<(&LoopId, u64)>,
-        max_retries: usize,
+        opts: StepCompletionOpts<'_>,
     ) -> Result<(), MobError> {
+        let StepCompletionOpts {
+            node_id,
+            step_id,
+            output,
+            loop_context,
+            max_retries,
+        } = opts;
         for attempt in 0..=max_retries {
             let snap = self.require_frame(run_id, frame_id).await?;
             let complete_input = KernelInput {
@@ -318,7 +351,7 @@ impl FlowFrameMutator for FlowFrameKernel {
                 )));
             }
         }
-        // Unreachable, but satisfy the compiler.
+        // Unreachable — the loop always returns on the last attempt.
         Err(MobError::Internal("CompleteNode CAS exhausted".into()))
     }
 

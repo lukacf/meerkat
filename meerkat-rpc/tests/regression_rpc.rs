@@ -791,6 +791,12 @@ async fn initialize_methods_list_complete() {
     let resp = read_response(&mut reader).await;
     assert!(resp["error"].is_null(), "initialize failed: {resp}");
 
+    assert_eq!(
+        resp["result"]["contract_version"].as_str(),
+        Some("0.6.0"),
+        "initialize must report the current contract version"
+    );
+
     let methods = resp["result"]["methods"]
         .as_array()
         .expect("methods should be array");
@@ -986,6 +992,67 @@ async fn mob_create_status_list_lifecycle() {
     assert_eq!(lifecycle_resp["result"]["ok"], true);
     assert_eq!(lifecycle_resp["result"]["action"], "stop");
     assert_eq!(lifecycle_resp["result"]["mob_id"], mob_id);
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 16. mob_create_rejects_missing_definition (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_missing_definition() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // Sending an empty params object — definition field is required at the
+    // serde level, so parse_params should fail and return an error response.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {}
+    });
+    send_request(&mut writer, &req).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        !resp["error"].is_null(),
+        "mob/create without definition must return an error, got: {resp}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 17. mob_create_rejects_invalid_definition (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_invalid_definition() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // A definition with no profiles fails validate_definition() with
+    // DiagnosticCode::EmptyProfiles before the mob is created.
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {
+            "definition": {
+                "id": "bad_mob",
+                "profiles": {}
+            }
+        }
+    });
+    send_request(&mut writer, &req).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        !resp["error"].is_null(),
+        "mob/create with empty profiles must return an error, got: {resp}"
+    );
 
     drop(writer);
     handle.await.unwrap().unwrap();

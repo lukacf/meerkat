@@ -3282,4 +3282,39 @@ timeout_ms = 1000
             "duplicate create must not replace active mob"
         );
     }
+
+    #[tokio::test]
+    async fn test_mob_create_rejects_missing_definition() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        // definition field is required at the serde level — empty args should
+        // fail at parse_args() time with InvalidArguments.
+        let error = call_tool_err(&d, "mob_create", json!({})).await;
+        assert!(
+            matches!(error, ToolError::InvalidArguments { .. }),
+            "mob_create with missing definition must return InvalidArguments, got: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mob_create_rejects_invalid_definition() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        // A definition with no profiles triggers DiagnosticCode::EmptyProfiles
+        // in validate_definition() and must surface as ExecutionFailed.
+        let error = call_tool_err(
+            &d,
+            "mob_create",
+            json!({"definition": {"id": "bad_mob", "profiles": {}}}),
+        )
+        .await;
+        assert!(
+            matches!(error, ToolError::ExecutionFailed { .. }),
+            "mob_create with empty profiles must return ExecutionFailed, got: {error:?}"
+        );
+    }
 }

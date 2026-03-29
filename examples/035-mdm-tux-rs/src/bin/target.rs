@@ -169,27 +169,39 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
+        let sender = msg.from_peer.clone();
+        eprintln!("[target] received message from '{sender}'");
+
         // Create a per-turn event channel + forwarder
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
         let fwd_router = router.clone();
-        let sender = msg.from_peer.clone();
+        let fwd_sender = sender.clone();
         let fwd_handle = tokio::spawn(async move {
+            let mut count = 0u32;
             while let Some(event) = event_rx.recv().await {
                 if should_forward(&event) {
                     let Ok(json) = serde_json::to_string(&event) else {
                         continue;
                     };
                     let body = format!("{STREAM_PREFIX}{json}");
-                    let _ = fwd_router
-                        .send(&sender, MessageKind::Message { body, blocks: None })
-                        .await;
+                    if let Err(e) = fwd_router
+                        .send(&fwd_sender, MessageKind::Message { body, blocks: None })
+                        .await
+                    {
+                        eprintln!("[target] failed to send event to '{fwd_sender}': {e}");
+                    } else {
+                        count += 1;
+                    }
                 }
             }
+            eprintln!("[target] forwarded {count} events to '{fwd_sender}'");
         });
 
         let input = msg.to_user_message_text();
-        if let Err(e) = agent.run_with_events(input.into(), event_tx).await {
-            eprintln!("[target] agent error: {e}");
+        eprintln!("[target] running agent...");
+        match agent.run_with_events(input.into(), event_tx).await {
+            Ok(result) => eprintln!("[target] agent done ({} chars)", result.text.len()),
+            Err(e) => eprintln!("[target] agent error: {e}"),
         }
 
         // event_tx is dropped here → fwd_handle will finish draining

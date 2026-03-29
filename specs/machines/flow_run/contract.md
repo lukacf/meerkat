@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `meerkat-mob` / `generated::flow_run`
 
 ## State
@@ -26,9 +26,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `consecutive_failure_count`: `u32`
 - `escalation_threshold`: `u32`
 - `max_step_retries`: `u32`
+- `ready_frames`: `Seq<FrameId>`
+- `ready_frame_membership`: `Set<FrameId>`
+- `pending_body_frame_loops`: `Seq<LoopInstanceId>`
+- `pending_body_frame_loop_membership`: `Set<LoopInstanceId>`
+- `active_node_count`: `u32`
+- `active_frame_count`: `u32`
+- `max_active_nodes`: `u32`
+- `max_active_frames`: `u32`
+- `max_frame_depth`: `u32`
+- `last_granted_frame`: `FrameId`
+- `last_granted_loop`: `LoopInstanceId`
+- `frames`: `Map<FrameId, FrameSnapshotRef>`
+- `loops`: `Map<LoopInstanceId, LoopSnapshotRef>`
 
 ## Inputs
-- `CreateRun`(step_ids: Seq<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u32, max_step_retries: u32)
+- `CreateRun`(step_ids: Seq<StepId>, ordered_steps: Seq<StepId>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, escalation_threshold: u32, max_step_retries: u32, max_active_nodes: u32, max_active_frames: u32, max_frame_depth: u32)
 - `StartRun`
 - `DispatchStep`(step_id: StepId)
 - `CompleteStep`(step_id: StepId)
@@ -43,6 +56,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordTargetTerminalFailure`(step_id: StepId)
 - `RecordTargetCanceled`(step_id: StepId, target_id: MeerkatId)
 - `RecordTargetFailure`(step_id: StepId, target_id: MeerkatId, retry_key: String)
+- `RegisterFrame`(frame_id: FrameId)
+- `RegisterLoop`(loop_instance_id: LoopInstanceId)
+- `RegisterReadyFrame`(frame_id: FrameId)
+- `PumpNodeScheduler`
+- `RegisterPendingBodyFrame`(loop_instance_id: LoopInstanceId, depth: u32)
+- `PumpFrameScheduler`
+- `NodeExecutionReleased`(frame_id: FrameId)
+- `FrameTerminated`(frame_id: FrameId, status: FlowFrameStatus, released_count: u32)
+- `LoopTerminated`(loop_instance_id: LoopInstanceId, outcome: LoopOutcome)
 - `TerminalizeCompleted`
 - `TerminalizeFailed`
 - `TerminalizeCanceled`
@@ -58,6 +80,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ProjectTargetSuccess`(step_id: StepId, target_id: MeerkatId)
 - `ProjectTargetFailure`(step_id: StepId, target_id: MeerkatId)
 - `ProjectTargetCanceled`(step_id: StepId, target_id: MeerkatId)
+- `GrantNodeSlot`(frame_id: FrameId)
+- `GrantBodyFrameStart`(loop_instance_id: LoopInstanceId)
 
 ## Helpers
 - `RunIsTerminal`() -> `Bool`
@@ -96,7 +120,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Transitions
 ### `CreateRun`
 - From: `Absent`
-- On: `CreateRun`(step_ids, ordered_steps, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, escalation_threshold, max_step_retries)
+- On: `CreateRun`(step_ids, ordered_steps, step_has_conditions, step_dependencies, step_dependency_modes, step_branches, step_collection_policies, step_quorum_thresholds, escalation_threshold, max_step_retries, max_active_nodes, max_active_frames, max_frame_depth)
 - Guards:
   - `step_ids_are_non_empty`
   - `ordered_steps_only_reference_step_ids`
@@ -244,6 +268,64 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `step_is_tracked`
   - `step_is_dispatched`
 - Emits: `ProjectTargetFailure`, `AppendFailureLedger`
+- To: `Running`
+
+### `RegisterFrame`
+- From: `Running`
+- On: `RegisterFrame`(frame_id)
+- To: `Running`
+
+### `RegisterLoop`
+- From: `Running`
+- On: `RegisterLoop`(loop_instance_id)
+- To: `Running`
+
+### `RegisterReadyFrame`
+- From: `Running`
+- On: `RegisterReadyFrame`(frame_id)
+- Guards:
+  - `frame_not_already_ready`
+- To: `Running`
+
+### `PumpNodeScheduler`
+- From: `Running`
+- On: `PumpNodeScheduler`()
+- Guards:
+  - `ready_frames_available_and_under_limit`
+- Emits: `GrantNodeSlot`
+- To: `Running`
+
+### `RegisterPendingBodyFrame`
+- From: `Running`
+- On: `RegisterPendingBodyFrame`(loop_instance_id, depth)
+- Guards:
+  - `depth_within_limit`
+  - `loop_not_already_pending`
+- To: `Running`
+
+### `PumpFrameScheduler`
+- From: `Running`
+- On: `PumpFrameScheduler`()
+- Guards:
+  - `pending_loops_available_and_under_frame_limit`
+- Emits: `GrantBodyFrameStart`
+- To: `Running`
+
+### `NodeExecutionReleased`
+- From: `Running`
+- On: `NodeExecutionReleased`(frame_id)
+- To: `Running`
+
+### `FrameTerminated`
+- From: `Running`
+- On: `FrameTerminated`(frame_id, status, released_count)
+- Guards:
+  - `sufficient_active_nodes`
+- To: `Running`
+
+### `LoopTerminated`
+- From: `Running`
+- On: `LoopTerminated`(loop_instance_id, outcome)
 - To: `Running`
 
 ### `TerminalizeCompleted`

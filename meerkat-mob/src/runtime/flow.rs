@@ -90,6 +90,7 @@ impl FlowEngine {
             run_id: run_id.clone(),
             activation_params,
             step_outputs: IndexMap::new(),
+            loop_outputs: IndexMap::new(),
         };
 
         let mut canceled = false;
@@ -1518,6 +1519,7 @@ mod template_tests {
             run_id: RunId::new(),
             activation_params: serde_json::json!({"user":"luka"}),
             step_outputs,
+            loop_outputs: IndexMap::new(),
         }
     }
 

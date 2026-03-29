@@ -712,6 +712,7 @@ mod tests {
         FlowSpec {
             description: Some("sample".into()),
             steps,
+            root: None,
         }
     }
 

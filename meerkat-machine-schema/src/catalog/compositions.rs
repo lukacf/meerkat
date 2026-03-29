@@ -7487,6 +7487,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 field: "max_step_retries".into(),
                                 expr: Expr::U64(0),
                             },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
+                                expr: Expr::U64(0),
+                            },
                         ],
                     },
                     CompositionWitnessInput {
@@ -8006,6 +8018,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 field: "max_step_retries".into(),
                                 expr: Expr::U64(0),
                             },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
+                                expr: Expr::U64(0),
+                            },
                         ],
                     },
                     CompositionWitnessInput {
@@ -8189,6 +8213,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                             },
                             CompositionWitnessField {
                                 field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
                                 expr: Expr::U64(0),
                             },
                         ],
@@ -8559,6 +8595,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                             },
                             CompositionWitnessField {
                                 field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
                                 expr: Expr::U64(0),
                             },
                         ],

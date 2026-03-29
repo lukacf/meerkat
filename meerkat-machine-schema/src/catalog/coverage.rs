@@ -9,8 +9,10 @@ use super::{
         runtime_pipeline_composition, surface_event_runtime_bundle_composition,
     },
     external_tool_surface::external_tool_surface_machine,
+    flow_frame::flow_frame_machine,
     flow_run::flow_run_machine,
     input_lifecycle::input_lifecycle_machine,
+    loop_iteration::loop_iteration_machine,
     mob_helper_result_anchor::mob_helper_result_anchor_machine,
     mob_lifecycle::mob_lifecycle_machine,
     mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine,
@@ -741,6 +743,30 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "drain task is stopped or aborted and suppression is lifted",
                 ),
             ],
+        ),
+        machine_manifest_from_schema(
+            &flow_frame_machine(),
+            &[anchor(
+                "flow_frame_schema",
+                "meerkat-machine-schema/src/catalog/flow_frame.rs",
+                "formal FlowFrameMachine schema (Phase 0 stub)",
+            )],
+            &[scenario(
+                "start-run-terminalize",
+                "frame starts, admits nodes, and terminalizes (Phase 1 complete)",
+            )],
+        ),
+        machine_manifest_from_schema(
+            &loop_iteration_machine(),
+            &[anchor(
+                "loop_iteration_schema",
+                "meerkat-machine-schema/src/catalog/loop_iteration.rs",
+                "formal LoopIterationMachine schema (Phase 0 stub)",
+            )],
+            &[scenario(
+                "start-iterate-complete",
+                "loop starts, body frames execute, until condition terminates it (Phase 1 complete)",
+            )],
         ),
     ]
 }

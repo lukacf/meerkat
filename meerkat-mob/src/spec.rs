@@ -337,6 +337,7 @@ mod tests {
             FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
         );
 
@@ -374,6 +375,7 @@ mod tests {
             FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
         );
 
@@ -428,6 +430,7 @@ mod tests {
             FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
         );
 

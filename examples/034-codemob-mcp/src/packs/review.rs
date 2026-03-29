@@ -54,7 +54,7 @@ impl Pack for ReviewPack {
             &["general_review", "security_review", "perf_review"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Parallel code review with synthesis".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Parallel code review with synthesis".into()), steps, root: None });
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
         mob_definition("review", profiles, skills, flows, identity_spawn_policy(&names))

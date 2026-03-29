@@ -9984,6 +9984,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
             flow_state: Default::default(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 2,
+            root_step_outputs: Default::default(),
+            loop_iteration_outputs: std::collections::BTreeMap::new(),
         };
 
         let run_json = render_flow_status_json(Some(run)).expect("encode run json");
@@ -10021,6 +10027,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
                             flow_state: Default::default(),
+                            frames: std::collections::BTreeMap::new(),
+                            loops: std::collections::BTreeMap::new(),
+                            loop_iteration_ledger: Vec::new(),
+                            schema_version: 2,
+                            root_step_outputs: Default::default(),
+                            loop_iteration_outputs: std::collections::BTreeMap::new(),
                         },
                     ),
                     (
@@ -10036,6 +10048,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
                             flow_state: Default::default(),
+                            frames: std::collections::BTreeMap::new(),
+                            loops: std::collections::BTreeMap::new(),
+                            loop_iteration_ledger: Vec::new(),
+                            schema_version: 2,
+                            root_step_outputs: Default::default(),
+                            loop_iteration_outputs: std::collections::BTreeMap::new(),
                         },
                     ),
                 ]),

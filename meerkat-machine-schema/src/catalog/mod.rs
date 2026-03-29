@@ -2,8 +2,10 @@ mod comms_drain_lifecycle;
 mod compositions;
 mod coverage;
 mod external_tool_surface;
+mod flow_frame;
 mod flow_run;
 mod input_lifecycle;
+mod loop_iteration;
 mod mob_helper_result_anchor;
 mod mob_lifecycle;
 mod mob_member_lifecycle_anchor;
@@ -32,8 +34,10 @@ pub use coverage::{
     canonical_machine_coverage_manifests,
 };
 pub use external_tool_surface::external_tool_surface_machine;
+pub use flow_frame::flow_frame_machine;
 pub use flow_run::flow_run_machine;
 pub use input_lifecycle::input_lifecycle_machine;
+pub use loop_iteration::loop_iteration_machine;
 /// Observation anchors hold statements about what the composition has seen while
 /// canonical mob ownership schemas continue to evolve. They are not the final
 /// owners of these routes and only exist to keep the instrumentation explicit.
@@ -72,6 +76,8 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         flow_run_machine(),
         mob_orchestrator_machine(),
         comms_drain_lifecycle_machine(),
+        flow_frame_machine(),
+        loop_iteration_machine(),
     ]
 }
 

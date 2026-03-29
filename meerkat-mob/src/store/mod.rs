@@ -10,8 +10,10 @@ pub use sqlite::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, Sql
 
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, MobId, RunId, StepId};
-use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
+use crate::ids::{FlowId, FrameId, LoopInstanceId, MobId, RunId, StepId};
+use crate::run::{
+    FailureLedgerEntry, FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_machine_kernels::KernelState;
@@ -136,6 +138,112 @@ pub trait MobRunStore: Send + Sync {
         run_id: &RunId,
         entry: FailureLedgerEntry,
     ) -> Result<(), MobStoreError>;
+
+    // Phase 3: CAS wrappers for frame and loop state.
+
+    /// CAS wrapper 1: frame state update.
+    ///
+    /// If `expected` is `None`, this is an insert (frame must not yet exist).
+    /// If `expected` is `Some(snapshot)`, the current frame state must match.
+    /// Returns `Ok(true)` on success, `Ok(false)` on mismatch.
+    async fn cas_frame_state(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected: Option<&FrameSnapshot>,
+        next: FrameSnapshot,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 2: grant node slot — atomically update run flow state + frame state.
+    async fn cas_grant_node_slot(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 3: complete step — update frame state and record step output.
+    async fn cas_complete_step_and_record_output(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 4: start loop — register loop + update run state + parent frame.
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_start_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        initial_loop: LoopSnapshot,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 5: register pending body frame — loop transition + run state update.
+    async fn cas_loop_request_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 6: body frame start — loop transition + register new frame + run state update.
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_body_frame_start(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        initial_frame: FrameSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 7: body frame completion — terminalize frame + loop state update + run state.
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError>;
+
+    /// CAS wrapper 8: loop completion — loop state + run state + parent frame update.
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &KernelState,
+        next_run_state: KernelState,
+    ) -> Result<bool, MobStoreError>;
 }
 
 /// Trait for persisting and querying mob specs.

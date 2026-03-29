@@ -9,7 +9,7 @@ use crate::{
 pub fn flow_run_machine() -> MachineSchema {
     MachineSchema {
         machine: "FlowRunMachine".into(),
-        version: 1,
+        version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
             module: "generated::flow_run".into(),
@@ -129,6 +129,47 @@ pub fn flow_run_machine() -> MachineSchema {
                 field("consecutive_failure_count", TypeRef::U32),
                 field("escalation_threshold", TypeRef::U32),
                 field("max_step_retries", TypeRef::U32),
+                // v2: frame/loop registries and slot schedulers
+                field(
+                    "ready_frames",
+                    TypeRef::Seq(Box::new(TypeRef::Named("FrameId".into()))),
+                ),
+                field(
+                    "ready_frame_membership",
+                    TypeRef::Set(Box::new(TypeRef::Named("FrameId".into()))),
+                ),
+                field(
+                    "pending_body_frame_loops",
+                    TypeRef::Seq(Box::new(TypeRef::Named("LoopInstanceId".into()))),
+                ),
+                field(
+                    "pending_body_frame_loop_membership",
+                    TypeRef::Set(Box::new(TypeRef::Named("LoopInstanceId".into()))),
+                ),
+                field("active_node_count", TypeRef::U32),
+                field("active_frame_count", TypeRef::U32),
+                field("max_active_nodes", TypeRef::U32),
+                field("max_active_frames", TypeRef::U32),
+                field("max_frame_depth", TypeRef::U32),
+                // v2: scratch fields to capture head value before SeqPopFront
+                // (effects are evaluated after updates, so we capture head first)
+                field("last_granted_frame", TypeRef::Named("FrameId".into())),
+                field("last_granted_loop", TypeRef::Named("LoopInstanceId".into())),
+                // v2: frame and loop registries
+                field(
+                    "frames",
+                    TypeRef::Map(
+                        Box::new(TypeRef::Named("FrameId".into())),
+                        Box::new(TypeRef::Named("FrameSnapshotRef".into())),
+                    ),
+                ),
+                field(
+                    "loops",
+                    TypeRef::Map(
+                        Box::new(TypeRef::Named("LoopInstanceId".into())),
+                        Box::new(TypeRef::Named("LoopSnapshotRef".into())),
+                    ),
+                ),
             ],
             init: InitSchema {
                 phase: "Absent".into(),
@@ -152,6 +193,22 @@ pub fn flow_run_machine() -> MachineSchema {
                     init("consecutive_failure_count", Expr::U64(0)),
                     init("escalation_threshold", Expr::U64(0)),
                     init("max_step_retries", Expr::U64(0)),
+                    // v2 field inits
+                    init("ready_frames", Expr::SeqLiteral(vec![])),
+                    init("ready_frame_membership", Expr::EmptySet),
+                    init("pending_body_frame_loops", Expr::SeqLiteral(vec![])),
+                    init("pending_body_frame_loop_membership", Expr::EmptySet),
+                    init("active_node_count", Expr::U64(0)),
+                    init("active_frame_count", Expr::U64(0)),
+                    init("max_active_nodes", Expr::U64(0)),
+                    init("max_active_frames", Expr::U64(0)),
+                    init("max_frame_depth", Expr::U64(0)),
+                    // v2: scratch fields for head capture
+                    init("last_granted_frame", Expr::String(String::new())),
+                    init("last_granted_loop", Expr::String(String::new())),
+                    // v2: frame and loop registry inits
+                    init("frames", Expr::EmptyMap),
+                    init("loops", Expr::EmptyMap),
                 ],
             },
             terminal_phases: vec!["Completed".into(), "Failed".into(), "Canceled".into()],
@@ -216,6 +273,10 @@ pub fn flow_run_machine() -> MachineSchema {
                         ),
                         field("escalation_threshold", TypeRef::U32),
                         field("max_step_retries", TypeRef::U32),
+                        // v2 scheduler limits
+                        field("max_active_nodes", TypeRef::U32),
+                        field("max_active_frames", TypeRef::U32),
+                        field("max_frame_depth", TypeRef::U32),
                     ],
                 },
                 variant("StartRun"),
@@ -284,6 +345,49 @@ pub fn flow_run_machine() -> MachineSchema {
                         field("retry_key", TypeRef::String),
                     ],
                 },
+                VariantSchema {
+                    name: "RegisterFrame".into(),
+                    fields: vec![field("frame_id", TypeRef::Named("FrameId".into()))],
+                },
+                VariantSchema {
+                    name: "RegisterLoop".into(),
+                    fields: vec![field(
+                        "loop_instance_id",
+                        TypeRef::Named("LoopInstanceId".into()),
+                    )],
+                },
+                VariantSchema {
+                    name: "RegisterReadyFrame".into(),
+                    fields: vec![field("frame_id", TypeRef::Named("FrameId".into()))],
+                },
+                variant("PumpNodeScheduler"),
+                VariantSchema {
+                    name: "RegisterPendingBodyFrame".into(),
+                    fields: vec![
+                        field("loop_instance_id", TypeRef::Named("LoopInstanceId".into())),
+                        field("depth", TypeRef::U32),
+                    ],
+                },
+                variant("PumpFrameScheduler"),
+                VariantSchema {
+                    name: "NodeExecutionReleased".into(),
+                    fields: vec![field("frame_id", TypeRef::Named("FrameId".into()))],
+                },
+                VariantSchema {
+                    name: "FrameTerminated".into(),
+                    fields: vec![
+                        field("frame_id", TypeRef::Named("FrameId".into())),
+                        field("status", TypeRef::Enum("FlowFrameStatus".into())),
+                        field("released_count", TypeRef::U32),
+                    ],
+                },
+                VariantSchema {
+                    name: "LoopTerminated".into(),
+                    fields: vec![
+                        field("loop_instance_id", TypeRef::Named("LoopInstanceId".into())),
+                        field("outcome", TypeRef::Enum("LoopOutcome".into())),
+                    ],
+                },
                 variant("TerminalizeCompleted"),
                 variant("TerminalizeFailed"),
                 variant("TerminalizeCanceled"),
@@ -343,6 +447,18 @@ pub fn flow_run_machine() -> MachineSchema {
                         field("step_id", TypeRef::Named("StepId".into())),
                         field("target_id", TypeRef::Named("MeerkatId".into())),
                     ],
+                },
+                // v2 effects
+                VariantSchema {
+                    name: "GrantNodeSlot".into(),
+                    fields: vec![field("frame_id", TypeRef::Named("FrameId".into()))],
+                },
+                VariantSchema {
+                    name: "GrantBodyFrameStart".into(),
+                    fields: vec![field(
+                        "loop_instance_id",
+                        TypeRef::Named("LoopInstanceId".into()),
+                    )],
                 },
             ],
         },
@@ -876,6 +992,9 @@ pub fn flow_run_machine() -> MachineSchema {
                         "step_quorum_thresholds".into(),
                         "escalation_threshold".into(),
                         "max_step_retries".into(),
+                        "max_active_nodes".into(),
+                        "max_active_frames".into(),
+                        "max_frame_depth".into(),
                     ],
                 },
                 guards: vec![
@@ -1001,6 +1120,59 @@ pub fn flow_run_machine() -> MachineSchema {
                     Update::Assign {
                         field: "max_step_retries".into(),
                         expr: Expr::Binding("max_step_retries".into()),
+                    },
+                    // v2 field inits in CreateRun
+                    Update::Assign {
+                        field: "ready_frames".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
+                        field: "ready_frame_membership".into(),
+                        expr: Expr::EmptySet,
+                    },
+                    Update::Assign {
+                        field: "pending_body_frame_loops".into(),
+                        expr: Expr::SeqLiteral(vec![]),
+                    },
+                    Update::Assign {
+                        field: "pending_body_frame_loop_membership".into(),
+                        expr: Expr::EmptySet,
+                    },
+                    Update::Assign {
+                        field: "active_node_count".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "active_frame_count".into(),
+                        expr: Expr::U64(0),
+                    },
+                    Update::Assign {
+                        field: "max_active_nodes".into(),
+                        expr: Expr::Binding("max_active_nodes".into()),
+                    },
+                    Update::Assign {
+                        field: "max_active_frames".into(),
+                        expr: Expr::Binding("max_active_frames".into()),
+                    },
+                    Update::Assign {
+                        field: "max_frame_depth".into(),
+                        expr: Expr::Binding("max_frame_depth".into()),
+                    },
+                    Update::Assign {
+                        field: "last_granted_frame".into(),
+                        expr: Expr::String(String::new()),
+                    },
+                    Update::Assign {
+                        field: "last_granted_loop".into(),
+                        expr: Expr::String(String::new()),
+                    },
+                    Update::Assign {
+                        field: "frames".into(),
+                        expr: Expr::EmptyMap,
+                    },
+                    Update::Assign {
+                        field: "loops".into(),
+                        expr: Expr::EmptyMap,
                     },
                     Update::ForEach {
                         binding: "step_id".into(),
@@ -1445,6 +1617,259 @@ pub fn flow_run_machine() -> MachineSchema {
                     effect_with_step("AppendFailureLedger", "step_id"),
                 ],
             },
+            // v2 stub transitions
+            TransitionSchema {
+                name: "RegisterFrame".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "RegisterFrame".into(),
+                    bindings: vec!["frame_id".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            TransitionSchema {
+                name: "RegisterLoop".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "RegisterLoop".into(),
+                    bindings: vec!["loop_instance_id".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            // RegisterReadyFrame: add frame to ready queue (dedup via membership set)
+            TransitionSchema {
+                name: "RegisterReadyFrame".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "RegisterReadyFrame".into(),
+                    bindings: vec!["frame_id".into()],
+                },
+                guards: vec![Guard {
+                    name: "frame_not_already_ready".into(),
+                    expr: Expr::Not(Box::new(Expr::Contains {
+                        collection: Box::new(Expr::Field("ready_frame_membership".into())),
+                        value: Box::new(Expr::Binding("frame_id".into())),
+                    })),
+                }],
+                updates: vec![
+                    Update::SeqAppend {
+                        field: "ready_frames".into(),
+                        value: Expr::Binding("frame_id".into()),
+                    },
+                    Update::SetInsert {
+                        field: "ready_frame_membership".into(),
+                        value: Expr::Binding("frame_id".into()),
+                    },
+                ],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            // PumpNodeScheduler: grant one node slot if queue is non-empty and under limit
+            TransitionSchema {
+                name: "PumpNodeScheduler".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "PumpNodeScheduler".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "ready_frames_available_and_under_limit".into(),
+                    expr: Expr::And(vec![
+                        Expr::Gt(
+                            Box::new(Expr::Len(Box::new(Expr::Field("ready_frames".into())))),
+                            Box::new(Expr::U64(0)),
+                        ),
+                        Expr::Lt(
+                            Box::new(Expr::Field("active_node_count".into())),
+                            Box::new(Expr::Field("max_active_nodes".into())),
+                        ),
+                    ]),
+                }],
+                updates: vec![
+                    // Capture the head frame_id before popping
+                    Update::Assign {
+                        field: "last_granted_frame".into(),
+                        expr: Expr::Head(Box::new(Expr::Field("ready_frames".into()))),
+                    },
+                    // Remove from membership set
+                    Update::SetRemove {
+                        field: "ready_frame_membership".into(),
+                        value: Expr::Head(Box::new(Expr::Field("ready_frames".into()))),
+                    },
+                    // Pop from queue
+                    Update::SeqPopFront {
+                        field: "ready_frames".into(),
+                    },
+                    // Increment active node count
+                    Update::Increment {
+                        field: "active_node_count".into(),
+                        amount: 1,
+                    },
+                ],
+                to: "Running".into(),
+                emit: vec![EffectEmit {
+                    variant: "GrantNodeSlot".into(),
+                    fields: IndexMap::from([(
+                        "frame_id".into(),
+                        Expr::Field("last_granted_frame".into()),
+                    )]),
+                }],
+            },
+            // RegisterPendingBodyFrame: add loop instance to pending frame queue (with depth guard)
+            TransitionSchema {
+                name: "RegisterPendingBodyFrame".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "RegisterPendingBodyFrame".into(),
+                    bindings: vec!["loop_instance_id".into(), "depth".into()],
+                },
+                guards: vec![
+                    Guard {
+                        name: "depth_within_limit".into(),
+                        expr: Expr::Lt(
+                            Box::new(Expr::Binding("depth".into())),
+                            Box::new(Expr::Field("max_frame_depth".into())),
+                        ),
+                    },
+                    Guard {
+                        name: "loop_not_already_pending".into(),
+                        expr: Expr::Not(Box::new(Expr::Contains {
+                            collection: Box::new(Expr::Field(
+                                "pending_body_frame_loop_membership".into(),
+                            )),
+                            value: Box::new(Expr::Binding("loop_instance_id".into())),
+                        })),
+                    },
+                ],
+                updates: vec![
+                    Update::SeqAppend {
+                        field: "pending_body_frame_loops".into(),
+                        value: Expr::Binding("loop_instance_id".into()),
+                    },
+                    Update::SetInsert {
+                        field: "pending_body_frame_loop_membership".into(),
+                        value: Expr::Binding("loop_instance_id".into()),
+                    },
+                ],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            // PumpFrameScheduler: grant one body frame start if queue is non-empty and under limit
+            TransitionSchema {
+                name: "PumpFrameScheduler".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "PumpFrameScheduler".into(),
+                    bindings: vec![],
+                },
+                guards: vec![Guard {
+                    name: "pending_loops_available_and_under_frame_limit".into(),
+                    expr: Expr::And(vec![
+                        Expr::Gt(
+                            Box::new(Expr::Len(Box::new(Expr::Field(
+                                "pending_body_frame_loops".into(),
+                            )))),
+                            Box::new(Expr::U64(0)),
+                        ),
+                        Expr::Lt(
+                            Box::new(Expr::Field("active_frame_count".into())),
+                            Box::new(Expr::Field("max_active_frames".into())),
+                        ),
+                    ]),
+                }],
+                updates: vec![
+                    // Capture the head loop_instance_id before popping
+                    Update::Assign {
+                        field: "last_granted_loop".into(),
+                        expr: Expr::Head(Box::new(Expr::Field("pending_body_frame_loops".into()))),
+                    },
+                    // Remove from membership set
+                    Update::SetRemove {
+                        field: "pending_body_frame_loop_membership".into(),
+                        value: Expr::Head(Box::new(Expr::Field("pending_body_frame_loops".into()))),
+                    },
+                    // Pop from queue
+                    Update::SeqPopFront {
+                        field: "pending_body_frame_loops".into(),
+                    },
+                    // Increment active frame count
+                    Update::Increment {
+                        field: "active_frame_count".into(),
+                        amount: 1,
+                    },
+                ],
+                to: "Running".into(),
+                emit: vec![EffectEmit {
+                    variant: "GrantBodyFrameStart".into(),
+                    fields: IndexMap::from([(
+                        "loop_instance_id".into(),
+                        Expr::Field("last_granted_loop".into()),
+                    )]),
+                }],
+            },
+            // NodeExecutionReleased: no-op, shell-driven
+            TransitionSchema {
+                name: "NodeExecutionReleased".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "NodeExecutionReleased".into(),
+                    bindings: vec!["frame_id".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            // FrameTerminated: subtract released_count from active_node_count, decrement active_frame_count
+            TransitionSchema {
+                name: "FrameTerminated".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "FrameTerminated".into(),
+                    bindings: vec!["frame_id".into(), "status".into(), "released_count".into()],
+                },
+                guards: vec![Guard {
+                    name: "sufficient_active_nodes".into(),
+                    expr: Expr::Gte(
+                        Box::new(Expr::Field("active_node_count".into())),
+                        Box::new(Expr::Binding("released_count".into())),
+                    ),
+                }],
+                updates: vec![
+                    Update::Assign {
+                        field: "active_node_count".into(),
+                        expr: Expr::Sub(
+                            Box::new(Expr::Field("active_node_count".into())),
+                            Box::new(Expr::Binding("released_count".into())),
+                        ),
+                    },
+                    Update::Decrement {
+                        field: "active_frame_count".into(),
+                        amount: 1,
+                    },
+                ],
+                to: "Running".into(),
+                emit: vec![],
+            },
+            // LoopTerminated: no-op at the run level for Phase 2; shell handles routing
+            TransitionSchema {
+                name: "LoopTerminated".into(),
+                from: vec!["Running".into()],
+                on: InputMatch {
+                    variant: "LoopTerminated".into(),
+                    bindings: vec!["loop_instance_id".into(), "outcome".into()],
+                },
+                guards: vec![],
+                updates: vec![],
+                to: "Running".into(),
+                emit: vec![],
+            },
             TransitionSchema {
                 name: "TerminalizeCompleted".into(),
                 from: vec!["Running".into()],
@@ -1556,6 +1981,9 @@ pub fn flow_run_machine() -> MachineSchema {
             disposition("ProjectTargetSuccess", EffectDisposition::External),
             disposition("ProjectTargetFailure", EffectDisposition::External),
             disposition("ProjectTargetCanceled", EffectDisposition::External),
+            // v2 dispositions
+            disposition("GrantNodeSlot", EffectDisposition::External),
+            disposition("GrantBodyFrameStart", EffectDisposition::External),
         ],
     }
 }

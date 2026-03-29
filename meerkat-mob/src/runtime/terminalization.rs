@@ -253,6 +253,185 @@ mod tests {
         ) -> Result<(), MobStoreError> {
             self.inner.append_failure_entry(run_id, entry).await
         }
+
+        async fn cas_frame_state(
+            &self,
+            run_id: &RunId,
+            frame_id: &crate::ids::FrameId,
+            expected: Option<&crate::run::FrameSnapshot>,
+            next: crate::run::FrameSnapshot,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_frame_state(run_id, frame_id, expected, next)
+                .await
+        }
+
+        async fn cas_grant_node_slot(
+            &self,
+            run_id: &RunId,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_grant_node_slot(
+                    run_id,
+                    expected_run_state,
+                    next_run_state,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                )
+                .await
+        }
+
+        async fn cas_complete_step_and_record_output(
+            &self,
+            run_id: &RunId,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            step_output_key: String,
+            step_output: serde_json::Value,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_complete_step_and_record_output(
+                    run_id,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    step_output_key,
+                    step_output,
+                )
+                .await
+        }
+
+        async fn cas_start_loop(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            initial_loop: crate::run::LoopSnapshot,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_start_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_run_state,
+                    next_run_state,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    initial_loop,
+                )
+                .await
+        }
+
+        async fn cas_loop_request_body_frame(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_loop_request_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
+
+        async fn cas_grant_body_frame_start(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            initial_frame: crate::run::FrameSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_grant_body_frame_start(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    initial_frame,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
+
+        async fn cas_complete_body_frame(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_complete_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
+
+        async fn cas_complete_loop(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            expected_run_state: &meerkat_machine_kernels::KernelState,
+            next_run_state: meerkat_machine_kernels::KernelState,
+        ) -> Result<bool, crate::error::MobError> {
+            self.inner
+                .cas_complete_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    expected_run_state,
+                    next_run_state,
+                )
+                .await
+        }
     }
 
     #[derive(Default)]
@@ -343,6 +522,12 @@ mod tests {
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 2,
+            root_step_outputs: indexmap::IndexMap::new(),
+            loop_iteration_outputs: std::collections::BTreeMap::new(),
         }
     }
 

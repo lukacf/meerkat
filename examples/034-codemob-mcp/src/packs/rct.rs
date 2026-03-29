@@ -82,7 +82,7 @@ impl Pack for RctPack {
 
         let mut flows = BTreeMap::new();
         flows.insert(FlowId::from("main"), FlowSpec {
-            description: Some("RCT: plan → implement → parallel gate review → aggregate".into()), steps });
+            description: Some("RCT: plan → implement → parallel gate review → aggregate".into()), steps, root: None });
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
         mob_definition("rct", profiles, skills, flows, identity_spawn_policy(&names))

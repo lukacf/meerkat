@@ -173,6 +173,7 @@ impl UserMobConfig {
                 flows.insert(FlowId::from(flow_name.as_str()), FlowSpec {
                     description: None,
                     steps: step_specs,
+                    root: None,
                 });
             }
         }

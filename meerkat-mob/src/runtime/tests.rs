@@ -1581,6 +1581,185 @@ impl MobRunStore for RecordingRunStore {
     ) -> Result<(), MobStoreError> {
         self.inner.append_failure_entry(run_id, entry).await
     }
+
+    async fn cas_frame_state(
+        &self,
+        run_id: &RunId,
+        frame_id: &crate::ids::FrameId,
+        expected: Option<&crate::run::FrameSnapshot>,
+        next: crate::run::FrameSnapshot,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_frame_state(run_id, frame_id, expected, next)
+            .await
+    }
+
+    async fn cas_grant_node_slot(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_grant_node_slot(
+                run_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+            )
+            .await
+    }
+
+    async fn cas_complete_step_and_record_output(
+        &self,
+        run_id: &RunId,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_complete_step_and_record_output(
+                run_id,
+                frame_id,
+                expected_frame,
+                next_frame,
+                step_output_key,
+                step_output,
+            )
+            .await
+    }
+
+    async fn cas_start_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        initial_loop: crate::run::LoopSnapshot,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_start_loop(
+                run_id,
+                loop_instance_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                initial_loop,
+            )
+            .await
+    }
+
+    async fn cas_loop_request_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_loop_request_body_frame(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
+
+    async fn cas_grant_body_frame_start(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        initial_frame: crate::run::FrameSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_grant_body_frame_start(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                initial_frame,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
+
+    async fn cas_complete_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_complete_body_frame(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
+
+    async fn cas_complete_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobError> {
+        self.inner
+            .cas_complete_loop(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -1779,6 +1958,7 @@ fn sample_definition_with_single_step_flow(
         FlowSpec {
             description: Some("single step demo flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1787,6 +1967,7 @@ fn sample_definition_with_single_step_flow(
         max_step_retries: None,
         max_orphaned_turns: Some(max_orphaned_turns),
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     def
 }
@@ -1800,6 +1981,7 @@ fn with_cancel_grace_timeout(
         max_step_retries: None,
         max_orphaned_turns: None,
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     limits.cancel_grace_timeout_ms = Some(cancel_grace_timeout_ms);
     def
@@ -1839,6 +2021,7 @@ fn sample_definition_with_branch_flow() -> MobDefinition {
         FlowSpec {
             description: Some("branch winner flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1912,6 +2095,7 @@ fn sample_definition_with_collection_policy(policy: CollectionPolicy) -> MobDefi
         FlowSpec {
             description: Some("collection policy flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1933,6 +2117,7 @@ fn sample_definition_with_dispatch_mode(mode: DispatchMode) -> MobDefinition {
         FlowSpec {
             description: Some("dispatch mode flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1957,6 +2142,7 @@ fn sample_definition_with_dispatch_mode_and_policy(
         FlowSpec {
             description: Some("dispatch mode flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1970,6 +2156,7 @@ fn sample_definition_with_retry_flow(max_step_retries: u32) -> MobDefinition {
         max_step_retries: Some(max_step_retries),
         max_orphaned_turns: Some(8),
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     def
 }
@@ -2018,6 +2205,7 @@ fn sample_definition_with_branch_fallback_flow() -> MobDefinition {
         FlowSpec {
             description: Some("branch fallback flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -2057,6 +2245,7 @@ fn sample_definition_with_shared_path_resolution_flow() -> MobDefinition {
         FlowSpec {
             description: Some("shared path resolver flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -2103,6 +2292,7 @@ fn sample_definition_with_two_step_flow(timeout_ms: u64) -> MobDefinition {
         FlowSpec {
             description: Some("cooperative cancel flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -10369,6 +10559,7 @@ async fn test_handle_list_flows_returns_definition_flow_ids() {
         FlowSpec {
             description: Some("secondary flow".to_string()),
             steps: extra_steps,
+            root: None,
         },
     );
 
@@ -11090,6 +11281,7 @@ async fn test_cancel_flow_fallback_uses_configured_grace_timeout() {
         max_step_retries: None,
         max_orphaned_turns: Some(8),
         cancel_grace_timeout_ms: Some(25),
+        ..Default::default()
     });
     let (handle, service) = create_test_mob(definition).await;
     handle
@@ -11752,6 +11944,7 @@ async fn test_max_flow_duration_limit_is_enforced() {
         max_step_retries: None,
         max_orphaned_turns: Some(8),
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     let (handle, service) = create_test_mob(definition).await;
     handle

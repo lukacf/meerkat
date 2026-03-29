@@ -43,6 +43,7 @@ fn owner_test_config() -> FlowRunConfig {
         FlowSpec {
             description: Some("owner test flow".into()),
             steps,
+            root: None,
         },
     );
 
@@ -96,6 +97,7 @@ fn owner_test_config() -> FlowRunConfig {
             max_step_retries: Some(1),
             max_orphaned_turns: Some(8),
             cancel_grace_timeout_ms: None,
+            ..Default::default()
         }),
         spawn_policy: None,
         event_router: None,

@@ -123,6 +123,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordTargetFailure`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `terminalize-on-failure-or-cancel`
+- `RegisterFrame`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `RegisterLoop`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `RegisterReadyFrame`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `PumpNodeScheduler`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `RegisterPendingBodyFrame`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `PumpFrameScheduler`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `NodeExecutionReleased`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `FrameTerminated`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `LoopTerminated`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
 - `TerminalizeCompleted`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `create-dispatch-complete`
@@ -164,6 +191,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ProjectTargetCanceled`
   - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
   - scenarios: `terminalize-on-failure-or-cancel`
+- `GrantNodeSlot`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
+- `GrantBodyFrameStart`
+  - anchors: `flow_run_aggregate`, `flow_runtime`, `flow_terminalization`
+  - scenarios: `create-dispatch-complete`
 
 ### Invariants
 - `output_only_follows_completed_steps`

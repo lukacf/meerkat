@@ -1,38 +1,29 @@
-//! # 035 — MDM TUX: Target Agent (Rust)
+//! # 035 — MDM TUX: Target Agent
 //!
-//! This binary runs on a managed computer. It:
-//! - Generates or loads a persistent Ed25519 keypair
-//! - Prints its public key (for pairing with TUX)
-//! - Listens for TCP comms messages from TUX
-//! - Executes each incoming command with shell tools
-//! - Sends the result back to the sender via the `send` comms tool
+//! Runs on managed machines. Registers with a TUX host automatically,
+//! then executes shell commands received via comms.
 //!
-//! The target goes straight into the inbox-wait loop — no LLM call is made
-//! until the first command actually arrives.
-//!
-//! ## Supported providers
-//! Detected from the model name prefix (see `detect_provider` in lib.rs).
-//! Set the matching env var: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
-//!
-//! ## Run
-//! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --bin target -- target.toml.example
-//! # or
-//! OPENAI_API_KEY=... cargo run --bin target -- target.toml.example  # with model = "gpt-5.2"
+//! ```text
+//! target <HOST:PORT> [--name NAME] [--model MODEL]
 //! ```
-//! Copy the printed pubkey into `tux.toml` before starting TUX.
+//!
+//! - `HOST:PORT` — the TUX host's comms port (registration runs on PORT+1)
+//! - `--name`    — agent name (default: system hostname)
+//! - `--model`   — LLM model (default: auto-detect from API key env vars)
+//!
+//! Set one of: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use meerkat::{AgentBuilder, AgentFactory, CompositeDispatcher, MemoryTaskStore};
-use meerkat_comms::TrustedPeers;
-use meerkat_comms::agent::{CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener};
+use meerkat_comms::agent::CommsToolDispatcher;
+use meerkat_comms::{PeerMeta, TrustedPeer};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::builtin::shell::ShellConfig;
 
-use mdm_tux::{TargetConfig, build_llm_client, detect_provider, load_or_generate_keypair, peer_entry_to_trusted};
+use mdm_tux::{CommsNode, auto_detect, build_llm_client, detect_provider, load_or_generate_keypair, register_with_host};
 
 const SYSTEM_PROMPT: &str = "\
 You are a managed system agent named '{name}'. You receive commands from TUX (the controller).
@@ -48,109 +39,135 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
         .init();
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "target.toml".into());
-    let raw = tokio::fs::read_to_string(&config_path)
-        .await
-        .with_context(|| format!("read config '{config_path}'"))?;
-    let config: TargetConfig = toml::from_str(&raw)
-        .with_context(|| format!("parse config '{config_path}'"))?;
+    // ── Parse CLI args ────────────────────────────────────────────────────────
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+        eprintln!("Usage: target <HOST:PORT> [--name NAME] [--model MODEL]");
+        eprintln!("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY");
+        std::process::exit(1);
+    }
+    let host_addr = &args[0];
+    let name = find_flag(&args, "--name")
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+    let (model, provider) = match find_flag(&args, "--model") {
+        Some(m) => { let p = detect_provider(&m); (m, p.to_string()) }
+        None => match auto_detect() {
+            Some((m, p, _)) => (m, p),
+            None => bail!("set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY"),
+        },
+    };
 
-    let provider = detect_provider(&config.model);
-    let data_dir = PathBuf::from(&config.data_dir);
+    let data_dir = PathBuf::from(format!("/tmp/mdm-target-{name}"));
 
-    // ── 1. Load or generate identity ─────────────────────────────────────────
+    // ── 1. Load or generate identity ──────────────────────────────────────────
     let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;
-    let pubkey = keypair.public_key();
-    println!("=== MDM Target: {} ===", config.name);
-    println!("my pubkey : {}", pubkey.to_peer_id());
-    println!("listening : tcp://{}", config.listen_addr);
-    println!("provider  : {provider} ({})", config.model);
-    println!("(add pubkey + addr to tux.toml, then start TUX)\n");
 
-    // ── 2. Build trusted peers ────────────────────────────────────────────────
-    let trusted_peers: Vec<_> = config.trusted_peers
-        .iter()
-        .map(peer_entry_to_trusted)
-        .collect::<anyhow::Result<_>>()?;
-    let trusted = TrustedPeers { peers: trusted_peers };
+    // ── 2. Create comms node + bind a random free port ────────────────────────
+    let mut node = CommsNode::new(keypair);
+    let comms_listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+    let comms_port = comms_listener.local_addr()?.port();
+    let comms_addr = format!("0.0.0.0:{comms_port}");
+    drop(comms_listener);
+    node.listen(&comms_addr).await?;
 
-    // ── 3. Create CommsManager ────────────────────────────────────────────────
-    let comms_cfg = CommsManagerConfig::with_keypair(keypair).trusted_peers(trusted);
-    let mut comms = CommsManager::new(comms_cfg)?;
+    println!("=== MDM Target: {name} ===");
+    println!("comms     : tcp://0.0.0.0:{comms_port}");
+    println!("provider  : {provider} ({model})");
 
-    // ── 4. Start TCP listener ─────────────────────────────────────────────────
-    // Use the router's shared trusted peers so listener + router + dispatcher
-    // all see the same live peer list.
-    let trusted_shared = comms.router().shared_trusted_peers();
-    let _listener = spawn_tcp_listener(
-        &config.listen_addr,
-        comms.keypair_arc(),
-        trusted_shared.clone(),
-        comms.inbox_sender().clone(),
-    )
-    .await
-    .context("spawn TCP listener")?;
+    // ── 3. Register with TUX ──────────────────────────────────────────────────
+    // Registration runs on host's comms port + 1.
+    let host_comms_port: u16 = host_addr.rsplit(':').next()
+        .and_then(|s| s.parse().ok())
+        .context("invalid HOST:PORT")?;
+    let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
+    let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The public comms_addr we advertise must be reachable from the host.
+    // For same-machine testing: use the host's IP base.
+    let advertised_addr = format!("tcp://{host_base}:{comms_port}");
 
-    // ── 5. Build tool dispatcher (shell + comms) ──────────────────────────────
+    println!("registering with {reg_addr} ...");
+    let resp = register_with_host(&reg_addr, &name, &node.pubkey_string(), &advertised_addr).await?;
+    println!("paired with host '{}' ({})", resp.name, resp.pubkey);
+
+    // Add host to our trusted peers so we accept its future messages.
+    let host_pubkey = meerkat_comms::identity::PubKey::from_peer_id(&resp.pubkey)
+        .context("bad host pubkey")?;
+    node.add_peer(TrustedPeer {
+        name: resp.name,
+        pubkey: host_pubkey,
+        addr: format!("tcp://{host_addr}"),
+        meta: PeerMeta::default(),
+    });
+
+    // ── 4. Build tool dispatcher (shell + comms) ──────────────────────────────
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-
-    let task_store = Arc::new(MemoryTaskStore::new());
     let factory = AgentFactory::new(&session_dir);
 
     let shell_config = ShellConfig {
-        restrict_to_project: false, // full system access for the managed machine
-        ..ShellConfig::with_project_root(data_dir.clone())
+        restrict_to_project: false,
+        ..ShellConfig::with_project_root(data_dir)
     };
-
-    // build_composite_dispatcher returns concrete CompositeDispatcher (Sized),
-    // required for CommsToolDispatcher::with_inner<T: Sized>.
     let builtin: CompositeDispatcher = factory
         .build_composite_dispatcher(
-            task_store,
+            Arc::new(MemoryTaskStore::new()),
             &Default::default(),
             None,
             Some(shell_config),
-            None,
-            None,
-            None,
-            false,
+            None, None, None, false,
         )
         .await
         .context("build composite dispatcher")?;
 
     let tools = Arc::new(CommsToolDispatcher::with_inner(
-        comms.router().clone(),
-        trusted_shared,
+        node.router.clone(),
+        node.trusted.clone(),
         Arc::new(builtin),
     ));
 
-    // ── 6. Build agent ────────────────────────────────────────────────────────
-    let llm = build_llm_client(&factory, &config.model, provider).await?;
+    // ── 5. Build agent ────────────────────────────────────────────────────────
+    let llm = build_llm_client(&factory, &model, &provider).await?;
 
     let store = Arc::new(JsonlStore::new(session_dir));
     store.init().await?;
     let store = Arc::new(StoreAdapter::new(store));
 
-    let system_prompt = SYSTEM_PROMPT.replace("{name}", &config.name);
     let mut agent = AgentBuilder::new()
-        .model(&config.model)
-        .system_prompt(system_prompt)
+        .model(&model)
+        .system_prompt(SYSTEM_PROMPT.replace("{name}", &name))
         .build(llm, tools, store)
         .await;
 
-    // ── 7. Stay alive — wake on inbox, execute, respond ───────────────────────
-    // No initial LLM call: the target goes straight into the wait loop.
-    // The agent only calls the LLM when a real command arrives in the inbox.
-    println!("Ready. Waiting for commands from TUX...\n");
+    // ── 6. Listen for commands ────────────────────────────────────────────────
+    // No initial LLM call — go straight into the inbox loop.
+    // DISMISS from a peer exits the process (matches CommsAgent::run_stay_alive).
+    println!("\nReady. Waiting for commands...\n");
     loop {
-        let Some(msg) = comms.recv_message().await else { break };
+        let Some(msg) = node.recv_message().await else { break };
+        if is_dismiss(&msg) {
+            println!("[target] received DISMISS — shutting down");
+            break;
+        }
         if let Err(e) = agent.run(msg.to_user_message_text().into()).await {
             eprintln!("[target] agent error: {e}");
         }
     }
 
     Ok(())
+}
+
+fn is_dismiss(msg: &meerkat_comms::agent::types::CommsMessage) -> bool {
+    match &msg.content {
+        meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
+            body.trim().eq_ignore_ascii_case("DISMISS")
+        }
+        _ => false,
+    }
+}
+
+fn find_flag(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }

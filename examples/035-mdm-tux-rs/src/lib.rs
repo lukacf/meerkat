@@ -1,78 +1,45 @@
-//! Shared types for the MDM TUX example.
+//! Shared infrastructure for the MDM TUX example.
 //!
-//! Config structs use plain `String` for pubkeys (e.g. `"ed25519:..."`)
-//! because `PubKey` serialises as CBOR bytes, which is incompatible with
-//! TOML. Conversion to `TrustedPeer` happens via `PubKey::from_peer_id`
-//! at startup.
+//! Provides provider auto-detection, a lightweight JSON registration protocol
+//! (so target + tux can pair without manual key exchange), and a comms inbox
+//! receiver that uses live trusted peers for dynamic registration.
 
 use anyhow::Context as _;
 use meerkat::{AgentFactory, AnthropicClient, GeminiClient, OpenAiClient};
-use meerkat_comms::identity::{Keypair, PubKey};
-use meerkat_comms::{PeerMeta, TrustedPeer, TrustedPeers};
+use meerkat_comms::agent::spawn_tcp_listener;
+use meerkat_comms::agent::types::CommsMessage;
+use meerkat_comms::identity::Keypair;
+use meerkat_comms::router::CommsConfig;
+use meerkat_comms::{
+    Inbox, InboxItem, InboxSender, PeerMeta, Router, TrustedPeer, TrustedPeers,
+};
 use meerkat_core::AgentLlmClient;
-use serde::Deserialize;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 
-// ── Config structs ────────────────────────────────────────────────────────────
+// ── Provider auto-detection ───────────────────────────────────────────────────
 
-/// Configuration for the `target` binary (managed machine).
-#[derive(Debug, Deserialize)]
-pub struct TargetConfig {
-    /// Agent name (used in system prompt and peer discovery).
-    pub name: String,
-    /// TCP address to listen on, e.g. `"0.0.0.0:4748"`.
-    pub listen_addr: String,
-    /// LLM model name, e.g. `"claude-sonnet-4-6"`, `"gpt-5.2"`, `"gemini-3.1-flash-lite"`.
-    pub model: String,
-    /// Directory for keypair + session store persistence.
-    pub data_dir: String,
-    /// Peers trusted to send this agent commands (typically just TUX).
-    #[serde(default)]
-    pub trusted_peers: Vec<PeerEntry>,
-}
-
-/// Configuration for the `tux` binary (controller machine).
-#[derive(Debug, Deserialize)]
-pub struct TuxConfig {
-    /// TCP address TUX listens on for incoming replies.
-    pub listen_addr: String,
-    /// LLM model for the hive agent (only used in Hive mode).
-    pub model: String,
-    /// Directory for keypair persistence.
-    pub data_dir: String,
-    /// Known managed targets.
-    #[serde(default)]
-    pub targets: Vec<TargetEntry>,
-}
-
-/// A peer entry in `target.toml` (trusted controllers).
-#[derive(Debug, Deserialize, Clone)]
-pub struct PeerEntry {
-    pub name: String,
-    /// `"ed25519:..."` string as printed by the remote binary at startup.
-    pub pubkey: String,
-    /// Transport address, e.g. `"tcp://192.168.1.50:4747"`.
-    pub addr: String,
-}
-
-/// A target entry in `tux.toml` (managed machines).
-#[derive(Debug, Deserialize, Clone)]
-pub struct TargetEntry {
-    pub name: String,
-    /// `"ed25519:..."` string as printed by `target` at startup.
-    pub pubkey: String,
-    /// Transport address, e.g. `"tcp://192.168.1.100:4748"`.
-    pub addr: String,
-}
-
-// ── Provider detection ────────────────────────────────────────────────────────
-
-/// Infer the provider from a model name prefix.
+/// Probe env vars in priority order and return `(model, provider, api_key)`.
 ///
-/// - `gpt-*`, `o1-*`, `o3-*`, `o4-*` → `"openai"`
-/// - `gemini-*` → `"gemini"`
-/// - anything else → `"anthropic"`
+/// Checks `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GEMINI_API_KEY`.
+pub fn auto_detect() -> Option<(String, String, String)> {
+    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
+        return Some(("claude-sonnet-4-6".into(), "anthropic".into(), k));
+    }
+    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+        return Some(("gpt-5.2".into(), "openai".into(), k));
+    }
+    if let Ok(k) = std::env::var("GEMINI_API_KEY") {
+        return Some(("gemini-3.1-flash-lite".into(), "gemini".into(), k));
+    }
+    None
+}
+
+/// Infer provider from model name prefix.
 pub fn detect_provider(model: &str) -> &'static str {
     if model.starts_with("gpt-")
         || model.starts_with("o1-")
@@ -87,7 +54,7 @@ pub fn detect_provider(model: &str) -> &'static str {
     }
 }
 
-/// Return the environment variable name that holds the API key for a provider.
+/// Return the env-var name that holds the API key for `provider`.
 pub fn api_key_env_var(provider: &str) -> &'static str {
     match provider {
         "openai" => "OPENAI_API_KEY",
@@ -97,9 +64,6 @@ pub fn api_key_env_var(provider: &str) -> &'static str {
 }
 
 /// Build an `Arc<dyn AgentLlmClient>` for the given model + provider.
-///
-/// Reads the appropriate API key from the environment.
-/// Returns an error (with a clear message) if the key is absent.
 pub async fn build_llm_client(
     factory: &AgentFactory,
     model: &str,
@@ -112,12 +76,12 @@ pub async fn build_llm_client(
     let adapter: Arc<dyn AgentLlmClient> = match provider {
         "openai" => Arc::new(
             factory
-                .build_llm_adapter(Arc::new(OpenAiClient::new(key)?), model)
+                .build_llm_adapter(Arc::new(OpenAiClient::new(key)), model)
                 .await,
         ),
         "gemini" => Arc::new(
             factory
-                .build_llm_adapter(Arc::new(GeminiClient::new(key)?), model)
+                .build_llm_adapter(Arc::new(GeminiClient::new(key)), model)
                 .await,
         ),
         _ => Arc::new(
@@ -129,42 +93,185 @@ pub async fn build_llm_client(
     Ok(adapter)
 }
 
-// ── Keypair helpers ───────────────────────────────────────────────────────────
+// ── Comms node (Router + Inbox, supports dynamic peers) ───────────────────────
+
+/// A lightweight comms node that supports dynamic peer registration.
+///
+/// Unlike `CommsManager` (which snapshots trusted peers at construction and
+/// never updates the inbox filter), `CommsNode` uses the router's live
+/// `Arc<RwLock<TrustedPeers>>` for every `recv_message()` call.
+pub struct CommsNode {
+    pub router: Arc<Router>,
+    pub trusted: Arc<RwLock<TrustedPeers>>,
+    inbox: Inbox,
+    inbox_sender: InboxSender,
+    keypair: Arc<Keypair>,
+}
+
+impl CommsNode {
+    pub fn new(keypair: Keypair) -> Self {
+        let (inbox, inbox_sender) = Inbox::new();
+        let router = Arc::new(Router::new(
+            keypair.clone(),
+            TrustedPeers::default(),
+            CommsConfig::default(),
+            inbox_sender.clone(),
+            true,
+        ));
+        let trusted = router.shared_trusted_peers();
+        let keypair = router.keypair_arc();
+        Self { router, trusted, inbox, inbox_sender, keypair }
+    }
+
+    /// Start the TCP comms listener on `addr`.
+    pub async fn listen(&self, addr: &str) -> anyhow::Result<()> {
+        spawn_tcp_listener(addr, self.keypair.clone(), self.trusted.clone(), self.inbox_sender.clone())
+            .await
+            .context("spawn TCP comms listener")?;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    /// Add a trusted peer (both send-side and receive-side updated immediately).
+    pub fn add_peer(&self, peer: TrustedPeer) {
+        self.router.add_trusted_peer(peer);
+    }
+
+    /// Receive the next message from a trusted peer. Blocks until one arrives.
+    /// Uses the live trusted-peer list, so dynamically added peers are accepted.
+    pub async fn recv_message(&mut self) -> Option<CommsMessage> {
+        loop {
+            let item = self.inbox.recv().await?;
+            let peers = self.trusted.read();
+            if let Some(msg) = CommsMessage::from_inbox_item(&item, &peers, true) {
+                return Some(msg);
+            }
+        }
+    }
+
+    /// Receive the next raw inbox item (including from untrusted senders).
+    /// Used during the registration handshake.
+    pub async fn recv_raw(&mut self) -> Option<InboxItem> {
+        self.inbox.recv().await
+    }
+
+    pub fn pubkey_string(&self) -> String {
+        self.keypair.public_key().to_peer_id()
+    }
+}
+
+// ── Registration protocol ─────────────────────────────────────────────────────
+//
+// A simple JSON-over-TCP handshake on port+1 so that clients can pair with the
+// host without manual pubkey exchange.
+//
+// Client → Host: {"name":"mac","pubkey":"ed25519:...","comms_addr":"tcp://1.2.3.4:9200"}\n
+// Host → Client: {"name":"tux","pubkey":"ed25519:..."}\n
+
+#[derive(Serialize, Deserialize)]
+pub struct RegRequest {
+    pub name: String,
+    pub pubkey: String,
+    pub comms_addr: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RegResponse {
+    pub name: String,
+    pub pubkey: String,
+}
+
+/// Host: listen for client registrations on `reg_addr` (typically comms port + 1).
+/// Each accepted client is added to `node.trusted` and appended to `targets`.
+pub async fn run_registration_server(
+    reg_addr: String,
+    node_pubkey: String,
+    trusted: Arc<RwLock<TrustedPeers>>,
+    new_target_tx: tokio::sync::mpsc::Sender<(String, String)>, // (name, addr) for TUI
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(&reg_addr).await.with_context(|| format!("bind reg {reg_addr}"))?;
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let pubkey = node_pubkey.clone();
+        let trusted = trusted.clone();
+        let tx = new_target_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_registration(stream, &pubkey, &trusted, &tx).await {
+                eprintln!("[reg] error: {e}");
+            }
+        });
+    }
+}
+
+async fn handle_registration(
+    mut stream: TcpStream,
+    host_pubkey: &str,
+    trusted: &Arc<RwLock<TrustedPeers>>,
+    new_target_tx: &tokio::sync::mpsc::Sender<(String, String)>,
+) -> anyhow::Result<()> {
+    let (reader, mut writer) = stream.split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    let req: RegRequest = serde_json::from_str(line.trim())?;
+
+    let pubkey = meerkat_comms::identity::PubKey::from_peer_id(&req.pubkey)
+        .with_context(|| format!("bad pubkey from '{}'", req.name))?;
+
+    trusted.write().upsert(TrustedPeer {
+        name: req.name.clone(),
+        pubkey,
+        addr: req.comms_addr.clone(),
+        meta: PeerMeta::default(),
+    });
+
+    let resp = RegResponse { name: "tux".into(), pubkey: host_pubkey.into() };
+    let mut resp_json = serde_json::to_string(&resp)?;
+    resp_json.push('\n');
+    writer.write_all(resp_json.as_bytes()).await?;
+    writer.flush().await?;
+
+    eprintln!("[reg] registered target '{}' at {}", req.name, req.comms_addr);
+    let _ = new_target_tx.send((req.name, req.comms_addr)).await;
+    Ok(())
+}
+
+/// Client: register with the host. Returns the host's pubkey.
+pub async fn register_with_host(
+    reg_addr: &str,
+    name: &str,
+    our_pubkey: &str,
+    our_comms_addr: &str,
+) -> anyhow::Result<RegResponse> {
+    let mut stream = TcpStream::connect(reg_addr)
+        .await
+        .with_context(|| format!("connect to registration server at {reg_addr}"))?;
+
+    let req = RegRequest {
+        name: name.into(),
+        pubkey: our_pubkey.into(),
+        comms_addr: our_comms_addr.into(),
+    };
+    let mut req_json = serde_json::to_string(&req)?;
+    req_json.push('\n');
+    stream.write_all(req_json.as_bytes()).await?;
+    stream.flush().await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    let resp: RegResponse = serde_json::from_str(line.trim())?;
+    Ok(resp)
+}
+
+// ── Keypair helper ────────────────────────────────────────────────────────────
 
 /// Load or generate a persistent Ed25519 keypair from `dir`.
-///
-/// The keypair is stored as `<dir>/ed25519_secret_key` (CBOR binary).
-/// On first run a new key is generated; subsequent runs load the same key.
-pub async fn load_or_generate_keypair(dir: &Path) -> anyhow::Result<Keypair> {
+pub async fn load_or_generate_keypair(dir: &std::path::Path) -> anyhow::Result<Keypair> {
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("create keypair dir {}", dir.display()))?;
     Keypair::load_or_generate(dir)
         .await
         .with_context(|| format!("load_or_generate keypair in {}", dir.display()))
-}
-
-// ── Peer conversion helpers ───────────────────────────────────────────────────
-
-/// Convert a `PeerEntry` (from `target.toml`) to a `TrustedPeer`.
-pub fn peer_entry_to_trusted(e: &PeerEntry) -> anyhow::Result<TrustedPeer> {
-    let pubkey = PubKey::from_peer_id(&e.pubkey)
-        .with_context(|| format!("invalid pubkey '{}' for peer '{}'", e.pubkey, e.name))?;
-    Ok(TrustedPeer { name: e.name.clone(), pubkey, addr: e.addr.clone(), meta: PeerMeta::default() })
-}
-
-/// Convert a `TargetEntry` (from `tux.toml`) to a `TrustedPeer`.
-pub fn target_entry_to_trusted(e: &TargetEntry) -> anyhow::Result<TrustedPeer> {
-    let pubkey = PubKey::from_peer_id(&e.pubkey)
-        .with_context(|| format!("invalid pubkey '{}' for target '{}'", e.pubkey, e.name))?;
-    Ok(TrustedPeer { name: e.name.clone(), pubkey, addr: e.addr.clone(), meta: PeerMeta::default() })
-}
-
-/// Build a `TrustedPeers` list from a `TargetEntry` slice.
-pub fn targets_to_trusted_peers(targets: &[TargetEntry]) -> anyhow::Result<TrustedPeers> {
-    let peers = targets
-        .iter()
-        .map(target_entry_to_trusted)
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(TrustedPeers { peers })
 }

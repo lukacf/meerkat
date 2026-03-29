@@ -1,124 +1,102 @@
 # 035 — MDM TUX: Meerkat Device Manager
 
 A smart MDM (Mobile Device Management) demo using Meerkat peer-to-peer comms over TCP.
-Two binaries: **`target`** runs on each managed machine, **`tux`** is the ratatui TUI on the
-controller.
+Two binaries: **`target`** runs on each managed machine, **`tux`** is the ratatui TUI controller.
+
+Targets register with TUX automatically — no config files, no manual key exchange.
 
 ```
   Managed machine                    Controller machine
   ┌────────────────────────┐         ┌───────────────────────────────────────────┐
-  │ target                 │         │ tux                                       │
+  │ target <HOST:PORT>     │         │ tux <PORT>                                │
   │                        │  TCP    │                                           │
-  │ CommsAgent             │◄───────►│ Direct mode: router.send() → one target   │
-  │  shell + comms tools   │         │ Hive mode:   LLM agent → send() → all     │
-  │  run_stay_alive()      │         │                                           │
-  └────────────────────────┘         │ Drain task receives all replies → TUI     │
+  │ auto-registers ────────┼────────►│ registration server (PORT+1)              │
+  │ shell + comms tools    │◄───────►│ comms listener (PORT)                     │
+  │ inbox loop             │         │                                           │
+  └────────────────────────┘         │ Direct mode: select target, type command  │
+                                     │ Hive mode:   LLM fans out to all targets  │
                                      └───────────────────────────────────────────┘
 ```
 
 ---
 
-## Building
+## Quick Start (local test)
 
 ```bash
 cd examples/035-mdm-tux-rs
-cargo build --release
+
+# Terminal 1 — host
+ANTHROPIC_API_KEY=sk-ant-... cargo run --bin tux -- 4747
+
+# Terminal 2 — target (auto-registers with host)
+ANTHROPIC_API_KEY=sk-ant-... cargo run --bin target -- 127.0.0.1:4747
 ```
 
-This produces two binaries in `target/release/`:
-- `target` — copy to each managed machine
-- `tux` — run on the controller
+That's it. The target registers automatically. In TUX, type `ls /tmp` and press Enter.
 
-For local testing you can also use `cargo run --bin target` / `cargo run --bin tux` without
-building first.
+---
+
+## CLI Reference
+
+### `tux <PORT> [--model MODEL]`
+
+Starts the TUI controller. Comms listens on `PORT`, target registration on `PORT+1`.
+
+- **Direct mode** (default): no API key required — dispatches commands via `router.send()`
+- **Hive mode** (Tab): requires an API key — an LLM agent decides which targets to contact
+
+### `target <HOST:PORT> [--name NAME] [--model MODEL]`
+
+Starts a managed agent that registers with TUX and waits for commands.
+
+- `HOST:PORT` — TUX's comms port (registration auto-connects to `PORT+1`)
+- `--name` — agent name shown in TUX (default: system hostname)
+- `--model` — LLM model (default: auto-detect from API key env vars)
+
+### Provider auto-detection
+
+Both binaries detect the provider from the model name or available API keys:
+
+| Env var | Provider | Default model |
+|---------|----------|---------------|
+| `ANTHROPIC_API_KEY` | Anthropic | `claude-sonnet-4-6` |
+| `OPENAI_API_KEY` | OpenAI | `gpt-5.2` |
+| `GEMINI_API_KEY` | Gemini | `gemini-3.1-flash-lite` |
+
+If `--model` is given, the provider is inferred from the prefix (`claude-*` → Anthropic, `gpt-*`/`o1-*` → OpenAI, `gemini-*` → Gemini).
+
+---
+
+## How Pairing Works
+
+No manual key exchange is needed. The sequence:
+
+1. TUX starts, generates an Ed25519 keypair, listens on `PORT` (comms) and `PORT+1` (registration)
+2. Target starts, generates its own keypair, binds a random comms port
+3. Target connects to `HOST:PORT+1` and sends: name, pubkey, comms address (JSON)
+4. TUX adds the target to its trusted peer list and responds with its own pubkey
+5. Target adds TUX to its trusted peer list
+6. All subsequent messages use Ed25519-signed comms on `PORT`
+
+Keypairs are persisted in `/tmp/mdm-tux/identity/` (TUX) and `/tmp/mdm-target-NAME/identity/` (targets), so restarts reuse the same identity.
 
 ---
 
 ## Deployment
 
-### Step 1 — Install `target` on each managed machine
-
-Copy the binary (or build from source) and create a config file.
-
-**`target.toml`** on the managed machine:
-
-```toml
-name        = "mac-laptop"
-listen_addr = "0.0.0.0:4748"          # port this machine listens on
-model       = "claude-sonnet-4-6"
-data_dir    = "/var/lib/meerkat-target" # persistent storage for keypair + sessions
-
-[[trusted_peers]]
-name   = "tux"
-pubkey = "ed25519:REPLACE_WITH_TUX_PUBKEY"  # filled in during pairing (step 3)
-addr   = "tcp://192.168.1.50:4747"          # TUX's IP and port
-```
-
-You can run multiple managed machines — give each a unique `name` and `data_dir`.
-
----
-
-### Step 2 — Configure TUX on the controller
-
-**`tux.toml`** on the controller machine:
-
-```toml
-listen_addr = "0.0.0.0:4747"
-model       = "claude-sonnet-4-6"
-data_dir    = "~/.local/share/meerkat-tux"  # persistent storage for keypair
-
-[[targets]]
-name   = "mac-laptop"
-pubkey = "ed25519:REPLACE_WITH_TARGET_PUBKEY"  # filled in during pairing (step 3)
-addr   = "tcp://192.168.1.100:4748"
-
-# Add more targets as needed:
-# [[targets]]
-# name   = "office-pc"
-# pubkey = "ed25519:REPLACE_WITH_SECOND_TARGET_PUBKEY"
-# addr   = "tcp://192.168.1.101:4748"
-```
-
----
-
-### Step 3 — Pair TUX and target (one-time key exchange)
-
-Each binary generates a persistent Ed25519 keypair on first run and prints its public key.
-You need to exchange these keys once.
-
-**On the managed machine** — start target with an incomplete config (trusted_peers can be
-empty for now):
+### Install the binaries
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... ./target target.toml
-# Prints:
-#   my pubkey : ed25519:AbCdEfGhIj...
-#   listening : tcp://0.0.0.0:4748
+cd examples/035-mdm-tux-rs
+cargo build --release
+# Produces: target/release/target and target/release/tux
 ```
 
-Copy that pubkey into `tux.toml` `[[targets]]`.
+Copy `target/release/target` to each managed machine. Run `target/release/tux` on the controller.
 
-**On the controller** — start TUX:
+### macOS launchd (target as a persistent service)
 
-```bash
-ANTHROPIC_API_KEY=sk-ant-... ./tux tux.toml
-# Prints:
-#   my pubkey : ed25519:XyZwVuTs...
-#   listening : tcp://0.0.0.0:4747
-```
-
-Copy TUX's pubkey into `target.toml` `[[trusted_peers]]`.
-
-Restart both. They are now paired and will authenticate all messages with Ed25519 signatures.
-Messages from any unknown key are rejected.
-
----
-
-### Step 4 — Run as a persistent service (optional)
-
-To keep the target running across reboots on macOS, create a launchd plist.
-
-**`/Library/LaunchDaemons/com.example.meerkat-target.plist`:**
+**`/Library/LaunchDaemons/com.example.mdm-target.plist`:**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -127,11 +105,11 @@ To keep the target running across reboots on macOS, create a launchd plist.
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.example.meerkat-target</string>
+  <string>com.example.mdm-target</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/meerkat-target</string>
-    <string>/etc/meerkat-target/target.toml</string>
+    <string>/usr/local/bin/target</string>
+    <string>192.168.1.50:4747</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -143,172 +121,90 @@ To keep the target running across reboots on macOS, create a launchd plist.
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/var/log/meerkat-target.log</string>
+  <string>/var/log/mdm-target.log</string>
   <key>StandardErrorPath</key>
-  <string>/var/log/meerkat-target.log</string>
+  <string>/var/log/mdm-target.log</string>
 </dict>
 </plist>
 ```
 
-Load it:
-
 ```bash
-sudo launchctl load /Library/LaunchDaemons/com.example.meerkat-target.plist
+sudo cp target/release/target /usr/local/bin/target
+sudo launchctl load /Library/LaunchDaemons/com.example.mdm-target.plist
 ```
 
-For Linux with systemd, see [the systemd section](#linux-systemd) below.
+### Linux systemd
 
----
-
-## Admin / Sudo Permissions on the Target
-
-The `target` agent runs shell commands on the managed machine using its own user identity.
-To allow it to run privileged commands (e.g. `softwareupdate`, `mdatp`, `diskutil`, package
-managers, service management), you have three options ranked by security posture:
-
-### Option A — Run as root (simplest, least restricted)
-
-Start `target` as root:
-
-```bash
-sudo ANTHROPIC_API_KEY=sk-ant-... ./target target.toml
-```
-
-Or in the launchd plist, add:
-
-```xml
-<key>UserName</key>
-<string>root</string>
-```
-
-Then `sudo launchctl load /Library/LaunchDaemons/com.example.meerkat-target.plist`.
-
-The agent will have unrestricted access to everything on the machine.
-Only appropriate on a machine you fully control and trust the LLM/key setup.
-
----
-
-### Option B — Passwordless sudo for a dedicated user (recommended)
-
-Create a dedicated low-privilege user for the agent, then grant it passwordless sudo only for
-the specific commands you want it to run.
-
-**1. Create the user** (macOS):
-
-```bash
-sudo dscl . -create /Users/meerkat-agent
-sudo dscl . -create /Users/meerkat-agent UserShell /bin/bash
-sudo dscl . -create /Users/meerkat-agent UniqueID 510
-sudo dscl . -create /Users/meerkat-agent PrimaryGroupID 20
-sudo dscl . -create /Users/meerkat-agent NFSHomeDirectory /var/meerkat-agent
-sudo mkdir -p /var/meerkat-agent
-sudo chown meerkat-agent /var/meerkat-agent
-```
-
-**2. Grant passwordless sudo for specific commands:**
-
-```bash
-sudo visudo -f /etc/sudoers.d/meerkat-agent
-```
-
-Add:
-
-```
-# Allow meerkat-agent to run system management commands without a password
-meerkat-agent ALL=(ALL) NOPASSWD: /usr/sbin/softwareupdate, \
-                                   /bin/launchctl, \
-                                   /usr/bin/pkill, \
-                                   /usr/bin/killall, \
-                                   /usr/sbin/diskutil, \
-                                   /usr/bin/installer, \
-                                   /usr/local/bin/brew
-```
-
-The LLM will naturally prefix commands with `sudo` when it needs elevated access.
-
-**3. Set `data_dir` to a path the user can write:**
-
-```toml
-data_dir = "/var/meerkat-agent"
-```
-
-**4. Run the target as that user:**
-
-```bash
-sudo -u meerkat-agent ANTHROPIC_API_KEY=sk-ant-... ./target target.toml
-```
-
-Or in the launchd plist:
-
-```xml
-<key>UserName</key>
-<string>meerkat-agent</string>
-```
-
----
-
-### Option C — Full passwordless sudo (broad access, convenient)
-
-If you want the agent to run any command with sudo without restrictions:
-
-```bash
-sudo visudo -f /etc/sudoers.d/meerkat-agent
-```
-
-Add:
-
-```
-meerkat-agent ALL=(ALL) NOPASSWD: ALL
-```
-
-This is equivalent to root access in practice. Use only on machines where the LLM API key
-and the Ed25519 keypair are both adequately secured.
-
----
-
-### macOS System Integrity Protection (SIP)
-
-Some system paths and operations are protected by SIP regardless of sudo/root access:
-`/System`, `/usr` (except `/usr/local`), `/bin`, `/sbin`, and kernel extensions.
-
-SIP cannot be disabled without booting into Recovery Mode. For MDM use cases that require
-touching SIP-protected paths, use a proper MDM framework (Jamf, Kandji, etc.) instead.
-This example is well-suited for everything outside SIP-protected territory:
-app installation, user data, network config, services, homebrew packages, etc.
-
----
-
-## Linux (systemd) {#linux-systemd}
-
-**`/etc/systemd/system/meerkat-target.service`:**
+**`/etc/systemd/system/mdm-target.service`:**
 
 ```ini
 [Unit]
-Description=Meerkat Target Agent
+Description=MDM Target Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=meerkat-agent
-ExecStart=/usr/local/bin/meerkat-target /etc/meerkat-target/target.toml
+ExecStart=/usr/local/bin/target 192.168.1.50:4747
 Environment=ANTHROPIC_API_KEY=sk-ant-YOUR_KEY_HERE
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
+sudo cp target/release/target /usr/local/bin/target
 sudo systemctl daemon-reload
-sudo systemctl enable --now meerkat-target
-sudo journalctl -u meerkat-target -f   # follow logs
+sudo systemctl enable --now mdm-target
 ```
 
-For sudo access, create the user and add to sudoers the same way as Option B above.
+---
+
+## Admin / Sudo Permissions on the Target
+
+The target agent runs shell commands as its own user. For privileged operations:
+
+### Option A — Run as root (simplest)
+
+```bash
+sudo ANTHROPIC_API_KEY=sk-ant-... ./target 192.168.1.50:4747
+```
+
+Or in the launchd plist: `<key>UserName</key><string>root</string>`.
+
+### Option B — Scoped passwordless sudo (recommended)
+
+Create a dedicated user with passwordless sudo for specific commands:
+
+```bash
+# macOS
+sudo dscl . -create /Users/mdm-agent
+sudo dscl . -create /Users/mdm-agent UserShell /bin/bash
+sudo dscl . -create /Users/mdm-agent UniqueID 510
+sudo dscl . -create /Users/mdm-agent PrimaryGroupID 20
+sudo mkdir -p /var/mdm-agent && sudo chown mdm-agent /var/mdm-agent
+```
+
+Grant scoped sudo:
+
+```bash
+sudo visudo -f /etc/sudoers.d/mdm-agent
+```
+
+```
+mdm-agent ALL=(ALL) NOPASSWD: /usr/sbin/softwareupdate, /bin/launchctl, \
+                               /usr/sbin/diskutil, /usr/bin/installer, /usr/local/bin/brew
+```
+
+Run as that user: `sudo -u mdm-agent ANTHROPIC_API_KEY=... ./target 192.168.1.50:4747`
+
+### Option C — Full passwordless sudo
+
+```
+mdm-agent ALL=(ALL) NOPASSWD: ALL
+```
 
 ---
 
@@ -316,56 +212,45 @@ For sudo access, create the user and add to sudoers the same way as Option B abo
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
-│ TUX — Meerkat Device Manager    [Direct]  Hive  [Tab] toggle [Esc]│
+│ TUX — Meerkat Device Manager    [Direct]  Hive  [Tab] [Esc]      │
 ├──────────────────────┬────────────────────────────────────────────┤
 │ TARGETS              │ OUTPUT                                     │
-│ > mac-laptop         │ [COMMS MESSAGE from mac-laptop]            │
-│   office-pc          │ /tmp:                                      │
-│                      │ total 8                                    │
-│                      │ drwxrwxrwt  9 root  wheel  288 Mar 29 ... │
+│ > mac-laptop         │ [registered] target 'mac-laptop' connected │
+│   office-pc          │ > [mac-laptop] ls /tmp                     │
+│                      │ [COMMS MESSAGE from mac-laptop]            │
+│                      │ file1.txt  file2.txt                       │
 ├──────────────────────┴────────────────────────────────────────────┤
 │ COMMAND                                                           │
-│ [mac-laptop] > ls /tmp_                                           │
+│ [mac-laptop] > _                                                  │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 | Key | Action |
 |-----|--------|
-| Tab | Toggle Direct ↔ Hive mode |
+| Tab | Toggle Direct ↔ Hive |
 | ↑ / ↓ | Select target (Direct mode) |
-| Type | Build command |
 | Enter | Send command |
 | Esc | Quit |
 
-**Direct mode** — select a target, type a task. The target agent receives the message,
-executes it using shell tools (with whatever permissions its process has), and sends the
-output back. You see the raw `[COMMS MESSAGE from mac-laptop]` reply in the output panel.
-
-**Hive mode** — type a task in natural language. A local LLM agent uses the `peers` tool
-to discover all targets, then decides who to contact and what to ask each one. Replies from
-all targets flow back into the same output panel. Useful for "check disk usage on all
-machines" style queries.
-
 ---
 
-## Security Model
+## Security
 
-- All messages are signed with Ed25519. TUX only accepts replies from keys in its
-  `[[targets]]` list; the target only accepts commands from keys in its `[[trusted_peers]]` list.
-- The API key lives only on the machine that uses it (target machines each need their own;
-  TUX needs one for the hive agent).
-- There is no built-in transport encryption beyond the signature check — run over a VPN
-  or private LAN. Do not expose the comms port to the public internet.
-- The `data_dir/identity/` directory contains the private key. Protect it with filesystem
-  permissions (`chmod 700`).
+- All comms messages are Ed25519 signed. Only registered peers are accepted.
+- Registration is unauthenticated (plain TCP on PORT+1) — any client that connects to
+  the registration port is trusted. Run on a private network or VPN.
+- API keys live only on the machine that uses them.
+- Keypairs are persisted in `/tmp/mdm-*`. For production, use a locked-down directory
+  with `chmod 700`.
+- There is no transport encryption beyond signatures — use a VPN or private LAN.
 
 ---
 
 ## What you'll learn (code)
 
-- Persistent Ed25519 keypair management across process restarts
-- TCP comms between two separate processes/machines (`spawn_tcp_listener`)
+- Building a `Router` + `Inbox` directly (bypassing `CommsManager`) for dynamic peer registration
+- `CommsMessage::from_inbox_item` with live `Arc<RwLock<TrustedPeers>>` for runtime-added peers
 - `CommsToolDispatcher::with_inner` composing shell + comms tools on a single agent
-- `CommsAgent::run_stay_alive` for inbox-driven autonomous loops
-- Async/sync bridge for ratatui: `spawn_blocking` + unbounded `mpsc` channel
-- Splitting `CommsManager` ownership: inbox → drain task, router → command task
+- `DynAgent` (fully type-erased agent) for provider-agnostic hive agent construction
+- `TermGuard` (RAII) for terminal restore on error paths
+- Async/sync TUI bridge: `spawn_blocking` + unbounded mpsc + `try_recv`

@@ -116,6 +116,12 @@ async fn main() -> anyhow::Result<()> {
     builtin_config.policy.enable.insert("shell".into());
     builtin_config.policy.enable.insert("shell_job_cancel".into());
 
+    // Provide a session ID + ops lifecycle registry so the JobManager
+    // is session-bound and supports background shell execution.
+    let session_id = meerkat_core::types::SessionId::new().to_string();
+    let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+
     let builtin: CompositeDispatcher = factory
         .build_composite_dispatcher(
             Arc::new(MemoryTaskStore::new()),
@@ -123,8 +129,8 @@ async fn main() -> anyhow::Result<()> {
             None,
             Some(shell_config),
             None,
-            None,
-            None,
+            Some(session_id),
+            Some(ops_registry),
             false,
         )
         .await

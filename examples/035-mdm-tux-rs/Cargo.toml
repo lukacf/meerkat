@@ -18,7 +18,8 @@ path = "src/bin/tux.rs"
 meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store"] }
 meerkat-core  = { path = "../../meerkat-core" }
 meerkat-comms = { path = "../../meerkat-comms" }
-meerkat-tools = { path = "../../meerkat-tools" }
+meerkat-tools   = { path = "../../meerkat-tools" }
+meerkat-runtime = { path = "../../meerkat-runtime" }
 meerkat-store = { path = "../../meerkat-store", features = ["jsonl"] }
 tokio         = { version = "1", features = ["full"] }
 serde         = { version = "1", features = ["derive"] }

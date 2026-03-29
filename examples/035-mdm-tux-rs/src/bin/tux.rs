@@ -118,6 +118,23 @@ impl App {
         }
     }
 
+    /// The label prefix shown before the input text (e.g. `[target] > `).
+    fn input_label(&self) -> String {
+        match self.mode {
+            Mode::Direct if !self.targets.is_empty() => {
+                let t = &self.targets[self.selected];
+                if self.busy_targets.contains(t) {
+                    format!("[{t} ...processing] > ")
+                } else {
+                    format!("[{t}] > ")
+                }
+            }
+            Mode::Hive if self.hive_planning => "[hive: planning...] > ".into(),
+            Mode::Hive => "[hive] > ".into(),
+            _ => "[waiting for targets...] > ".into(),
+        }
+    }
+
     /// Recalculate scroll offset for auto-scroll mode.
     fn update_scroll(&mut self) {
         if !self.auto_scroll {
@@ -616,16 +633,21 @@ fn handle_key(
 
 fn render(f: &mut ratatui::Frame, app: &mut App) {
     // Input box height: 2 (borders) + estimated visual lines (min 1, max 8).
-    // Account for both explicit newlines and soft wrapping.
-    // Subtract borders (2) + label prefix (~25 chars on first line).
-    let label_len = 25_usize; // approximate label prefix length
-    let box_width = f.area().width.saturating_sub(2) as usize; // inner width minus borders
+    // Derive the label length from the actual label string so the
+    // first-line available width is always correct.
+    let label = app.input_label();
+    let label_len = label.len();
+    let inner_width = f.area().width.saturating_sub(2) as usize; // minus left+right border
     let input_lines: usize = app
         .input
         .split('\n')
         .enumerate()
         .map(|(i, line)| {
-            let avail = if i == 0 { box_width.saturating_sub(label_len) } else { box_width };
+            let avail = if i == 0 {
+                inner_width.saturating_sub(label_len)
+            } else {
+                inner_width.saturating_sub(2) // "  " continuation indent
+            };
             if avail == 0 { 1 } else { (line.len() / avail.max(1)) + 1 }
         })
         .sum();
@@ -743,24 +765,12 @@ fn render_output(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut 
 }
 
 fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
-    let label: String = match app.mode {
-        Mode::Direct if !app.targets.is_empty() => {
-            let t = &app.targets[app.selected];
-            if app.busy_targets.contains(t) {
-                format!("[{t} ...processing] ")
-            } else {
-                format!("[{t}] ")
-            }
-        }
-        Mode::Hive if app.hive_planning => "[hive: planning...] ".into(),
-        Mode::Hive => "[hive] ".into(),
-        _ => "[waiting for targets...] ".into(),
-    };
+    let label = app.input_label();
     // Build multiline display: first line gets the label, rest are continuation
     let mut lines: Vec<Line> = Vec::new();
     for (i, part) in app.input.split('\n').enumerate() {
         if i == 0 {
-            lines.push(Line::from(format!("{label}> {part}")));
+            lines.push(Line::from(format!("{label}{part}")));
         } else {
             lines.push(Line::from(format!("  {part}")));
         }

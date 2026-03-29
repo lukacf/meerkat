@@ -1,15 +1,15 @@
 //! # 035 — MDM TUX: Target Agent
 //!
 //! Runs on managed machines. Registers with a TUX host automatically,
-//! then executes shell commands received via comms.
+//! then serves as a directly-controlled agent with streaming output.
+//!
+//! Each incoming message is a new turn on the same agent session (history
+//! accumulates). Agent events (text deltas, tool calls) are streamed back
+//! to TUX as individual comms messages with the `__STREAM__` prefix.
 //!
 //! ```text
 //! target <HOST:PORT> [--name NAME] [--model MODEL]
 //! ```
-//!
-//! - `HOST:PORT` — the TUX host's comms port (registration runs on PORT+1)
-//! - `--name`    — agent name (default: system hostname)
-//! - `--model`   — LLM model (default: auto-detect from API key env vars)
 //!
 //! Set one of: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
 
@@ -17,21 +17,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use meerkat::{AgentBuilder, AgentFactory, CompositeDispatcher, MemoryTaskStore};
+use meerkat::{AgentBuilder, AgentEvent, AgentFactory, CompositeDispatcher, MemoryTaskStore};
+use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
 use meerkat_comms::{PeerMeta, TrustedPeer};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::builtin::shell::ShellConfig;
+use tokio::sync::mpsc;
 
-use mdm_tux::{CommsNode, auto_detect, build_llm_client, detect_provider, load_or_generate_keypair, register_with_host};
+use mdm_tux::{
+    CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
+    load_or_generate_keypair, register_with_host,
+};
 
 const SYSTEM_PROMPT: &str = "\
-You are a managed system agent named '{name}'. You receive commands from TUX (the controller).
-For each incoming message:
-1. Execute the requested task using your shell tools.
-2. Collect the output.
-3. Send the result back to the sender using the 'send' comms tool.
-Always respond after completing a command. Keep responses concise.";
+You are a managed system agent named '{name}' controlled by a human operator via TUX.
+Execute user requests using your available tools. Respond conversationally.
+Your responses stream directly to the controller — do not use the 'send' comms tool to reply.";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
     let name = find_flag(&args, "--name")
         .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
     let (model, provider) = match find_flag(&args, "--model") {
-        Some(m) => { let p = detect_provider(&m); (m, p.to_string()) }
+        Some(m) => {
+            let p = detect_provider(&m);
+            (m, p.to_string())
+        }
         None => match auto_detect() {
             Some((m, p, _)) => (m, p),
             None => bail!("set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY"),
@@ -63,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;
 
     // ── 2. Create comms node + bind a random free port ────────────────────────
-    let mut node = CommsNode::new(keypair);
+    let node = CommsNode::new(keypair);
     let comms_listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
     let comms_port = comms_listener.local_addr()?.port();
     let comms_addr = format!("0.0.0.0:{comms_port}");
@@ -75,24 +80,22 @@ async fn main() -> anyhow::Result<()> {
     println!("provider  : {provider} ({model})");
 
     // ── 3. Register with TUX ──────────────────────────────────────────────────
-    // Registration runs on host's comms port + 1.
-    let host_comms_port: u16 = host_addr.rsplit(':').next()
+    let host_comms_port: u16 = host_addr
+        .rsplit(':')
+        .next()
         .and_then(|s| s.parse().ok())
         .context("invalid HOST:PORT")?;
     let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
     let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
-
-    // The public comms_addr we advertise must be reachable from the host.
-    // For same-machine testing: use the host's IP base.
     let advertised_addr = format!("tcp://{host_base}:{comms_port}");
 
     println!("registering with {reg_addr} ...");
-    let resp = register_with_host(&reg_addr, &name, &node.pubkey_string(), &advertised_addr).await?;
+    let resp =
+        register_with_host(&reg_addr, &name, &node.pubkey_string(), &advertised_addr).await?;
     println!("paired with host '{}' ({})", resp.name, resp.pubkey);
 
-    // Add host to our trusted peers so we accept its future messages.
-    let host_pubkey = meerkat_comms::identity::PubKey::from_peer_id(&resp.pubkey)
-        .context("bad host pubkey")?;
+    let host_pubkey =
+        meerkat_comms::identity::PubKey::from_peer_id(&resp.pubkey).context("bad host pubkey")?;
     node.add_peer(TrustedPeer {
         name: resp.name,
         pubkey: host_pubkey,
@@ -109,7 +112,6 @@ async fn main() -> anyhow::Result<()> {
         restrict_to_project: false,
         ..ShellConfig::with_project_root(data_dir)
     };
-    // Shell tools have default_enabled=false in the policy — explicitly enable them.
     let mut builtin_config = meerkat::BuiltinToolConfig::default();
     builtin_config.policy.enable.insert("shell".into());
     builtin_config.policy.enable.insert("shell_job_cancel".into());
@@ -120,7 +122,10 @@ async fn main() -> anyhow::Result<()> {
             &builtin_config,
             None,
             Some(shell_config),
-            None, None, None, false,
+            None,
+            None,
+            None,
+            false,
         )
         .await
         .context("build composite dispatcher")?;
@@ -144,22 +149,71 @@ async fn main() -> anyhow::Result<()> {
         .build(llm, tools, store)
         .await;
 
-    // ── 6. Listen for commands ────────────────────────────────────────────────
-    // No initial LLM call — go straight into the inbox loop.
-    // DISMISS from a peer exits the process (matches CommsAgent::run_stay_alive).
+    // ── 6. Listen for commands with streaming ─────────────────────────────────
+    // Each message is a new turn on the same session (history accumulates).
+    // Agent events are forwarded to the sender as __STREAM__-prefixed messages.
+    // DISMISS from a peer exits the process.
     println!("\nReady. Waiting for commands...\n");
+
+    // We need a mutable reference to node for recv_message, but also need
+    // the router for the event forwarder. Clone the router Arc before the loop.
+    let router = node.router.clone();
+    let mut node = node;
+
     loop {
-        let Some(msg) = node.recv_message().await else { break };
+        let Some(msg) = node.recv_message().await else {
+            break;
+        };
         if is_dismiss(&msg) {
             println!("[target] received DISMISS — shutting down");
             break;
         }
-        if let Err(e) = agent.run(msg.to_user_message_text().into()).await {
+
+        // Create a per-turn event channel + forwarder
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
+        let fwd_router = router.clone();
+        let sender = msg.from_peer.clone();
+        let fwd_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if should_forward(&event) {
+                    let Ok(json) = serde_json::to_string(&event) else {
+                        continue;
+                    };
+                    let body = format!("{STREAM_PREFIX}{json}");
+                    let _ = fwd_router
+                        .send(&sender, MessageKind::Message { body, blocks: None })
+                        .await;
+                }
+            }
+        });
+
+        let input = msg.to_user_message_text();
+        if let Err(e) = agent.run_with_events(input.into(), event_tx).await {
             eprintln!("[target] agent error: {e}");
         }
+
+        // event_tx is dropped here → fwd_handle will finish draining
+        let _ = fwd_handle.await;
     }
 
     Ok(())
+}
+
+/// Select which events to stream back to TUX.
+fn should_forward(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::RunStarted { .. }
+            | AgentEvent::RunCompleted { .. }
+            | AgentEvent::RunFailed { .. }
+            | AgentEvent::TextDelta { .. }
+            | AgentEvent::TextComplete { .. }
+            | AgentEvent::ToolCallRequested { .. }
+            | AgentEvent::ToolExecutionStarted { .. }
+            | AgentEvent::ToolExecutionCompleted { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::TurnCompleted { .. }
+    )
 }
 
 fn is_dismiss(msg: &meerkat_comms::agent::types::CommsMessage) -> bool {

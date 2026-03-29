@@ -264,6 +264,12 @@ pub async fn register_with_host(
     Ok(resp)
 }
 
+// ── Streaming protocol ────────────────────────────────────────────────────────
+
+/// Prefix for streaming event messages.
+/// Body format: `__STREAM__\n<json-serialized AgentEvent>`.
+pub const STREAM_PREFIX: &str = "__STREAM__\n";
+
 // ── Keypair helper ────────────────────────────────────────────────────────────
 
 /// Load or generate a persistent Ed25519 keypair from `dir`.

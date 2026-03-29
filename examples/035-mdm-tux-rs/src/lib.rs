@@ -288,6 +288,10 @@ pub async fn register_with_host(
 /// Body format: `__STREAM__\n<json-serialized AgentEvent>`.
 pub const STREAM_PREFIX: &str = "__STREAM__\n";
 
+/// Prefix for slash-command messages (TUX → target).
+/// Body format: `__CMD__\n<COMMAND> [args...]`.
+pub const CMD_PREFIX: &str = "__CMD__\n";
+
 // ── Keypair helper ────────────────────────────────────────────────────────────
 
 /// Load or generate a persistent Ed25519 keypair from `dir`.

@@ -39,7 +39,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use mdm_tux::{
-    CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
+    CMD_PREFIX, CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
     load_or_generate_keypair, run_registration_server,
 };
 
@@ -48,6 +48,8 @@ use mdm_tux::{
 enum AppCommand {
     Send { target: String, body: String },
     RunHive { prompt: String },
+    /// Slash command sent to a target (no busy indicator set).
+    SlashCmd { target: String, cmd: String },
 }
 
 enum TuiEvent {
@@ -282,6 +284,24 @@ async fn main() -> anyhow::Result<()> {
                                 let _ = ev
                                     .send(TuiEvent::SendError(format!(
                                         "[{target}] send failed: {e}"
+                                    )))
+                                    .await;
+                            }
+                        });
+                    }
+                    AppCommand::SlashCmd { target, cmd } => {
+                        // Send __CMD__-prefixed message. No busy indicator.
+                        let r = router.clone();
+                        let body = format!("{CMD_PREFIX}{cmd}");
+                        let ev = event_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = r
+                                .send(&target, MessageKind::Message { body, blocks: None })
+                                .await
+                            {
+                                let _ = ev
+                                    .send(TuiEvent::SendError(format!(
+                                        "[{target}] cmd failed: {e}"
                                     )))
                                     .await;
                             }
@@ -598,13 +618,72 @@ fn handle_key(
         KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
             app.input.push('\n');
         }
-        // Plain Enter → submit
+        // Plain Enter → submit (slash commands or regular message)
         KeyCode::Enter if !app.input.is_empty() => {
             let body = std::mem::take(&mut app.input);
+
+            // ── Slash commands ────────────────────────────────────────────
+            if body.starts_with('/') {
+                let parts: Vec<&str> = body.splitn(2, ' ').collect();
+                let slash = parts[0];
+                let arg = parts.get(1).unwrap_or(&"").trim();
+
+                match slash {
+                    "/new" => {
+                        if app.mode == Mode::Hive {
+                            app.output.clear();
+                            app.streaming_text.clear();
+                            app.hive_planning = false;
+                            app.push("Session reset (hive).".into());
+                            // Hive agent will be rebuilt on next use
+                            return;
+                        }
+                        if app.targets.is_empty() { return; }
+                        let target = app.targets[app.selected].clone();
+                        app.output.clear();
+                        app.streaming_text.clear();
+                        app.push(format!("> /new ({target})"));
+                        let _ = command_tx.send(AppCommand::SlashCmd {
+                            target,
+                            cmd: "NEW_SESSION".into(),
+                        });
+                    }
+                    "/resume" if arg.is_empty() => {
+                        if app.targets.is_empty() { return; }
+                        let target = app.targets[app.selected].clone();
+                        app.push(format!("> /resume ({target})"));
+                        let _ = command_tx.send(AppCommand::SlashCmd {
+                            target,
+                            cmd: "LIST_SESSIONS".into(),
+                        });
+                    }
+                    "/resume" => {
+                        if app.targets.is_empty() { return; }
+                        let target = app.targets[app.selected].clone();
+                        app.push(format!("> /resume {arg} ({target})"));
+                        let _ = command_tx.send(AppCommand::SlashCmd {
+                            target,
+                            cmd: format!("RESUME {arg}"),
+                        });
+                    }
+                    "/help" => {
+                        app.push("**Commands:**".into());
+                        app.push("  `/new`          — start a fresh session".into());
+                        app.push("  `/resume`       — list past sessions".into());
+                        app.push("  `/resume <N>`   — resume session N".into());
+                        app.push("  `/help`         — show this help".into());
+                    }
+                    _ => {
+                        app.push(format!("Unknown command: {slash} (try /help)"));
+                    }
+                }
+                return;
+            }
+
+            // ── Regular message ───────────────────────────────────────────
             let cmd = match app.mode {
                 Mode::Direct if !app.targets.is_empty() => {
                     let target = app.targets[app.selected].clone();
-                    // Show the command in output, replacing newlines with spaces for display
                     let display = body.replace('\n', " ");
                     app.push(format!("> [{target}] {display}"));
                     app.set_busy(&target, true);

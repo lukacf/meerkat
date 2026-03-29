@@ -3,9 +3,9 @@
 //! Runs on managed machines. Registers with a TUX host automatically,
 //! then serves as a directly-controlled agent with streaming output.
 //!
-//! Each incoming message is a new turn on the same agent session (history
-//! accumulates). Agent events (text deltas, tool calls) are streamed back
-//! to TUX as individual comms messages with the `__STREAM__` prefix.
+//! Sessions are persisted to disk. On restart the most recent session
+//! is automatically resumed. TUX can send `/new` to start a fresh
+//! session or `/resume` to pick from past sessions.
 //!
 //! ```text
 //! target <HOST:PORT> [--name NAME] [--model MODEL]
@@ -21,12 +21,13 @@ use meerkat::{AgentBuilder, AgentEvent, AgentFactory, CompositeDispatcher, Memor
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
 use meerkat_comms::{PeerMeta, TrustedPeer};
-use meerkat_store::{JsonlStore, StoreAdapter};
+use meerkat_core::AgentLlmClient;
+use meerkat_store::{JsonlStore, SessionFilter, SessionStore, StoreAdapter};
 use meerkat_tools::builtin::shell::ShellConfig;
 use tokio::sync::mpsc;
 
 use mdm_tux::{
-    CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
+    CMD_PREFIX, CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
     load_or_generate_keypair, register_with_host,
 };
 
@@ -116,8 +117,6 @@ async fn main() -> anyhow::Result<()> {
     builtin_config.policy.enable.insert("shell".into());
     builtin_config.policy.enable.insert("shell_job_cancel".into());
 
-    // Provide a session ID + ops lifecycle registry so the JobManager
-    // is session-bound and supports background shell execution.
     let session_id = meerkat_core::types::SessionId::new().to_string();
     let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
         Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
@@ -136,33 +135,28 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("build composite dispatcher")?;
 
-    let tools = Arc::new(CommsToolDispatcher::with_inner(
+    let tools: Arc<_> = Arc::new(CommsToolDispatcher::with_inner(
         node.router.clone(),
         node.trusted.clone(),
         Arc::new(builtin),
     ));
 
-    // ── 5. Build agent ────────────────────────────────────────────────────────
-    let llm = build_llm_client(&factory, &model, &provider).await?;
+    // ── 5. Build agent (auto-resume most recent session) ──────────────────────
+    let llm: Arc<dyn AgentLlmClient> = build_llm_client(&factory, &model, &provider).await?;
+    let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
 
-    let store = Arc::new(JsonlStore::new(session_dir));
-    store.init().await?;
-    let store = Arc::new(StoreAdapter::new(store));
+    let jsonl_store = Arc::new(JsonlStore::new(session_dir));
+    jsonl_store.init().await?;
+    let store = Arc::new(StoreAdapter::new(jsonl_store.clone()));
 
-    let mut agent = AgentBuilder::new()
-        .model(&model)
-        .system_prompt(SYSTEM_PROMPT.replace("{name}", &name))
-        .build(llm, tools, store)
-        .await;
+    let mut agent = build_agent_fresh_or_resume(
+        &jsonl_store, &llm, &tools, &store, &model, &system_prompt, None,
+    )
+    .await;
 
     // ── 6. Listen for commands with streaming ─────────────────────────────────
-    // Each message is a new turn on the same session (history accumulates).
-    // Agent events are forwarded to the sender as __STREAM__-prefixed messages.
-    // DISMISS from a peer exits the process.
     println!("\nReady. Waiting for commands...\n");
 
-    // We need a mutable reference to node for recv_message, but also need
-    // the router for the event forwarder. Clone the router Arc before the loop.
     let router = node.router.clone();
     let mut node = node;
 
@@ -176,48 +170,224 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let sender = msg.from_peer.clone();
+
+        // Check for slash commands (__CMD__ prefix)
+        if let meerkat_comms::agent::types::CommsContent::Message { ref body, .. } = msg.content {
+            if let Some(cmd) = body.strip_prefix(CMD_PREFIX) {
+                let cmd = cmd.trim();
+                eprintln!("[target] command: {cmd}");
+
+                let response = handle_command(
+                    cmd,
+                    &jsonl_store,
+                    &llm,
+                    &tools,
+                    &store,
+                    &model,
+                    &system_prompt,
+                    &mut agent,
+                )
+                .await;
+
+                let _ = router
+                    .send(
+                        &sender,
+                        MessageKind::Message { body: response, blocks: None },
+                    )
+                    .await;
+                continue;
+            }
+        }
+
         eprintln!("[target] received message from '{sender}'");
 
-        // Create a per-turn event channel + forwarder
+        // Normal message: run agent with streaming
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
         let fwd_router = router.clone();
         let fwd_sender = sender.clone();
         let fwd_handle = tokio::spawn(async move {
-            let mut count = 0u32;
             while let Some(event) = event_rx.recv().await {
                 if should_forward(&event) {
                     let Ok(json) = serde_json::to_string(&event) else {
                         continue;
                     };
                     let body = format!("{STREAM_PREFIX}{json}");
-                    if let Err(e) = fwd_router
+                    let _ = fwd_router
                         .send(&fwd_sender, MessageKind::Message { body, blocks: None })
-                        .await
-                    {
-                        eprintln!("[target] failed to send event to '{fwd_sender}': {e}");
-                    } else {
-                        count += 1;
-                    }
+                        .await;
                 }
             }
-            eprintln!("[target] forwarded {count} events to '{fwd_sender}'");
         });
 
         let input = msg.to_user_message_text();
-        eprintln!("[target] running agent...");
-        match agent.run_with_events(input.into(), event_tx).await {
-            Ok(result) => eprintln!("[target] agent done ({} chars)", result.text.len()),
-            Err(e) => eprintln!("[target] agent error: {e}"),
+        if let Err(e) = agent.run_with_events(input.into(), event_tx).await {
+            eprintln!("[target] agent error: {e}");
         }
 
-        // event_tx is dropped here → fwd_handle will finish draining
         let _ = fwd_handle.await;
     }
 
     Ok(())
 }
 
-/// Select which events to stream back to TUX.
+// ── Command handling ──────────────────────────────────────────────────────────
+
+async fn handle_command(
+    cmd: &str,
+    jsonl_store: &Arc<JsonlStore>,
+    llm: &Arc<dyn AgentLlmClient>,
+    tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
+    store: &Arc<StoreAdapter<Arc<JsonlStore>>>,
+    model: &str,
+    system_prompt: &str,
+    agent: &mut meerkat::DynAgent,
+) -> String {
+    if cmd == "NEW_SESSION" {
+        *agent = AgentBuilder::new()
+            .model(model)
+            .system_prompt(system_prompt)
+            .build(llm.clone(), tools.clone() as _, store.clone() as _)
+            .await;
+        let sid = agent.session().id();
+        eprintln!("[target] new session: {sid}");
+        format!("New session started: {sid}")
+    } else if cmd == "LIST_SESSIONS" {
+        match jsonl_store.list(SessionFilter::default()).await {
+            Ok(mut sessions) => {
+                sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                if sessions.is_empty() {
+                    "No saved sessions.".into()
+                } else {
+                    let current_id = agent.session().id().to_string();
+                    let mut out = String::from("**Sessions:**\n");
+                    for (i, s) in sessions.iter().enumerate().take(20) {
+                        let age = s
+                            .updated_at
+                            .elapsed()
+                            .map(|d| format_duration(d))
+                            .unwrap_or_else(|_| "?".into());
+                        let marker = if s.id.to_string() == current_id {
+                            " ← current"
+                        } else {
+                            ""
+                        };
+                        out.push_str(&format!(
+                            "  **{}.**  {} msgs, {} ago{}\n",
+                            i + 1,
+                            s.message_count,
+                            age,
+                            marker,
+                        ));
+                    }
+                    out.push_str("\nType `/resume <number>` to load a session.");
+                    out
+                }
+            }
+            Err(e) => format!("Error listing sessions: {e}"),
+        }
+    } else if let Some(arg) = cmd.strip_prefix("RESUME ") {
+        let arg = arg.trim();
+        // Parse as 1-based index
+        let idx: usize = match arg.parse::<usize>() {
+            Ok(n) if n >= 1 => n - 1,
+            _ => return format!("Invalid session number: {arg}"),
+        };
+        match jsonl_store.list(SessionFilter::default()).await {
+            Ok(mut sessions) => {
+                sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                if idx >= sessions.len() {
+                    return format!("Session {arg} not found (have {})", sessions.len());
+                }
+                let meta = &sessions[idx];
+                match jsonl_store.load(&meta.id).await {
+                    Ok(Some(session)) => {
+                        let msg_count = session.messages().len();
+                        *agent = AgentBuilder::new()
+                            .model(model)
+                            .system_prompt(system_prompt)
+                            .resume_session(session)
+                            .build(llm.clone(), tools.clone() as _, store.clone() as _)
+                            .await;
+                        eprintln!("[target] resumed session {} ({msg_count} messages)", meta.id);
+                        format!("Resumed session {} ({msg_count} messages)", meta.id)
+                    }
+                    Ok(None) => format!("Session {} not found on disk", meta.id),
+                    Err(e) => format!("Error loading session: {e}"),
+                }
+            }
+            Err(e) => format!("Error listing sessions: {e}"),
+        }
+    } else {
+        format!("Unknown command: {cmd}")
+    }
+}
+
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Build an agent, auto-resuming the most recent session if one exists.
+async fn build_agent_fresh_or_resume(
+    jsonl_store: &Arc<JsonlStore>,
+    llm: &Arc<dyn AgentLlmClient>,
+    tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
+    store: &Arc<StoreAdapter<Arc<JsonlStore>>>,
+    model: &str,
+    system_prompt: &str,
+    specific_session: Option<meerkat_core::session::Session>,
+) -> meerkat::DynAgent {
+    // If a specific session was requested, use it
+    if let Some(session) = specific_session {
+        let msg_count = session.messages().len();
+        eprintln!("[target] resuming session with {msg_count} messages");
+        return AgentBuilder::new()
+            .model(model)
+            .system_prompt(system_prompt)
+            .resume_session(session)
+            .build(llm.clone(), tools.clone() as _, store.clone() as _)
+            .await;
+    }
+
+    // Try to auto-resume the most recent session
+    if let Ok(mut sessions) = jsonl_store.list(SessionFilter::default()).await {
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        if let Some(latest) = sessions.first() {
+            if let Ok(Some(session)) = jsonl_store.load(&latest.id).await {
+                let msg_count = session.messages().len();
+                eprintln!(
+                    "[target] auto-resuming session {} ({msg_count} messages)",
+                    latest.id
+                );
+                return AgentBuilder::new()
+                    .model(model)
+                    .system_prompt(system_prompt)
+                    .resume_session(session)
+                    .build(llm.clone(), tools.clone() as _, store.clone() as _)
+                    .await;
+            }
+        }
+    }
+
+    // Fresh session
+    eprintln!("[target] starting fresh session");
+    AgentBuilder::new()
+        .model(model)
+        .system_prompt(system_prompt)
+        .build(llm.clone(), tools.clone() as _, store.clone() as _)
+        .await
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 fn should_forward(event: &AgentEvent) -> bool {
     matches!(
         event,

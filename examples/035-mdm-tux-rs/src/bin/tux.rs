@@ -557,8 +557,13 @@ fn handle_key(
             app.auto_scroll = true;
             app.update_scroll();
         }
-        // Shift+Enter or Alt+Enter → insert newline
-        KeyCode::Enter if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+        // Shift+Enter, Alt+Enter, or Ctrl+J → insert newline
+        KeyCode::Enter
+            if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+        {
+            app.input.push('\n');
+        }
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
             app.input.push('\n');
         }
         // Plain Enter → submit
@@ -595,9 +600,15 @@ fn handle_key(
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 fn render(f: &mut ratatui::Frame, app: &mut App) {
-    // Input box height: 2 (borders) + number of content lines (min 1, max 8)
-    let input_lines = (app.input.chars().filter(|&c| c == '\n').count() + 1).clamp(1, 8) as u16;
-    let input_height = input_lines + 2;
+    // Input box height: 2 (borders) + estimated visual lines (min 1, max 8).
+    // Account for both explicit newlines and soft wrapping.
+    let input_width = f.area().width.saturating_sub(4) as usize; // borders + padding
+    let input_lines: usize = app
+        .input
+        .split('\n')
+        .map(|line| if input_width == 0 { 1 } else { (line.len() / input_width.max(1)) + 1 })
+        .sum();
+    let input_height = (input_lines.clamp(1, 8) as u16) + 2;
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -737,7 +748,7 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
     if let Some(last) = lines.last_mut() {
         last.spans.push(Span::styled("_", Style::default().fg(Color::DarkGray)));
     }
-    let title = format!("COMMAND  [Shift+Enter: newline]");
+    let title = "COMMAND  [Ctrl+J: newline]".to_string();
     f.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))

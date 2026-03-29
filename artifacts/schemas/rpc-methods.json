@@ -124,11 +124,7 @@
       "result_type": "InputListResult"
     },
     {
-      "description": "List available mob prefabs",
-      "name": "mob/prefabs"
-    },
-    {
-      "description": "Create a mob from a prefab or definition",
+      "description": "Create a mob from a definition",
       "name": "mob/create"
     },
     {

@@ -138,7 +138,10 @@ impl App {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "warn,tui_markdown=error".into()),
+        )
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();

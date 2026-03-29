@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Part 1: Explore the coding swarm definition ──────────────────────────
     println!("=== Mob: Coding Swarm ===\n");
 
-    let definition = MobDefinition::from_toml(CODING_SWARM_TOML).expect("coding swarm definition");
+    let definition = MobDefinition::from_toml(CODING_SWARM_TOML)?;
 
     println!("Mob ID: {}", definition.id);
     println!("Profiles:");
@@ -211,7 +211,7 @@ content = "Implement Rust services, APIs, and data models."
     let session_service = Arc::new(build_ephemeral_service(factory, config, 16));
 
     // Create the mob from the coding swarm definition.
-    let prefab_def = MobDefinition::from_toml(CODING_SWARM_TOML).expect("coding swarm definition");
+    let prefab_def = MobDefinition::from_toml(CODING_SWARM_TOML)?;
     let storage = MobStorage::in_memory();
     let handle = MobBuilder::new(prefab_def, storage)
         .with_session_service(session_service)

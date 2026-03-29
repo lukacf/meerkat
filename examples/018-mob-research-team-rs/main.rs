@@ -97,8 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Part 1: Explore the research team definition ─────────────────────────
     println!("=== Mob: Research Team ===\n");
 
-    let prefab_def =
-        MobDefinition::from_toml(RESEARCH_TEAM_TOML).expect("research team definition");
+    let prefab_def = MobDefinition::from_toml(RESEARCH_TEAM_TOML)?;
 
     println!("Mob ID: {}", prefab_def.id);
     println!("Profiles:");

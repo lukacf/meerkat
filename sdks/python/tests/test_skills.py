@@ -259,6 +259,3 @@ async def test_set_config_returns_envelope():
     assert calls == [
         ("config/set", {"config": {"agent": {"model": "x"}}, "expected_generation": 6})
     ]
-
-
-

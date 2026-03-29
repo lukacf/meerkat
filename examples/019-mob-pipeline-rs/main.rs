@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Part 1: Explore the pipeline definition ──────────────────────────────
     println!("=== Mob: Pipeline ===\n");
-    println!("{}\n", PIPELINE_TOML);
+    println!("{PIPELINE_TOML}\n");
 
     // ── Part 2: Custom CI/CD pipeline definition (TOML) ──────────────────────
 

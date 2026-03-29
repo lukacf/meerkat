@@ -188,23 +188,40 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // ── 5. Spawn comms drain task ─────────────────────────────────────────────
-    // Parse __STREAM__-prefixed messages as streaming events.
+    // Use recv_raw() to bypass from_inbox_item trusted-peer filtering,
+    // then convert manually. This ensures dynamically registered peers
+    // are always accepted even if the snapshot-based filter rejects them.
     let router = node.router.clone();
     let trusted_shared = node.trusted.clone();
     tokio::spawn({
         let event_tx = event_tx.clone();
+        let trusted = trusted_shared.clone();
         async move {
             loop {
-                let Some(msg) = node.recv_message().await else {
+                let Some(item) = node.recv_raw().await else {
                     break;
                 };
+                // Convert raw InboxItem → CommsMessage with live trusted peers.
+                // Fall back to using pubkey as name if peer is unknown.
+                let msg = {
+                    let peers = trusted.read();
+                    meerkat_comms::agent::types::CommsMessage::from_inbox_item(
+                        &item, &peers, false, // require_peer_auth=false: accept all signed messages
+                    )
+                };
+                let Some(msg) = msg else {
+                    continue; // ACK or truly unprocessable
+                };
+
                 let tui_event = match &msg.content {
                     CommsContent::Message { body, .. }
                         if body.starts_with(STREAM_PREFIX) =>
                     {
                         let json = &body[STREAM_PREFIX.len()..];
                         match serde_json::from_str::<AgentEvent>(json) {
-                            Ok(event) => TuiEvent::StreamEvent { from: msg.from_peer.clone(), event },
+                            Ok(event) => {
+                                TuiEvent::StreamEvent { from: msg.from_peer.clone(), event }
+                            }
                             Err(_) => TuiEvent::CommsMessage(msg.to_user_message_text()),
                         }
                     }

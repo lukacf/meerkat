@@ -13,7 +13,7 @@ use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
 use meerkat_mob::{
     FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobDefinition, MobId, MobRespawnError,
-    MobRuntimeMode, Prefab, RunId, SpawnMemberSpec,
+    MobRuntimeMode, RunId, SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -30,29 +30,6 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
         return Err(invalid_params(id, "mob_id must not be empty"));
     }
     Ok(MobId::from(raw))
-}
-
-#[derive(Debug, Serialize)]
-struct MobPrefabEntry {
-    key: String,
-    toml_template: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MobPrefabsResult {
-    prefabs: Vec<MobPrefabEntry>,
-}
-
-/// Handle `mob/prefabs` — list built-in mob prefab templates.
-pub async fn handle_prefabs(id: Option<RpcId>) -> RpcResponse {
-    let prefabs = Prefab::all()
-        .into_iter()
-        .map(|prefab| MobPrefabEntry {
-            key: prefab.key().to_string(),
-            toml_template: prefab.toml_template().to_string(),
-        })
-        .collect();
-    RpcResponse::success(id, MobPrefabsResult { prefabs })
 }
 
 #[derive(Debug, Serialize)]
@@ -96,8 +73,6 @@ pub async fn handle_call(
 #[derive(Debug, Deserialize)]
 pub struct MobCreateParams {
     #[serde(default)]
-    pub prefab: Option<String>,
-    #[serde(default)]
     pub definition: Option<MobDefinition>,
 }
 
@@ -111,19 +86,10 @@ pub async fn handle_create(
         Err(resp) => return resp.with_id(id),
     };
 
-    let result = match (params.prefab.as_deref(), params.definition) {
-        (Some(prefab_key), None) => match Prefab::from_key(prefab_key) {
-            Some(prefab) => state.mob_create_prefab(prefab).await,
-            None => {
-                return invalid_params(id, format!("Unknown prefab: {prefab_key}"));
-            }
-        },
-        (None, Some(definition)) => state.mob_create_definition(definition).await,
-        (Some(_), Some(_)) => {
-            return invalid_params(id, "Provide either prefab or definition, not both");
-        }
-        (None, None) => {
-            return invalid_params(id, "Provide either prefab or definition");
+    let result = match params.definition {
+        Some(definition) => state.mob_create_definition(definition).await,
+        None => {
+            return invalid_params(id, "definition required");
         }
     };
 
@@ -1030,31 +996,6 @@ pub async fn handle_wait_kickoff(
 mod tests {
     use super::*;
     use meerkat_core::types::SessionId;
-
-    #[tokio::test]
-    async fn handle_prefabs_returns_expected_shape() -> Result<(), Box<dyn std::error::Error>> {
-        let resp = handle_prefabs(Some(RpcId::Num(7))).await;
-        assert!(resp.error.is_none());
-        assert_eq!(resp.id, Some(RpcId::Num(7)));
-        let result = resp.result.as_ref();
-        assert!(result.is_some(), "result payload should exist");
-        let Some(raw) = result else {
-            return Ok(());
-        };
-        let value: serde_json::Value = serde_json::from_str(raw.get())?;
-        let prefabs = value["prefabs"].as_array();
-        assert!(prefabs.is_some(), "prefabs should be an array");
-        let Some(prefabs) = prefabs else {
-            return Ok(());
-        };
-        assert!(prefabs.iter().all(|entry| entry["key"].is_string()));
-        assert!(
-            prefabs
-                .iter()
-                .all(|entry| entry["toml_template"].is_string())
-        );
-        Ok(())
-    }
 
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()

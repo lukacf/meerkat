@@ -1040,7 +1040,6 @@ pub fn router(state: AppState) -> Router {
 
     #[cfg(feature = "mob")]
     let r = r
-        .route("/mob/prefabs", get(mob_prefabs))
         .route("/mob/tools", get(mob_tools))
         .route("/mob/call", post(mob_call))
         .route("/mob/{id}/events", get(mob_event_stream))
@@ -1315,21 +1314,6 @@ async fn input_state(
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
-}
-
-/// GET /mob/prefabs — list built-in mob prefab templates.
-#[cfg(feature = "mob")]
-async fn mob_prefabs() -> Json<Value> {
-    let prefabs: Vec<Value> = meerkat_mob::Prefab::all()
-        .into_iter()
-        .map(|prefab| {
-            json!({
-                "key": prefab.key(),
-                "toml_template": prefab.toml_template(),
-            })
-        })
-        .collect();
-    Json(json!({ "prefabs": prefabs }))
 }
 
 /// GET /mob/tools — list protocol-callable mob lifecycle tools.
@@ -4794,56 +4778,6 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn test_mob_prefabs_handler_returns_builtin_prefabs() {
-        let Json(result) = mob_prefabs().await;
-        let prefabs = result["prefabs"]
-            .as_array()
-            .expect("prefabs should be an array");
-        assert!(prefabs.len() >= 4);
-        let keys: Vec<&str> = prefabs
-            .iter()
-            .filter_map(|entry| entry["key"].as_str())
-            .collect();
-        assert!(keys.contains(&"coding_swarm"));
-        assert!(keys.contains(&"code_review"));
-        assert!(keys.contains(&"research_team"));
-        assert!(keys.contains(&"pipeline"));
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_mob_prefabs_route_returns_json() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let app = router(state);
-
-        let request = axum::http::Request::builder()
-            .method("GET")
-            .uri("/mob/prefabs")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        let prefabs = payload["prefabs"]
-            .as_array()
-            .expect("prefabs should be an array");
-        assert!(
-            prefabs
-                .iter()
-                .all(|entry| entry["toml_template"].is_string())
-        );
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
     async fn test_mob_tools_and_call_routes_work() {
         use axum::body::Body;
         use http_body_util::BodyExt;
@@ -4879,7 +4813,7 @@ mod tests {
             .body(Body::from(
                 serde_json::json!({
                     "name": "mob_create",
-                    "arguments": { "prefab": "coding_swarm" }
+                    "arguments": { "definition": { "id": "test_mob", "profiles": { "worker": { "model": "claude-sonnet-4-6", "tools": { "comms": true } } } } }
                 })
                 .to_string(),
             ))
@@ -4902,9 +4836,13 @@ mod tests {
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n",
+        )
+        .expect("minimal mob definition");
         let mob_id = state
             .mob_state
-            .mob_create_prefab(meerkat_mob::Prefab::CodingSwarm)
+            .mob_create_definition(definition)
             .await
             .expect("create mob");
 
@@ -4939,9 +4877,13 @@ mod tests {
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            "[mob]\nid = \"test_mob\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-6\"\n",
+        )
+        .expect("minimal mob definition");
         let mob_id = state
             .mob_state
-            .mob_create_prefab(meerkat_mob::Prefab::CodingSwarm)
+            .mob_create_definition(definition)
             .await
             .expect("create mob");
 

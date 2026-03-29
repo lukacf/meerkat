@@ -431,7 +431,7 @@ describe("Skills v2.1", () => {
     };
 
     const tools = await client.listMobTools();
-    const result = await client.callMobTool("mob_create", { prefab: "coding_swarm" });
+    const result = await client.callMobTool("mob_create", { definition: { id: "mob-1", profiles: { worker: { model: "claude-sonnet-4-6" } } } });
 
     assert.deepEqual(tools, [{ name: "mob_create" }]);
     assert.equal(result.mob_id, "m1");
@@ -439,7 +439,7 @@ describe("Skills v2.1", () => {
       { method: "mob/tools", params: {} },
       {
         method: "mob/call",
-        params: { name: "mob_create", arguments: { prefab: "coding_swarm" } },
+        params: { name: "mob_create", arguments: { definition: { id: "mob-1", profiles: { worker: { model: "claude-sonnet-4-6" } } } } },
       },
     ]);
   });

@@ -813,7 +813,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     client._request = fake_request  # type: ignore[method-assign]
     client.require_capability = lambda _cap: None  # type: ignore[method-assign]
 
-    mob = await client.create_mob(prefab="office")
+    mob = await client.create_mob(definition={"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}})
     assert mob.id == "mob-1"
     assert await client.list_mobs() == [{"mob_id": "mob-1"}]
     assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "running"}

@@ -665,10 +665,6 @@ class MeerkatClient:
             params["source"] = source
         return await self._request("skills/inspect", params)
 
-    async def list_mob_prefabs(self) -> list[dict[str, Any]]:
-        result = await self._request("mob/prefabs", {})
-        return result.get("prefabs", [])
-
     async def list_mob_tools(self) -> list[dict[str, Any]]:
         result = await self._request("mob/tools", {})
         return result.get("tools", [])
@@ -697,11 +693,10 @@ class MeerkatClient:
     async def create_mob(
         self,
         *,
-        prefab: str | None = None,
-        definition: dict[str, Any] | None = None,
+        definition: dict[str, Any],
     ) -> Mob:
         self.require_capability("mob")
-        result = await self._request("mob/create", {"prefab": prefab, "definition": definition})
+        result = await self._request("mob/create", {"definition": definition})
         return Mob(self, str(result.get("mob_id", "")))
 
     def mob(self, mob_id: str) -> Mob:

@@ -557,15 +557,6 @@ export class MeerkatClient {
     };
   }
 
-  async listMobPrefabs(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.request("mob/prefabs", {});
-    return (result.prefabs as Array<Record<string, unknown>>) ?? [];
-  }
-
-  async list_mob_prefabs(): Promise<Array<Record<string, unknown>>> {
-    return this.listMobPrefabs();
-  }
-
   async listMobTools(): Promise<Array<Record<string, unknown>>> {
     const result = await this.request("mob/tools", {});
     return (result.tools as Array<Record<string, unknown>>) ?? [];

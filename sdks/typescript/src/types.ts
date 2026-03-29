@@ -275,6 +275,5 @@ export interface AttributedMobEvent {
 
 /** Options for creating a mob through the RPC-backed SDK surface. */
 export interface MobCreateOptions {
-  prefab?: string;
-  definition?: Record<string, unknown>;
+  definition: Record<string, unknown>;
 }

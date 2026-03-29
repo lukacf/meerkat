@@ -1,6 +1,94 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use crate::{FlowRunConfig, MobBuilder, MobError, MobStorage, Prefab, SpawnMemberSpec};
+use crate::{FlowRunConfig, MobBuilder, MobDefinition, MobError, MobStorage, SpawnMemberSpec};
+
+/// Pipeline definition with flows, topology, supervisor, and limits.
+/// Used for tests that exercise FlowRunConfig derivation.
+const PIPELINE_TOML: &str = r#"
+[mob]
+id = "pipeline"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+skills = ["orchestrator"]
+peer_description = "Orchestrator"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+skills = ["worker"]
+peer_description = "Worker"
+external_addressable = false
+
+[profiles.worker.tools]
+builtins = true
+shell = true
+comms = true
+mob_tasks = true
+
+[wiring]
+auto_wire_orchestrator = true
+
+[skills.orchestrator]
+source = "inline"
+content = "Drive staged pipeline execution."
+
+[skills.worker]
+source = "inline"
+content = "Execute your stage deterministically and emit handoff artifacts."
+
+[flows.pipeline]
+description = "pipeline flow"
+
+[flows.pipeline.steps.start]
+role = "lead"
+message = "go"
+dispatch_mode = "one_to_one"
+depends_on_mode = "all"
+
+[flows.pipeline.steps.branch_a]
+role = "worker"
+message = "a"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "a" }
+
+[flows.pipeline.steps.branch_b]
+role = "worker"
+message = "b"
+depends_on = ["start"]
+branch = "choose"
+condition = { op = "eq", path = "params.choice", value = "b" }
+
+[flows.pipeline.steps.join]
+role = "lead"
+message = "join"
+depends_on = ["branch_a", "branch_b"]
+depends_on_mode = "any"
+collection_policy = { type = "quorum", n = 1 }
+timeout_ms = 1000
+expected_schema_ref = "schemas/join.json"
+
+[topology]
+mode = "strict"
+rules = [{ from_role = "lead", to_role = "worker", allowed = true }]
+
+[supervisor]
+role = "lead"
+escalation_threshold = 2
+
+[limits]
+max_flow_duration_ms = 30000
+max_step_retries = 1
+max_orphaned_turns = 8
+"#;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
@@ -36,7 +124,7 @@ fn background_spec(name: &str) -> OperationSpec {
 #[tokio::test]
 #[ignore = "Phase 1 red-ok mob decomposition suite"]
 async fn mob_decomposition_red_ok_builder_mode_guards_keep_create_and_resume_paths_distinct() {
-    let definition = Prefab::Pipeline.definition();
+    let definition = MobDefinition::from_toml(PIPELINE_TOML).expect("pipeline toml");
 
     let resume_on_create = match MobBuilder::new(definition.clone(), MobStorage::in_memory())
         .resume()
@@ -66,13 +154,13 @@ async fn mob_decomposition_red_ok_builder_mode_guards_keep_create_and_resume_pat
 #[test]
 #[ignore = "Phase 1 red-ok mob decomposition suite"]
 fn mob_decomposition_red_ok_flow_run_config_carries_orchestrator_and_flow_truth() {
-    let definition = Prefab::Pipeline.definition();
+    let definition = MobDefinition::from_toml(PIPELINE_TOML).expect("pipeline toml");
     let flow_id = definition
         .flows
         .keys()
         .next()
         .cloned()
-        .expect("pipeline prefab should define at least one flow");
+        .expect("pipeline definition should define at least one flow");
     let config = FlowRunConfig::from_definition(flow_id.clone(), &definition)
         .expect("flow config should be derivable from durable mob definition");
 

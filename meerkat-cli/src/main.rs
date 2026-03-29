@@ -9241,7 +9241,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &dispatcher_a,
             "t-create",
             "mob_create",
-            serde_json::json!({"prefab":"pipeline"}),
+            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]
@@ -9313,7 +9313,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &dispatcher,
             "t-create-runtime",
             "mob_create",
-            serde_json::json!({"prefab":"pipeline"}),
+            serde_json::json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
@@ -9361,7 +9361,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             &dispatcher,
             "t-create",
             "mob_create",
-            serde_json::json!({"prefab":"pipeline"}),
+            serde_json::json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}}),
         )
         .await;
         let mob_id = created["mob_id"]

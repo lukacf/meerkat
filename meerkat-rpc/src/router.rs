@@ -637,8 +637,6 @@ impl MethodRouter {
                 }
             }
             #[cfg(feature = "mob")]
-            "mob/prefabs" => handlers::mob::handle_prefabs(id).await,
-            #[cfg(feature = "mob")]
             "mob/tools" => handlers::mob::handle_tools(id).await,
             #[cfg(feature = "mob")]
             "mob/call" => handlers::mob::handle_call(id, params, &self.mob_state).await,
@@ -2392,7 +2390,7 @@ mod tests {
         );
         #[cfg(feature = "mob")]
         {
-            assert!(method_names.contains(&"mob/prefabs"));
+            assert!(!method_names.contains(&"mob/prefabs"));
             assert!(method_names.contains(&"mob/spawn_helper"));
             assert!(method_names.contains(&"mob/fork_helper"));
             assert!(method_names.contains(&"mob/force_cancel"));
@@ -2415,44 +2413,6 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_prefabs_returns_prefab_templates() {
-        let (router, _notif_rx) = test_router().await;
-        let req = make_request_no_params("mob/prefabs");
-
-        let resp = router.dispatch(req).await.unwrap();
-        let result = result_value(&resp);
-        let prefabs = result["prefabs"]
-            .as_array()
-            .expect("prefabs should be an array");
-        assert!(
-            prefabs.len() >= 4,
-            "expected built-in prefabs, got {}",
-            prefabs.len()
-        );
-
-        let keys: Vec<&str> = prefabs
-            .iter()
-            .filter_map(|entry| entry["key"].as_str())
-            .collect();
-        assert!(keys.contains(&"coding_swarm"));
-        assert!(keys.contains(&"code_review"));
-        assert!(keys.contains(&"research_team"));
-        assert!(keys.contains(&"pipeline"));
-
-        for entry in prefabs {
-            assert!(entry["key"].is_string());
-            let template = entry["toml_template"]
-                .as_str()
-                .expect("toml_template should be a string");
-            assert!(
-                template.contains("id ="),
-                "template should look like TOML definition"
-            );
-        }
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
     async fn mob_tools_and_call_flow_work() {
         let (router, _notif_rx) = test_router().await;
 
@@ -2471,7 +2431,17 @@ mod tests {
                 "mob/call",
                 serde_json::json!({
                     "name": "mob_create",
-                    "arguments": { "prefab": "coding_swarm" }
+                    "arguments": {
+                        "definition": {
+                            "id": "test_mob",
+                            "profiles": {
+                                "worker": {
+                                    "model": "claude-sonnet-4-6",
+                                    "tools": { "comms": true }
+                                }
+                            }
+                        }
+                    }
                 }),
             ))
             .await
@@ -3761,7 +3731,7 @@ mod tests {
                 "mob/call",
                 serde_json::json!({
                     "name": "mob_create",
-                    "arguments": { "prefab": "coding_swarm" }
+                    "arguments": { "definition": { "id": "test_mob", "profiles": { "worker": { "model": "claude-sonnet-4-6", "tools": { "comms": true } } } } }
                 }),
             ))
             .await
@@ -3817,7 +3787,7 @@ mod tests {
                 "mob/call",
                 serde_json::json!({
                     "name": "mob_create",
-                    "arguments": { "prefab": "coding_swarm" }
+                    "arguments": { "definition": { "id": "test_mob", "profiles": { "worker": { "model": "claude-sonnet-4-6", "tools": { "comms": true } } } } }
                 }),
             ))
             .await

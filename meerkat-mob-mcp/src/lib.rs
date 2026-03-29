@@ -26,8 +26,7 @@ use meerkat_core::types::{
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::{
     FlowId, MeerkatId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
-    MobRuntimeMode, MobSessionService, MobState, MobStorage, Prefab, ProfileName, RunId,
-    SpawnMemberSpec,
+    MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -164,10 +163,6 @@ impl MobMcpState {
             }
         }
         Ok(mob_id)
-    }
-
-    pub async fn mob_create_prefab(&self, prefab: Prefab) -> Result<MobId, MobError> {
-        self.mob_create_definition(prefab.definition()).await
     }
 
     /// Register an existing mob handle in this dispatcher state.
@@ -1045,11 +1040,8 @@ impl MobMcpDispatcher {
             // ── Mob-level (mob_*) ──────────────────────────────────────
             tool(
                 "mob_create",
-                &format!(
-                    "{PRIMER} Create a new mob. Provide exactly one of: prefab or definition. \
-                     Returns mob_id."
-                ),
-                json!({"type":"object","properties":{"prefab":{"type":"string"},"definition":{"type":"object"}}}),
+                &format!("{PRIMER} Create a new mob from a definition. Returns mob_id."),
+                json!({"type":"object","properties":{"definition":{"type":"object"}},"required":["definition"]}),
             ),
             tool(
                 "mob_list",
@@ -1292,7 +1284,6 @@ fn map_mob_err(call: ToolCallView<'_>, err: MobError) -> ToolError {
 
 #[derive(Deserialize)]
 struct MobCreateArgs {
-    prefab: Option<String>,
     definition: Option<MobDefinition>,
 }
 #[derive(Deserialize)]
@@ -1458,20 +1449,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                if args.prefab.is_some() && args.definition.is_some() {
-                    return Err(ToolError::invalid_arguments(
-                        call.name,
-                        "provide exactly one of prefab or definition",
-                    ));
-                }
-                let mob_id = if let Some(prefab) = args.prefab {
-                    let p = Prefab::from_key(&prefab)
-                        .ok_or_else(|| ToolError::invalid_arguments(call.name, "unknown prefab"))?;
-                    self.state
-                        .mob_create_prefab(p)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?
-                } else if let Some(definition) = args.definition {
+                let mob_id = if let Some(definition) = args.definition {
                     self.state
                         .mob_create_definition(definition)
                         .await
@@ -1479,7 +1457,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 } else {
                     return Err(ToolError::invalid_arguments(
                         call.name,
-                        "provide prefab or definition",
+                        "definition required",
                     ));
                 };
                 encode(call, json!({"mob_id": mob_id}))
@@ -2765,11 +2743,11 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let a = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"]
+        let a = call_tool(&d, "mob_create", json!({"definition":{"id":"mob_a","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
-        let b = call_tool(&d, "mob_create", json!({"prefab":"code_review"})).await["mob_id"]
+        let b = call_tool(&d, "mob_create", json!({"definition":{"id":"mob_b","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -2812,7 +2790,7 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"]
+        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -2902,7 +2880,7 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await["mob_id"]
+        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -3133,7 +3111,7 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
 
         call_tool(
@@ -3176,7 +3154,7 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
 
         let spawned = call_tool(
@@ -3216,7 +3194,7 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
@@ -3253,7 +3231,7 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"prefab":"coding_swarm"})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-6","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
@@ -3286,9 +3264,9 @@ timeout_ms = 1000
         let state = Arc::new(MobMcpState::new(svc));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"prefab":"pipeline"})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"dup_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
-        let error = call_tool_err(&d, "mob_create", json!({"prefab":"pipeline"})).await;
+        let error = call_tool_err(&d, "mob_create", json!({"definition":{"id":"dup_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         assert!(
             matches!(error, ToolError::ExecutionFailed { .. }),
             "duplicate mob creation should fail deterministically"
@@ -3308,41 +3286,6 @@ timeout_ms = 1000
             ids,
             vec![mob_id],
             "duplicate create must not replace active mob"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mob_create_rejects_prefab_and_definition_together() {
-        let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(svc));
-        let d = MobMcpDispatcher::new(state);
-
-        let error = call_tool_err(
-            &d,
-            "mob_create",
-            json!({
-                "prefab":"pipeline",
-                "definition": {
-                    "id": "ignored",
-                    "orchestrator": {"profile": "lead"},
-                    "profiles": {
-                        "lead": {
-                            "model": "claude-opus-4-6",
-                            "tools": {"comms": true},
-                            "external_addressable": true
-                        }
-                    },
-                    "mcp_servers": {},
-                    "wiring": {"auto_wire_orchestrator": false, "role_wiring": []},
-                    "skills": {},
-                    "backend": {"default": "session"}
-                }
-            }),
-        )
-        .await;
-        assert!(
-            matches!(error, ToolError::InvalidArguments { .. }),
-            "mob_create should reject conflicting inputs"
         );
     }
 }

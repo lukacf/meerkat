@@ -213,26 +213,6 @@ async def test_deferred_session_history_routes_to_client_history_reader():
 
 
 @pytest.mark.asyncio
-async def test_client_list_mob_prefabs_calls_rpc_method():
-    client = object.__new__(MeerkatClient)
-    calls: list[tuple[str, dict]] = []
-
-    async def fake_request(method, params):
-        calls.append((method, params))
-        return {
-            "prefabs": [
-                {"key": "coding_swarm", "toml_template": 'id = "coding_swarm"'},
-                {"key": "pipeline", "toml_template": 'id = "pipeline"'},
-            ]
-        }
-
-    client._request = fake_request  # type: ignore[attr-defined]
-    prefabs = await MeerkatClient.list_mob_prefabs(client)
-    assert [entry["key"] for entry in prefabs] == ["coding_swarm", "pipeline"]
-    assert calls == [("mob/prefabs", {})]
-
-
-@pytest.mark.asyncio
 async def test_client_list_mob_tools_and_call_tool():
     client = object.__new__(MeerkatClient)
     calls: list[tuple[str, dict]] = []
@@ -250,13 +230,13 @@ async def test_client_list_mob_tools_and_call_tool():
     result = await MeerkatClient.call_mob_tool(
         client,
         "mob_create",
-        {"prefab": "coding_swarm"},
+        {"definition": {"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}}},
     )
     assert tools == [{"name": "mob_create"}]
     assert result["mob_id"] == "m1"
     assert calls == [
         ("mob/tools", {}),
-        ("mob/call", {"name": "mob_create", "arguments": {"prefab": "coding_swarm"}}),
+        ("mob/call", {"name": "mob_create", "arguments": {"definition": {"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}}}}),
     ]
 
 
@@ -281,13 +261,4 @@ async def test_set_config_returns_envelope():
     ]
 
 
-@pytest.mark.asyncio
-async def test_client_list_mob_prefabs_propagates_errors():
-    client = object.__new__(MeerkatClient)
 
-    async def fake_request(_method, _params):
-        raise RuntimeError("transport down")
-
-    client._request = fake_request  # type: ignore[attr-defined]
-    with pytest.raises(RuntimeError, match="transport down"):
-        await MeerkatClient.list_mob_prefabs(client)

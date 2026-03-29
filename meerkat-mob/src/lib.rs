@@ -42,7 +42,6 @@ pub mod error;
 pub mod event;
 pub mod ids;
 pub mod launch;
-pub mod prefab;
 pub mod profile;
 pub mod roster;
 pub mod run;
@@ -61,7 +60,6 @@ pub use error::MobError;
 pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
-pub use prefab::Prefab;
 pub use profile::{Profile, ToolConfig};
 pub use roster::{MemberState, Roster, RosterAddEntry, RosterEntry};
 pub use run::{

@@ -836,7 +836,6 @@ async fn initialize_methods_list_complete() {
     #[cfg(feature = "mob")]
     {
         let expected_mob = [
-            "mob/prefabs",
             "mob/create",
             "mob/list",
             "mob/status",
@@ -906,13 +905,20 @@ async fn notification_catalog_lists_live_stream_notifications() {
 async fn mob_create_status_list_lifecycle() {
     let (mut writer, mut reader, handle) = spawn_test_server();
 
-    // mob/create using a prefab (avoids manual definition wiring)
     let create_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "mob/create",
         "params": {
-            "prefab": "coding_swarm"
+            "definition": {
+                "id": "test_mob",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": { "comms": true }
+                    }
+                }
+            }
         }
     });
     send_request(&mut writer, &create_req).await;

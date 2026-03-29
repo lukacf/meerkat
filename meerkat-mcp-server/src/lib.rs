@@ -1113,15 +1113,6 @@ fn base_tools_list() -> Vec<Value> {
             "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
         }),
         json!({
-            "name": "meerkat_mob_prefabs",
-            "description": "List built-in mob prefab templates.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        json!({
             "name": "meerkat_read",
             "description": "Read current session state.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionIdInput>()
@@ -1231,9 +1222,6 @@ pub fn tools_list() -> Vec<Value> {
     #[cfg(feature = "mob")]
     tools.extend(mob_event_stream_tools_list());
 
-    #[cfg(not(feature = "mob"))]
-    tools.retain(|tool| tool["name"] != "meerkat_mob_prefabs");
-
     #[cfg(feature = "comms")]
     tools.extend(comms_tools_list());
 
@@ -1310,11 +1298,6 @@ pub async fn handle_tools_call_with_notifier(
                 .map(wrap_tool_payload)
                 .map_err(ToolCallError::internal)
         }
-        #[cfg(feature = "mob")]
-        "meerkat_mob_prefabs" => handle_meerkat_mob_prefabs()
-            .await
-            .map(wrap_tool_payload)
-            .map_err(ToolCallError::internal),
         "meerkat_read" => {
             let input: MeerkatSessionIdInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
@@ -1533,20 +1516,6 @@ async fn handle_meerkat_capabilities(state: &MeerkatMcpState) -> Result<Value, S
 fn handle_meerkat_models_catalog() -> Result<Value, String> {
     let response = meerkat::surface::build_models_catalog_response();
     serde_json::to_value(&response).map_err(|e| format!("Serialization failed: {e}"))
-}
-
-#[cfg(feature = "mob")]
-async fn handle_meerkat_mob_prefabs() -> Result<Value, String> {
-    let prefabs: Vec<Value> = meerkat_mob::Prefab::all()
-        .into_iter()
-        .map(|prefab| {
-            json!({
-                "key": prefab.key(),
-                "toml_template": prefab.toml_template(),
-            })
-        })
-        .collect();
-    Ok(json!({ "prefabs": prefabs }))
 }
 
 async fn handle_meerkat_config(
@@ -3133,13 +3102,13 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         #[cfg(all(feature = "comms", feature = "mob"))]
-        assert_eq!(tools.len(), 24 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 23 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
-        assert_eq!(tools.len(), 22 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
         #[cfg(all(feature = "comms", not(feature = "mob")))]
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 20);
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -3205,14 +3174,7 @@ mod tests {
 
         #[cfg(feature = "mob")]
         {
-            let mob_prefabs_tool = find_tool("meerkat_mob_prefabs");
-            assert_eq!(mob_prefabs_tool["inputSchema"]["type"], "object");
-            assert!(
-                mob_prefabs_tool["inputSchema"]["properties"]
-                    .as_object()
-                    .is_some_and(serde_json::Map::is_empty)
-            );
-            assert!(tool_names.contains(&"meerkat_mob_prefabs"));
+            assert!(!tool_names.contains(&"meerkat_mob_prefabs"));
             assert!(tool_names.contains(&"mob_create"));
             assert!(tool_names.contains(&"mob_list"));
             assert!(tool_names.contains(&"mob_lifecycle"));
@@ -3222,7 +3184,6 @@ mod tests {
         }
         #[cfg(not(feature = "mob"))]
         {
-            assert!(!tool_names.contains(&"meerkat_mob_prefabs"));
             assert!(!tool_names.contains(&"mob_create"));
             assert!(!tool_names.contains(&"mob_list"));
             assert!(!tool_names.contains(&"mob_lifecycle"));
@@ -3251,8 +3212,6 @@ mod tests {
         assert!(names.contains(&"meerkat_event_stream_open"));
         assert!(names.contains(&"meerkat_event_stream_read"));
         assert!(names.contains(&"meerkat_event_stream_close"));
-        #[cfg(not(feature = "mob"))]
-        assert!(!names.contains(&"meerkat_mob_prefabs"));
     }
 
     #[test]
@@ -3860,34 +3819,6 @@ mod tests {
                     .is_some_and(|types| types.contains(&json!("string"))),
             "unexpected comms_name type: {comms_name_type}"
         );
-    }
-
-    #[cfg(feature = "mob")]
-    #[tokio::test]
-    async fn test_handle_tools_call_mob_prefabs_returns_prefabs() {
-        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
-        let state = MeerkatMcpState::new_with_store(store).await;
-        let response = handle_tools_call(&state, "meerkat_mob_prefabs", &json!({}))
-            .await
-            .expect("mob prefabs tool call should succeed");
-        let payload: Value = if response.get("prefabs").is_some() {
-            response
-        } else {
-            let wrapped = response["content"][0]["text"]
-                .as_str()
-                .expect("wrapped text payload");
-            serde_json::from_str(wrapped).expect("wrapped payload JSON")
-        };
-        let prefabs = payload["prefabs"].as_array().expect("prefabs array");
-        assert!(prefabs.len() >= 4);
-        let keys: Vec<&str> = prefabs
-            .iter()
-            .filter_map(|entry| entry["key"].as_str())
-            .collect();
-        assert!(keys.contains(&"coding_swarm"));
-        assert!(keys.contains(&"code_review"));
-        assert!(keys.contains(&"research_team"));
-        assert!(keys.contains(&"pipeline"));
     }
 
     #[tokio::test]

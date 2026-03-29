@@ -196,10 +196,6 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/mob/prefabs",
-            vec![RestOperationDescriptor::new("get", "List mob prefabs")],
-        ),
-        RestPathDescriptor::new(
             "/mob/tools",
             vec![RestOperationDescriptor::new("get", "List mob tools")],
         ),

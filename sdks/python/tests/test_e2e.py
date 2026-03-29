@@ -98,7 +98,7 @@ async def test_python_sdk_live_mob_stream_explicit_close():
     )
 
     async with MeerkatClient(rpc_path) as client:
-        created = await client.call_mob_tool("mob_create", {"prefab": "coding_swarm"})
+        created = await client.call_mob_tool("mob_create", {"definition": {"id": "coding_swarm", "orchestrator": {"profile": "lead"}, "profiles": {"lead": {"model": "claude-opus-4-6"}, "worker": {"model": "claude-sonnet-4-6"}}}})
         mob_id = str(created.get("mob_id", ""))
         assert mob_id
 

@@ -150,8 +150,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.mob_enabled {
         methods.extend([
-            RpcMethodDescriptor::basic("mob/prefabs", "List available mob prefabs"),
-            RpcMethodDescriptor::basic("mob/create", "Create a mob from a prefab or definition"),
+            RpcMethodDescriptor::basic("mob/create", "Create a mob from a definition"),
             RpcMethodDescriptor::basic("mob/list", "List active mobs"),
             RpcMethodDescriptor::basic("mob/status", "Get mob lifecycle status"),
             RpcMethodDescriptor::basic("mob/lifecycle", "Apply a mob lifecycle action"),

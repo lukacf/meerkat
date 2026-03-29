@@ -3,8 +3,19 @@
 //! Ratatui-based terminal UI for managing remote Meerkat agents.
 //!
 //! ## Modes
-//! - **Direct** (Tab): send a command to a single selected target
-//! - **Hive** (Tab): a local LLM agent fans commands out to any/all targets
+//! - **Direct** (default): send a command to a single selected target — no API key needed
+//! - **Hive** (Tab): a local LLM agent fans commands out to any/all targets using the
+//!   `send` comms tool; the hive agent is built lazily on first use
+//!
+//! ## API key requirements
+//! - Direct mode: none — messages are dispatched via `router.send()` only
+//! - Hive mode: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY` depending
+//!   on the model configured in `tux.toml`; detected from the model name prefix
+//!
+//! ## Supported providers
+//! Detected from the model name prefix (see `detect_provider` in lib.rs).
+//! Provider examples: `claude-sonnet-4-6` → Anthropic, `gpt-5.2` → OpenAI,
+//! `gemini-3.1-flash-lite` → Gemini.
 //!
 //! ## Ownership model
 //! TUX's single `CommsManager` is split at startup:
@@ -26,6 +37,10 @@
 //!
 //! ## Run
 //! ```bash
+//! # Direct mode only (no API key needed):
+//! cargo run --bin tux -- tux.toml.example
+//!
+//! # Hive mode (API key required for model in tux.toml):
 //! ANTHROPIC_API_KEY=... cargo run --bin tux -- tux.toml.example
 //! ```
 
@@ -36,11 +51,12 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use meerkat::{AgentBuilder, AgentFactory, AnthropicClient};
+use meerkat::{AgentBuilder, AgentFactory, DynAgent};
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::{
     CommsManager, CommsManagerConfig, CommsToolDispatcher, spawn_tcp_listener,
 };
+use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -48,7 +64,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
-use mdm_tux::{TuxConfig, TargetEntry, load_or_generate_keypair, targets_to_trusted_peers};
+use mdm_tux::{
+    TuxConfig, TargetEntry, build_llm_client, detect_provider, load_or_generate_keypair,
+    targets_to_trusted_peers,
+};
 
 // ── Event / command types ─────────────────────────────────────────────────────
 
@@ -63,6 +82,8 @@ enum TuiEvent {
     /// Hive planner finished dispatching; replies still in flight via drain task.
     HivePlanDone(String),
     HiveError(String),
+    /// A direct `router.send()` call failed (target offline, wrong pubkey, etc.).
+    SendError(String),
 }
 
 // ── TUI application state ─────────────────────────────────────────────────────
@@ -109,8 +130,6 @@ async fn main() -> anyhow::Result<()> {
     let config: TuxConfig = toml::from_str(&raw)
         .with_context(|| format!("parse config '{config_path}'"))?;
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
-
     let data_dir = PathBuf::from(&config.data_dir);
 
     // ── 1. Load or generate TUX identity ─────────────────────────────────────
@@ -120,7 +139,9 @@ async fn main() -> anyhow::Result<()> {
     println!("my pubkey : {}", pubkey.to_peer_id());
     println!("listening : tcp://{}", config.listen_addr);
     println!("targets   : {}", config.targets.len());
+    println!("hive model: {} ({})", config.model, detect_provider(&config.model));
     println!("(add pubkey + addr to target.toml on each managed machine)\n");
+    println!("Direct mode needs no API key. Hive mode requires the matching key on first use.\n");
 
     // ── 2. Build trusted peers from targets ───────────────────────────────────
     let trusted = targets_to_trusted_peers(&config.targets)?;
@@ -143,6 +164,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // ── 5. Split ownership ────────────────────────────────────────────────────
+    // router → used by command handler (outbound sends) and hive agent
+    // comms (inbox) → moved into drain task
     let router = comms.router().clone();
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel::<AppCommand>();
@@ -165,50 +188,80 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── 7. Build hive agent ───────────────────────────────────────────────────
-    // Regular Agent (not CommsAgent) — uses shared router for sending only.
-    // Never owns the inbox; target replies arrive via the drain task.
+    // ── 7. Spawn command handler ──────────────────────────────────────────────
+    // The hive agent is built lazily on first RunHive — no API key required
+    // at startup. Direct sends are spawned independently so they are never
+    // serialised behind a hive LLM call.
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
+    let hive_model = config.model.clone();
+    let hive_session_dir = session_dir.clone();
 
-    let factory = AgentFactory::new(&session_dir);
-    let hive_tools = Arc::new(CommsToolDispatcher::new(router.clone(), trusted_shared));
-    let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, &config.model).await;
-
-    let store = Arc::new(JsonlStore::new(session_dir.clone()));
-    store.init().await?;
-    let store = Arc::new(StoreAdapter::new(store));
-
-    let mut hive_agent = AgentBuilder::new()
-        .model(&config.model)
-        .system_prompt(
-            "You are a hive orchestrator for a fleet of remote machines. \
-             Use the 'peers' tool to discover available targets, then 'send' \
-             to dispatch commands to them. Target responses arrive in the TUX \
-             output panel; the user will relay results if needed. \
-             Keep dispatches concise — each target will reply via comms.",
-        )
-        .build(Arc::new(llm), hive_tools, store)
-        .await;
-
-    // ── 8. Spawn command handler ──────────────────────────────────────────────
-    // Direct sends are spawned independently so they are never serialized
-    // behind a hive run. The hive run blocks this task, but hive_planning
-    // gating in the UI ensures at most one RunHive is ever queued at a time.
     tokio::spawn(async move {
+        let mut hive_agent: Option<DynAgent> = None;
+
         while let Some(cmd) = command_rx.recv().await {
             match cmd {
                 AppCommand::Send { target, body } => {
+                    // Spawn independently so Direct sends are never blocked by a hive run.
                     let r = router.clone();
+                    let ev_tx = event_tx.clone();
                     tokio::spawn(async move {
-                        let _ = r
-                            .send(&target, MessageKind::Message { body, blocks: None })
-                            .await;
+                        if let Err(e) =
+                            r.send(&target, MessageKind::Message { body, blocks: None }).await
+                        {
+                            let _ = ev_tx
+                                .send(TuiEvent::SendError(format!("[{target}] send failed: {e}")))
+                                .await;
+                        }
                     });
                 }
                 AppCommand::RunHive { prompt } => {
-                    let ev = match hive_agent.run(prompt.into()).await {
+                    // Build agent on first use — reads API key from env at this point.
+                    if hive_agent.is_none() {
+                        let provider = detect_provider(&hive_model);
+                        let factory = AgentFactory::new(&hive_session_dir);
+
+                        let llm = match build_llm_client(&factory, &hive_model, provider).await {
+                            Ok(l) => l,
+                            Err(e) => {
+                                let _ = event_tx.send(TuiEvent::HiveError(e.to_string())).await;
+                                continue;
+                            }
+                        };
+
+                        let hive_tools: Arc<dyn AgentToolDispatcher> = Arc::new(
+                            CommsToolDispatcher::new(router.clone(), trusted_shared.clone()),
+                        );
+
+                        let store = Arc::new(JsonlStore::new(hive_session_dir.clone()));
+                        if let Err(e) = store.init().await {
+                            let _ = event_tx
+                                .send(TuiEvent::HiveError(format!("store init: {e}")))
+                                .await;
+                            continue;
+                        }
+                        let hive_store: Arc<dyn AgentSessionStore> =
+                            Arc::new(StoreAdapter::new(store));
+
+                        let agent: DynAgent = AgentBuilder::new()
+                            .model(&hive_model)
+                            .system_prompt(
+                                "You are a hive orchestrator for a fleet of remote machines. \
+                                 Use the 'peers' tool to discover available targets, then 'send' \
+                                 to dispatch commands to them. Target responses arrive in the TUX \
+                                 output panel; the user will relay results if needed. \
+                                 Keep dispatches concise — each target will reply via comms.",
+                            )
+                            .build(llm, hive_tools, hive_store)
+                            .await;
+
+                        hive_agent = Some(agent);
+                    }
+
+                    // Safe: we either just built it or it was already Some.
+                    let agent = hive_agent.as_mut().expect("hive agent was just built");
+                    let ev = match agent.run(prompt.into()).await {
                         Ok(result) => TuiEvent::HivePlanDone(result.text),
                         Err(e) => TuiEvent::HiveError(e.to_string()),
                     };
@@ -218,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── 9. Run TUI in blocking thread ─────────────────────────────────────────
+    // ── 8. Run TUI in blocking thread ─────────────────────────────────────────
     let app = App {
         mode: Mode::Direct,
         targets: config.targets.clone(),
@@ -268,6 +321,9 @@ fn tui_loop(
                     app.push(format!("[hive error] {e}"));
                     app.hive_planning = false;
                 }
+                TuiEvent::SendError(e) => {
+                    app.push(format!("[send error] {e}"));
+                }
             }
         }
 
@@ -300,7 +356,7 @@ fn handle_key(app: &mut App, code: KeyCode, command_tx: &mpsc::UnboundedSender<A
         KeyCode::Backspace => {
             app.input.pop();
         }
-        KeyCode::Enter if !app.input.is_empty() && app.input != "q" => {
+        KeyCode::Enter if !app.input.is_empty() => {
             let body = std::mem::take(&mut app.input);
             let cmd = match app.mode {
                 Mode::Direct if !app.targets.is_empty() => {
@@ -357,7 +413,7 @@ fn render_title(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
         Span::styled(" Direct ", direct_style),
         Span::raw(" "),
         Span::styled(" Hive ", hive_style),
-        Span::styled("  [Tab] toggle  [q] quit", Style::default().fg(Color::DarkGray)),
+        Span::styled("  [Tab] toggle  [Esc] quit", Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(title), area);
 }
@@ -391,7 +447,8 @@ fn render_main(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
     // Output panel — show most recent lines that fit
     let inner_height = chunks[1].height.saturating_sub(2) as usize;
     let start = app.output.len().saturating_sub(inner_height);
-    let lines: Vec<Line> = app.output.iter().skip(start).map(|s| Line::from(s.as_str())).collect();
+    let lines: Vec<Line> =
+        app.output.iter().skip(start).map(|s| Line::from(s.as_str())).collect();
 
     let output = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("OUTPUT"))

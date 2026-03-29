@@ -188,43 +188,27 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // ── 5. Spawn comms drain task ─────────────────────────────────────────────
+    // Use recv_raw() + require_peer_auth=false to accept all signed messages
+    // from dynamically registered targets.
     let router = node.router.clone();
     let trusted_shared = node.trusted.clone();
     tokio::spawn({
         let event_tx = event_tx.clone();
         let trusted = trusted_shared.clone();
         async move {
-            use std::io::Write;
-            let mut log = std::fs::File::create("/tmp/tux-drain.log")
-                .expect("create drain log");
-            let _ = writeln!(log, "drain task started");
-
             loop {
                 let Some(item) = node.recv_raw().await else {
-                    let _ = writeln!(log, "inbox closed");
                     break;
                 };
-                let _ = writeln!(log, "received raw item");
-
                 let msg = {
                     let peers = trusted.read();
-                    let peer_count = peers.peers.len();
-                    let _ = writeln!(log, "  trusted_peers={peer_count}");
                     meerkat_comms::agent::types::CommsMessage::from_inbox_item(
                         &item, &peers, false,
                     )
                 };
                 let Some(msg) = msg else {
-                    let _ = writeln!(log, "  -> filtered out (ACK or unprocessable)");
                     continue;
                 };
-
-                let _ = writeln!(log, "  from={}, content_type={}", msg.from_peer, match &msg.content {
-                    CommsContent::Message { body, .. } => {
-                        if body.starts_with(STREAM_PREFIX) { "stream_event" } else { "message" }
-                    },
-                    _ => "other",
-                });
 
                 let tui_event = match &msg.content {
                     CommsContent::Message { body, .. }
@@ -233,23 +217,16 @@ async fn main() -> anyhow::Result<()> {
                         let json = &body[STREAM_PREFIX.len()..];
                         match serde_json::from_str::<AgentEvent>(json) {
                             Ok(event) => {
-                                let _ = writeln!(log, "  -> parsed as StreamEvent");
                                 TuiEvent::StreamEvent { from: msg.from_peer.clone(), event }
                             }
-                            Err(e) => {
-                                let _ = writeln!(log, "  -> JSON parse error: {e}");
-                                TuiEvent::CommsMessage(msg.to_user_message_text())
-                            }
+                            Err(_) => TuiEvent::CommsMessage(msg.to_user_message_text()),
                         }
                     }
                     _ => TuiEvent::CommsMessage(msg.to_user_message_text()),
                 };
                 if event_tx.send(tui_event).await.is_err() {
-                    let _ = writeln!(log, "  -> event_tx closed");
                     break;
                 }
-                let _ = writeln!(log, "  -> sent to TUI");
-                let _ = log.flush();
             }
         }
     });
@@ -458,9 +435,14 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
                 .push_str(delta);
             app.update_scroll();
         }
-        AgentEvent::TextComplete { .. } => {
-            // Move streaming buffer into completed output
-            app.flush_streaming(from);
+        AgentEvent::TextComplete { content, .. } => {
+            // TextComplete carries the authoritative final text.
+            // Discard the streaming buffer (which may be empty if no
+            // TextDelta events preceded this) and use content directly.
+            app.streaming_text.remove(from);
+            if !content.is_empty() {
+                app.push(format!("[{from}] {content}"));
+            }
         }
         AgentEvent::ToolCallRequested { name, .. } => {
             // Flush any streaming text before the tool call line

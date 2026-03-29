@@ -109,10 +109,15 @@ async fn main() -> anyhow::Result<()> {
         restrict_to_project: false,
         ..ShellConfig::with_project_root(data_dir)
     };
+    // Shell tools have default_enabled=false in the policy — explicitly enable them.
+    let mut builtin_config = meerkat::BuiltinToolConfig::default();
+    builtin_config.policy.enable.insert("shell".into());
+    builtin_config.policy.enable.insert("shell_job_cancel".into());
+
     let builtin: CompositeDispatcher = factory
         .build_composite_dispatcher(
             Arc::new(MemoryTaskStore::new()),
-            &Default::default(),
+            &builtin_config,
             None,
             Some(shell_config),
             None, None, None, false,

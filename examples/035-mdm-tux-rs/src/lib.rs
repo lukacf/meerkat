@@ -146,6 +146,25 @@ impl CommsNode {
             if let Some(msg) = CommsMessage::from_inbox_item(&item, &peers, true) {
                 return Some(msg);
             }
+            // Log dropped messages for debugging
+            match &item {
+                InboxItem::External { envelope } => {
+                    let peer_id = envelope.from.to_peer_id();
+                    let known = peers.peers.iter().any(|p| p.pubkey == envelope.from);
+                    eprintln!(
+                        "[comms] dropped item from {peer_id} (known={known}, \
+                         kind={}, trusted_count={})",
+                        match &envelope.kind {
+                            meerkat_comms::MessageKind::Message { .. } => "message",
+                            meerkat_comms::MessageKind::Request { .. } => "request",
+                            meerkat_comms::MessageKind::Response { .. } => "response",
+                            meerkat_comms::MessageKind::Ack { .. } => "ack",
+                        },
+                        peers.peers.len()
+                    );
+                }
+                _ => eprintln!("[comms] dropped non-external item"),
+            }
         }
     }
 

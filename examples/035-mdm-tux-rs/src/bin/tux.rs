@@ -89,9 +89,12 @@ struct App {
 
 impl App {
     fn push(&mut self, line: String) {
-        self.output.push_back(line);
-        if self.output.len() > 1000 {
-            self.output.pop_front();
+        // Split on newlines so each visual line is a separate entry.
+        for l in line.split('\n') {
+            self.output.push_back(l.to_string());
+            if self.output.len() > 1000 {
+                self.output.pop_front();
+            }
         }
         self.update_scroll();
     }
@@ -392,7 +395,15 @@ fn tui_loop(
 
         while let Ok(ev) = event_rx.try_recv() {
             match ev {
-                TuiEvent::CommsMessage(s) => app.push(s),
+                TuiEvent::CommsMessage(s) => {
+                    // Strip the [COMMS MESSAGE from ...] prefix if present
+                    let clean = s
+                        .strip_prefix("[COMMS MESSAGE from ")
+                        .and_then(|rest| rest.split_once("]\n"))
+                        .map(|(from, body)| format!("[{from}] {body}"))
+                        .unwrap_or(s);
+                    app.push(clean);
+                }
                 TuiEvent::HivePlanDone(s) => {
                     app.push(format!("[hive dispatched] {s}"));
                     app.hive_planning = false;
@@ -425,7 +436,6 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
     match event {
         AgentEvent::RunStarted { .. } => {
             app.set_busy(from, true);
-            // Start a new streaming text buffer for this target
             app.streaming_text.insert(from.to_string(), String::new());
         }
         AgentEvent::TextDelta { delta, .. } => {
@@ -437,17 +447,18 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
         }
         AgentEvent::TextComplete { content, .. } => {
             // TextComplete carries the authoritative final text.
-            // Discard the streaming buffer (which may be empty if no
-            // TextDelta events preceded this) and use content directly.
             app.streaming_text.remove(from);
             if !content.is_empty() {
-                app.push(format!("[{from}] {content}"));
+                app.push(content.clone());
             }
         }
-        AgentEvent::ToolCallRequested { name, .. } => {
-            // Flush any streaming text before the tool call line
+        AgentEvent::ToolCallRequested { name, args, .. } => {
             app.flush_streaming(from);
-            app.push(format!("[{from}]   -> {name}"));
+            // Show compact tool call: name + first ~80 chars of args
+            let args_preview = args.to_string();
+            let args_short: String = args_preview.chars().take(80).collect();
+            let ellipsis = if args_preview.len() > 80 { "..." } else { "" };
+            app.push(format!("  -> {name}({args_short}{ellipsis})"));
         }
         AgentEvent::ToolExecutionCompleted {
             name,
@@ -457,17 +468,25 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
             ..
         } => {
             let status = if *is_error { "ERR" } else { "OK" };
-            let preview: String = result.chars().take(200).collect();
-            let preview = preview.replace('\n', " ");
-            app.push(format!("[{from}]   <- {name} ({status}, {duration_ms}ms): {preview}"));
+            // Show result on its own lines, indented
+            app.push(format!("  <- {name} [{status} {duration_ms}ms]"));
+            // Show first ~10 lines of result
+            for (i, line) in result.lines().enumerate() {
+                if i >= 10 {
+                    app.push(format!("     ... ({} more lines)", result.lines().count() - 10));
+                    break;
+                }
+                app.push(format!("     {line}"));
+            }
         }
         AgentEvent::RunCompleted { .. } => {
             app.flush_streaming(from);
             app.set_busy(from, false);
+            app.push(String::new()); // blank line between turns
         }
         AgentEvent::RunFailed { error, .. } => {
             app.flush_streaming(from);
-            app.push(format!("[{from}] run failed: {error}"));
+            app.push(format!("[error] {error}"));
             app.set_busy(from, false);
         }
         _ => {}

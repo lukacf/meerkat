@@ -1623,6 +1623,7 @@ impl MobRunStore for RecordingRunStore {
         next_frame: crate::run::FrameSnapshot,
         step_output_key: String,
         step_output: serde_json::Value,
+        loop_context: Option<(&crate::ids::LoopId, u64)>,
     ) -> Result<bool, MobError> {
         self.inner
             .cas_complete_step_and_record_output(
@@ -1632,6 +1633,7 @@ impl MobRunStore for RecordingRunStore {
                 next_frame,
                 step_output_key,
                 step_output,
+                loop_context,
             )
             .await
     }
@@ -14527,5 +14529,127 @@ async fn test_restored_member_gets_external_tools() {
     assert!(
         flags[1],
         "restored member should have external tools from provider"
+    );
+}
+
+/// Integration test: a flow with `root: Some(FrameSpec { ... })` executes frame nodes
+/// via the FlowFrameEngine path (not the flat-step path).
+///
+/// This validates the wiring added in task #16 — FlowSpec.root dispatches to
+/// FlowFrameEngine with a scripted step executor.
+#[tokio::test]
+async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::{FlowNodeId, FrameId};
+    use crate::run::FlowContext;
+    use crate::runtime::flow_frame_engine::{FlowFrameEngine, FrameStepExecutor};
+
+    /// Scripted executor that returns pre-configured output per node.
+    struct ScriptedExecutor {
+        outputs: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl FrameStepExecutor for ScriptedExecutor {
+        async fn execute_step(
+            &self,
+            _run_id: &crate::ids::RunId,
+            _frame_id: &FrameId,
+            node_id: &FlowNodeId,
+            _step_id: &crate::ids::StepId,
+            _context: &FlowContext,
+        ) -> Result<serde_json::Value, MobError> {
+            self.outputs
+                .get(&node_id.to_string())
+                .cloned()
+                .ok_or_else(|| MobError::Internal(format!("no scripted output for {node_id}")))
+        }
+    }
+
+    // Build store + run.
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        meerkat_machine_kernels::KernelState::default(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create_run");
+
+    // Build a root FrameSpec: setup -> finalize
+    let root_spec = {
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            FlowNodeId::from("setup-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: crate::ids::StepId::from("setup"),
+                depends_on: vec![],
+                depends_on_mode: crate::definition::DependencyMode::All,
+                branch: None,
+            }),
+        );
+        nodes.insert(
+            FlowNodeId::from("finalize-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: crate::ids::StepId::from("finalize"),
+                depends_on: vec![FlowNodeId::from("setup-node")],
+                depends_on_mode: crate::definition::DependencyMode::All,
+                branch: None,
+            }),
+        );
+        FrameSpec { nodes }
+    };
+
+    let mut scripted_outputs = std::collections::HashMap::new();
+    scripted_outputs.insert(
+        "setup-node".to_string(),
+        serde_json::json!({"initialized": true}),
+    );
+    scripted_outputs.insert(
+        "finalize-node".to_string(),
+        serde_json::json!({"complete": true}),
+    );
+
+    let executor = Arc::new(ScriptedExecutor {
+        outputs: scripted_outputs,
+    });
+    let engine = FlowFrameEngine::new(store.clone(), executor);
+    let context = FlowContext {
+        run_id: run_id.clone(),
+        activation_params: serde_json::json!({}),
+        step_outputs: IndexMap::new(),
+        loop_outputs: IndexMap::new(),
+    };
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+
+    let outputs = engine
+        .execute_frame(&run_id, &frame_id, &root_spec, &context)
+        .await
+        .expect("frame-based execution should complete");
+
+    assert!(
+        outputs.contains_key(&crate::ids::StepId::from("setup")),
+        "setup output missing; outputs: {outputs:?}"
+    );
+    assert!(
+        outputs.contains_key(&crate::ids::StepId::from("finalize")),
+        "finalize output missing; outputs: {outputs:?}"
+    );
+    assert_eq!(
+        outputs[&crate::ids::StepId::from("finalize")],
+        serde_json::json!({"complete": true}),
+    );
+
+    // Verify frame state is Completed in the store.
+    let run = store
+        .get_run(&run_id)
+        .await
+        .expect("get_run")
+        .expect("run exists");
+    let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
+    assert_eq!(
+        frame_snap.kernel_state.phase, "Completed",
+        "frame should be in Completed phase"
     );
 }

@@ -136,7 +136,7 @@ mod tests {
             loop_iteration_ledger: Vec::new(),
             schema_version: 2,
             root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
+            loop_iteration_outputs: indexmap::IndexMap::new(),
         };
         runs.create_run(run.clone()).await.unwrap();
         assert!(runs.get_run(&run.run_id).await.unwrap().is_some());
@@ -186,7 +186,7 @@ model = "test"
             loop_iteration_ledger: Vec::new(),
             schema_version: 2,
             root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
+            loop_iteration_outputs: indexmap::IndexMap::new(),
         };
         storage.runs.create_run(run.clone()).await.unwrap();
         assert!(storage.runs.get_run(&run.run_id).await.unwrap().is_some());

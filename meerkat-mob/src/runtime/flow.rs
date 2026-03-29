@@ -78,6 +78,46 @@ impl FlowEngine {
             )
             .await?;
 
+        // If the flow uses the new frame-based execution path, dispatch to FlowFrameEngine.
+        if let Some(root_spec) = &config.flow_spec.root {
+            let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
+            let context = FlowContext {
+                run_id: run_id.clone(),
+                activation_params: activation_params.clone(),
+                step_outputs: IndexMap::new(),
+                loop_outputs: IndexMap::new(),
+            };
+            let adapter = FlowTurnExecutorAdapter::new(
+                self.executor.clone(),
+                self.handle.clone(),
+                config.clone(),
+            );
+            let frame_engine = super::flow_frame_engine::FlowFrameEngine::new(
+                self.run_store.clone(),
+                Arc::new(adapter),
+            );
+            let result = frame_engine
+                .execute_frame(&run_id, &frame_id, root_spec, &context)
+                .await;
+
+            match result {
+                Ok(_outputs) => {
+                    let flow_id = config.flow_id;
+                    if let super::terminalization::TerminalizationOutcome::Transitioned = self
+                        .flow_kernel
+                        .terminalize_completed(run_id.clone(), flow_id)
+                        .await?
+                    {
+                        tracing::debug!(run_id = %run_id, "frame-based flow completed terminalization applied");
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    return self.fail_run(&run_id, &config.flow_id, e).await;
+                }
+            }
+        }
+
         let ordered_steps = self.flow_kernel.ordered_steps(&run_id).await?;
         let supervisor = Supervisor::new(self.handle.clone(), self.emitter.clone());
         let flow_started_at = Instant::now();
@@ -1500,6 +1540,105 @@ fn render_content_input_template(
 
 fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Option<&'a Value> {
     resolve_context_path(context, expression)
+}
+
+// ─── FlowTurnExecutorAdapter ────────────────────────────────────────────────
+
+/// Adapter that implements `FrameStepExecutor` by delegating to the existing
+/// `FlowTurnExecutor` infrastructure. Maps `FlowNodeId` + `StepId` to the v1
+/// dispatch/await flow, looking up role and message template from `FlowRunConfig`.
+struct FlowTurnExecutorAdapter {
+    executor: Arc<dyn FlowTurnExecutor>,
+    handle: MobHandle,
+    config: FlowRunConfig,
+}
+
+impl FlowTurnExecutorAdapter {
+    fn new(executor: Arc<dyn FlowTurnExecutor>, handle: MobHandle, config: FlowRunConfig) -> Self {
+        Self {
+            executor,
+            handle,
+            config,
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
+    async fn execute_step(
+        &self,
+        run_id: &RunId,
+        _frame_id: &crate::ids::FrameId,
+        _node_id: &crate::ids::FlowNodeId,
+        step_id: &StepId,
+        context: &FlowContext,
+    ) -> Result<serde_json::Value, MobError> {
+        // Look up the step spec from the v1 steps map.
+        let step = self
+            .config
+            .flow_spec
+            .steps
+            .get(step_id)
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "FlowTurnExecutorAdapter: no FlowStepSpec for step_id '{step_id}'"
+                ))
+            })?
+            .clone();
+
+        // Render the prompt template.
+        let prompt = render_content_input_template(&step.message, context).map_err(|e| {
+            MobError::Internal(format!("template render failed for step '{step_id}': {e}"))
+        })?;
+
+        // Select target(s) by role.
+        let mut targets: Vec<MeerkatId> = self
+            .handle
+            .list_runnable_members()
+            .await
+            .into_iter()
+            .filter(|entry| entry.profile == step.role)
+            .map(|entry| entry.meerkat_id)
+            .collect();
+        targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let target = targets.into_iter().next().ok_or_else(|| {
+            MobError::Internal(format!(
+                "no target available for role '{}' in step '{step_id}'",
+                step.role
+            ))
+        })?;
+
+        let step_timeout =
+            meerkat_core::time_compat::Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
+        let flow_tool_overlay = step_tool_overlay(&step);
+
+        // Dispatch.
+        let ticket = self
+            .executor
+            .dispatch(run_id, step_id, &target, prompt, flow_tool_overlay)
+            .await?;
+
+        // Await terminal.
+        match self.executor.await_terminal(ticket, step_timeout).await? {
+            FlowTurnOutcome::Completed { output } => {
+                let parsed = parse_output_value(&output, step_id, &target, &step.output_format);
+                match parsed {
+                    Ok(value) => Ok(value),
+                    Err(reason) => Err(MobError::Internal(format!(
+                        "output parse failed for step '{step_id}': {reason}"
+                    ))),
+                }
+            }
+            FlowTurnOutcome::Failed { reason } => Err(MobError::Internal(format!(
+                "step '{step_id}' failed: {reason}"
+            ))),
+            FlowTurnOutcome::Canceled => {
+                Err(MobError::Internal(format!("step '{step_id}' was canceled")))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

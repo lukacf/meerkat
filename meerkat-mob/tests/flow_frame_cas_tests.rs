@@ -34,7 +34,6 @@ async fn test_cas_node_slot_grant_is_atomic() {
 
     let frame_id = FrameId::from("frame-1");
     let initial_frame = FrameSnapshot {
-        frame_id: frame_id.clone(),
         kernel_state: KernelState::default(),
     };
 
@@ -64,14 +63,12 @@ async fn test_cas_node_slot_grant_is_atomic() {
     let initial2 = initial_frame.clone();
 
     let next1 = FrameSnapshot {
-        frame_id: frame_id.clone(),
         kernel_state: KernelState {
             phase: "Running".into(),
             ..Default::default()
         },
     };
     let next2 = FrameSnapshot {
-        frame_id: frame_id.clone(),
         kernel_state: KernelState {
             phase: "Completed".into(),
             ..Default::default()
@@ -140,7 +137,9 @@ fn test_pump_to_exhaustion_after_frame_terminated() {
 /// Synthetic integration: drive a 2-node frame through the full CAS chain to FrameTerminalized
 #[tokio::test]
 async fn test_execute_two_node_frame_through_cas_chain() {
-    use meerkat_mob::ids::FlowNodeId;
+    use indexmap::IndexMap;
+    use meerkat_mob::definition::{DependencyMode, FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use meerkat_mob::ids::{FlowNodeId, StepId};
     use meerkat_mob::runtime::FlowFrameKernel;
 
     let store = Arc::new(InMemoryMobRunStore::new());
@@ -152,14 +151,37 @@ async fn test_execute_two_node_frame_through_cas_chain() {
     let node_a = FlowNodeId::from("node-a");
     let node_b = FlowNodeId::from("node-b");
 
+    // Build a FrameSpec with A→B DAG
+    let spec = {
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            node_a.clone(),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: StepId::from("step-a"),
+                depends_on: vec![],
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        );
+        nodes.insert(
+            node_b.clone(),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: StepId::from("step-b"),
+                depends_on: vec![node_a.clone()],
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        );
+        FrameSpec { nodes }
+    };
+
     let kernel = FlowFrameKernel::new(store.clone());
 
     // Step 1: Start the frame (A->B DAG)
     let initial_snapshot = kernel
-        .start_frame(&run_id, &frame_id, &node_a, &node_b)
+        .start_frame(&run_id, &frame_id, &spec)
         .await
         .expect("start_frame");
-    assert_eq!(initial_snapshot.frame_id, frame_id);
     assert_eq!(initial_snapshot.kernel_state.phase, "Running");
 
     // Step 2: Admit node A

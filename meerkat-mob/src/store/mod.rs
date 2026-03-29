@@ -10,7 +10,7 @@ pub use sqlite::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, Sql
 
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, FrameId, LoopInstanceId, MobId, RunId, StepId};
+use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry,
 };
@@ -146,6 +146,10 @@ pub trait MobRunStore: Send + Sync {
     /// If `expected` is `None`, this is an insert (frame must not yet exist).
     /// If `expected` is `Some(snapshot)`, the current frame state must match.
     /// Returns `Ok(true)` on success, `Ok(false)` on mismatch.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     async fn cas_frame_state(
         &self,
         run_id: &RunId,
@@ -155,6 +159,10 @@ pub trait MobRunStore: Send + Sync {
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 2: grant node slot — atomically update run flow state + frame state.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
@@ -166,6 +174,15 @@ pub trait MobRunStore: Send + Sync {
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 3: complete step — update frame state and record step output.
+    ///
+    /// When `loop_context` is `None`, the output is stored in `root_step_outputs`.
+    /// When `loop_context` is `Some((loop_id, iteration))`, the output is stored
+    /// in `loop_iteration_outputs[loop_id][iteration]`.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
+    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_step_and_record_output(
         &self,
         run_id: &RunId,
@@ -174,9 +191,14 @@ pub trait MobRunStore: Send + Sync {
         next_frame: FrameSnapshot,
         step_output_key: String,
         step_output: serde_json::Value,
+        loop_context: Option<(&LoopId, u64)>,
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 4: start loop — register loop + update run state + parent frame.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop(
         &self,
@@ -191,6 +213,10 @@ pub trait MobRunStore: Send + Sync {
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 5: register pending body frame — loop transition + run state update.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     async fn cas_loop_request_body_frame(
         &self,
         run_id: &RunId,
@@ -202,6 +228,10 @@ pub trait MobRunStore: Send + Sync {
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 6: body frame start — loop transition + register new frame + run state update.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     #[allow(clippy::too_many_arguments)]
     async fn cas_grant_body_frame_start(
         &self,
@@ -216,6 +246,10 @@ pub trait MobRunStore: Send + Sync {
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 7: body frame completion — terminalize frame + loop state update + run state.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame(
         &self,
@@ -231,6 +265,10 @@ pub trait MobRunStore: Send + Sync {
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 8: loop completion — loop state + run state + parent frame update.
+    ///
+    /// # Frame support
+    /// This method requires [`InMemoryMobRunStore`]. The [`RedbMobRunStore`] returns
+    /// `Err(MobError::Internal(...))` until redb transactions are implemented for frame-aware flows.
     #[allow(clippy::too_many_arguments)]
     async fn cas_complete_loop(
         &self,

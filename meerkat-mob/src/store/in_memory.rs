@@ -3,7 +3,7 @@
 use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, FrameId, LoopInstanceId, MobId, RunId, StepId};
+use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry,
 };
@@ -334,6 +334,7 @@ impl MobRunStore for InMemoryMobRunStore {
         next_frame: FrameSnapshot,
         step_output_key: String,
         step_output: serde_json::Value,
+        loop_context: Option<(&LoopId, u64)>,
     ) -> Result<bool, MobError> {
         let mut runs = self.runs.write().await;
         let run = runs
@@ -343,11 +344,27 @@ impl MobRunStore for InMemoryMobRunStore {
             return Ok(false);
         }
         run.frames.insert(frame_id.clone(), next_frame);
-        // Record step output in root_step_outputs (idempotent upsert).
-        run.root_step_outputs.insert(
-            crate::ids::StepId::from(step_output_key.as_str()),
-            step_output,
-        );
+        match loop_context {
+            None => {
+                run.root_step_outputs.insert(
+                    crate::ids::StepId::from(step_output_key.as_str()),
+                    step_output,
+                );
+            }
+            Some((loop_id, iteration)) => {
+                let vec = run
+                    .loop_iteration_outputs
+                    .entry(loop_id.clone())
+                    .or_insert_with(Vec::new);
+                while vec.len() <= iteration as usize {
+                    vec.push(IndexMap::new());
+                }
+                vec[iteration as usize].insert(
+                    crate::ids::StepId::from(step_output_key.as_str()),
+                    step_output,
+                );
+            }
+        }
         Ok(true)
     }
 
@@ -638,7 +655,7 @@ mod tests {
             loop_iteration_ledger: Vec::new(),
             schema_version: 2,
             root_step_outputs: IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
+            loop_iteration_outputs: IndexMap::new(),
         }
     }
 

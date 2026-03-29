@@ -295,6 +295,7 @@ mod tests {
             next_frame: crate::run::FrameSnapshot,
             step_output_key: String,
             step_output: serde_json::Value,
+            loop_context: Option<(&crate::ids::LoopId, u64)>,
         ) -> Result<bool, crate::error::MobError> {
             self.inner
                 .cas_complete_step_and_record_output(
@@ -304,6 +305,7 @@ mod tests {
                     next_frame,
                     step_output_key,
                     step_output,
+                    loop_context,
                 )
                 .await
         }
@@ -527,7 +529,7 @@ mod tests {
             loop_iteration_ledger: Vec::new(),
             schema_version: 2,
             root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: std::collections::BTreeMap::new(),
+            loop_iteration_outputs: indexmap::IndexMap::new(),
         }
     }
 

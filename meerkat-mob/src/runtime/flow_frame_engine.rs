@@ -6,17 +6,16 @@
 //! - Loop nodes: runs body frame iterations until the `until` condition is met
 //!   or `max_iterations` is exhausted, storing per-iteration outputs.
 
-use crate::definition::{ConditionExpr, DependencyMode, FlowNodeSpec, FrameSpec};
+use crate::definition::{ConditionExpr, FlowNodeSpec, FrameSpec};
 use crate::error::MobError;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::{FlowContext, LoopContextHistory};
 use crate::runtime::conditions::evaluate_condition;
+use crate::runtime::flow_frame_kernel::FlowFrameKernel;
 use crate::store::MobRunStore;
 use async_trait::async_trait;
 use indexmap::IndexMap;
-use meerkat_machine_kernels::generated::flow_frame;
-use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelValue};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use meerkat_machine_kernels::KernelValue;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -39,6 +38,16 @@ pub trait FrameStepExecutor: Send + Sync {
     ) -> Result<serde_json::Value, MobError>;
 }
 
+// ─── LoopResult ─────────────────────────────────────────────────────────────
+
+/// Outcome of executing a repeat_until loop body.
+enum LoopResult {
+    /// The `until` condition was met; contains all iteration outputs.
+    ConditionMet(Vec<IndexMap<StepId, serde_json::Value>>),
+    /// `max_iterations` exhausted without the condition being met.
+    Exhausted,
+}
+
 // ─── FlowFrameEngine ─────────────────────────────────────────────────────────
 
 /// Drives a `FrameSpec` to completion using a `FrameStepExecutor` for step work
@@ -46,13 +55,16 @@ pub trait FrameStepExecutor: Send + Sync {
 pub struct FlowFrameEngine {
     run_store: Arc<dyn MobRunStore>,
     executor: Arc<dyn FrameStepExecutor>,
+    frame_kernel: Arc<FlowFrameKernel>,
 }
 
 impl FlowFrameEngine {
     pub fn new(run_store: Arc<dyn MobRunStore>, executor: Arc<dyn FrameStepExecutor>) -> Self {
+        let frame_kernel = Arc::new(FlowFrameKernel::new(run_store.clone()));
         Self {
             run_store,
             executor,
+            frame_kernel,
         }
     }
 
@@ -79,51 +91,54 @@ impl FlowFrameEngine {
         spec: &FrameSpec,
         context: &FlowContext,
     ) -> Result<IndexMap<StepId, serde_json::Value>, MobError> {
-        // Compute topological order for StartFrame input.
-        let ordered = topological_order(spec)?;
+        use crate::runtime::flow_frame_kernel::FlowFrameMutator;
 
-        // Build StartFrame input from the FrameSpec.
-        let start_input = build_start_frame_input(frame_id, spec, &ordered);
-
-        // Initialize or retrieve frame state.
-        let initial = flow_frame::initial_state()
-            .map_err(|e| MobError::Internal(format!("flow_frame initial_state failed: {e:?}")))?;
-        let start_outcome = flow_frame::transition(&initial, &start_input)
-            .map_err(|e| MobError::Internal(format!("StartFrame failed: {e:?}")))?;
-
-        // Store the new frame snapshot via the run store.
-        let initial_snap = crate::run::FrameSnapshot {
-            frame_id: frame_id.clone(),
-            kernel_state: start_outcome.next_state.clone(),
-        };
-        let inserted = self
-            .run_store
-            .cas_frame_state(run_id, frame_id, None, initial_snap)
+        // Initialize the frame via the kernel (computes topo order + StartFrame).
+        self.frame_kernel
+            .start_frame(run_id, frame_id, spec)
             .await?;
-        if !inserted {
-            return Err(MobError::Internal(format!(
-                "frame '{frame_id}' already exists in run '{run_id}'"
-            )));
-        }
 
         // Accumulate step outputs for this frame.
         let mut frame_outputs: IndexMap<StepId, serde_json::Value> = IndexMap::new();
-        let mut local_context = context.clone();
+
+        // Rebuild context from stored outputs (needed for resume correctness).
+        let mut local_context = if let Ok(Some(run)) = self.run_store.get_run(run_id).await {
+            let rebuilt = FlowContext::from_run_aggregate(
+                &run,
+                run_id.clone(),
+                context.activation_params.clone(),
+            );
+            // Merge any pre-existing outputs from the caller context that aren't
+            // yet persisted (e.g. from a parent frame).
+            let mut ctx = rebuilt;
+            for (k, v) in &context.step_outputs {
+                ctx.step_outputs
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
+            }
+            for (k, v) in &context.loop_outputs {
+                ctx.loop_outputs
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
+            }
+            ctx
+        } else {
+            context.clone()
+        };
 
         // Pump the admit loop until the frame is terminal.
         loop {
-            let effects_opt = self.admit_next(run_id, frame_id).await?;
+            let effects_opt = self
+                .frame_kernel
+                .admit_next_ready_node_with_retry(run_id, frame_id, 5)
+                .await?;
             match effects_opt {
                 None => {
                     // No more work from this admit — check if frame is done.
                     let snap = self.require_frame(run_id, frame_id).await?;
-                    if snap.kernel_state.phase == "Completed" {
-                        break;
-                    }
-                    // Phase is still Running but nothing ready — this means
-                    // the queue is empty AND not all nodes terminal yet
-                    // (should not happen in a sequential executor, but be safe).
-                    if snap.kernel_state.phase != "Running" {
+                    if snap.kernel_state.phase == "Completed"
+                        || snap.kernel_state.phase != "Running"
+                    {
                         break;
                     }
                     // No effects but still Running — all remaining nodes are
@@ -162,60 +177,19 @@ impl FlowFrameEngine {
                                         .step_outputs
                                         .insert(step_id.clone(), out.clone());
 
-                                    // CAS-complete the node + record output.
-                                    let snap = self.require_frame(run_id, frame_id).await?;
-                                    let complete_input = KernelInput {
-                                        variant: "CompleteNode".into(),
-                                        fields: BTreeMap::from([(
-                                            "node_id".into(),
-                                            KernelValue::String(node_id.to_string()),
-                                        )]),
-                                    };
-                                    let next_outcome =
-                                        flow_frame::transition(&snap.kernel_state, &complete_input)
-                                            .map_err(|e| {
-                                                MobError::Internal(format!(
-                                                    "CompleteNode failed: {e:?}"
-                                                ))
-                                            })?;
-                                    let next_snap = crate::run::FrameSnapshot {
-                                        frame_id: frame_id.clone(),
-                                        kernel_state: next_outcome.next_state,
-                                    };
-                                    self.run_store
-                                        .cas_complete_step_and_record_output(
-                                            run_id,
-                                            frame_id,
-                                            &snap,
-                                            next_snap,
-                                            step_id.to_string(),
-                                            out,
+                                    // CAS-complete the node + record output via kernel.
+                                    self.frame_kernel
+                                        .complete_node_with_output(
+                                            run_id, frame_id, &node_id, &step_id, out,
+                                            None, // root frame step — no loop context
+                                            5,
                                         )
                                         .await?;
                                 }
                                 Err(err) => {
-                                    // Fail the node.
-                                    let snap = self.require_frame(run_id, frame_id).await?;
-                                    let fail_input = KernelInput {
-                                        variant: "FailNode".into(),
-                                        fields: BTreeMap::from([(
-                                            "node_id".into(),
-                                            KernelValue::String(node_id.to_string()),
-                                        )]),
-                                    };
-                                    let next_outcome =
-                                        flow_frame::transition(&snap.kernel_state, &fail_input)
-                                            .map_err(|e| {
-                                                MobError::Internal(format!(
-                                                    "FailNode failed: {e:?}"
-                                                ))
-                                            })?;
-                                    let next_snap = crate::run::FrameSnapshot {
-                                        frame_id: frame_id.clone(),
-                                        kernel_state: next_outcome.next_state,
-                                    };
-                                    self.run_store
-                                        .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
+                                    // Fail the node via kernel.
+                                    self.frame_kernel
+                                        .fail_node(run_id, frame_id, &node_id)
                                         .await?;
                                     return Err(err);
                                 }
@@ -239,7 +213,7 @@ impl FlowFrameEngine {
                                 LoopInstanceId::from(format!("{frame_id}-{node_id}").as_str());
                             let loop_id = loop_spec.loop_id.clone();
 
-                            let all_iter_outputs = self
+                            let loop_result = self
                                 .execute_loop(
                                     run_id,
                                     &loop_instance_id,
@@ -251,37 +225,32 @@ impl FlowFrameEngine {
                                 )
                                 .await?;
 
-                            // Update local_context with loop iteration history.
-                            let loop_history = LoopContextHistory {
-                                iterations: all_iter_outputs.clone(),
-                            };
-                            local_context
-                                .loop_outputs
-                                .insert(loop_id.clone(), loop_history);
+                            match loop_result {
+                                LoopResult::ConditionMet(all_iter_outputs) => {
+                                    // Update local_context with loop iteration history.
+                                    let loop_history = LoopContextHistory {
+                                        iterations: all_iter_outputs,
+                                    };
+                                    local_context
+                                        .loop_outputs
+                                        .insert(loop_id.clone(), loop_history);
 
-                            // Complete the loop node in the parent frame.
-                            let snap = self.require_frame(run_id, frame_id).await?;
-                            let complete_input = KernelInput {
-                                variant: "CompleteNode".into(),
-                                fields: BTreeMap::from([(
-                                    "node_id".into(),
-                                    KernelValue::String(node_id.to_string()),
-                                )]),
-                            };
-                            let next_outcome =
-                                flow_frame::transition(&snap.kernel_state, &complete_input)
-                                    .map_err(|e| {
-                                        MobError::Internal(format!(
-                                            "CompleteNode (loop) failed: {e:?}"
-                                        ))
-                                    })?;
-                            let next_snap = crate::run::FrameSnapshot {
-                                frame_id: frame_id.clone(),
-                                kernel_state: next_outcome.next_state,
-                            };
-                            self.run_store
-                                .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
-                                .await?;
+                                    // Complete the loop node in the parent frame.
+                                    self.frame_kernel
+                                        .complete_node(run_id, frame_id, &node_id)
+                                        .await?;
+                                }
+                                LoopResult::Exhausted => {
+                                    // Fail the loop node — max iterations exhausted.
+                                    self.frame_kernel
+                                        .fail_node(run_id, frame_id, &node_id)
+                                        .await?;
+                                    return Err(MobError::Internal(format!(
+                                        "repeat_until loop '{loop_id}' exhausted max iterations ({max})",
+                                        max = loop_spec.max_iterations
+                                    )));
+                                }
+                            }
                         }
                         // Other effects (e.g. ReadyFrontierChanged, FrameTerminalized) are
                         // informational; we continue the admit loop.
@@ -293,20 +262,8 @@ impl FlowFrameEngine {
                         && self.all_nodes_terminal(&snap.kernel_state, spec)
                     {
                         // Terminalize.
-                        let term_input = KernelInput {
-                            variant: "TerminalizeCompleted".into(),
-                            fields: BTreeMap::new(),
-                        };
-                        let term_outcome = flow_frame::transition(&snap.kernel_state, &term_input)
-                            .map_err(|e| {
-                                MobError::Internal(format!("TerminalizeCompleted failed: {e:?}"))
-                            })?;
-                        let next_snap = crate::run::FrameSnapshot {
-                            frame_id: frame_id.clone(),
-                            kernel_state: term_outcome.next_state,
-                        };
-                        self.run_store
-                            .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
+                        self.frame_kernel
+                            .terminalize_frame(run_id, frame_id)
                             .await?;
                         break;
                     }
@@ -329,13 +286,7 @@ impl FlowFrameEngine {
         until: &'a ConditionExpr,
         max_iterations: u32,
         context: &'a FlowContext,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<IndexMap<StepId, serde_json::Value>>, MobError>>
-                + Send
-                + 'a,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<LoopResult, MobError>> + Send + 'a>> {
         Box::pin(self.execute_loop_inner(
             run_id,
             loop_instance_id,
@@ -357,9 +308,10 @@ impl FlowFrameEngine {
         until: &ConditionExpr,
         max_iterations: u32,
         context: &FlowContext,
-    ) -> Result<Vec<IndexMap<StepId, serde_json::Value>>, MobError> {
+    ) -> Result<LoopResult, MobError> {
         let mut all_iter_outputs: Vec<IndexMap<StepId, serde_json::Value>> = Vec::new();
         let mut iter_context = context.clone();
+        let mut condition_met = false;
 
         for iteration in 0..max_iterations as u64 {
             let body_frame_id =
@@ -389,47 +341,16 @@ impl FlowFrameEngine {
 
             // Evaluate the until condition.
             if evaluate_condition(until, &iter_context) {
+                condition_met = true;
                 break;
             }
         }
 
-        Ok(all_iter_outputs)
-    }
-
-    /// Admit the next ready node in a frame. Returns the effects or None if queue empty.
-    async fn admit_next(
-        &self,
-        run_id: &RunId,
-        frame_id: &FrameId,
-    ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        let snap = self.require_frame(run_id, frame_id).await?;
-        let queue_empty = match snap.kernel_state.fields.get("ready_queue") {
-            Some(KernelValue::Seq(seq)) => seq.is_empty(),
-            _ => true,
-        };
-        if queue_empty {
-            return Ok(None);
+        if condition_met {
+            Ok(LoopResult::ConditionMet(all_iter_outputs))
+        } else {
+            Ok(LoopResult::Exhausted)
         }
-
-        let admit_input = KernelInput {
-            variant: "AdmitNextReadyNode".into(),
-            fields: BTreeMap::new(),
-        };
-        let outcome = flow_frame::transition(&snap.kernel_state, &admit_input)
-            .map_err(|e| MobError::Internal(format!("AdmitNextReadyNode failed: {e:?}")))?;
-        let next_snap = crate::run::FrameSnapshot {
-            frame_id: frame_id.clone(),
-            kernel_state: outcome.next_state,
-        };
-        let won = self
-            .run_store
-            .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
-            .await?;
-        if !won {
-            // CAS lost — retry (simplified: return None to stop this pump cycle).
-            return Ok(None);
-        }
-        Ok(Some(outcome.effects))
     }
 
     /// Read the current frame snapshot.
@@ -476,170 +397,11 @@ impl FlowFrameEngine {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Build the `StartFrame` KernelInput from a `FrameSpec` and its topological order.
-pub fn build_start_frame_input(
-    frame_id: &FrameId,
-    spec: &FrameSpec,
-    ordered: &[FlowNodeId],
-) -> KernelInput {
-    let ordered_kv: Vec<KernelValue> = ordered
-        .iter()
-        .map(|n| KernelValue::String(n.to_string()))
-        .collect();
-
-    let tracked: BTreeSet<KernelValue> = ordered
-        .iter()
-        .map(|n| KernelValue::String(n.to_string()))
-        .collect();
-
-    let mut node_kind: BTreeMap<KernelValue, KernelValue> = BTreeMap::new();
-    let mut node_deps: BTreeMap<KernelValue, KernelValue> = BTreeMap::new();
-    let mut node_dep_modes: BTreeMap<KernelValue, KernelValue> = BTreeMap::new();
-    let mut node_branches: BTreeMap<KernelValue, KernelValue> = BTreeMap::new();
-
-    for (node_id, node_spec) in &spec.nodes {
-        let k = KernelValue::String(node_id.to_string());
-        match node_spec {
-            FlowNodeSpec::Step(s) => {
-                node_kind.insert(
-                    k.clone(),
-                    KernelValue::NamedVariant {
-                        enum_name: "FlowNodeKind".into(),
-                        variant: "Step".into(),
-                    },
-                );
-                node_deps.insert(
-                    k.clone(),
-                    KernelValue::Seq(
-                        s.depends_on
-                            .iter()
-                            .map(|d| KernelValue::String(d.to_string()))
-                            .collect(),
-                    ),
-                );
-                node_dep_modes.insert(k.clone(), dep_mode_kv(&s.depends_on_mode));
-                node_branches.insert(
-                    k.clone(),
-                    s.branch
-                        .as_ref()
-                        .map_or(KernelValue::None, |b| KernelValue::String(b.to_string())),
-                );
-            }
-            FlowNodeSpec::RepeatUntil(l) => {
-                node_kind.insert(
-                    k.clone(),
-                    KernelValue::NamedVariant {
-                        enum_name: "FlowNodeKind".into(),
-                        variant: "Loop".into(),
-                    },
-                );
-                node_deps.insert(
-                    k.clone(),
-                    KernelValue::Seq(
-                        l.depends_on
-                            .iter()
-                            .map(|d| KernelValue::String(d.to_string()))
-                            .collect(),
-                    ),
-                );
-                node_dep_modes.insert(k.clone(), dep_mode_kv(&l.depends_on_mode));
-                node_branches.insert(k.clone(), KernelValue::None);
-            }
-        }
-    }
-
-    KernelInput {
-        variant: "StartFrame".into(),
-        fields: BTreeMap::from([
-            ("frame_id".into(), KernelValue::String(frame_id.to_string())),
-            ("tracked_nodes".into(), KernelValue::Set(tracked)),
-            ("ordered_nodes".into(), KernelValue::Seq(ordered_kv)),
-            ("node_kind".into(), KernelValue::Map(node_kind)),
-            ("node_dependencies".into(), KernelValue::Map(node_deps)),
-            (
-                "node_dependency_modes".into(),
-                KernelValue::Map(node_dep_modes),
-            ),
-            ("node_branches".into(), KernelValue::Map(node_branches)),
-        ]),
-    }
-}
-
-fn dep_mode_kv(mode: &DependencyMode) -> KernelValue {
-    let variant = match mode {
-        DependencyMode::All => "All",
-        DependencyMode::Any => "Any",
-    };
-    KernelValue::NamedVariant {
-        enum_name: "DependencyMode".into(),
-        variant: variant.into(),
-    }
-}
-
-/// Topological sort of a `FrameSpec` (Kahn's algorithm).
-pub fn topological_order(spec: &FrameSpec) -> Result<Vec<FlowNodeId>, MobError> {
-    let mut in_degree: BTreeMap<FlowNodeId, usize> = BTreeMap::new();
-    let mut outgoing: BTreeMap<FlowNodeId, Vec<FlowNodeId>> = BTreeMap::new();
-
-    for node_id in spec.nodes.keys() {
-        in_degree.insert(node_id.clone(), 0);
-        outgoing.entry(node_id.clone()).or_default();
-    }
-
-    for (node_id, node_spec) in &spec.nodes {
-        let deps = match node_spec {
-            FlowNodeSpec::Step(s) => s.depends_on.clone(),
-            FlowNodeSpec::RepeatUntil(l) => l.depends_on.clone(),
-        };
-        for dep in deps {
-            if !in_degree.contains_key(&dep) {
-                return Err(MobError::Internal(format!(
-                    "node '{node_id}' depends on unknown node '{dep}'"
-                )));
-            }
-            *in_degree.entry(node_id.clone()).or_insert(0) += 1;
-            outgoing
-                .entry(dep.clone())
-                .or_default()
-                .push(node_id.clone());
-        }
-    }
-
-    let mut queue = VecDeque::new();
-    for node_id in spec.nodes.keys() {
-        if in_degree.get(node_id) == Some(&0) {
-            queue.push_back(node_id.clone());
-        }
-    }
-
-    let mut ordered = Vec::with_capacity(spec.nodes.len());
-    while let Some(next) = queue.pop_front() {
-        ordered.push(next.clone());
-        if let Some(children) = outgoing.get(&next) {
-            for child in children {
-                if let Some(count) = in_degree.get_mut(child)
-                    && *count > 0
-                {
-                    *count -= 1;
-                    if *count == 0 {
-                        queue.push_back(child.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    if ordered.len() != spec.nodes.len() {
-        return Err(MobError::Internal(
-            "frame contains a cycle; cannot compute topological order".to_string(),
-        ));
-    }
-
-    Ok(ordered)
-}
-
 /// Extract a String from a named field of a `KernelEffect`.
-fn string_from_effect_field(effect: &KernelEffect, field: &str) -> Result<String, MobError> {
+fn string_from_effect_field(
+    effect: &meerkat_machine_kernels::KernelEffect,
+    field: &str,
+) -> Result<String, MobError> {
     match effect.fields.get(field) {
         Some(KernelValue::String(s)) => Ok(s.clone()),
         other => Err(MobError::Internal(format!(

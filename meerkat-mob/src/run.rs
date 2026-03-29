@@ -15,14 +15,12 @@ use std::collections::{BTreeMap, VecDeque};
 /// Snapshot of a FlowFrameMachine kernel state stored per-frame in MobRun.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FrameSnapshot {
-    pub frame_id: FrameId,
     pub kernel_state: KernelState,
 }
 
 /// Snapshot of a LoopIterationMachine kernel state stored per-loop in MobRun.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoopSnapshot {
-    pub loop_instance_id: LoopInstanceId,
     pub kernel_state: KernelState,
 }
 
@@ -62,9 +60,9 @@ pub struct MobRun {
     /// Root frame step outputs keyed by step_id string.
     #[serde(default)]
     pub root_step_outputs: IndexMap<StepId, serde_json::Value>,
-    /// Loop iteration outputs: key=loop_id string, value=per-iteration step outputs.
+    /// Loop iteration outputs: key=loop_id, value=per-iteration step outputs.
     #[serde(default)]
-    pub loop_iteration_outputs: BTreeMap<String, Vec<IndexMap<StepId, serde_json::Value>>>,
+    pub loop_iteration_outputs: IndexMap<LoopId, Vec<IndexMap<StepId, serde_json::Value>>>,
 }
 
 impl MobRun {
@@ -102,7 +100,7 @@ impl MobRun {
             loop_iteration_ledger: Vec::new(),
             schema_version: 2,
             root_step_outputs: IndexMap::new(),
-            loop_iteration_outputs: BTreeMap::new(),
+            loop_iteration_outputs: IndexMap::new(),
         }
     }
 
@@ -516,12 +514,11 @@ impl FlowContext {
         let loop_outputs = run
             .loop_iteration_outputs
             .iter()
-            .map(|(loop_id_str, iterations)| {
-                let loop_id = LoopId::from(loop_id_str.as_str());
+            .map(|(loop_id, iterations)| {
                 let history = LoopContextHistory {
                     iterations: iterations.clone(),
                 };
-                (loop_id, history)
+                (loop_id.clone(), history)
             })
             .collect();
 
@@ -717,7 +714,7 @@ mod tests {
             loop_iteration_ledger: Vec::new(),
             schema_version: 2,
             root_step_outputs: IndexMap::new(),
-            loop_iteration_outputs: BTreeMap::new(),
+            loop_iteration_outputs: IndexMap::new(),
         };
 
         let encoded = serde_json::to_string(&run).unwrap();

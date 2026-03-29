@@ -5,7 +5,7 @@
 //! consistent with the per-frame and per-loop kernel snapshots.
 
 use crate::ids::FrameId;
-use crate::run::{FrameSnapshot, MobRun, MobRunStatus};
+use crate::run::{FrameSnapshot, LoopSnapshot, MobRun, MobRunStatus};
 use meerkat_machine_kernels::KernelValue;
 
 /// Errors that prevent a run from being resumed.
@@ -42,6 +42,9 @@ pub fn reconcile_run_state(run: &mut MobRun) -> Result<(), RestoreIncompatible> 
     //    We rebuild both ready_frames (Seq) and ready_frame_membership (Set)
     //    from scratch to avoid partial state.
     reconcile_ready_frames(run);
+
+    // 4. Reconcile pending_body_frame_loops in flow_state from loop snapshots.
+    reconcile_pending_body_frame_loops(run);
 
     Ok(())
 }
@@ -123,6 +126,54 @@ fn reconcile_ready_frames(run: &mut MobRun) {
         .insert("ready_frame_membership".to_string(), new_set);
 }
 
+/// Rebuild `pending_body_frame_loops` and `pending_body_frame_loop_membership`
+/// in `run.flow_state` from the per-loop snapshots.
+///
+/// A loop instance belongs in pending_body_frame_loops iff:
+/// - it exists in `run.loops`
+/// - its kernel state phase is "Running"
+/// - its `active_body_frame_id` field is `None` (requested body frame but not yet started)
+fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
+    let mut pending_loop_ids: Vec<String> = run
+        .loops
+        .iter()
+        .filter(|(_, snap)| loop_is_pending_body_frame(snap))
+        .map(|(loop_id, _)| loop_id.to_string())
+        .collect();
+    pending_loop_ids.sort();
+
+    let new_seq = KernelValue::Seq(
+        pending_loop_ids
+            .iter()
+            .map(|s| KernelValue::String(s.clone()))
+            .collect(),
+    );
+    let new_set = KernelValue::Set(
+        pending_loop_ids
+            .iter()
+            .map(|s| KernelValue::String(s.clone()))
+            .collect(),
+    );
+
+    run.flow_state
+        .fields
+        .insert("pending_body_frame_loops".to_string(), new_seq);
+    run.flow_state
+        .fields
+        .insert("pending_body_frame_loop_membership".to_string(), new_set);
+}
+
+/// Return true if a loop snapshot represents a loop that is pending a body frame.
+fn loop_is_pending_body_frame(snap: &LoopSnapshot) -> bool {
+    if snap.kernel_state.phase != "Running" {
+        return false;
+    }
+    matches!(
+        snap.kernel_state.fields.get("active_body_frame_id"),
+        Some(KernelValue::None) | None
+    )
+}
+
 /// Return true if the frame's `ready_queue` is present and non-empty.
 fn frame_has_nonempty_ready_queue(snap: &FrameSnapshot) -> bool {
     match snap.kernel_state.fields.get("ready_queue") {
@@ -171,12 +222,12 @@ mod tests {
             loop_iteration_ledger: vec![],
             schema_version: 2,
             root_step_outputs: indexmap::IndexMap::new(),
-            loop_iteration_outputs: BTreeMap::new(),
+            loop_iteration_outputs: indexmap::IndexMap::new(),
         }
     }
 
     fn frame_snapshot_with_ready_queue(
-        frame_id: &str,
+        _frame_id: &str,
         ready_nodes: Vec<&str>,
         all_nodes_ready: bool,
     ) -> FrameSnapshot {
@@ -210,7 +261,6 @@ mod tests {
         };
 
         FrameSnapshot {
-            frame_id: crate::FrameId::from(frame_id),
             kernel_state: KernelState {
                 phase: "Running".into(),
                 fields: BTreeMap::from([
@@ -254,7 +304,6 @@ mod tests {
         // Frame with empty ready_queue and no Ready nodes is valid.
         let frame_id = crate::FrameId::from("f1");
         let snap = FrameSnapshot {
-            frame_id: frame_id.clone(),
             kernel_state: KernelState {
                 phase: "Running".into(),
                 fields: BTreeMap::from([
@@ -279,7 +328,6 @@ mod tests {
     fn test_frame_invariant_violation_ready_not_in_queue() {
         let frame_id = crate::FrameId::from("f-bad");
         let snap = FrameSnapshot {
-            frame_id: frame_id.clone(),
             kernel_state: KernelState {
                 phase: "Running".into(),
                 fields: BTreeMap::from([

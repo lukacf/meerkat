@@ -3,8 +3,10 @@
 
 use indexmap::IndexMap;
 use meerkat_machine_kernels::{KernelState, KernelValue};
-use meerkat_mob::ids::{FrameId, LoopId, RunId, StepId};
-use meerkat_mob::run::{FlowContext, FrameSnapshot, LoopContextHistory, MobRun, MobRunStatus};
+use meerkat_mob::ids::{FrameId, LoopId, LoopInstanceId, RunId, StepId};
+use meerkat_mob::run::{
+    FlowContext, FrameSnapshot, LoopContextHistory, LoopSnapshot, MobRun, MobRunStatus,
+};
 use meerkat_mob::runtime::recovery::{RestoreIncompatible, reconcile_run_state};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,12 +31,12 @@ fn minimal_run_with_schema_v2() -> MobRun {
         loop_iteration_ledger: vec![],
         schema_version: 2,
         root_step_outputs: IndexMap::new(),
-        loop_iteration_outputs: BTreeMap::new(),
+        loop_iteration_outputs: IndexMap::new(),
     }
 }
 
 /// Build a FrameSnapshot with a specific ready_queue and matching node_status.
-fn frame_snapshot_with_ready_queue(frame_id: &str, ready_nodes: &[&str]) -> FrameSnapshot {
+fn frame_snapshot_with_ready_queue(_frame_id: &str, ready_nodes: &[&str]) -> FrameSnapshot {
     let ready_queue_seq = KernelValue::Seq(
         ready_nodes
             .iter()
@@ -59,7 +61,6 @@ fn frame_snapshot_with_ready_queue(frame_id: &str, ready_nodes: &[&str]) -> Fram
         .collect();
 
     FrameSnapshot {
-        frame_id: FrameId::from(frame_id),
         kernel_state: KernelState {
             phase: "Running".into(),
             fields: BTreeMap::from([
@@ -192,7 +193,6 @@ fn test_recovery_invalid_frame_invariant() {
 
     // Frame with node-a status=Ready but NOT in ready_queue → invariant violation.
     let bad_frame = FrameSnapshot {
-        frame_id: FrameId::from("frame-bad"),
         kernel_state: KernelState {
             phase: "Running".into(),
             fields: BTreeMap::from([
@@ -255,4 +255,93 @@ fn test_pre_v2_pending_run_is_accepted() {
 
     let result = reconcile_run_state(&mut run);
     assert!(result.is_ok(), "Pending pre-v2 run should be accepted");
+}
+
+// ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────
+
+fn get_pending_body_frame_loops_from_run_state(flow_state: &KernelState) -> Vec<String> {
+    match flow_state.fields.get("pending_body_frame_loops") {
+        Some(KernelValue::Seq(seq)) => seq
+            .iter()
+            .filter_map(|v| {
+                if let KernelValue::String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Recovery adds missing pending_body_frame_loops entries for loops in Running
+/// phase with active_body_frame_id = None.
+#[test]
+fn test_recovery_adds_missing_pending_body_frame_loops() {
+    let mut run = minimal_run_with_schema_v2();
+
+    // A LoopSnapshot in Running phase with active_body_frame_id = None
+    // → should be added to pending_body_frame_loops.
+    let loop_snap = LoopSnapshot {
+        kernel_state: KernelState {
+            phase: "Running".into(),
+            fields: BTreeMap::from([("active_body_frame_id".into(), KernelValue::None)]),
+        },
+    };
+    run.loops
+        .insert(LoopInstanceId::from("loop-inst-1"), loop_snap);
+
+    // Do NOT insert into pending_body_frame_loops (simulating missing entry).
+
+    reconcile_run_state(&mut run).expect("reconcile");
+
+    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
+    assert!(
+        pending.contains(&"loop-inst-1".to_string()),
+        "Missing loop-inst-1 should be added to pending_body_frame_loops; got: {pending:?}"
+    );
+}
+
+/// Recovery drops stale pending_body_frame_loops entries for loops whose
+/// active_body_frame_id is already set (body frame already started).
+#[test]
+fn test_recovery_drops_stale_pending_body_frame_loops() {
+    let mut run = minimal_run_with_schema_v2();
+
+    // A LoopSnapshot in Running phase with active_body_frame_id = Some(frame_id)
+    // → should NOT be in pending_body_frame_loops.
+    let loop_snap = LoopSnapshot {
+        kernel_state: KernelState {
+            phase: "Running".into(),
+            fields: BTreeMap::from([(
+                "active_body_frame_id".into(),
+                KernelValue::String("body-frame-1".into()),
+            )]),
+        },
+    };
+    run.loops
+        .insert(LoopInstanceId::from("loop-inst-2"), loop_snap);
+
+    // Manually add loop-inst-2 to pending_body_frame_loops as a stale entry.
+    run.flow_state.fields.insert(
+        "pending_body_frame_loops".to_string(),
+        KernelValue::Seq(vec![KernelValue::String("loop-inst-2".into())]),
+    );
+    run.flow_state.fields.insert(
+        "pending_body_frame_loop_membership".to_string(),
+        KernelValue::Set(
+            [KernelValue::String("loop-inst-2".into())]
+                .into_iter()
+                .collect(),
+        ),
+    );
+
+    reconcile_run_state(&mut run).expect("reconcile");
+
+    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
+    assert!(
+        !pending.contains(&"loop-inst-2".to_string()),
+        "Stale loop-inst-2 should be removed from pending_body_frame_loops; got: {pending:?}"
+    );
 }

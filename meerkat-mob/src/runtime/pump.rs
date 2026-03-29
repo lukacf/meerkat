@@ -32,10 +32,10 @@ pub fn pump_schedulers_to_exhaustion(
 ) -> Result<(KernelState, Vec<SchedulerGrant>), MobError> {
     let mut state = run_state.clone();
     let mut grants = Vec::new();
-    let mut pump_count = 0;
+    let mut round = 0;
 
     loop {
-        if pump_count >= max_pumps {
+        if round >= max_pumps {
             break;
         }
         let mut any_grant = false;
@@ -65,11 +65,6 @@ pub fn pump_schedulers_to_exhaustion(
                 any_grant = true;
             }
         }
-        pump_count += 1;
-
-        if pump_count >= max_pumps {
-            break;
-        }
 
         // Try PumpFrameScheduler
         let frame_pump = KernelInput {
@@ -98,8 +93,8 @@ pub fn pump_schedulers_to_exhaustion(
                 any_grant = true;
             }
         }
-        pump_count += 1;
 
+        round += 1;
         if !any_grant {
             break;
         }

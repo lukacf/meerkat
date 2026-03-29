@@ -2377,6 +2377,7 @@ dependencies = [
  "meerkat",
  "meerkat-comms",
  "meerkat-core",
+ "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
  "parking_lot",

@@ -399,7 +399,19 @@ fn tui_loop(
         while let Ok(ev) = event_rx.try_recv() {
             match ev {
                 TuiEvent::CommsMessage(s) => {
-                    // Strip the [COMMS MESSAGE from ...] prefix if present
+                    // Extract the sender name from [COMMS MESSAGE from X]\n...
+                    // If this sender is currently being streamed, skip the
+                    // message — it's a duplicate from the agent's send tool.
+                    if let Some(rest) = s.strip_prefix("[COMMS MESSAGE from ") {
+                        if let Some((from, _body)) = rest.split_once("]\n") {
+                            if app.busy_targets.contains(from)
+                                || app.streaming_text.contains_key(from)
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                    // Strip the raw prefix for clean display
                     let clean = s
                         .strip_prefix("[COMMS MESSAGE from ")
                         .and_then(|rest| rest.split_once("]\n"))
@@ -457,11 +469,17 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
         }
         AgentEvent::ToolCallRequested { name, args, .. } => {
             app.flush_streaming(from);
-            // Show compact tool call: name + first ~80 chars of args
-            let args_preview = args.to_string();
-            let args_short: String = args_preview.chars().take(80).collect();
-            let ellipsis = if args_preview.len() > 80 { "..." } else { "" };
-            app.push(format!("  -> {name}({args_short}{ellipsis})"));
+            // For shell: show just the command. For others: compact args.
+            let display = if name == "shell" {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+                let bg = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+                if bg { format!("$ {cmd} &") } else { format!("$ {cmd}") }
+            } else {
+                let s = args.to_string();
+                let short: String = s.chars().take(80).collect();
+                if s.len() > 80 { format!("{short}...") } else { short }
+            };
+            app.push(format!("  [{name}] {display}"));
         }
         AgentEvent::ToolExecutionCompleted {
             name,
@@ -470,16 +488,28 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
             duration_ms,
             ..
         } => {
-            let status = if *is_error { "ERR" } else { "OK" };
-            // Show result on its own lines, indented
-            app.push(format!("  <- {name} [{status} {duration_ms}ms]"));
-            // Show first ~10 lines of result
-            for (i, line) in result.lines().enumerate() {
-                if i >= 10 {
-                    app.push(format!("     ... ({} more lines)", result.lines().count() - 10));
-                    break;
+            if *is_error {
+                app.push(format!("  [{name}] error ({duration_ms}ms):"));
+                for line in result.lines().take(10) {
+                    app.push(format!("  {line}"));
                 }
-                app.push(format!("     {line}"));
+            } else if result.trim().is_empty() {
+                // Silent success (e.g. background job started with no output)
+            } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
+                // Structured result — show the "message" field if present
+                if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
+                    app.push(format!("  {msg}"));
+                }
+            } else {
+                // Plain text output — show first 15 lines
+                let line_count = result.lines().count();
+                for (i, line) in result.lines().enumerate() {
+                    if i >= 15 {
+                        app.push(format!("  ... ({} more lines)", line_count - 15));
+                        break;
+                    }
+                    app.push(format!("  {line}"));
+                }
             }
         }
         AgentEvent::RunCompleted { .. } => {

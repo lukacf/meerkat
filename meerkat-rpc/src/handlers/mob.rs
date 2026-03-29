@@ -72,8 +72,7 @@ pub async fn handle_call(
 
 #[derive(Debug, Deserialize)]
 pub struct MobCreateParams {
-    #[serde(default)]
-    pub definition: Option<MobDefinition>,
+    pub definition: MobDefinition,
 }
 
 pub async fn handle_create(
@@ -86,12 +85,7 @@ pub async fn handle_create(
         Err(resp) => return resp.with_id(id),
     };
 
-    let result = match params.definition {
-        Some(definition) => state.mob_create_definition(definition).await,
-        None => {
-            return invalid_params(id, "definition required");
-        }
-    };
+    let result = state.mob_create_definition(params.definition).await;
 
     match result {
         Ok(mob_id) => RpcResponse::success(id, serde_json::json!({"mob_id": mob_id})),

@@ -1284,7 +1284,7 @@ fn map_mob_err(call: ToolCallView<'_>, err: MobError) -> ToolError {
 
 #[derive(Deserialize)]
 struct MobCreateArgs {
-    definition: Option<MobDefinition>,
+    definition: MobDefinition,
 }
 #[derive(Deserialize)]
 struct MobListArgs {
@@ -1449,17 +1449,11 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                let mob_id = if let Some(definition) = args.definition {
-                    self.state
-                        .mob_create_definition(definition)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?
-                } else {
-                    return Err(ToolError::invalid_arguments(
-                        call.name,
-                        "definition required",
-                    ));
-                };
+                let mob_id = self
+                    .state
+                    .mob_create_definition(args.definition)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"mob_id": mob_id}))
             }
             "mob_list" => {

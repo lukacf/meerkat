@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use meerkat::{AgentBuilder, AgentEvent, AgentFactory, DynAgent};
 use meerkat_comms::MessageKind;
@@ -632,16 +632,23 @@ fn render_output(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut 
     app.last_output_width = area.width.saturating_sub(2);
     app.last_output_height = area.height.saturating_sub(2);
 
-    // Build all lines: completed output + live streaming text
-    let mut lines: Vec<Line> = app.output.iter().map(|s| Line::from(s.as_str())).collect();
+    // Join all output lines + live streaming text into one markdown string
+    let mut md = String::new();
+    for line in &app.output {
+        md.push_str(line);
+        md.push('\n');
+    }
     for (target, text) in &app.streaming_text {
         if !text.is_empty() {
-            lines.push(Line::from(format!("[{target}] {text}▌")));
+            md.push_str(&format!("[{target}] {text}▌\n"));
         }
     }
 
+    // Render markdown → styled ratatui Text (headings, bold, italic, code, lists)
+    let text = tui_markdown::from_str(&md);
+
     f.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("OUTPUT"))
             .wrap(Wrap { trim: false })
             .scroll((app.scroll_offset, 0)),

@@ -16,7 +16,6 @@ use meerkat_comms::{
 use meerkat_core::AgentLlmClient;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};

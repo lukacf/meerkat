@@ -24,8 +24,9 @@ tokio         = { version = "1", features = ["full"] }
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
 toml          = "0.8"
-ratatui       = "0.29"
-crossterm     = "0.28"
+ratatui       = "0.30"
+tui-markdown  = { version = "0.3", default-features = false }
+crossterm     = "0.29"
 anyhow        = "1"
 gethostname   = "1"
 parking_lot   = "0.12"

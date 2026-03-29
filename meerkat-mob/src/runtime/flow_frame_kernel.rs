@@ -8,7 +8,7 @@ use crate::error::MobError;
 use crate::ids::{FlowNodeId, FrameId, LoopId, RunId, StepId};
 use crate::run::FrameSnapshot;
 use crate::store::MobRunStore;
-use meerkat_machine_kernels::generated::flow_frame;
+use meerkat_machine_kernels::generated::{flow_frame, flow_run};
 use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelValue};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -228,15 +228,46 @@ impl FlowFrameMutator for FlowFrameKernel {
             let next_snap = FrameSnapshot {
                 kernel_state: outcome.next_state,
             };
-            // TODO(fix-12): Use cas_grant_node_slot here to atomically update both
-            // run flow_state (PumpNodeScheduler) and frame state. Currently we only
-            // update frame state, which means the run-level slot accounting can drift
-            // under concurrent frame execution. This is acceptable for the sequential
-            // FlowFrameEngine but must be fixed for parallel execution.
-            let won = self
+            // Use cas_grant_node_slot to atomically update BOTH the run's
+            // scheduler state (via PumpNodeScheduler which increments
+            // active_node_count and pops ready_frames) and the frame state
+            // (via AdmitNextReadyNode which pops the ready_queue).
+            //
+            // PumpNodeScheduler requires max_active_nodes > 0 and the frame
+            // to be in ready_frames. When the run scheduler is not configured
+            // (e.g. sequential FlowFrameEngine with default limits of 0 = unlimited),
+            // we fall back to cas_frame_state so only frame state is updated.
+            let run = self
                 .run_store
-                .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
-                .await?;
+                .get_run(run_id)
+                .await?
+                .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            let pump_input = KernelInput {
+                variant: "PumpNodeScheduler".into(),
+                fields: BTreeMap::new(),
+            };
+            let won = match flow_run::transition(&run.flow_state, &pump_input) {
+                Ok(run_outcome) => {
+                    // Run scheduler is active — atomically update run + frame state.
+                    self.run_store
+                        .cas_grant_node_slot(
+                            run_id,
+                            &run.flow_state,
+                            run_outcome.next_state,
+                            frame_id,
+                            &snap,
+                            next_snap,
+                        )
+                        .await?
+                }
+                Err(_) => {
+                    // Run scheduler not configured (max_active_nodes=0 or frame not
+                    // registered in ready_frames) — update frame state only.
+                    self.run_store
+                        .cas_frame_state(run_id, frame_id, Some(&snap), next_snap)
+                        .await?
+                }
+            };
             if won {
                 return Ok(Some(outcome.effects));
             }

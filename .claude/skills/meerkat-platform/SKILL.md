@@ -86,8 +86,7 @@ rkat resume <session_id> "retire worker-2 and add worker-4"
 Where needed, direct lifecycle commands are available as operational compatibility surface:
 
 ```bash
-rkat mob prefabs
-rkat mob create --prefab <name> | --definition <path>
+rkat mob create --definition <path>
 rkat mob list
 rkat mob status <mob_id>
 rkat mob spawn <mob_id> <profile> <meerkat_id>
@@ -235,8 +234,7 @@ git diff | rkat run "Review these changes" --enable-builtins
 cat data.csv | rkat run "Extract entities" | rkat run "Write a story about them"
 # Live streaming: --keep-alive --stdin reads stdin line-by-line as events
 tail -f app.log | rkat run --keep-alive --stdin "Monitor and alert on anomalies"
-rkat mob prefabs
-rkat mob create --prefab coding_swarm
+rkat mob create --definition ./mobs/coding-swarm.toml
 rkat mob list
 ```
 

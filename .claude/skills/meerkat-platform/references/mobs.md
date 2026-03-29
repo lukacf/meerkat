@@ -150,12 +150,33 @@ async fn run_mob(
 ### Rust example: high-level in-memory mob state helper
 
 ```rust
-use meerkat_mob::{MeerkatId, Prefab, ProfileName};
+use meerkat_mob::{MeerkatId, MobDefinition, ProfileName};
 use meerkat_mob_mcp::MobMcpState;
 
 async fn in_memory() -> Result<(), Box<dyn std::error::Error>> {
     let state = MobMcpState::new_in_memory();
-    let mob_id = state.mob_create_prefab(Prefab::Pipeline).await?;
+    let definition = MobDefinition::from_toml(r#"
+[mob]
+id = "my-mob"
+orchestrator = "lead"
+
+[profiles.lead]
+model = "claude-opus-4-6"
+external_addressable = true
+
+[profiles.lead.tools]
+builtins = true
+comms = true
+mob = true
+
+[profiles.worker]
+model = "claude-sonnet-4-6"
+
+[profiles.worker.tools]
+builtins = true
+comms = true
+"#)?;
+    let mob_id = state.mob_create_definition(definition).await?;
 
     state
         .mob_spawn(

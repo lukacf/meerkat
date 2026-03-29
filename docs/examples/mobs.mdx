@@ -114,59 +114,11 @@ When `enable_mob` is set, the agent gets these tools:
 
 ---
 
-## List prefabs
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat mob prefabs
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    ```json
-    {"jsonrpc":"2.0","id":1,"method":"mob/prefabs","params":{}}
-    ```
-  </Tab>
-  <Tab title="REST">
-    ```bash
-    curl http://localhost:8080/mob/prefabs
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {"name": "meerkat_mob_prefabs", "arguments": {}}
-    ```
-  </Tab>
-  <Tab title="Python">
-    ```python
-    prefabs = await client.list_mob_prefabs()
-    for p in prefabs:
-        print(p["key"])
-    ```
-  </Tab>
-  <Tab title="TypeScript">
-    ```typescript
-    const prefabs = await client.listMobPrefabs();
-    prefabs.forEach(p => console.log(p.key));
-    ```
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    for prefab in meerkat_mob::Prefab::all() {
-        println!("{}", prefab.key());
-    }
-    ```
-  </Tab>
-</Tabs>
-
 ## Create a mob
 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    # From a prefab template
-    rkat mob create --prefab coding_swarm
-
     # From a definition file
     rkat mob create --definition ./mobs/triage/definition.json
     ```
@@ -177,7 +129,7 @@ When `enable_mob` is set, the agent gets these tools:
       "jsonrpc": "2.0", "id": 1,
       "method": "session/create",
       "params": {
-        "prompt": "Create a mob from the coding_swarm prefab, spawn all members, wire them, and report status.",
+        "prompt": "Create a coding swarm mob, spawn all members, wire them, and report status.",
         "enable_builtins": true,
         "enable_mob": true
       }
@@ -188,7 +140,7 @@ When `enable_mob` is set, the agent gets these tools:
     ```bash
     curl -X POST http://localhost:8080/sessions \
       -H "Content-Type: application/json" \
-      -d '{"prompt":"Create a mob from the coding_swarm prefab, spawn and wire all members.","enable_builtins":true,"enable_mob":true}'
+      -d '{"prompt":"Create a coding swarm mob, spawn and wire all members.","enable_builtins":true,"enable_mob":true}'
     ```
   </Tab>
   <Tab title="MCP">
@@ -220,7 +172,33 @@ When `enable_mob` is set, the agent gets these tools:
   </Tab>
   <Tab title="Rust">
     ```rust
-    let definition = Prefab::CodingSwarm.definition();
+    let definition = MobDefinition::from_toml(r#"
+    [mob]
+    id = "coding_swarm"
+    orchestrator = "lead"
+
+    [profiles.lead]
+    model = "claude-opus-4-6"
+    external_addressable = true
+
+    [profiles.lead.tools]
+    builtins = true
+    comms = true
+    mob = true
+    mob_tasks = true
+
+    [profiles.worker]
+    model = "claude-sonnet-4-6"
+
+    [profiles.worker.tools]
+    builtins = true
+    shell = true
+    comms = true
+    mob_tasks = true
+
+    [wiring]
+    auto_wire_orchestrator = true
+    "#)?;
     let handle = MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(service)
         .allow_ephemeral_sessions(true)

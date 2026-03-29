@@ -142,18 +142,7 @@ A mob definition is a JSON or TOML document that declares everything: profiles, 
 }
 ```
 
-### Prefabs and mobpacks
-
-**Prefabs** are built-in definition templates for common patterns:
-
-| Prefab | Pattern | Profiles |
-|--------|---------|----------|
-| `coding_swarm` | Lead + workers for coding tasks | lead, worker |
-| `code_review` | Multi-reviewer code audits | lead, worker |
-| `research_team` | Diverge/converge research | lead, worker |
-| `pipeline` | Sequential stage handoffs | lead, worker |
-
-Prefabs are starting points — create from a prefab, then customize.
+### Mobpacks
 
 **Mobpacks** are portable archives (`.mobpack`) that bundle a mob definition with its skills, config, and optional Ed25519 signatures into a single deployable artifact. Mobpacks can be deployed to any surface or compiled into a browser-runnable WASM bundle. See the [Mobpack guide](/guides/mobpack) for packaging, signing, trust policies, and web deployment.
 
@@ -219,11 +208,8 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
 <Tabs>
   <Tab title="JSON-RPC">
     ```json
-    // List prefabs
-    {"jsonrpc":"2.0","id":1,"method":"mob/prefabs","params":{}}
-
     // Create a mob directly
-    {"jsonrpc":"2.0","id":2,"method":"mob/create","params":{
+    {"jsonrpc":"2.0","id":1,"method":"mob/create","params":{
       "definition": {"id":"my-mob","profiles":{}}
     }}
 
@@ -242,8 +228,6 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
   </Tab>
   <Tab title="REST">
     ```bash
-    # REST keeps mob lifecycle compact/generic
-    curl http://localhost:8080/mob/prefabs
     curl http://localhost:8080/mob/tools
     curl -X POST http://localhost:8080/mob/call \
       -H "Content-Type: application/json" \

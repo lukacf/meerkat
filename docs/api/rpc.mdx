@@ -70,10 +70,9 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `runtime/reset` | Runtime | Reset runtime-backed ingress |
 | `input/state` | Runtime | Read runtime input lifecycle state |
 | `input/list` | Runtime | List runtime input lifecycle records |
-| `mob/prefabs` | Mob | List mob prefab templates (mob feature) |
 | `session/stream_open` | Session | Open a standalone session event stream |
 | `session/stream_close` | Session | Close a standalone session event stream |
-| `mob/create` | Mob | Create a mob from a prefab or definition (mob feature) |
+| `mob/create` | Mob | Create a mob from a definition (mob feature) |
 | `mob/list` | Mob | List mobs (mob feature) |
 | `mob/status` | Mob | Get mob status (mob feature) |
 | `mob/members` | Mob | List mob members (mob feature) |
@@ -186,7 +185,7 @@ Handshake. Returns server capabilities.
       "runtime/state", "runtime/accept", "runtime/retire", "runtime/reset",
       "input/state", "input/list",
       "session/stream_open", "session/stream_close",
-      "mob/prefabs", "mob/create", "mob/list", "mob/status",
+      "mob/create", "mob/list", "mob/status",
       "mob/members", "mob/spawn", "mob/spawn_many",
       "mob/retire", "mob/respawn",
       "mob/wire", "mob/unwire", "mob/lifecycle", "mob/send",

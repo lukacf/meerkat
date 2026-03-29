@@ -65,7 +65,7 @@ rkat realms current|list|show
 rkat skills list [--json]
 rkat skills inspect <ID> [--source <SOURCE>] [--json]
 rkat models catalog [--json]
-rkat mob prefabs|create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
+rkat mob create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
 rkat capabilities
 rkat-rpc
@@ -92,7 +92,6 @@ rkat mob flow-status <MOB_ID> <RUN_ID>
 Primary CLI mob usage is tool-driven from `run`/`resume` prompts using `mob_*` tools.
 Mob lifecycle (non-flow) commands remain available as explicit operational/compatibility controls:
 
-- `prefabs`
 - `create`
 - `list`
 - `status`
@@ -149,7 +148,6 @@ Core endpoints:
 - `POST /sessions/{id}/mcp/reload` — stage live MCP server reload (feature-gated)
 - `POST /comms/send` (feature-gated)
 - `GET /comms/peers` (feature-gated)
-- `GET /mob/prefabs` — list mob prefab templates (feature-gated)
 - `GET /mob/tools` — list mob tools (feature-gated)
 - `POST /mob/call` — invoke a mob tool (feature-gated)
 - `GET /mob/{id}/events` — SSE stream for mob events (feature-gated)
@@ -211,7 +209,6 @@ Core methods:
 - `mcp/add` — stage live MCP server add for a session
 - `mcp/remove` — stage live MCP server remove
 - `mcp/reload` — stage live MCP server reload
-- `mob/prefabs` — list built-in mob prefab templates (feature-gated)
 - `session/stream_open` / `session/stream_close` — standalone session event streaming
 - `mob/create`, `mob/list`, `mob/status`, `mob/members` — explicit mob lifecycle/state methods (feature-gated)
 - `mob/spawn`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/lifecycle`, `mob/send` — explicit mob control methods (feature-gated)
@@ -261,7 +258,6 @@ Core tools:
 
 Mob tools (feature-gated):
 
-- `meerkat_mob_prefabs` — list prefab templates
 - `mob_create`, `mob_list`, `mob_lifecycle`, etc. — mob lifecycle tools (via `meerkat-mob-mcp`)
 - `meerkat_mob_event_stream_open` / `meerkat_mob_event_stream_read` / `meerkat_mob_event_stream_close`
 

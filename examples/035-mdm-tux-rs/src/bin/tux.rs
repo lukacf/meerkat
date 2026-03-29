@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use meerkat::{AgentBuilder, AgentEvent, AgentFactory, DynAgent};
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
@@ -391,7 +391,7 @@ fn tui_loop(
         if crossterm::event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = crossterm::event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    handle_key(&mut app, key.code, &command_tx);
+                    handle_key(&mut app, key.code, key.modifiers, &command_tx);
                 }
             }
         }
@@ -526,7 +526,12 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
     }
 }
 
-fn handle_key(app: &mut App, code: KeyCode, command_tx: &mpsc::UnboundedSender<AppCommand>) {
+fn handle_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    command_tx: &mpsc::UnboundedSender<AppCommand>,
+) {
     match code {
         KeyCode::Tab => {
             app.mode = if app.mode == Mode::Direct { Mode::Hive } else { Mode::Direct };
@@ -552,27 +557,35 @@ fn handle_key(app: &mut App, code: KeyCode, command_tx: &mpsc::UnboundedSender<A
             app.auto_scroll = true;
             app.update_scroll();
         }
-        KeyCode::Char(c) => app.input.push(c),
-        KeyCode::Backspace => {
-            app.input.pop();
+        // Shift+Enter or Alt+Enter → insert newline
+        KeyCode::Enter if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+            app.input.push('\n');
         }
+        // Plain Enter → submit
         KeyCode::Enter if !app.input.is_empty() => {
             let body = std::mem::take(&mut app.input);
             let cmd = match app.mode {
                 Mode::Direct if !app.targets.is_empty() => {
                     let target = app.targets[app.selected].clone();
-                    app.push(format!("> [{target}] {body}"));
+                    // Show the command in output, replacing newlines with spaces for display
+                    let display = body.replace('\n', " ");
+                    app.push(format!("> [{target}] {display}"));
                     app.set_busy(&target, true);
                     AppCommand::Send { target, body }
                 }
                 Mode::Hive if !app.hive_planning => {
                     app.hive_planning = true;
-                    app.push(format!("> [hive] {body}"));
+                    let display = body.replace('\n', " ");
+                    app.push(format!("> [hive] {display}"));
                     AppCommand::RunHive { prompt: body }
                 }
                 _ => return,
             };
             let _ = command_tx.send(cmd);
+        }
+        KeyCode::Char(c) => app.input.push(c),
+        KeyCode::Backspace => {
+            app.input.pop();
         }
         KeyCode::Esc => app.quit = true,
         _ => {}
@@ -582,9 +595,17 @@ fn handle_key(app: &mut App, code: KeyCode, command_tx: &mpsc::UnboundedSender<A
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 fn render(f: &mut ratatui::Frame, app: &mut App) {
+    // Input box height: 2 (borders) + number of content lines (min 1, max 8)
+    let input_lines = (app.input.chars().filter(|&c| c == '\n').count() + 1).clamp(1, 8) as u16;
+    let input_height = input_lines + 2;
+
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(input_height),
+        ])
         .split(f.area());
 
     // Title bar
@@ -703,9 +724,24 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
         Mode::Hive => "[hive] ".into(),
         _ => "[waiting for targets...] ".into(),
     };
+    // Build multiline display: first line gets the label, rest are continuation
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, part) in app.input.split('\n').enumerate() {
+        if i == 0 {
+            lines.push(Line::from(format!("{label}> {part}")));
+        } else {
+            lines.push(Line::from(format!("  {part}")));
+        }
+    }
+    // Cursor on the last line
+    if let Some(last) = lines.last_mut() {
+        last.spans.push(Span::styled("_", Style::default().fg(Color::DarkGray)));
+    }
+    let title = format!("COMMAND  [Shift+Enter: newline]");
     f.render_widget(
-        Paragraph::new(format!("{label}> {}_", app.input))
-            .block(Block::default().borders(Borders::ALL).title("COMMAND")),
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }

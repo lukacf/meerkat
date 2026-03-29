@@ -1,0 +1,21 @@
+# MDM TUX configuration — runs on the controller machine.
+#
+# 1. Start TUX:
+#      ANTHROPIC_API_KEY=... cargo run --bin tux -- tux.toml.example
+# 2. Copy the printed pubkey into target.toml [[trusted_peers]]
+# 3. Start target on the managed machine.
+
+listen_addr = "0.0.0.0:4747"
+model       = "claude-sonnet-4-6"
+data_dir    = ".tux-data"
+
+# Add each managed machine here (pubkey printed when target starts).
+[[targets]]
+name   = "mac-laptop"
+pubkey = "ed25519:REPLACE_WITH_TARGET_PUBKEY"
+addr   = "tcp://192.168.1.100:4748"
+
+# [[targets]]
+# name   = "office-pc"
+# pubkey = "ed25519:REPLACE_WITH_SECOND_TARGET_PUBKEY"
+# addr   = "tcp://192.168.1.101:4748"

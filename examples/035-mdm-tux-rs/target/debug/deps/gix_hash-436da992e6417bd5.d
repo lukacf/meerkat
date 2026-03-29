@@ -1,0 +1,12 @@
+/Users/luka/src/meerkat/examples/035-mdm-tux-rs/target/debug/deps/gix_hash-436da992e6417bd5.d: /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/lib.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/oid.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/hasher.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/io.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/object_id.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/prefix.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/verify.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/kind.rs
+
+/Users/luka/src/meerkat/examples/035-mdm-tux-rs/target/debug/deps/libgix_hash-436da992e6417bd5.rmeta: /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/lib.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/oid.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/hasher.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/io.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/object_id.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/prefix.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/verify.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/kind.rs
+
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/lib.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/oid.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/hasher.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/io.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/object_id.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/prefix.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/verify.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-hash-0.22.1/src/kind.rs:

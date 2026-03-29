@@ -1,0 +1,13 @@
+/Users/luka/src/meerkat/examples/035-mdm-tux-rs/target/debug/deps/gix_fs-79b8eec986bb35ab.d: /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/lib.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/capabilities.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/snapshot.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/symlink.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/read_dir.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/mod.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/create.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/remove.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/stack.rs
+
+/Users/luka/src/meerkat/examples/035-mdm-tux-rs/target/debug/deps/libgix_fs-79b8eec986bb35ab.rmeta: /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/lib.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/capabilities.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/snapshot.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/symlink.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/read_dir.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/mod.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/create.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/remove.rs /Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/stack.rs
+
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/lib.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/capabilities.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/snapshot.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/symlink.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/read_dir.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/mod.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/create.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/dir/remove.rs:
+/Users/luka/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gix-fs-0.19.2/src/stack.rs:

@@ -1,0 +1,1 @@
+CommsAgent<meerkat_client::adapter::LlmClientAdapter, CommsToolDispatcher<dyn AgentToolDispatcher>, StoreAdapter<JsonlStore>>

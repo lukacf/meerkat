@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use meerkat::{AgentBuilder, AgentEvent, AgentFactory, DynAgent};
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
@@ -379,9 +381,14 @@ fn tui_loop(
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
 
+    // Enable bracketed paste so multiline pastes arrive as Event::Paste
+    // instead of individual Enter key events.
+    crossterm::execute!(std::io::stdout(), EnableBracketedPaste)?;
+
     struct TermGuard;
     impl Drop for TermGuard {
         fn drop(&mut self) {
+            let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
             ratatui::restore();
         }
     }
@@ -389,10 +396,18 @@ fn tui_loop(
 
     loop {
         if crossterm::event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match crossterm::event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     handle_key(&mut app, key.code, key.modifiers, &command_tx);
                 }
+                Event::Paste(text) => {
+                    let line_count = text.lines().count();
+                    app.input.push_str(&text);
+                    if line_count > 1 {
+                        app.push(format!("[pasted {line_count} lines]"));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -602,11 +617,17 @@ fn handle_key(
 fn render(f: &mut ratatui::Frame, app: &mut App) {
     // Input box height: 2 (borders) + estimated visual lines (min 1, max 8).
     // Account for both explicit newlines and soft wrapping.
-    let input_width = f.area().width.saturating_sub(4) as usize; // borders + padding
+    // Subtract borders (2) + label prefix (~25 chars on first line).
+    let label_len = 25_usize; // approximate label prefix length
+    let box_width = f.area().width.saturating_sub(2) as usize; // inner width minus borders
     let input_lines: usize = app
         .input
         .split('\n')
-        .map(|line| if input_width == 0 { 1 } else { (line.len() / input_width.max(1)) + 1 })
+        .enumerate()
+        .map(|(i, line)| {
+            let avail = if i == 0 { box_width.saturating_sub(label_len) } else { box_width };
+            if avail == 0 { 1 } else { (line.len() / avail.max(1)) + 1 }
+        })
         .sum();
     let input_height = (input_lines.clamp(1, 8) as u16) + 2;
 

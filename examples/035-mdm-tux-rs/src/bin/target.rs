@@ -376,17 +376,20 @@ async fn handle_command(
     node: &CommsNode,
 ) -> String {
     if cmd == "NEW_SESSION" {
-        // Rebuild tools with a fresh session scope.
-        match build_tools(factory, data_dir, node, None).await {
+        // Generate a shared session ID for both tools and agent so
+        // background shell jobs are scoped to the correct session.
+        let sid = meerkat_core::types::SessionId::new();
+        match build_tools(factory, data_dir, node, Some(sid.clone())).await {
             Ok(t) => *tools = t,
             Err(e) => return format!("Failed to rebuild tools: {e}"),
         }
+        let session = meerkat_core::session::Session::with_id(sid.clone());
         *agent = AgentBuilder::new()
             .model(model)
             .system_prompt(system_prompt)
+            .resume_session(session)
             .build(llm.clone(), tools.clone(), store.clone() as _)
             .await;
-        let sid = agent.session().id();
         eprintln!("[target] new session: {sid}");
         format!("New session started: {sid}")
     } else if cmd == "LIST_SESSIONS" {
@@ -515,11 +518,17 @@ async fn build_agent_fresh_or_resume(
         }
     }
 
-    // Fresh session
-    eprintln!("[target] starting fresh session");
+    // Fresh session — generate a shared ID for both tools and agent
+    let sid = meerkat_core::types::SessionId::new();
+    eprintln!("[target] starting fresh session: {sid}");
+    if let Ok(t) = build_tools(factory, data_dir, node, Some(sid.clone())).await {
+        *tools = t;
+    }
+    let session = meerkat_core::session::Session::with_id(sid);
     AgentBuilder::new()
         .model(model)
         .system_prompt(system_prompt)
+        .resume_session(session)
         .build(llm.clone(), tools.clone(), store.clone() as _)
         .await
 }
@@ -548,6 +557,8 @@ async fn build_tools(
     let mut builtin_config = meerkat::BuiltinToolConfig::default();
     builtin_config.policy.enable.insert("shell".into());
     builtin_config.policy.enable.insert("shell_job_cancel".into());
+    builtin_config.policy.enable.insert("shell_job_status".into());
+    builtin_config.policy.enable.insert("shell_jobs".into());
     // Disable task tools — MemoryTaskStore can't persist across restarts,
     // so resumed sessions would have dangling task references.
     builtin_config.policy.disable.insert("task_create".into());

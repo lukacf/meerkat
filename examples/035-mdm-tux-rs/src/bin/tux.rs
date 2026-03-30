@@ -668,15 +668,26 @@ fn handle_key(
         }
         // Plain Enter → submit (slash commands or regular message)
         KeyCode::Enter if !app.input.is_empty() => {
+            // Check if submission is possible BEFORE consuming the input.
+            // Slash commands are always submittable. Regular messages need
+            // a valid target (Direct) or no in-flight hive plan (Hive).
+            let is_slash = app.input.starts_with('/')
+                && matches!(
+                    app.input.split_once(' ').map(|(c, _)| c).unwrap_or(&app.input),
+                    "/new" | "/resume" | "/help"
+                );
+            if !is_slash {
+                match app.mode {
+                    Mode::Direct if app.targets.is_empty() => return,
+                    Mode::Hive if app.hive_planning => return,
+                    _ => {}
+                }
+            }
+
             let body = std::mem::take(&mut app.input);
 
-            // ── Slash commands (only known ones — don't intercept /bin/ls etc.) ──
-            if body.starts_with('/')
-                && matches!(
-                    body.split_once(' ').map(|(c, _)| c).unwrap_or(&body),
-                    "/new" | "/resume" | "/help"
-                )
-            {
+            // ── Slash commands ────────────────────────────────────────────
+            if is_slash {
                 let parts: Vec<&str> = body.splitn(2, ' ').collect();
                 let slash = parts[0];
                 let arg = parts.get(1).unwrap_or(&"").trim();
@@ -740,13 +751,13 @@ fn handle_key(
                     app.set_busy(&target, true);
                     AppCommand::Send { target, body }
                 }
-                Mode::Hive if !app.hive_planning => {
+                Mode::Hive => {
                     app.hive_planning = true;
                     let display = body.replace('\n', " ");
                     app.push(format!("> [hive] {display}"));
                     AppCommand::RunHive { prompt: body }
                 }
-                _ => return,
+                _ => unreachable!("checked before taking input"),
             };
             let _ = command_tx.send(cmd);
         }

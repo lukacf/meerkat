@@ -177,8 +177,9 @@ async fn main() -> anyhow::Result<()> {
         let sender = msg.from_peer.clone();
 
         // Check for slash commands (__CMD__ prefix)
-        if let meerkat_comms::agent::types::CommsContent::Message { ref body, .. } = msg.content {
-            if let Some(cmd) = body.strip_prefix(CMD_PREFIX) {
+        if let meerkat_comms::agent::types::CommsContent::Message { ref body, .. } = msg.content
+            && let Some(cmd) = body.strip_prefix(CMD_PREFIX)
+        {
                 let cmd = cmd.trim();
                 eprintln!("[target] command: {cmd}");
 
@@ -201,7 +202,6 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await;
                 continue;
-            }
         }
 
         eprintln!("[target] received message from '{sender}'");
@@ -237,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
 
 // ── Command handling ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     cmd: &str,
     jsonl_store: &JsonlStore,
@@ -269,7 +270,7 @@ async fn handle_command(
                         let age = s
                             .updated_at
                             .elapsed()
-                            .map(|d| format_duration(d))
+                            .map(format_duration)
                             .unwrap_or_else(|_| "?".into());
                         let marker = if s.id.to_string() == current_id {
                             " ← current"
@@ -365,20 +366,20 @@ async fn build_agent_fresh_or_resume(
     // Try to auto-resume the most recent session
     if let Ok(mut sessions) = jsonl_store.list(SessionFilter::default()).await {
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        if let Some(latest) = sessions.first() {
-            if let Ok(Some(session)) = jsonl_store.load(&latest.id).await {
-                let msg_count = session.messages().len();
-                eprintln!(
-                    "[target] auto-resuming session {} ({msg_count} messages)",
-                    latest.id
-                );
-                return AgentBuilder::new()
-                    .model(model)
-                    .system_prompt(system_prompt)
-                    .resume_session(session)
-                    .build(llm.clone(), tools.clone() as _, store.clone() as _)
-                    .await;
-            }
+        if let Some(latest) = sessions.first()
+            && let Ok(Some(session)) = jsonl_store.load(&latest.id).await
+        {
+            let msg_count = session.messages().len();
+            eprintln!(
+                "[target] auto-resuming session {} ({msg_count} messages)",
+                latest.id
+            );
+            return AgentBuilder::new()
+                .model(model)
+                .system_prompt(system_prompt)
+                .resume_session(session)
+                .build(llm.clone(), tools.clone() as _, store.clone() as _)
+                .await;
         }
     }
 

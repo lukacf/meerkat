@@ -113,10 +113,10 @@ impl App {
 
     /// Flush streaming text for a target into the output buffer.
     fn flush_streaming(&mut self, target: &str) {
-        if let Some(text) = self.streaming_text.remove(target) {
-            if !text.is_empty() {
-                self.push(format!("[{target}] {text}"));
-            }
+        if let Some(text) = self.streaming_text.remove(target)
+            && !text.is_empty()
+        {
+            self.push(format!("[{target}] {text}"));
         }
     }
 
@@ -147,7 +147,7 @@ impl App {
             .output
             .iter()
             .chain(self.streaming_text.values())
-            .map(|line| if line.is_empty() { 1 } else { (line.len() + w - 1) / w })
+            .map(|line| if line.is_empty() { 1 } else { line.len().div_ceil(w) })
             .sum();
         let vis = self.last_output_height as usize;
         self.scroll_offset = total.saturating_sub(vis) as u16;
@@ -454,14 +454,12 @@ fn tui_loop(
                     // Extract the sender name from [COMMS MESSAGE from X]\n...
                     // If this sender is currently being streamed, skip the
                     // message — it's a duplicate from the agent's send tool.
-                    if let Some(rest) = s.strip_prefix("[COMMS MESSAGE from ") {
-                        if let Some((from, _body)) = rest.split_once("]\n") {
-                            if app.busy_targets.contains(from)
-                                || app.streaming_text.contains_key(from)
-                            {
-                                continue;
-                            }
-                        }
+                    if let Some(rest) = s.strip_prefix("[COMMS MESSAGE from ")
+                        && let Some((from, _body)) = rest.split_once("]\n")
+                        && (app.busy_targets.contains(from)
+                            || app.streaming_text.contains_key(from))
+                    {
+                        continue;
                     }
                     // Strip the raw prefix for clean display
                     let clean = s

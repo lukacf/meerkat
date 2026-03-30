@@ -43,8 +43,23 @@ pub struct DefaultPolicyTable;
 
 impl DefaultPolicyTable {
     /// Resolve a policy decision for the given input and runtime state.
+    ///
+    /// If the input carries an explicit `handling_mode`, the override is
+    /// honored for actionable input kinds only. Response conventions
+    /// (`peer_response_progress`, `peer_response_terminal`) always fall
+    /// through to kind-based defaults — the policy table does not apply
+    /// handling_mode overrides for those kinds.
     pub fn resolve(input: &Input, runtime_idle: bool) -> PolicyDecision {
-        if let Some(mode) = input.handling_mode() {
+        let kind = input.kind_id();
+        // Response conventions must not have their policy overridden by
+        // handling_mode. Admission validation rejects this combination,
+        // but the policy table also refuses to honor it so the contract
+        // holds for any caller of resolve(), not just the driver path.
+        let is_response_convention = matches!(
+            kind.0.as_str(),
+            "peer_response_progress" | "peer_response_terminal"
+        );
+        if !is_response_convention && let Some(mode) = input.handling_mode() {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(
                     ApplyMode::StageRunStart,
@@ -77,7 +92,7 @@ impl DefaultPolicyTable {
             };
         }
 
-        let kind = input.kind_id();
+        // kind already computed above for response-convention check.
         Self::resolve_by_kind(&kind, runtime_idle)
     }
 
@@ -738,6 +753,45 @@ mod tests {
         let input = make_peer_input(Some(PeerConvention::Message), None);
         let decision = DefaultPolicyTable::resolve(&input, true);
         // Kind-based default for peer_message idle is Queue
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
+        assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+    }
+
+    // -----------------------------------------------------------------------
+    // P2: Policy table refuses to honor handling_mode for response conventions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn response_progress_with_handling_mode_falls_through_to_kind_default() {
+        // Even if a ResponseProgress somehow carries handling_mode=Steer,
+        // the policy table must ignore it and use kind-based defaults.
+        let input = make_peer_input(
+            Some(PeerConvention::ResponseProgress {
+                request_id: "r".into(),
+                phase: crate::input::ResponseProgressPhase::InProgress,
+            }),
+            Some(HandlingMode::Steer),
+        );
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        // Kind default for peer_response_progress: Coalesce, StageRunBoundary, Steer
+        // — but via kind-based resolution, NOT via the handling_mode override path.
+        assert_eq!(decision.queue_mode, QueueMode::Coalesce);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);
+        assert_eq!(decision.wake_mode, WakeMode::None);
+    }
+
+    #[test]
+    fn response_terminal_with_handling_mode_falls_through_to_kind_default() {
+        let input = make_peer_input(
+            Some(PeerConvention::ResponseTerminal {
+                request_id: "r".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            Some(HandlingMode::Steer),
+        );
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        // Kind default for peer_response_terminal idle: Queue, StageRunStart, WakeIfIdle
         assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);

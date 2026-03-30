@@ -143,7 +143,18 @@ async fn main() -> anyhow::Result<()> {
         .context("invalid HOST:PORT")?;
     let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
     let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
-    let advertised_addr = format!("tcp://{host_base}:{comms_port}");
+
+    // Discover our own IP as seen from the host by making a UDP "connection"
+    // (no traffic sent) and reading the local address. Falls back to 127.0.0.1.
+    let local_ip = {
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok();
+        probe
+            .and_then(|s| s.connect(format!("{host_base}:{host_comms_port}")).ok().map(|_| s))
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|| "127.0.0.1".into())
+    };
+    let advertised_addr = format!("tcp://{local_ip}:{comms_port}");
 
     let router = node.router.clone();
     let mut node = node;

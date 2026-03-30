@@ -50,6 +50,8 @@ enum AppCommand {
     RunHive { prompt: String },
     /// Slash command sent to a target (no busy indicator set).
     SlashCmd { target: String, cmd: String },
+    /// Drop the cached hive agent so the next RunHive starts fresh.
+    ResetHive,
 }
 
 enum TuiEvent {
@@ -233,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
                 let msg = {
                     let peers = trusted.read();
                     meerkat_comms::agent::types::CommsMessage::from_inbox_item(
-                        &item, &peers, false,
+                        &item, &peers, true,
                     )
                 };
                 let Some(msg) = msg else {
@@ -314,6 +316,9 @@ async fn main() -> anyhow::Result<()> {
                                     .await;
                             }
                         });
+                    }
+                    AppCommand::ResetHive => {
+                        hive_agent = None;
                     }
                     AppCommand::RunHive { prompt } => {
                         if hive_agent.is_none() {
@@ -492,7 +497,14 @@ fn tui_loop(
                     app.push(format!("[hive error] {e}"));
                     app.hive_planning = false;
                 }
-                TuiEvent::SendError(e) => app.push(format!("[send error] {e}")),
+                TuiEvent::SendError(e) => {
+                    // Extract target name from "[target] send failed: ..."
+                    // and clear its busy state so it's not stuck processing.
+                    if let Some(name) = e.strip_prefix('[').and_then(|s| s.split_once(']').map(|(n, _)| n)) {
+                        app.set_busy(name, false);
+                    }
+                    app.push(format!("[send error] {e}"));
+                }
                 TuiEvent::TargetRegistered { name } => {
                     if !app.targets.contains(&name) {
                         app.targets.push(name.clone());
@@ -652,7 +664,7 @@ fn handle_key(
                             app.streaming_text.clear();
                             app.hive_planning = false;
                             app.push("Session reset (hive).".into());
-                            // Hive agent will be rebuilt on next use
+                            let _ = command_tx.send(AppCommand::ResetHive);
                             return;
                         }
                         if app.targets.is_empty() { return; }

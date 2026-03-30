@@ -533,6 +533,15 @@ impl FlowFrameEngine {
             }
         }
 
+        // [P1] Re-evaluate the until condition before entering the iteration loop on resume.
+        // If the process crashed between "body frame completed" and "evaluate_condition(until)",
+        // the persisted LoopSnapshot has current_iteration = N+1 but the condition was never
+        // checked. Without this gate, a loop that should have terminated executes one extra
+        // body frame on resume (dogma Rule 3: semantic decisions must survive crashes).
+        if start_iteration > 0 && evaluate_condition(until, &iter_context) {
+            condition_met = true;
+        }
+
         // Check depth and active-frame count before recursing into the loop body frame.
         // In the sequential executor, active_body_frames == depth (each recursion level
         // adds one body frame). Both limits apply at the same site.
@@ -553,133 +562,136 @@ impl FlowFrameEngine {
             )));
         }
 
-        for iteration in start_iteration..max_iterations as u64 {
-            // Use "::" separator consistent with loop_instance_id construction.
-            let body_frame_id =
-                FrameId::from(format!("{loop_instance_id}::iter-{iteration}").as_str());
+        // Only enter the iteration loop if the condition wasn't already met on resume.
+        if !condition_met {
+            for iteration in start_iteration..max_iterations as u64 {
+                // Use "::" separator consistent with loop_instance_id construction.
+                let body_frame_id =
+                    FrameId::from(format!("{loop_instance_id}::iter-{iteration}").as_str());
 
-            // Persist the loop snapshot with active_body_frame_id so that
-            // reconcile_run_state can reconstruct in-progress loop state after a
-            // crash. Phase="Running", active_body_frame_id=Some(body_frame_id).
-            self.run_store
-                .upsert_loop_snapshot(
-                    run_id,
-                    loop_instance_id,
-                    LoopSnapshot {
-                        kernel_state: KernelState {
-                            phase: "Running".into(),
-                            fields: std::collections::BTreeMap::from([
-                                (
-                                    "loop_instance_id".into(),
-                                    meerkat_machine_kernels::KernelValue::String(
-                                        loop_instance_id.to_string(),
+                // Persist the loop snapshot with active_body_frame_id so that
+                // reconcile_run_state can reconstruct in-progress loop state after a
+                // crash. Phase="Running", active_body_frame_id=Some(body_frame_id).
+                self.run_store
+                    .upsert_loop_snapshot(
+                        run_id,
+                        loop_instance_id,
+                        LoopSnapshot {
+                            kernel_state: KernelState {
+                                phase: "Running".into(),
+                                fields: std::collections::BTreeMap::from([
+                                    (
+                                        "loop_instance_id".into(),
+                                        meerkat_machine_kernels::KernelValue::String(
+                                            loop_instance_id.to_string(),
+                                        ),
                                     ),
-                                ),
-                                (
-                                    "current_iteration".into(),
-                                    meerkat_machine_kernels::KernelValue::U64(iteration),
-                                ),
-                                (
-                                    "max_iterations".into(),
-                                    meerkat_machine_kernels::KernelValue::U64(
-                                        max_iterations as u64,
+                                    (
+                                        "current_iteration".into(),
+                                        meerkat_machine_kernels::KernelValue::U64(iteration),
                                     ),
-                                ),
-                                (
-                                    "active_body_frame_id".into(),
-                                    meerkat_machine_kernels::KernelValue::String(
-                                        body_frame_id.to_string(),
+                                    (
+                                        "max_iterations".into(),
+                                        meerkat_machine_kernels::KernelValue::U64(
+                                            max_iterations as u64,
+                                        ),
                                     ),
-                                ),
-                            ]),
+                                    (
+                                        "active_body_frame_id".into(),
+                                        meerkat_machine_kernels::KernelValue::String(
+                                            body_frame_id.to_string(),
+                                        ),
+                                    ),
+                                ]),
+                            },
                         },
-                    },
-                    Some(LoopIterationLedgerEntry {
-                        loop_instance_id: loop_instance_id.clone(),
-                        iteration,
-                        frame_id: body_frame_id.clone(),
-                    }),
-                )
-                .await?;
+                        Some(LoopIterationLedgerEntry {
+                            loop_instance_id: loop_instance_id.clone(),
+                            iteration,
+                            frame_id: body_frame_id.clone(),
+                        }),
+                    )
+                    .await?;
 
-            // Execute the body frame with loop context so each step's output is
-            // routed to loop_iteration_outputs[loop_id][iteration] in the store.
-            let iter_outputs = self
-                .execute_frame_inner(
-                    run_id,
-                    &body_frame_id,
-                    body_spec,
-                    &iter_context,
-                    Some((loop_id.clone(), iteration)),
-                    next_depth,
-                )
-                .await?;
+                // Execute the body frame with loop context so each step's output is
+                // routed to loop_iteration_outputs[loop_id][iteration] in the store.
+                let iter_outputs = self
+                    .execute_frame_inner(
+                        run_id,
+                        &body_frame_id,
+                        body_spec,
+                        &iter_context,
+                        Some((loop_id.clone(), iteration)),
+                        next_depth,
+                    )
+                    .await?;
 
-            // Mark body frame as complete: clear active_body_frame_id.
-            self.run_store
-                .upsert_loop_snapshot(
-                    run_id,
-                    loop_instance_id,
-                    LoopSnapshot {
-                        kernel_state: KernelState {
-                            phase: "Running".into(),
-                            fields: std::collections::BTreeMap::from([
-                                (
-                                    "loop_instance_id".into(),
-                                    meerkat_machine_kernels::KernelValue::String(
-                                        loop_instance_id.to_string(),
+                // Mark body frame as complete: clear active_body_frame_id.
+                self.run_store
+                    .upsert_loop_snapshot(
+                        run_id,
+                        loop_instance_id,
+                        LoopSnapshot {
+                            kernel_state: KernelState {
+                                phase: "Running".into(),
+                                fields: std::collections::BTreeMap::from([
+                                    (
+                                        "loop_instance_id".into(),
+                                        meerkat_machine_kernels::KernelValue::String(
+                                            loop_instance_id.to_string(),
+                                        ),
                                     ),
-                                ),
-                                (
-                                    "current_iteration".into(),
-                                    meerkat_machine_kernels::KernelValue::U64(iteration + 1),
-                                ),
-                                (
-                                    "max_iterations".into(),
-                                    meerkat_machine_kernels::KernelValue::U64(
-                                        max_iterations as u64,
+                                    (
+                                        "current_iteration".into(),
+                                        meerkat_machine_kernels::KernelValue::U64(iteration + 1),
                                     ),
-                                ),
-                                (
-                                    "active_body_frame_id".into(),
-                                    meerkat_machine_kernels::KernelValue::None,
-                                ),
-                            ]),
+                                    (
+                                        "max_iterations".into(),
+                                        meerkat_machine_kernels::KernelValue::U64(
+                                            max_iterations as u64,
+                                        ),
+                                    ),
+                                    (
+                                        "active_body_frame_id".into(),
+                                        meerkat_machine_kernels::KernelValue::None,
+                                    ),
+                                ]),
+                            },
                         },
-                    },
-                    None, // ledger entry already appended at iteration start
-                )
-                .await?;
+                        None, // ledger entry already appended at iteration start
+                    )
+                    .await?;
 
-            // Merge this iteration's step outputs into the rolling context so
-            // sibling nodes after the loop can reference them.
-            for (step_id, output) in &iter_outputs {
+                // Merge this iteration's step outputs into the rolling context so
+                // sibling nodes after the loop can reference them.
+                for (step_id, output) in &iter_outputs {
+                    iter_context
+                        .step_outputs
+                        .insert(step_id.clone(), output.clone());
+                }
+
+                // Append this iteration's outputs to the loop history in O(1) — we
+                // push a single IndexMap rather than cloning the entire history Vec.
+                // The history is used for condition evaluation and returned on success.
+                //
+                // TODO: consider compacting per-iteration history after N iterations
+                // if loop counts grow large, to prevent unbounded MobRun growth.
                 iter_context
-                    .step_outputs
-                    .insert(step_id.clone(), output.clone());
-            }
+                    .loop_outputs
+                    .entry(loop_id.clone())
+                    .or_insert_with(|| LoopContextHistory {
+                        iterations: Vec::new(),
+                    })
+                    .iterations
+                    .push(iter_outputs);
 
-            // Append this iteration's outputs to the loop history in O(1) — we
-            // push a single IndexMap rather than cloning the entire history Vec.
-            // The history is used for condition evaluation and returned on success.
-            //
-            // TODO: consider compacting per-iteration history after N iterations
-            // if loop counts grow large, to prevent unbounded MobRun growth.
-            iter_context
-                .loop_outputs
-                .entry(loop_id.clone())
-                .or_insert_with(|| LoopContextHistory {
-                    iterations: Vec::new(),
-                })
-                .iterations
-                .push(iter_outputs);
-
-            // Evaluate the until condition against the updated context.
-            if evaluate_condition(until, &iter_context) {
-                condition_met = true;
-                break;
+                // Evaluate the until condition against the updated context.
+                if evaluate_condition(until, &iter_context) {
+                    condition_met = true;
+                    break;
+                }
             }
-        }
+        } // end if !condition_met
 
         // Extract the accumulated iteration outputs.
         // shift_remove preserves insertion order of the remaining map entries

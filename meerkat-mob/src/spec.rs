@@ -67,6 +67,8 @@ impl SpecValidator {
 
     /// Validate a `FrameSpec` rooted at `location` within `flow`.
     /// Called recursively for loop body frames.
+    /// `seen_loop_ids` collects all LoopIds across the entire flow graph to reject duplicates
+    /// (dogma Rule 1: LoopId keys loop_iteration_outputs globally, so duplicates alias).
     #[allow(clippy::only_used_in_recursion)]
     fn validate_frame_spec(
         definition: &MobDefinition,
@@ -75,6 +77,7 @@ impl SpecValidator {
         location: &str,
         spec: &FrameSpec,
         depth: usize,
+        seen_loop_ids: &mut BTreeSet<crate::ids::LoopId>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         if depth > 32 {
@@ -119,6 +122,20 @@ impl SpecValidator {
                     }
                 }
                 FlowNodeSpec::RepeatUntil(repeat_spec) => {
+                    // LoopId must be unique across the entire flow graph.
+                    // loop_iteration_outputs is keyed by LoopId globally — duplicates alias.
+                    if !seen_loop_ids.insert(repeat_spec.loop_id.clone()) {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::FlowCycleDetected, // reuse: structural conflict
+                            message: format!(
+                                "duplicate loop_id '{}' in flow '{flow_name}'; \
+                                 loop IDs must be unique across the entire flow graph",
+                                repeat_spec.loop_id
+                            ),
+                            location: Some(format!("{node_loc}.loop_id")),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
                     // depends_on references must exist within this frame.
                     for dep in &repeat_spec.depends_on {
                         if !node_ids.contains(dep) {
@@ -148,6 +165,7 @@ impl SpecValidator {
                         &format!("{node_loc}.body"),
                         &repeat_spec.body,
                         depth + 1,
+                        seen_loop_ids,
                         diagnostics,
                     );
                 }
@@ -299,6 +317,7 @@ impl SpecValidator {
 
         // Validate root FrameSpec if present.
         if let Some(root) = &flow.root {
+            let mut seen_loop_ids = BTreeSet::new();
             Self::validate_frame_spec(
                 definition,
                 flow_name,
@@ -306,6 +325,7 @@ impl SpecValidator {
                 &format!("flows.{flow_name}.root"),
                 root,
                 0,
+                &mut seen_loop_ids,
                 diagnostics,
             );
         }

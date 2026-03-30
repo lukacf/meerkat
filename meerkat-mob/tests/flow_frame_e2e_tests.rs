@@ -652,14 +652,6 @@ async fn test_conditional_step_skipped_when_condition_false() {
     // Only setup-node runs; skipped-node has a condition that will evaluate to false.
     // If the skip is incorrect, the scripted executor would be called for skipped-node
     // and assert_all_consumed would fail (one script would be left unconsumed).
-    let executor = Arc::new(ScriptedStepExecutor::new(vec![
-        StepScript {
-            node_id: "setup-node".into(),
-            output: serde_json::json!({"flag": false}),
-        },
-        // skipped-node must NOT appear here — condition is false
-    ]));
-
     // NOTE: FlowTurnExecutorAdapter is what evaluates conditions. ScriptedStepExecutor
     // (used directly here) always returns Completed. To test condition evaluation we
     // need a ConditionCheckingExecutor that wraps the scripted one.
@@ -791,11 +783,9 @@ async fn test_empty_frame_terminalize() {
 #[tokio::test]
 async fn test_max_frame_depth_enforced_for_nested_loops() {
     let executor = Arc::new(ScriptedStepExecutor::new(vec![]));
-    let (run_id, _store, _engine) = setup_engine(executor.clone()).await;
 
     // Build an engine with max_frame_depth=1 (root=depth0, body=depth1, nested=depth2 rejected).
     let store = Arc::new(InMemoryMobRunStore::new());
-    let run = crate::build_run().1; // reuse helper if accessible, else rebuild
     // Use a fresh run for this engine
     let (run_id2, run2) = {
         use meerkat_machine_kernels::KernelState;

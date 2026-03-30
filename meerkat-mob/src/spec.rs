@@ -69,7 +69,7 @@ impl SpecValidator {
     /// Called recursively for loop body frames.
     /// `seen_loop_ids` collects all LoopIds across the entire flow graph to reject duplicates
     /// (dogma Rule 1: LoopId keys loop_iteration_outputs globally, so duplicates alias).
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
     fn validate_frame_spec(
         definition: &MobDefinition,
         flow_name: &FlowId,

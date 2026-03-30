@@ -121,29 +121,40 @@ async fn main() -> anyhow::Result<()> {
     let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
     let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
 
-    // Discover our own IP as seen from the host by making a UDP "connection"
-    // (no traffic sent) and reading the local address. Override with --advertise.
-    let local_ip = find_flag(&args, "--advertise").unwrap_or_else(|| {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0")
-            .context("bind UDP probe socket")
-            .unwrap();
-        sock.connect(format!("{host_base}:{host_comms_port}"))
-            .with_context(|| format!("UDP probe to {host_base}:{host_comms_port} failed — \
-                use --advertise <IP> to specify this machine's reachable address"))
-            .unwrap();
-        sock.local_addr().unwrap().ip().to_string()
-    });
-    let advertised_addr = format!("tcp://{local_ip}:{comms_port}");
+    let explicit_ip = find_flag(&args, "--advertise");
 
     let router = node.router.clone();
     let mut node = node;
 
     loop {
+        // Discover our own IP as seen from the host. Re-probe each connection
+        // attempt so network-not-ready at startup doesn't crash the process.
+        let local_ip = match &explicit_ip {
+            Some(ip) => ip.clone(),
+            None => match discover_local_ip(host_base, host_comms_port) {
+                Ok(ip) => ip,
+                Err(e) => {
+                    eprintln!("[target] address probe failed: {e} — retrying in 5s \
+                        (use --advertise <IP> to skip)");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            },
+        };
+        let advertised_addr = format!("tcp://{local_ip}:{comms_port}");
+
         // (Re-)register with TUX (retries with exponential backoff)
         eprintln!("[target] registering with {reg_addr} ...");
-        let resp =
-            register_with_backoff(&reg_addr, &name, &node.pubkey_string(), &advertised_addr)
-                .await;
+        let resp = match register_with_backoff(
+            &reg_addr, &name, &node.pubkey_string(), &advertised_addr,
+        ).await {
+            Ok(r) => r,
+            Err(e) => {
+                // Permanent rejection (e.g. name conflict) — exit, don't retry
+                eprintln!("[target] fatal: {e}");
+                std::process::exit(1);
+            }
+        };
         eprintln!("[target] paired with host '{}' ({})", resp.name, resp.pubkey);
 
         let resp_name = resp.name.clone();
@@ -596,6 +607,14 @@ fn is_dismiss(msg: &meerkat_comms::agent::types::CommsMessage) -> bool {
         }
         _ => false,
     }
+}
+
+/// Probe our outbound IP toward a host via a non-sending UDP "connect".
+fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind UDP probe socket")?;
+    sock.connect(format!("{host}:{port}"))
+        .with_context(|| format!("UDP probe to {host}:{port}"))?;
+    Ok(sock.local_addr()?.ip().to_string())
 }
 
 fn find_flag(args: &[String], flag: &str) -> Option<String> {

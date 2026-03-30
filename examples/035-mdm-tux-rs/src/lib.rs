@@ -197,6 +197,9 @@ pub struct RegRequest {
 pub struct RegResponse {
     pub name: String,
     pub pubkey: String,
+    /// If set, registration was permanently rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Host: listen for client registrations on `reg_addr` (typically comms port + 1).
@@ -236,30 +239,45 @@ async fn handle_registration(
     let pubkey = meerkat_comms::identity::PubKey::from_peer_id(&req.pubkey)
         .with_context(|| format!("bad pubkey from '{}'", req.name))?;
 
-    // Atomic check-then-insert under a single write lock to prevent
-    // concurrent registrations with the same name but different pubkeys
-    // from both passing the check.
-    {
+    // Atomic check-then-insert under a single write lock. The lock is
+    // dropped before any async I/O (parking_lot guards are !Send).
+    let conflict = {
         let mut peers = trusted.write();
         let existing = peers.peers.iter().find(|p| p.name == req.name);
         if let Some(old) = existing
             && old.pubkey != pubkey
         {
-            anyhow::bail!(
+            true
+        } else {
+            peers.upsert(TrustedPeer {
+                name: req.name.clone(),
+                pubkey,
+                addr: req.comms_addr.clone(),
+                meta: PeerMeta::default(),
+            });
+            false
+        }
+    }; // lock dropped here
+
+    if conflict {
+        let resp = RegResponse {
+            name: "tux".into(),
+            pubkey: host_pubkey.into(),
+            error: Some(format!(
                 "name '{}' already registered by a different machine — \
                  use --name to pick a unique name",
                 req.name
-            );
-        }
-        peers.upsert(TrustedPeer {
-            name: req.name.clone(),
-            pubkey,
-            addr: req.comms_addr.clone(),
-            meta: PeerMeta::default(),
-        });
+            )),
+        };
+        let mut resp_json = serde_json::to_string(&resp)?;
+        resp_json.push('\n');
+        writer.write_all(resp_json.as_bytes()).await?;
+        writer.flush().await?;
+        eprintln!("[reg] rejected '{}': name conflict", req.name);
+        return Ok(());
     }
 
-    let resp = RegResponse { name: "tux".into(), pubkey: host_pubkey.into() };
+    let resp = RegResponse { name: "tux".into(), pubkey: host_pubkey.into(), error: None };
     let mut resp_json = serde_json::to_string(&resp)?;
     resp_json.push('\n');
     writer.write_all(resp_json.as_bytes()).await?;
@@ -313,16 +331,24 @@ pub const HEARTBEAT_PREFIX: &str = "__HEARTBEAT__\n";
 
 /// Register with backoff retry. Retries forever with exponential backoff
 /// (1s → 2s → 4s → ... → 30s cap) until the host accepts the registration.
+/// Register with backoff retry. Retries transient errors forever.
+/// Returns `Err` for permanent rejections (e.g. name conflict).
 pub async fn register_with_backoff(
     reg_addr: &str,
     name: &str,
     pubkey: &str,
     comms_addr: &str,
-) -> RegResponse {
+) -> anyhow::Result<RegResponse> {
     let mut delay = 1u64;
     loop {
         match register_with_host(reg_addr, name, pubkey, comms_addr).await {
-            Ok(resp) => return resp,
+            Ok(resp) => {
+                // Check for permanent rejection from the server
+                if let Some(ref err) = resp.error {
+                    anyhow::bail!("registration rejected: {err}");
+                }
+                return Ok(resp);
+            }
             Err(e) => {
                 eprintln!("[target] registration failed: {e} — retrying in {delay}s");
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;

@@ -516,6 +516,12 @@ fn tui_loop(
                     if !app.targets.contains(&name) {
                         app.targets.push(name.clone());
                     }
+                    // Clear stale transient state from a previous connection.
+                    // Without this, busy_targets/streaming_text survive a
+                    // disconnect+reconnect and wedge the UI (stuck [...],
+                    // CommsMessage dedupe drops replies from "busy" target).
+                    app.set_busy(&name, false);
+                    app.streaming_text.remove(&name);
                     app.last_seen.insert(name.clone(), Instant::now());
                     app.push(format!("[registered] target '{name}' connected"));
                 }

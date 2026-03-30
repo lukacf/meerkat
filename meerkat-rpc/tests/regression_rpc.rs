@@ -793,7 +793,7 @@ async fn initialize_methods_list_complete() {
 
     assert_eq!(
         resp["result"]["contract_version"].as_str(),
-        Some("0.6.0"),
+        Some("0.5.1"),
         "initialize must report the current contract version"
     );
 

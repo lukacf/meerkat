@@ -965,6 +965,11 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 }
             }
         }
+        if let Err(e) = crate::peer_handling_mode::validate_peer_handling_mode(&input) {
+            return Ok(AcceptOutcome::Rejected {
+                reason: e.to_string(),
+            });
+        }
         let input_id = input.id().clone();
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);

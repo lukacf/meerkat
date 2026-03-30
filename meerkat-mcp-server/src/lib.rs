@@ -905,6 +905,8 @@ pub struct MeerkatCommsSendInput {
     pub stream: Option<String>,
     #[serde(default)]
     pub allow_self_session: Option<bool>,
+    #[serde(default)]
+    pub handling_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -2204,7 +2206,7 @@ async fn handle_meerkat_comms_send(
         source: input.source,
         stream: input.stream,
         allow_self_session: input.allow_self_session,
-        handling_mode: None,
+        handling_mode: input.handling_mode,
     };
     let cmd = request.parse(&session_id).map_err(|errors| {
         let details = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
@@ -4219,5 +4221,47 @@ mod tests {
         .expect("close should succeed");
         let close_payload = unwrap_payload(close);
         assert_eq!(close_payload["closed"], false);
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_comms_send_schema_includes_handling_mode() {
+        let schema = meerkat_tools::schema_for::<MeerkatCommsSendInput>();
+        let props = schema["properties"].as_object().expect("properties map");
+        assert!(
+            props.contains_key("handling_mode"),
+            "MeerkatCommsSendInput schema must expose handling_mode"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_comms_send_input_threads_handling_mode() {
+        let input: MeerkatCommsSendInput = serde_json::from_value(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "kind": "peer_message",
+            "to": "alice",
+            "body": "hi",
+            "handling_mode": "steer"
+        }))
+        .unwrap();
+        assert_eq!(input.handling_mode.as_deref(), Some("steer"));
+
+        let request = meerkat_core::comms::CommsCommandRequest {
+            kind: input.kind,
+            to: input.to,
+            body: input.body,
+            blocks: None,
+            intent: input.intent,
+            params: input.params,
+            in_reply_to: input.in_reply_to,
+            status: input.status,
+            result: input.result,
+            source: input.source,
+            stream: input.stream,
+            allow_self_session: input.allow_self_session,
+            handling_mode: input.handling_mode,
+        };
+        assert_eq!(request.handling_mode.as_deref(), Some("steer"));
     }
 }

@@ -48,6 +48,7 @@ fn make_progress_input(label: &str) -> Input {
         }),
         body: format!("progress-{label}"),
         blocks: None,
+        handling_mode: None,
     })
 }
 

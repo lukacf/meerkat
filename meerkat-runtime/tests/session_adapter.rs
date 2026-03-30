@@ -519,6 +519,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
             }),
             body: format!("progress-{label}"),
             blocks: None,
+            handling_mode: None,
         })
     }
 

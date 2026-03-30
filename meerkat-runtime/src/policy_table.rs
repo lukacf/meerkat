@@ -652,4 +652,94 @@ mod tests {
             "peer_request while idle must use WakeIfIdle"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Peer handling_mode override tests
+    // -----------------------------------------------------------------------
+
+    use crate::input::{
+        InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
+    };
+    use chrono::Utc;
+    use meerkat_core::lifecycle::InputId;
+    use meerkat_core::types::HandlingMode;
+
+    fn make_peer_input(
+        convention: Option<PeerConvention>,
+        handling_mode: Option<HandlingMode>,
+    ) -> Input {
+        Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "p".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention,
+            body: "test".into(),
+            blocks: None,
+            handling_mode,
+        })
+    }
+
+    #[test]
+    fn peer_message_with_explicit_queue_resolves_queue_semantics() {
+        let input = make_peer_input(Some(PeerConvention::Message), Some(HandlingMode::Queue));
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
+    }
+
+    #[test]
+    fn peer_message_with_explicit_steer_resolves_steer_semantics() {
+        let input = make_peer_input(Some(PeerConvention::Message), Some(HandlingMode::Steer));
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);
+        assert_eq!(
+            decision.interrupt_policy,
+            InterruptPolicy::InterruptYielding
+        );
+    }
+
+    #[test]
+    fn peer_request_with_explicit_steer_resolves_steer_semantics() {
+        let input = make_peer_input(
+            Some(PeerConvention::Request {
+                request_id: "r".into(),
+                intent: "i".into(),
+            }),
+            Some(HandlingMode::Steer),
+        );
+        let decision = DefaultPolicyTable::resolve(&input, false);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
+        assert_eq!(
+            decision.interrupt_policy,
+            InterruptPolicy::InterruptYielding
+        );
+    }
+
+    #[test]
+    fn peer_no_convention_with_explicit_steer_resolves_steer_semantics() {
+        let input = make_peer_input(None, Some(HandlingMode::Steer));
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
+    }
+
+    #[test]
+    fn peer_message_without_override_preserves_kind_default() {
+        let input = make_peer_input(Some(PeerConvention::Message), None);
+        let decision = DefaultPolicyTable::resolve(&input, true);
+        // Kind-based default for peer_message idle is Queue
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
+        assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+    }
 }

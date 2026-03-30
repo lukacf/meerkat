@@ -164,7 +164,8 @@ impl Input {
             Input::FlowStep(flow_step) => flow_step.turn_metadata.as_ref()?.handling_mode,
             Input::ExternalEvent(event) => Some(event.handling_mode),
             Input::Continuation(continuation) => Some(continuation.handling_mode),
-            _ => None,
+            Input::Peer(peer) => peer.handling_mode,
+            Input::Operation(_) => None,
         }
     }
 }
@@ -326,6 +327,12 @@ pub struct PeerInput {
     /// text projection (backwards compat), and `blocks` carries the full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// Optional handling-mode override for actionable peer inputs.
+    /// When present on Message/Request/no-convention, overrides kind-based
+    /// policy defaults. Forbidden on ResponseProgress and ResponseTerminal
+    /// (enforced by [`validate_peer_handling_mode`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handling_mode: Option<HandlingMode>,
 }
 
 /// Peer communication conventions.
@@ -515,6 +522,7 @@ mod tests {
             convention: Some(PeerConvention::Message),
             body: "hi there".into(),
             blocks: None,
+            handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "peer");
@@ -532,6 +540,7 @@ mod tests {
             }),
             body: "Agent joined".into(),
             blocks: None,
+            handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         let parsed: Input = serde_json::from_value(json).unwrap();
@@ -552,6 +561,7 @@ mod tests {
             }),
             body: "Done".into(),
             blocks: None,
+            handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         let parsed: Input = serde_json::from_value(json).unwrap();
@@ -568,6 +578,7 @@ mod tests {
             }),
             body: "Working...".into(),
             blocks: None,
+            handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         let parsed: Input = serde_json::from_value(json).unwrap();
@@ -740,6 +751,7 @@ mod tests {
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert_eq!(peer_msg.kind_id().0, "peer_message");
 
@@ -751,6 +763,7 @@ mod tests {
             }),
             body: "hi".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert_eq!(peer_req.kind_id().0, "peer_request");
 
@@ -807,5 +820,70 @@ mod tests {
             let parsed: InputDurability = serde_json::from_value(json).unwrap();
             assert_eq!(d, parsed);
         }
+    }
+
+    #[test]
+    fn peer_input_without_handling_mode_deserializes_as_none() {
+        // Simulate old serialized PeerInput without the handling_mode field.
+        let json = serde_json::json!({
+            "input_type": "peer",
+            "header": serde_json::to_value(make_header()).unwrap(),
+            "convention": { "convention_type": "message" },
+            "body": "hello"
+        });
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        match parsed {
+            Input::Peer(p) => assert!(p.handling_mode.is_none()),
+            other => panic!("Expected Peer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_input_with_queue_handling_mode_roundtrips() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::Message),
+            body: "hi".into(),
+            blocks: None,
+            handling_mode: Some(HandlingMode::Queue),
+        });
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json["handling_mode"], "queue");
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        match parsed {
+            Input::Peer(p) => assert_eq!(p.handling_mode, Some(HandlingMode::Queue)),
+            other => panic!("Expected Peer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_input_with_steer_handling_mode_roundtrips() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::Message),
+            body: "hi".into(),
+            blocks: None,
+            handling_mode: Some(HandlingMode::Steer),
+        });
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json["handling_mode"], "steer");
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        match parsed {
+            Input::Peer(p) => assert_eq!(p.handling_mode, Some(HandlingMode::Steer)),
+            other => panic!("Expected Peer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_input_handling_mode_not_serialized_when_none() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::Message),
+            body: "hi".into(),
+            blocks: None,
+            handling_mode: None,
+        });
+        let json = serde_json::to_value(&input).unwrap();
+        assert!(json.get("handling_mode").is_none());
     }
 }

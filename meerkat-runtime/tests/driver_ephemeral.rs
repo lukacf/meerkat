@@ -48,6 +48,7 @@ fn make_peer_terminal(body: &str) -> Input {
         }),
         body: body.into(),
         blocks: None,
+        handling_mode: None,
     })
 }
 
@@ -72,6 +73,7 @@ fn make_peer_progress() -> Input {
         }),
         body: "working...".into(),
         blocks: None,
+        handling_mode: None,
     })
 }
 

@@ -135,6 +135,7 @@ mod tests {
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -149,6 +150,7 @@ mod tests {
             }),
             body: "hi".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -163,6 +165,7 @@ mod tests {
             }),
             body: "done".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert!(validate_durability(&input).is_err());
     }
@@ -177,6 +180,7 @@ mod tests {
             }),
             body: "working".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert!(validate_durability(&input).is_ok());
     }

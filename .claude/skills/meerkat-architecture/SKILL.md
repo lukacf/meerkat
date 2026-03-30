@@ -150,6 +150,8 @@ With branches: `ErrorRecovery`, `Cancelling`
 
 **Policy engine:** `DefaultPolicyTable` resolves `PolicyDecision` per input kind × runtime state. 9 input kinds (prompt, peer_message, peer_request, peer_response_progress, peer_response_terminal, flow_step, external_event, continuation, operation) × 2 states (idle, running). Each cell specifies ApplyMode, WakeMode, QueueMode, ConsumePoint, InterruptPolicy, DrainPolicy, RoutingDisposition.
 
+**Peer handling_mode override:** `PeerInput` with `Message`, `Request`, or no convention may carry an explicit `handling_mode` (`Queue` or `Steer`) that overrides kind-based policy defaults. `ResponseProgress` and `ResponseTerminal` MUST NOT carry `handling_mode` — enforced by `validate_peer_handling_mode` at runtime admission. Built-in comms bridges default to `None` (kind-based policy).
+
 **Silent intent override:** If an incoming peer intent matches the session's `silent_comms_intents` list, the policy is overridden to `ApplyMode::Ignore`, `WakeMode::None` — no LLM turn triggered. This is canonical runtime-owned behavior.
 
 **Keep-alive drain ownership:** The runtime owns the comms drain lifecycle via `CommsDrainLifecycleAuthority`. `maybe_spawn_comms_drain` spawns on `keep_alive=true` and aborts on `keep_alive=false`. The direct session-service path (substrate) does not support keep-alive — only runtime-backed surfaces can.

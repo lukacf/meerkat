@@ -594,6 +594,7 @@ mod tests {
             convention: None,
             body: "peer message".into(),
             blocks: None,
+            handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
     }
@@ -647,6 +648,7 @@ mod tests {
             convention: Some(crate::input::PeerConvention::Message),
             body: "see this image".into(),
             blocks: Some(blocks.clone()),
+            handling_mode: None,
         });
         let input_id = input.id().clone();
         let primitive = input_to_primitive(&input, input_id);
@@ -701,6 +703,7 @@ mod tests {
             convention: Some(crate::input::PeerConvention::Message),
             body: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
             blocks: Some(blocks.clone()),
+            handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone()) {
             RunPrimitive::StagedInput(staged) => staged,
@@ -748,6 +751,7 @@ mod tests {
             convention: Some(crate::input::PeerConvention::Message),
             body: "[COMMS MESSAGE from peer-1]\n[image: image/png]".into(),
             blocks: Some(blocks.clone()),
+            handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone()) {
             RunPrimitive::StagedInput(staged) => staged,

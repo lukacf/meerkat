@@ -69,6 +69,10 @@ pub struct FlowFrameEngine {
     frame_kernel: Arc<FlowFrameKernel>,
     /// Maximum nesting depth for body frames. 0 means unlimited.
     max_frame_depth: u32,
+    /// Maximum number of simultaneously active body frames (each loop level adds one).
+    /// 0 means unlimited. In the sequential executor, active_body_frames == depth, so
+    /// this is enforced at the same site as max_frame_depth.
+    max_active_frames: u32,
 }
 
 impl FlowFrameEngine {
@@ -76,6 +80,7 @@ impl FlowFrameEngine {
         run_store: Arc<dyn MobRunStore>,
         executor: Arc<dyn FrameStepExecutor>,
         max_frame_depth: u32,
+        max_active_frames: u32,
     ) -> Self {
         let frame_kernel = Arc::new(FlowFrameKernel::new(run_store.clone()));
         Self {
@@ -83,6 +88,7 @@ impl FlowFrameEngine {
             executor,
             frame_kernel,
             max_frame_depth,
+            max_active_frames,
         }
     }
 
@@ -444,13 +450,23 @@ impl FlowFrameEngine {
         let mut iter_context = context.clone();
         let mut condition_met = false;
 
-        // Check depth before recursing into the loop body frame.
+        // Check depth and active-frame count before recursing into the loop body frame.
+        // In the sequential executor, active_body_frames == depth (each recursion level
+        // adds one body frame). Both limits apply at the same site.
         let next_depth = depth + 1;
         if self.max_frame_depth > 0 && next_depth > self.max_frame_depth {
             return Err(MobError::NotYetImplemented(format!(
                 "loop '{}' would exceed max_frame_depth={} (current depth={}); \
                  nested loops require a higher limit in LimitsSpec.max_frame_depth",
                 loop_id, self.max_frame_depth, depth
+            )));
+        }
+        // max_active_frames: next_depth body frames would be simultaneously active.
+        if self.max_active_frames > 0 && next_depth > self.max_active_frames {
+            return Err(MobError::NotYetImplemented(format!(
+                "loop '{}' would activate {} concurrent body frames, exceeding \
+                 max_active_frames={}; raise LimitsSpec.max_active_frames to allow nesting",
+                loop_id, next_depth, self.max_active_frames
             )));
         }
 

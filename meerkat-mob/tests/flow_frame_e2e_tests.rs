@@ -100,7 +100,7 @@ async fn setup_engine(
     let (run_id, run) = build_run();
     let store = Arc::new(InMemoryMobRunStore::new());
     store.create_run(run).await.expect("create_run");
-    let engine = FlowFrameEngine::new(store.clone(), executor, 0);
+    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
     (run_id, store, engine)
 }
 
@@ -801,7 +801,7 @@ async fn test_max_frame_depth_enforced_for_nested_loops() {
     };
     store.create_run(run2).await.expect("create_run");
 
-    let engine = FlowFrameEngine::new(store.clone(), executor, 1); // max_frame_depth=1
+    let engine = FlowFrameEngine::new(store.clone(), executor, 1, 0); // max_frame_depth=1
 
     // Root frame (depth=0) contains a loop; body (depth=1) also contains a loop.
     // Body-of-body (depth=2) exceeds max_frame_depth=1.
@@ -1225,7 +1225,7 @@ async fn test_frame_outputs_seeded_from_persisted_state_on_resume() {
 
     // Simulate a resume by creating a new engine (empty executor — no new steps run).
     let resume_executor = Arc::new(ScriptedStepExecutor::new(vec![]));
-    let resume_engine = FlowFrameEngine::new(store.clone(), resume_executor, 0);
+    let resume_engine = FlowFrameEngine::new(store.clone(), resume_executor, 0, 0);
 
     // Re-execute the frame (frame is already Completed in the store — it terminalized).
     // The resumed execute_frame should see the Completed phase and return the

@@ -14627,7 +14627,7 @@ async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
     let executor = Arc::new(ScriptedExecutor {
         outputs: scripted_outputs,
     });
-    let engine = FlowFrameEngine::new(store.clone(), executor, 0);
+    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
     let context = FlowContext {
         run_id: run_id.clone(),
         activation_params: serde_json::json!({}),

@@ -93,16 +93,23 @@ impl FlowEngine {
                 config.clone(),
                 self.run_store.clone(),
                 self.emitter.clone(),
+                self.topology.clone(),
             );
             let max_depth = config
                 .limits
                 .as_ref()
                 .and_then(|l| l.max_frame_depth)
                 .unwrap_or(0) as u32;
+            let max_active_frames = config
+                .limits
+                .as_ref()
+                .and_then(|l| l.max_active_frames)
+                .unwrap_or(0) as u32;
             let frame_engine = super::flow_frame_engine::FlowFrameEngine::new(
                 self.run_store.clone(),
                 Arc::new(adapter),
                 max_depth,
+                max_active_frames,
             );
             let frame_result = if let Some(limit_ms) =
                 config.limits.as_ref().and_then(|l| l.max_flow_duration_ms)
@@ -1580,9 +1587,10 @@ fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Opt
 /// `FlowTurnExecutor` infrastructure. Maps `FlowNodeId` + `StepId` to the v1
 /// dispatch/await flow, looking up role and message template from `FlowRunConfig`.
 ///
-/// Preserves the same retry, event, and ledger semantics as the flat-step path:
-/// - Emits `step_dispatched` / `step_completed` / `step_failed` events.
-/// - Appends step ledger entries for observability.
+/// Carries ALL the same enforcement context as the flat-step path (dogma Rule 1):
+/// - Topology policy (checked before target selection).
+/// - Step ledger entries (Dispatched → Completed/Failed, with output and failure reason).
+/// - Failure ledger entries for exhausted-retry steps.
 /// - Retries transient failures up to `limits.max_step_retries`.
 struct FlowTurnExecutorAdapter {
     executor: Arc<dyn FlowTurnExecutor>,
@@ -1590,6 +1598,7 @@ struct FlowTurnExecutorAdapter {
     config: FlowRunConfig,
     run_store: Arc<dyn crate::store::MobRunStore>,
     emitter: MobEventEmitter,
+    topology: Arc<MobTopologyService>,
 }
 
 impl FlowTurnExecutorAdapter {
@@ -1599,6 +1608,7 @@ impl FlowTurnExecutorAdapter {
         config: FlowRunConfig,
         run_store: Arc<dyn crate::store::MobRunStore>,
         emitter: MobEventEmitter,
+        topology: Arc<MobTopologyService>,
     ) -> Self {
         Self {
             executor,
@@ -1606,6 +1616,7 @@ impl FlowTurnExecutorAdapter {
             config,
             run_store,
             emitter,
+            topology,
         }
     }
 }
@@ -1650,6 +1661,26 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
         let prompt = render_content_input_template(&step.message, context).map_err(|e| {
             MobError::Internal(format!("template render failed for step '{step_id}': {e}"))
         })?;
+
+        // Topology policy (mirrors flat-step path at flow.rs:261–288).
+        if let Some(topology_spec) = &self.config.topology {
+            if let Some(from_role) = &self.config.orchestrator_role {
+                if matches!(
+                    self.topology.evaluate(from_role, &step.role),
+                    PolicyDecision::Deny
+                ) {
+                    if matches!(topology_spec.mode, PolicyMode::Strict) {
+                        return Err(MobError::TopologyViolation {
+                            from_role: from_role.clone(),
+                            to_role: step.role.clone(),
+                        });
+                    }
+                    self.emitter
+                        .topology_violation(from_role.clone(), step.role.clone())
+                        .await?;
+                }
+            }
+        }
 
         // Select target(s) by role.
         let mut targets: Vec<MeerkatId> = self
@@ -1736,9 +1767,20 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                 FlowTurnOutcome::Completed { output } => {
                     match parse_output_value(&output, step_id, &target, &step.output_format) {
                         Ok(value) => {
-                            // Record output in the step ledger and emit completion events.
+                            // Append a Completed ledger entry (mirrors apply_target_success_projection).
+                            // Note: we do NOT call put_step_output — that only mutates the existing
+                            // Dispatched entry. Callers (e.g. deliberate) read Completed entries.
                             self.run_store
-                                .put_step_output(run_id, step_id, value.clone())
+                                .append_step_entry(
+                                    run_id,
+                                    StepLedgerEntry {
+                                        step_id: step_id.clone(),
+                                        meerkat_id: target.clone(),
+                                        status: StepRunStatus::Completed,
+                                        output: Some(value.clone()),
+                                        timestamp: Utc::now(),
+                                    },
+                                )
                                 .await?;
                             self.emitter
                                 .step_target_completed(
@@ -1765,6 +1807,30 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                                     .await?;
                                 continue;
                             }
+                            // Terminal failure — append Failed ledger + failure ledger entry
+                            // (mirrors apply_failure_projection in flat-step path).
+                            self.run_store
+                                .append_step_entry(
+                                    run_id,
+                                    StepLedgerEntry {
+                                        step_id: step_id.clone(),
+                                        meerkat_id: target.clone(),
+                                        status: StepRunStatus::Failed,
+                                        output: None,
+                                        timestamp: Utc::now(),
+                                    },
+                                )
+                                .await?;
+                            self.run_store
+                                .append_failure_entry(
+                                    run_id,
+                                    FailureLedgerEntry {
+                                        step_id: step_id.clone(),
+                                        reason: reason.clone(),
+                                        timestamp: Utc::now(),
+                                    },
+                                )
+                                .await?;
                             self.emitter
                                 .step_failed(run_id.clone(), step_id.clone(), reason.clone())
                                 .await?;
@@ -1787,6 +1853,29 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                             .await?;
                         continue;
                     }
+                    // Terminal failure — append Failed ledger + failure ledger entry.
+                    self.run_store
+                        .append_step_entry(
+                            run_id,
+                            StepLedgerEntry {
+                                step_id: step_id.clone(),
+                                meerkat_id: target.clone(),
+                                status: StepRunStatus::Failed,
+                                output: None,
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.run_store
+                        .append_failure_entry(
+                            run_id,
+                            FailureLedgerEntry {
+                                step_id: step_id.clone(),
+                                reason: reason.clone(),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
                     self.emitter
                         .step_failed(run_id.clone(), step_id.clone(), reason.clone())
                         .await?;
@@ -1795,10 +1884,33 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                     )));
                 }
                 FlowTurnOutcome::Canceled => {
-                    self.emitter
-                        .step_failed(run_id.clone(), step_id.clone(), "step canceled".to_string())
+                    let reason = format!("step '{step_id}' was canceled");
+                    self.run_store
+                        .append_step_entry(
+                            run_id,
+                            StepLedgerEntry {
+                                step_id: step_id.clone(),
+                                meerkat_id: target.clone(),
+                                status: StepRunStatus::Canceled,
+                                output: None,
+                                timestamp: Utc::now(),
+                            },
+                        )
                         .await?;
-                    return Err(MobError::Internal(format!("step '{step_id}' was canceled")));
+                    self.run_store
+                        .append_failure_entry(
+                            run_id,
+                            FailureLedgerEntry {
+                                step_id: step_id.clone(),
+                                reason: reason.clone(),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.emitter
+                        .step_failed(run_id.clone(), step_id.clone(), reason.clone())
+                        .await?;
+                    return Err(MobError::Internal(reason));
                 }
             }
         }

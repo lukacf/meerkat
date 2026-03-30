@@ -85,37 +85,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&session_dir).await?;
     let factory = AgentFactory::new(&session_dir);
 
-    let shell_config = ShellConfig {
-        restrict_to_project: false,
-        ..ShellConfig::with_project_root(data_dir)
-    };
-    let mut builtin_config = meerkat::BuiltinToolConfig::default();
-    builtin_config.policy.enable.insert("shell".into());
-    builtin_config.policy.enable.insert("shell_job_cancel".into());
-
-    let session_id = meerkat_core::types::SessionId::new().to_string();
-    let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
-        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
-
-    let builtin: CompositeDispatcher = factory
-        .build_composite_dispatcher(
-            Arc::new(MemoryTaskStore::new()),
-            &builtin_config,
-            None,
-            Some(shell_config),
-            None,
-            Some(session_id),
-            Some(ops_registry),
-            false,
-        )
-        .await
-        .context("build composite dispatcher")?;
-
-    let tools: Arc<_> = Arc::new(CommsToolDispatcher::with_inner(
-        node.router.clone(),
-        node.trusted.clone(),
-        Arc::new(builtin),
-    ));
+    let mut tools = build_tools(&factory, &data_dir, &node).await?;
 
     // ── 4. Build agent (auto-resume most recent session) ──────────────────────
     let llm: Arc<dyn AgentLlmClient> = build_llm_client(&factory, &model, &provider).await?;
@@ -218,10 +188,12 @@ async fn main() -> anyhow::Result<()> {
             disconnect_tx,
             &jsonl_store,
             &llm,
-            &tools,
+            &mut tools,
             &store,
             &model,
             &system_prompt,
+            &factory,
+            &data_dir,
         )
         .await;
 
@@ -241,10 +213,12 @@ async fn run_inbox_loop(
     disconnect_tx: tokio::sync::watch::Sender<bool>,
     jsonl_store: &JsonlStore,
     llm: &Arc<dyn AgentLlmClient>,
-    tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
+    tools: &mut Arc<dyn meerkat_core::AgentToolDispatcher>,
     store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
+    factory: &AgentFactory,
+    data_dir: &std::path::Path,
 ) {
     loop {
         // select! over inbox message and disconnect signal
@@ -275,6 +249,7 @@ async fn run_inbox_loop(
 
             let response = handle_command(
                 cmd, jsonl_store, llm, tools, store, model, system_prompt, agent,
+                factory, data_dir, node,
             )
             .await;
 
@@ -371,17 +346,26 @@ async fn handle_command(
     cmd: &str,
     jsonl_store: &JsonlStore,
     llm: &Arc<dyn AgentLlmClient>,
-    tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
+    tools: &mut Arc<dyn meerkat_core::AgentToolDispatcher>,
     store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
     agent: &mut meerkat::DynAgent,
+    factory: &AgentFactory,
+    data_dir: &std::path::Path,
+    node: &CommsNode,
 ) -> String {
     if cmd == "NEW_SESSION" {
+        // Rebuild tools with a fresh session-scoped dispatcher so background
+        // shell jobs and task tools are bound to the new session.
+        match build_tools(factory, data_dir, node).await {
+            Ok(t) => *tools = t,
+            Err(e) => return format!("Failed to rebuild tools: {e}"),
+        }
         *agent = AgentBuilder::new()
             .model(model)
             .system_prompt(system_prompt)
-            .build(llm.clone(), tools.clone() as _, store.clone() as _)
+            .build(llm.clone(), tools.clone(), store.clone() as _)
             .await;
         let sid = agent.session().id();
         eprintln!("[target] new session: {sid}");
@@ -437,11 +421,16 @@ async fn handle_command(
                 match jsonl_store.load(&meta.id).await {
                     Ok(Some(session)) => {
                         let msg_count = session.messages().len();
+                        // Rebuild tools with fresh session scope
+                        match build_tools(factory, data_dir, node).await {
+                            Ok(t) => *tools = t,
+                            Err(e) => return format!("Failed to rebuild tools: {e}"),
+                        }
                         *agent = AgentBuilder::new()
                             .model(model)
                             .system_prompt(system_prompt)
                             .resume_session(session)
-                            .build(llm.clone(), tools.clone() as _, store.clone() as _)
+                            .build(llm.clone(), tools.clone(), store.clone() as _)
                             .await;
                         eprintln!("[target] resumed session {} ({msg_count} messages)", meta.id);
                         format!("Resumed session {} ({msg_count} messages)", meta.id)
@@ -474,7 +463,7 @@ fn format_duration(d: std::time::Duration) -> String {
 async fn build_agent_fresh_or_resume(
     jsonl_store: &JsonlStore,
     llm: &Arc<dyn AgentLlmClient>,
-    tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
     store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
@@ -488,7 +477,7 @@ async fn build_agent_fresh_or_resume(
             .model(model)
             .system_prompt(system_prompt)
             .resume_session(session)
-            .build(llm.clone(), tools.clone() as _, store.clone() as _)
+            .build(llm.clone(), tools.clone(), store.clone() as _)
             .await;
     }
 
@@ -507,7 +496,7 @@ async fn build_agent_fresh_or_resume(
                 .model(model)
                 .system_prompt(system_prompt)
                 .resume_session(session)
-                .build(llm.clone(), tools.clone() as _, store.clone() as _)
+                .build(llm.clone(), tools.clone(), store.clone() as _)
                 .await;
         }
     }
@@ -517,8 +506,51 @@ async fn build_agent_fresh_or_resume(
     AgentBuilder::new()
         .model(model)
         .system_prompt(system_prompt)
-        .build(llm.clone(), tools.clone() as _, store.clone() as _)
+        .build(llm.clone(), tools.clone(), store.clone() as _)
         .await
+}
+
+// ── Tool building ─────────────────────────────────────────────────────────────
+
+/// Build a fresh tools dispatcher with a new session-scoped `JobManager`.
+/// Called at startup and on `/new` / `/resume` to ensure shell background
+/// jobs and task tools are bound to the current session.
+async fn build_tools(
+    factory: &AgentFactory,
+    data_dir: &std::path::Path,
+    node: &CommsNode,
+) -> anyhow::Result<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+    let shell_config = ShellConfig {
+        restrict_to_project: false,
+        ..ShellConfig::with_project_root(data_dir.to_path_buf())
+    };
+    let mut builtin_config = meerkat::BuiltinToolConfig::default();
+    builtin_config.policy.enable.insert("shell".into());
+    builtin_config.policy.enable.insert("shell_job_cancel".into());
+
+    let session_id = meerkat_core::types::SessionId::new().to_string();
+    let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+
+    let builtin: CompositeDispatcher = factory
+        .build_composite_dispatcher(
+            Arc::new(MemoryTaskStore::new()),
+            &builtin_config,
+            None,
+            Some(shell_config),
+            None,
+            Some(session_id),
+            Some(ops_registry),
+            false,
+        )
+        .await
+        .context("build composite dispatcher")?;
+
+    Ok(Arc::new(CommsToolDispatcher::with_inner(
+        node.router.clone(),
+        node.trusted.clone(),
+        Arc::new(builtin),
+    )))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

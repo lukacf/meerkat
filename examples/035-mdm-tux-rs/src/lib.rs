@@ -236,28 +236,28 @@ async fn handle_registration(
     let pubkey = meerkat_comms::identity::PubKey::from_peer_id(&req.pubkey)
         .with_context(|| format!("bad pubkey from '{}'", req.name))?;
 
-    // Remove ALL stale entries with the same name before inserting.
-    // upsert only deduplicates by pubkey, so a re-registering target
-    // with a new key would leave the old entry and router.send()
-    // could resolve to the stale record.
+    // Check for name collisions: if a DIFFERENT pubkey already registered
+    // with this name, reject. Same pubkey = re-registration (allowed).
     {
-        let mut peers = trusted.write();
-        let stale: Vec<_> = peers
-            .peers
-            .iter()
-            .filter(|p| p.name == req.name)
-            .map(|p| p.pubkey)
-            .collect();
-        for pk in &stale {
-            peers.remove(pk);
+        let peers = trusted.read();
+        let existing = peers.peers.iter().find(|p| p.name == req.name);
+        if let Some(old) = existing
+            && old.pubkey != pubkey
+        {
+            anyhow::bail!(
+                "name '{}' already registered by a different machine — \
+                 use --name to pick a unique name",
+                req.name
+            );
         }
-        peers.upsert(TrustedPeer {
-            name: req.name.clone(),
-            pubkey,
-            addr: req.comms_addr.clone(),
-            meta: PeerMeta::default(),
-        });
     }
+    // Upsert: same pubkey updates addr; new pubkey inserts.
+    trusted.write().upsert(TrustedPeer {
+        name: req.name.clone(),
+        pubkey,
+        addr: req.comms_addr.clone(),
+        meta: PeerMeta::default(),
+    });
 
     let resp = RegResponse { name: "tux".into(), pubkey: host_pubkey.into() };
     let mut resp_json = serde_json::to_string(&resp)?;

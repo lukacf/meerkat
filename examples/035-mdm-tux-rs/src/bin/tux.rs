@@ -544,9 +544,10 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
         }
         AgentEvent::TextComplete { content, .. } => {
             // TextComplete carries the authoritative final text.
+            // Preserve source attribution so multi-target output is distinguishable.
             app.streaming_text.remove(from);
             if !content.is_empty() {
-                app.push(content.clone());
+                app.push(format!("[{from}] {content}"));
             }
         }
         AgentEvent::ToolCallRequested { name, args, .. } => {

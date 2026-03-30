@@ -664,6 +664,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fancy-regex"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1778,6 +1790,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "heapless"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2271,6 +2292,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsqlite3-sys"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "libyml"
 version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2372,13 +2404,17 @@ name = "mdm-tux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
  "crossterm",
  "dirs",
+ "futures",
  "gethostname",
  "meerkat",
  "meerkat-comms",
  "meerkat-core",
  "meerkat-runtime",
+ "meerkat-session",
  "meerkat-store",
  "meerkat-tools",
  "parking_lot",
@@ -2394,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2419,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2440,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2472,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2484,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2512,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2531,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2552,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "schemars",
  "serde",
@@ -2561,12 +2597,15 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
  "indexmap",
  "meerkat-core",
+ "meerkat-store",
+ "redb",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -2579,7 +2618,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2587,7 +2626,10 @@ dependencies = [
  "inventory",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-runtime",
  "meerkat-skills",
+ "meerkat-store",
+ "redb",
  "serde",
  "serde_json",
  "sha2",
@@ -2599,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "gix",
@@ -2619,12 +2661,13 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "dirs",
  "meerkat-core",
  "redb",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -2637,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -3044,6 +3087,12 @@ dependencies = [
  "der",
  "spki",
 ]
+
+[[package]]
+name = "pkg-config"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "plain"
@@ -3618,6 +3667,20 @@ dependencies = [
  "rustc_version",
  "syn 2.0.117",
  "unicode-ident",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+dependencies = [
+ "bitflags 2.11.0",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
 ]
 
 [[package]]
@@ -4654,6 +4717,12 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

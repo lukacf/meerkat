@@ -6,7 +6,6 @@
 
 use anyhow::Context as _;
 use meerkat::{AgentFactory, AnthropicClient, GeminiClient, OpenAiClient};
-use meerkat_comms::agent::spawn_tcp_listener;
 use meerkat_comms::agent::types::CommsMessage;
 use meerkat_comms::identity::Keypair;
 use meerkat_comms::router::CommsConfig;
@@ -122,13 +121,50 @@ impl CommsNode {
         Self { router, trusted, inbox, inbox_sender, keypair }
     }
 
-    /// Start the TCP comms listener on `addr`.
-    pub async fn listen(&self, addr: &str) -> anyhow::Result<()> {
-        spawn_tcp_listener(addr, self.keypair.clone(), self.trusted.clone(), self.inbox_sender.clone())
+    /// Start the TCP comms listener on `addr`. Returns the actual bound address
+    /// (useful when binding to port 0 for a random free port).
+    pub async fn listen(&self, addr: &str) -> anyhow::Result<std::net::SocketAddr> {
+        // Bind first so the caller can read the actual port before any TOCTOU gap.
+        let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .context("spawn TCP comms listener")?;
+            .context("bind TCP comms listener")?;
+        let local_addr = listener.local_addr().context("read bound address")?;
+
+        // Spawn the accept loop using the already-bound listener.
+        let keypair = self.keypair.clone();
+        let trusted = self.trusted.clone();
+        let inbox_sender = self.inbox_sender.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _peer)) => {
+                        let keypair = keypair.clone();
+                        let trusted = trusted.clone();
+                        let inbox_sender = inbox_sender.clone();
+                        tokio::spawn(async move {
+                            let trusted_snapshot = trusted.read().clone();
+                            if let Err(e) = meerkat_comms::handle_connection(
+                                stream,
+                                true, // require_peer_auth
+                                keypair.as_ref(),
+                                &trusted_snapshot,
+                                &inbox_sender,
+                            )
+                            .await
+                            {
+                                tracing::debug!("comms connection error: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("comms accept error: {e}");
+                    }
+                }
+            }
+        });
+
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        Ok(())
+        Ok(local_addr)
     }
 
     /// Add a trusted peer (both send-side and receive-side updated immediately).
@@ -320,14 +356,13 @@ pub async fn register_with_host(
 
 /// Prefix for streaming event messages.
 /// Body format: `__STREAM__\n<json-serialized AgentEvent>`.
+///
+/// **Tech debt:** This string-prefix convention is an acknowledged surface-
+/// protocol smell that stays inside the example's boundary until Phase 3
+/// replaces the custom `CommsNode` with the built-in `CommsRuntime`, at which
+/// point the TUX side subscribes to session events through the proper platform
+/// path and this prefix is eliminated.
 pub const STREAM_PREFIX: &str = "__STREAM__\n";
-
-/// Prefix for slash-command messages (TUX → target).
-/// Body format: `__CMD__\n<COMMAND> [args...]`.
-pub const CMD_PREFIX: &str = "__CMD__\n";
-
-/// Prefix for heartbeat pings (target → TUX).
-pub const HEARTBEAT_PREFIX: &str = "__HEARTBEAT__\n";
 
 /// Register with backoff retry. Retries forever with exponential backoff
 /// (1s → 2s → 4s → ... → 30s cap) until the host accepts the registration.
@@ -341,20 +376,30 @@ pub async fn register_with_backoff(
 ) -> anyhow::Result<RegResponse> {
     let mut delay = 1u64;
     loop {
-        match register_with_host(reg_addr, name, pubkey, comms_addr).await {
-            Ok(resp) => {
+        // Timeout the entire registration attempt (connect + write + read_line)
+        // so a black-holed or unresponsive server doesn't wedge the retry loop.
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            register_with_host(reg_addr, name, pubkey, comms_addr),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(resp)) => {
                 // Check for permanent rejection from the server
                 if let Some(ref err) = resp.error {
                     anyhow::bail!("registration rejected: {err}");
                 }
                 return Ok(resp);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("[target] registration failed: {e} — retrying in {delay}s");
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                delay = (delay * 2).min(30);
+            }
+            Err(_) => {
+                eprintln!("[target] registration timed out — retrying in {delay}s");
             }
         }
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        delay = (delay * 2).min(30);
     }
 }
 

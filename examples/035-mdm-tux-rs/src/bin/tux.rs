@@ -39,9 +39,13 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use mdm_tux::{
-    CMD_PREFIX, CommsNode, HEARTBEAT_PREFIX, STREAM_PREFIX, auto_detect, build_llm_client,
-    detect_provider, load_or_generate_keypair, run_registration_server,
+    CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
+    load_or_generate_keypair, run_registration_server,
 };
+
+/// Timeout for router.send() calls. Prevents a black-holed target from wedging
+/// the command loop (TCP connect can hang for minutes without this).
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Event / command types ─────────────────────────────────────────────────────
 
@@ -177,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     // ── 2. Create comms node ──────────────────────────────────────────────────
     let mut node = CommsNode::new(keypair);
     let comms_addr = format!("0.0.0.0:{port}");
-    node.listen(&comms_addr).await?;
+    let _ = node.listen(&comms_addr).await?;
 
     println!("=== TUX — Meerkat Device Manager ===");
     println!("comms     : tcp://0.0.0.0:{port}");
@@ -232,11 +236,13 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let tui_event = match &msg.content {
-                    CommsContent::Message { body, .. }
-                        if body.starts_with(HEARTBEAT_PREFIX) =>
+                    // Typed heartbeat request from target
+                    CommsContent::Request { intent, .. }
+                        if intent.as_str() == "heartbeat" =>
                     {
                         TuiEvent::Heartbeat { from: msg.from_peer.clone() }
                     }
+                    // Streaming events (acknowledged tech debt — Phase 3 eliminates this)
                     CommsContent::Message { body, .. }
                         if body.starts_with(STREAM_PREFIX) =>
                     {
@@ -269,42 +275,43 @@ async fn main() -> anyhow::Result<()> {
         let trusted_shared = trusted_shared.clone();
         async move {
             let mut hive_agent: Option<DynAgent> = None;
+            // Per-target send queues: preserves FIFO within each target while
+            // preventing one slow/unreachable target from blocking others.
+            let mut target_senders: HashMap<String, mpsc::Sender<MessageKind>> = HashMap::new();
 
             while let Some(cmd) = command_rx.recv().await {
                 match cmd {
                     AppCommand::Send { target, body } => {
-                        let r = router.clone();
-                        let ev = event_tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = r
-                                .send(&target, MessageKind::Message { body, blocks: None })
-                                .await
-                            {
-                                let _ = ev
-                                    .send(TuiEvent::SendError(format!(
-                                        "[{target}] send failed: {e}"
-                                    )))
-                                    .await;
-                            }
-                        });
+                        let tx = target_senders
+                            .entry(target.clone())
+                            .or_insert_with(|| {
+                                spawn_target_sender(
+                                    target.clone(),
+                                    router.clone(),
+                                    event_tx.clone(),
+                                )
+                            });
+                        let _ = tx
+                            .send(MessageKind::Message { body, blocks: None })
+                            .await;
                     }
                     AppCommand::SlashCmd { target, cmd } => {
-                        // Send __CMD__-prefixed message. No busy indicator.
-                        let r = router.clone();
-                        let body = format!("{CMD_PREFIX}{cmd}");
-                        let ev = event_tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = r
-                                .send(&target, MessageKind::Message { body, blocks: None })
-                                .await
-                            {
-                                let _ = ev
-                                    .send(TuiEvent::SendError(format!(
-                                        "[{target}] cmd failed: {e}"
-                                    )))
-                                    .await;
-                            }
-                        });
+                        let params = serde_json::json!({ "cmd": cmd });
+                        let tx = target_senders
+                            .entry(target.clone())
+                            .or_insert_with(|| {
+                                spawn_target_sender(
+                                    target.clone(),
+                                    router.clone(),
+                                    event_tx.clone(),
+                                )
+                            });
+                        let _ = tx
+                            .send(MessageKind::Request {
+                                intent: "command".into(),
+                                params,
+                            })
+                            .await;
                     }
                     AppCommand::ResetHive => {
                         hive_agent = None;
@@ -380,6 +387,38 @@ async fn main() -> anyhow::Result<()> {
         .context("TUI loop")?;
 
     Ok(())
+}
+
+/// Spawn a dedicated sender task for one target. Messages are drained FIFO
+/// with a per-send timeout, so one unreachable target cannot stall sends to
+/// other healthy targets.
+fn spawn_target_sender(
+    target: String,
+    router: Arc<meerkat_comms::Router>,
+    event_tx: mpsc::Sender<TuiEvent>,
+) -> mpsc::Sender<MessageKind> {
+    let (tx, mut rx) = mpsc::channel::<MessageKind>(32);
+    tokio::spawn(async move {
+        while let Some(kind) = rx.recv().await {
+            let send_fut = router.send(&target, kind);
+            match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let _ = event_tx
+                        .send(TuiEvent::SendError(format!("[{target}] send failed: {e}")))
+                        .await;
+                }
+                Err(_) => {
+                    let _ = event_tx
+                        .send(TuiEvent::SendError(format!(
+                            "[{target}] send timed out"
+                        )))
+                        .await;
+                }
+            }
+        }
+    });
+    tx
 }
 
 async fn build_hive(
@@ -503,6 +542,26 @@ fn tui_loop(
                     handle_stream_event(&mut app, &from, &event);
                 }
             }
+        }
+
+        // Clear busy/streaming state for targets that stopped heartbeating.
+        // Without this, a target that disconnects mid-run (after RunStarted
+        // but before RunCompleted) shows "...processing" forever.
+        let stale_threshold = Duration::from_secs(30);
+        let stale_targets: Vec<String> = app
+            .busy_targets
+            .iter()
+            .filter(|t| {
+                app.last_seen
+                    .get(*t)
+                    .is_some_and(|seen| seen.elapsed() > stale_threshold)
+            })
+            .cloned()
+            .collect();
+        for t in &stale_targets {
+            app.flush_streaming(t);
+            app.set_busy(t, false);
+            app.push(format!("[{t}] target unresponsive — cleared busy state"));
         }
 
         terminal.draw(|f| render(f, &mut app))?;
@@ -651,7 +710,7 @@ fn handle_key(
             let selected_busy = !app.targets.is_empty()
                 && app.busy_targets.contains(&app.targets[app.selected]);
             match app.mode {
-                Mode::Direct if app.targets.is_empty() => return,
+                Mode::Direct if app.targets.is_empty() && !is_slash => return,
                 // Slash commands blocked while target is busy (can't reset mid-run)
                 Mode::Direct if selected_busy && is_slash => return,
                 // Regular messages while busy: send immediately via comms.
@@ -682,8 +741,9 @@ fn handle_key(
                         }
                         if app.targets.is_empty() { return; }
                         let target = app.targets[app.selected].clone();
-                        app.output.clear();
-                        app.streaming_text.clear();
+                        // Don't clear output yet — wait for the target to confirm.
+                        // Clearing before the command succeeds would lose unrelated
+                        // history if the send fails or other targets are connected.
                         app.push(format!("> /new ({target})"));
                         let _ = command_tx.send(AppCommand::SlashCmd {
                             target,

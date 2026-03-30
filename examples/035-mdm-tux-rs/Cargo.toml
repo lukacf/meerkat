@@ -15,12 +15,16 @@ name = "tux"
 path = "src/bin/tux.rs"
 
 [dependencies]
-meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store"] }
+meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store", "session-store"] }
 meerkat-core  = { path = "../../meerkat-core" }
 meerkat-comms = { path = "../../meerkat-comms" }
 meerkat-tools   = { path = "../../meerkat-tools" }
 meerkat-runtime = { path = "../../meerkat-runtime" }
+meerkat-session = { path = "../../meerkat-session", features = ["session-store"] }
 meerkat-store = { path = "../../meerkat-store", features = ["jsonl"] }
+futures       = "0.3"
+async-trait   = "0.1"
+chrono        = "0.4"
 tokio         = { version = "1", features = ["full"] }
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"

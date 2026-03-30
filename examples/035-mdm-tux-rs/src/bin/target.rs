@@ -1,7 +1,13 @@
-//! # 035 — MDM TUX: Target Agent
+//! # 035 — MDM TUX: Target Agent (Runtime-Backed Surface)
 //!
 //! Runs on managed machines. Registers with a TUX host automatically,
 //! then serves as a directly-controlled agent with streaming output.
+//!
+//! This target is a **runtime-backed surface** (same tier as CLI/RPC/REST):
+//! - Agent construction via `AgentFactory::build_agent()`
+//! - Session lifecycle via `PersistentSessionService`
+//! - Input routing via `RuntimeSessionAdapter` with `HandlingMode::Steer`
+//! - Typed `MessageKind` classification (no string prefixes)
 //!
 //! Sessions are persisted to disk. On restart the most recent session
 //! is automatically resumed. TUX can send `/new` to start a fresh
@@ -17,18 +23,32 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use meerkat::{AgentBuilder, AgentEvent, AgentFactory, CompositeDispatcher, MemoryTaskStore};
+use futures::StreamExt;
+use meerkat::PersistentSessionService;
+use meerkat::{AgentFactory, FactoryAgentBuilder, PersistenceBundle, build_persistent_service};
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
 use meerkat_comms::{PeerMeta, TrustedPeer};
-use meerkat_core::AgentLlmClient;
-use meerkat_store::{JsonlStore, SessionFilter, SessionStore, StoreAdapter};
-use meerkat_tools::builtin::shell::ShellConfig;
-use tokio::sync::mpsc;
+use meerkat_core::lifecycle::RunId;
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::service::{
+    CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
+    StartTurnRequest,
+};
+use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
+use meerkat_core::{AgentEvent, AgentToolDispatcher, Config};
+use meerkat_runtime::input::{
+    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
+};
+use meerkat_runtime::RuntimeSessionAdapter;
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
+use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
-    CMD_PREFIX, CommsNode, HEARTBEAT_PREFIX, STREAM_PREFIX, auto_detect, build_llm_client,
-    detect_provider, load_or_generate_keypair, register_with_backoff,
+    CommsNode, STREAM_PREFIX, auto_detect, detect_provider, load_or_generate_keypair,
+    register_with_backoff,
 };
 
 const SYSTEM_PROMPT: &str = "\
@@ -75,44 +95,61 @@ async fn main() -> anyhow::Result<()> {
     let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;
 
     // ── 2. Create comms node + bind a random free port ────────────────────────
+    // listen("0.0.0.0:0") binds once and returns the actual address, avoiding
+    // the TOCTOU race of probing a port and then re-binding.
     let node = CommsNode::new(keypair);
-    let comms_listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
-    let comms_port = comms_listener.local_addr()?.port();
-    let comms_addr = format!("0.0.0.0:{comms_port}");
-    drop(comms_listener);
-    node.listen(&comms_addr).await?;
+    let comms_addr = node.listen("0.0.0.0:0").await?;
+    let comms_port = comms_addr.port();
 
     println!("=== MDM Target: {name} ===");
     println!("comms     : tcp://0.0.0.0:{comms_port}");
     println!("provider  : {provider} ({model})");
 
-    // ── 3. Build tool dispatcher (shell + comms) ──────────────────────────────
+    // ── 3. Build runtime-backed session service ───────────────────────────────
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-    let factory = AgentFactory::new(&session_dir);
 
-    let mut tools = build_tools(&factory, &data_dir, &node, None).await?;
+    let factory = AgentFactory::new(&session_dir).shell(true).builtins(true);
+    let config = Config::default();
 
-    // ── 4. Build agent (auto-resume most recent session) ──────────────────────
-    let llm: Arc<dyn AgentLlmClient> = build_llm_client(&factory, &model, &provider).await?;
-    let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
-
-    // Two store handles over the same directory:
-    // - jsonl_store: for list/load (session management commands)
-    // - store: wrapped in StoreAdapter for the agent's AgentSessionStore
     let jsonl_store = JsonlStore::new(session_dir.clone());
     jsonl_store.init().await?;
-    let agent_store = JsonlStore::new(session_dir);
-    agent_store.init().await?;
-    let store = Arc::new(StoreAdapter::new(Arc::new(agent_store)));
+    // Separate store instance for the persistence bundle (JsonlStore doesn't Clone)
+    let bundle_store = JsonlStore::new(session_dir.clone());
+    bundle_store.init().await?;
+    let persistence = PersistenceBundle::new(
+        Arc::new(bundle_store) as Arc<dyn SessionStore>,
+        None, // no runtime store for jsonl
+        Arc::new(MemoryBlobStore::new()),
+    );
+    let runtime_adapter = persistence.runtime_adapter();
 
-    let mut agent = build_agent_fresh_or_resume(
-        &jsonl_store, &llm, &mut tools, &store, &model, &system_prompt,
-        &factory, &data_dir, &node,
+    let service: Arc<PersistentSessionService<FactoryAgentBuilder>> =
+        Arc::new(build_persistent_service(factory, config, 10, persistence));
+
+    let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
+
+    // Comms tools: send/peers tools backed by the CommsNode's router
+    let comms_tools: Arc<dyn AgentToolDispatcher> =
+        Arc::new(CommsToolDispatcher::new(node.router.clone(), node.trusted.clone()));
+
+    // ── 4. Create or auto-resume session ──────────────────────────────────────
+    let mut current_session_id = create_or_resume_session(
+        &service,
+        &runtime_adapter,
+        &jsonl_store,
+        &model,
+        &system_prompt,
+        &comms_tools,
+        &provider,
     )
-    .await;
+    .await?;
 
-    // ── 5. Reconnection loop ─────────────────────────────────────────────────
+    // ── 5. Subscribe to session events for forwarding ─────────────────────────
+    let mut event_stream = service.subscribe_session_events(&current_session_id).await
+        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
+
+    // ── 6. Reconnection loop ─────────────────────────────────────────────────
     let host_comms_port: u16 = host_addr
         .rsplit(':')
         .next()
@@ -127,15 +164,16 @@ async fn main() -> anyhow::Result<()> {
     let mut node = node;
 
     loop {
-        // Discover our own IP as seen from the host. Re-probe each connection
-        // attempt so network-not-ready at startup doesn't crash the process.
+        // Discover our own IP as seen from the host.
         let local_ip = match &explicit_ip {
             Some(ip) => ip.clone(),
             None => match discover_local_ip(host_base, host_comms_port) {
                 Ok(ip) => ip,
                 Err(e) => {
-                    eprintln!("[target] address probe failed: {e} — retrying in 5s \
-                        (use --advertise <IP> to skip)");
+                    eprintln!(
+                        "[target] address probe failed: {e} — retrying in 5s \
+                        (use --advertise <IP> to skip)"
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
@@ -146,11 +184,15 @@ async fn main() -> anyhow::Result<()> {
         // (Re-)register with TUX (retries with exponential backoff)
         eprintln!("[target] registering with {reg_addr} ...");
         let resp = match register_with_backoff(
-            &reg_addr, &name, &node.pubkey_string(), &advertised_addr,
-        ).await {
+            &reg_addr,
+            &name,
+            &node.pubkey_string(),
+            &advertised_addr,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => {
-                // Permanent rejection (e.g. name conflict) — exit, don't retry
                 eprintln!("[target] fatal: {e}");
                 std::process::exit(1);
             }
@@ -168,9 +210,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        // Remove ALL stale entries for this peer name before adding fresh one.
-        // Multiple entries accumulate from identity regeneration or restarts;
-        // router.send() resolves by name, so any stale entry could win.
+        // Remove stale entries for this peer name before adding fresh one.
         {
             let stale_keys: Vec<_> = node
                 .trusted
@@ -194,26 +234,26 @@ async fn main() -> anyhow::Result<()> {
         // Disconnect signal: heartbeat + event forwarder can trigger reconnect
         let (disconnect_tx, disconnect_rx) = tokio::sync::watch::channel(false);
 
-        // Spawn heartbeat (pings TUX every 10s, triggers disconnect on 3 failures)
+        // Spawn heartbeat (pings TUX every 10s via typed Request, triggers disconnect on 3 failures)
         let hb = spawn_heartbeat(router.clone(), "tux", disconnect_tx.clone());
 
         eprintln!("[target] ready — waiting for commands\n");
 
         // Run inbox loop (exits on disconnect signal or DISMISS command)
         run_inbox_loop(
-            &mut agent,
             &mut node,
             &router,
             disconnect_rx,
             disconnect_tx,
+            &service,
+            &runtime_adapter,
             &jsonl_store,
-            &llm,
-            &mut tools,
-            &store,
             &model,
             &system_prompt,
-            &factory,
-            &data_dir,
+            &comms_tools,
+            &provider,
+            &mut current_session_id,
+            &mut event_stream,
         )
         .await;
 
@@ -226,100 +266,159 @@ async fn main() -> anyhow::Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_inbox_loop(
-    agent: &mut meerkat::DynAgent,
     node: &mut CommsNode,
     router: &Arc<meerkat_comms::Router>,
     mut disconnect_rx: tokio::sync::watch::Receiver<bool>,
     disconnect_tx: tokio::sync::watch::Sender<bool>,
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
     jsonl_store: &JsonlStore,
-    llm: &Arc<dyn AgentLlmClient>,
-    tools: &mut Arc<dyn meerkat_core::AgentToolDispatcher>,
-    store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
-    factory: &AgentFactory,
-    data_dir: &std::path::Path,
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+    current_session_id: &mut SessionId,
+    event_stream: &mut meerkat_core::comms::EventStream,
 ) {
     loop {
-        // select! over inbox message and disconnect signal
-        let msg = tokio::select! {
-            msg = node.recv_message() => match msg {
-                Some(m) => m,
-                None => break, // inbox closed
-            },
-            _ = disconnect_rx.changed() => {
-                if *disconnect_rx.borrow() { break; }
-                continue;
+        // select! over inbox message, session events, and disconnect signal
+        tokio::select! {
+            msg = node.recv_message() => {
+                let Some(msg) = msg else { break };
+
+                let sender = msg.from_peer.clone();
+
+                // ── Typed MessageKind classification ──────────────────────
+                match &msg.content {
+                    // DISMISS request
+                    meerkat_comms::agent::types::CommsContent::Request { intent, .. }
+                        if intent.as_str() == "dismiss" =>
+                    {
+                        eprintln!("[target] received DISMISS — shutting down");
+                        std::process::exit(0);
+                    }
+
+                    // Slash command request
+                    meerkat_comms::agent::types::CommsContent::Request { intent, params, .. }
+                        if intent.as_str() == "command" =>
+                    {
+                        let cmd = params
+                            .get("cmd")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        eprintln!("[target] command: {cmd}");
+
+                        let response = handle_command(
+                            cmd,
+                            service,
+                            runtime_adapter,
+                            jsonl_store,
+                            model,
+                            system_prompt,
+                            comms_tools,
+                            provider,
+                            current_session_id,
+                            event_stream,
+                        )
+                        .await;
+
+                        let _ = router
+                            .send(&sender, MessageKind::Message { body: response, blocks: None })
+                            .await;
+                    }
+
+                    // Heartbeat request — no-op (TUX manages heartbeat state)
+                    meerkat_comms::agent::types::CommsContent::Request { intent, .. }
+                        if intent.as_str() == "heartbeat" =>
+                    {
+                        // Heartbeats from TUX are just keep-alives, nothing to do
+                    }
+
+                    // Regular message → route through runtime with Steer
+                    meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
+                        eprintln!("[target] received message from '{sender}'");
+
+                        let peer_input = Input::Peer(PeerInput {
+                            header: InputHeader {
+                                id: meerkat_core::lifecycle::InputId::new(),
+                                timestamp: chrono::Utc::now(),
+                                source: InputOrigin::Peer {
+                                    peer_id: sender.clone(),
+                                    runtime_id: None,
+                                },
+                                durability: InputDurability::Ephemeral,
+                                visibility: InputVisibility::default(),
+                                idempotency_key: None,
+                                supersession_key: None,
+                                correlation_id: None,
+                            },
+                            convention: Some(PeerConvention::Message),
+                            body: body.clone(),
+                            blocks: None,
+                            handling_mode: Some(HandlingMode::Steer),
+                        });
+
+                        match runtime_adapter.accept_input(current_session_id, peer_input).await {
+                            Ok(outcome) => {
+                                tracing::debug!(?outcome, "input accepted");
+                            }
+                            Err(e) => {
+                                eprintln!("[target] accept_input error: {e}");
+                                // Fallback: start a direct turn via the service
+                                let req = StartTurnRequest {
+                                    prompt: ContentInput::Text(body.clone()),
+                                    system_prompt: None,
+                                    render_metadata: None,
+                                    handling_mode: HandlingMode::Queue,
+                                    event_tx: None,
+                                    skill_references: None,
+                                    flow_tool_overlay: None,
+                                    additional_instructions: None,
+                                };
+                                if let Err(e) = service.start_turn(current_session_id, req).await {
+                                    eprintln!("[target] fallback start_turn error: {e}");
+                                }
+                            }
+                        }
+                    }
+
+                    // Other content types — ignore
+                    _ => {}
+                }
             }
-        };
 
-        if is_dismiss(&msg) {
-            eprintln!("[target] received DISMISS — shutting down");
-            std::process::exit(0);
-        }
-
-        let sender = msg.from_peer.clone();
-
-        // Check for slash commands (__CMD__ prefix)
-        if let meerkat_comms::agent::types::CommsContent::Message { ref body, .. } = msg.content
-            && let Some(cmd) = body.strip_prefix(CMD_PREFIX)
-        {
-            let cmd = cmd.trim();
-            eprintln!("[target] command: {cmd}");
-
-            let response = handle_command(
-                cmd, jsonl_store, llm, tools, store, model, system_prompt, agent,
-                factory, data_dir, node,
-            )
-            .await;
-
-            let _ = router
-                .send(&sender, MessageKind::Message { body: response, blocks: None })
-                .await;
-            continue;
-        }
-
-        eprintln!("[target] received message from '{sender}'");
-
-        // Normal message: run agent with streaming + disconnect-aware forwarder
-        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
-        let fwd_router = router.clone();
-        let fwd_sender = sender.clone();
-        let fwd_disconnect_tx = disconnect_tx.clone();
-        let fwd_handle = tokio::spawn(async move {
-            let mut consecutive_failures = 0u32;
-            while let Some(event) = event_rx.recv().await {
-                if should_forward(&event) {
-                    let Ok(json) = serde_json::to_string(&event) else {
+            // Forward session events to TUX
+            event = event_stream.next() => {
+                let Some(envelope) = event else { continue };
+                let event = &envelope.payload;
+                if should_forward(event) {
+                    let Ok(json) = serde_json::to_string(event) else {
                         continue;
                     };
                     let body = format!("{STREAM_PREFIX}{json}");
-                    match fwd_router
-                        .send(&fwd_sender, MessageKind::Message { body, blocks: None })
-                        .await
+                    // Timeout prevents a black-holed TUX from blocking the
+                    // inbox loop, which would stop it from observing the
+                    // heartbeat's disconnect signal via disconnect_rx.
+                    let send_fut = router
+                        .send("tux", MessageKind::Message { body, blocks: None });
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        send_fut,
+                    )
+                    .await
                     {
-                        Ok(_) => consecutive_failures = 0,
-                        Err(_) => {
-                            consecutive_failures += 1;
-                            if consecutive_failures >= 3 {
-                                let _ = fwd_disconnect_tx.send(true);
-                            }
+                        Ok(Ok(_)) => {}
+                        _ => {
+                            // Event forwarding failure or timeout — signal disconnect
+                            let _ = disconnect_tx.send(true);
                         }
                     }
                 }
             }
-        });
 
-        let input = msg.to_user_message_text();
-        if let Err(e) = agent.run_with_events(input.into(), event_tx).await {
-            eprintln!("[target] agent error: {e}");
-        }
-
-        let _ = fwd_handle.await;
-
-        // Check disconnect flag after agent run completes
-        if *disconnect_rx.borrow() {
-            break;
+            _ = disconnect_rx.changed() => {
+                if *disconnect_rx.borrow() { break; }
+            }
         }
     }
 }
@@ -327,6 +426,7 @@ async fn run_inbox_loop(
 // ── Heartbeat ────────────────────────────────────────────────────────────────
 
 /// Spawn a background heartbeat task that pings the peer every 10 seconds.
+/// Uses typed `MessageKind::Request` instead of string prefix.
 /// On 3 consecutive send failures, triggers the disconnect signal.
 fn spawn_heartbeat(
     router: Arc<meerkat_comms::Router>,
@@ -338,22 +438,35 @@ fn spawn_heartbeat(
         let mut consecutive_failures = 0u32;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let body = format!("{HEARTBEAT_PREFIX}ping");
-            match router
-                .send(&peer, MessageKind::Message { body, blocks: None })
-                .await
+            // Timeout prevents a black-holed TUX from blocking the heartbeat
+            // loop indefinitely (TCP connect can hang for minutes). Without
+            // this, the failure counter never advances and reconnect never fires.
+            let send_fut = router.send(
+                &peer,
+                MessageKind::Request {
+                    intent: "heartbeat".into(),
+                    params: serde_json::Value::Null,
+                },
+            );
+            let failed = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                send_fut,
+            )
+            .await
             {
-                Ok(_) => consecutive_failures = 0,
-                Err(_) => {
-                    consecutive_failures += 1;
-                    eprintln!(
-                        "[target] heartbeat failed ({consecutive_failures}/3)"
-                    );
-                    if consecutive_failures >= 3 {
-                        let _ = disconnect_tx.send(true);
-                        break;
-                    }
+                Ok(Ok(_)) => false,
+                Ok(Err(_)) => true,  // send error
+                Err(_) => true,      // timeout
+            };
+            if failed {
+                consecutive_failures += 1;
+                eprintln!("[target] heartbeat failed ({consecutive_failures}/3)");
+                if consecutive_failures >= 3 {
+                    let _ = disconnect_tx.send(true);
+                    break;
                 }
+            } else {
+                consecutive_failures = 0;
             }
         }
     })
@@ -364,34 +477,33 @@ fn spawn_heartbeat(
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     cmd: &str,
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
     jsonl_store: &JsonlStore,
-    llm: &Arc<dyn AgentLlmClient>,
-    tools: &mut Arc<dyn meerkat_core::AgentToolDispatcher>,
-    store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
-    agent: &mut meerkat::DynAgent,
-    factory: &AgentFactory,
-    data_dir: &std::path::Path,
-    node: &CommsNode,
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+    current_session_id: &mut SessionId,
+    event_stream: &mut meerkat_core::comms::EventStream,
 ) -> String {
     if cmd == "NEW_SESSION" {
-        // Generate a shared session ID for both tools and agent so
-        // background shell jobs are scoped to the correct session.
-        let sid = meerkat_core::types::SessionId::new();
-        match build_tools(factory, data_dir, node, Some(sid.clone())).await {
-            Ok(t) => *tools = t,
-            Err(e) => return format!("Failed to rebuild tools: {e}"),
+        match switch_session(
+            service,
+            runtime_adapter,
+            None,
+            model,
+            system_prompt,
+            comms_tools,
+            provider,
+            current_session_id,
+            event_stream,
+        )
+        .await
+        {
+            Ok(sid) => format!("New session started: {sid}"),
+            Err(e) => format!("Failed to create session: {e}"),
         }
-        let session = meerkat_core::session::Session::with_id(sid.clone());
-        *agent = AgentBuilder::new()
-            .model(model)
-            .system_prompt(system_prompt)
-            .resume_session(session)
-            .build(llm.clone(), tools.clone(), store.clone() as _)
-            .await;
-        eprintln!("[target] new session: {sid}");
-        format!("New session started: {sid}")
     } else if cmd == "LIST_SESSIONS" {
         match jsonl_store.list(SessionFilter::default()).await {
             Ok(mut sessions) => {
@@ -399,7 +511,7 @@ async fn handle_command(
                 if sessions.is_empty() {
                     "No saved sessions.".into()
                 } else {
-                    let current_id = agent.session().id().to_string();
+                    let current_str = current_session_id.to_string();
                     let mut out = String::from("**Sessions:**\n");
                     for (i, s) in sessions.iter().enumerate().take(20) {
                         let age = s
@@ -407,7 +519,7 @@ async fn handle_command(
                             .elapsed()
                             .map(format_duration)
                             .unwrap_or_else(|_| "?".into());
-                        let marker = if s.id.to_string() == current_id {
+                        let marker = if s.id.to_string() == current_str {
                             " ← current"
                         } else {
                             ""
@@ -428,7 +540,6 @@ async fn handle_command(
         }
     } else if let Some(arg) = cmd.strip_prefix("RESUME ") {
         let arg = arg.trim();
-        // Parse as 1-based index
         let idx: usize = match arg.parse::<usize>() {
             Ok(n) if n >= 1 => n - 1,
             _ => return format!("Invalid session number: {arg}"),
@@ -439,26 +550,22 @@ async fn handle_command(
                 if idx >= sessions.len() {
                     return format!("Session {arg} not found (have {})", sessions.len());
                 }
-                let meta = &sessions[idx];
-                match jsonl_store.load(&meta.id).await {
-                    Ok(Some(session)) => {
-                        let msg_count = session.messages().len();
-                        // Rebuild tools scoped to the resumed session ID
-                        match build_tools(factory, data_dir, node, Some(meta.id.clone())).await {
-                            Ok(t) => *tools = t,
-                            Err(e) => return format!("Failed to rebuild tools: {e}"),
-                        }
-                        *agent = AgentBuilder::new()
-                            .model(model)
-                            .system_prompt(system_prompt)
-                            .resume_session(session)
-                            .build(llm.clone(), tools.clone(), store.clone() as _)
-                            .await;
-                        eprintln!("[target] resumed session {} ({msg_count} messages)", meta.id);
-                        format!("Resumed session {} ({msg_count} messages)", meta.id)
-                    }
-                    Ok(None) => format!("Session {} not found on disk", meta.id),
-                    Err(e) => format!("Error loading session: {e}"),
+                let resume_id = sessions[idx].id.clone();
+                match switch_session(
+                    service,
+                    runtime_adapter,
+                    Some(resume_id),
+                    model,
+                    system_prompt,
+                    comms_tools,
+                    provider,
+                    current_session_id,
+                    event_stream,
+                )
+                .await
+                {
+                    Ok(sid) => format!("Resumed session {sid}"),
+                    Err(e) => format!("Error resuming session: {e}"),
                 }
             }
             Err(e) => format!("Error listing sessions: {e}"),
@@ -481,117 +588,296 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// Build an agent, auto-resuming the most recent session if one exists.
-#[allow(clippy::too_many_arguments)]
-async fn build_agent_fresh_or_resume(
+// ── Session lifecycle ────────────────────────────────────────────────────────
+
+/// Create a new session or resume an existing one. Registers the session
+/// with the RuntimeSessionAdapter and subscribes to its events.
+async fn create_or_resume_session(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
     jsonl_store: &JsonlStore,
-    llm: &Arc<dyn AgentLlmClient>,
-    tools: &mut Arc<dyn meerkat_core::AgentToolDispatcher>,
-    store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
-    factory: &AgentFactory,
-    data_dir: &std::path::Path,
-    node: &CommsNode,
-) -> meerkat::DynAgent {
-    // Try to auto-resume the most recent session
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+) -> anyhow::Result<SessionId> {
+    // Try to auto-resume the most recent session. On failure, warn and start fresh.
     if let Ok(mut sessions) = jsonl_store.list(SessionFilter::default()).await {
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        if let Some(latest) = sessions.first()
-            && let Ok(Some(session)) = jsonl_store.load(&latest.id).await
-        {
-            let msg_count = session.messages().len();
+        if let Some(latest) = sessions.first() {
             eprintln!(
-                "[target] auto-resuming session {} ({msg_count} messages)",
-                latest.id
+                "[target] auto-resuming session {} ({} messages)",
+                latest.id, latest.message_count
             );
-            // Rebuild tools scoped to the resumed session ID
-            if let Ok(t) = build_tools(factory, data_dir, node, Some(latest.id.clone())).await {
-                *tools = t;
+            match setup_session(
+                service,
+                runtime_adapter,
+                Some(latest.id.clone()),
+                model,
+                system_prompt,
+                comms_tools,
+                provider,
+            )
+            .await
+            {
+                Ok(sid) => return Ok(sid),
+                Err(e) => {
+                    eprintln!("[target] auto-resume failed: {e} — starting fresh session");
+                }
             }
-            return AgentBuilder::new()
-                .model(model)
-                .system_prompt(system_prompt)
-                .resume_session(session)
-                .build(llm.clone(), tools.clone(), store.clone() as _)
-                .await;
         }
     }
 
-    // Fresh session — generate a shared ID for both tools and agent
-    let sid = meerkat_core::types::SessionId::new();
-    eprintln!("[target] starting fresh session: {sid}");
-    if let Ok(t) = build_tools(factory, data_dir, node, Some(sid.clone())).await {
-        *tools = t;
+    eprintln!("[target] starting fresh session");
+    setup_session(service, runtime_adapter, None, model, system_prompt, comms_tools, provider).await
+}
+
+/// Switch to a new or resumed session. Drops the old event subscription,
+/// creates/resumes the session, registers with the runtime adapter,
+/// and subscribes to the new session's events.
+#[allow(clippy::too_many_arguments)]
+async fn switch_session(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    resume_id: Option<SessionId>,
+    model: &str,
+    system_prompt: &str,
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+    current_session_id: &mut SessionId,
+    event_stream: &mut meerkat_core::comms::EventStream,
+) -> anyhow::Result<SessionId> {
+    let old_session_id = current_session_id.clone();
+
+    // Create the new session first. If this fails, the old session stays
+    // fully registered with its runtime loop — no degraded state.
+    let new_id = setup_session(
+        service,
+        runtime_adapter,
+        resume_id,
+        model,
+        system_prompt,
+        comms_tools,
+        provider,
+    )
+    .await?;
+
+    let new_event_stream = service
+        .subscribe_session_events(&new_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
+
+    // Only tear down the old session after the new one is fully set up.
+    // This prevents degraded state if the new session fails to create.
+    // Unregister from the runtime adapter (detaches the runtime loop) AND
+    // discard from the session service (frees the max_sessions slot).
+    runtime_adapter.unregister_session(&old_session_id).await;
+    if let Err(e) = service.discard_live_session(&old_session_id).await {
+        // NotFound is expected if the session was never materialized or already archived.
+        if !matches!(e, SessionError::NotFound { .. }) {
+            eprintln!("[target] warning: discard old session {old_session_id}: {e}");
+        }
     }
-    let session = meerkat_core::session::Session::with_id(sid);
-    AgentBuilder::new()
-        .model(model)
-        .system_prompt(system_prompt)
-        .resume_session(session)
-        .build(llm.clone(), tools.clone(), store.clone() as _)
-        .await
+
+    *event_stream = new_event_stream;
+    *current_session_id = new_id.clone();
+
+    Ok(new_id)
 }
 
-// ── Tool building ─────────────────────────────────────────────────────────────
-
-/// Build a tools dispatcher scoped to a specific session.
-///
-/// `session_id`: pass `Some(id)` for resumed sessions so the shell
-/// `JobManager` is bound to the same session as the agent. Pass `None`
-/// for fresh sessions (a new `SessionId` is generated).
-///
-/// Task tools are deliberately excluded: their `MemoryTaskStore` backend
-/// does not survive restarts, so resumed sessions would reference task IDs
-/// that no longer exist.
-async fn build_tools(
-    factory: &AgentFactory,
-    data_dir: &std::path::Path,
-    node: &CommsNode,
-    session_id: Option<meerkat_core::types::SessionId>,
-) -> anyhow::Result<Arc<dyn meerkat_core::AgentToolDispatcher>> {
-    let shell_config = ShellConfig {
-        restrict_to_project: false,
-        ..ShellConfig::with_project_root(data_dir.to_path_buf())
+/// Create or resume a session and register it with the runtime adapter.
+async fn setup_session(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    resume_id: Option<SessionId>,
+    model: &str,
+    system_prompt: &str,
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+) -> anyhow::Result<SessionId> {
+    let resume_session = match &resume_id {
+        Some(id) => {
+            let loaded = service
+                .load_persisted(id)
+                .await
+                .map_err(|e| anyhow::anyhow!("load session {id}: {e}"))?;
+            Some(loaded.ok_or_else(|| anyhow::anyhow!("session {id} not found on disk"))?)
+        }
+        None => None,
     };
-    let mut builtin_config = meerkat::BuiltinToolConfig::default();
-    builtin_config.policy.enable.insert("shell".into());
-    builtin_config.policy.enable.insert("shell_job_cancel".into());
-    builtin_config.policy.enable.insert("shell_job_status".into());
-    builtin_config.policy.enable.insert("shell_jobs".into());
-    // Disable task tools — MemoryTaskStore can't persist across restarts,
-    // so resumed sessions would have dangling task references.
-    builtin_config.policy.disable.insert("task_create".into());
-    builtin_config.policy.disable.insert("task_get".into());
-    builtin_config.policy.disable.insert("task_update".into());
-    builtin_config.policy.disable.insert("task_list".into());
 
-    let sid = session_id
-        .unwrap_or_default()
-        .to_string();
-    let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
-        Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+    let build_opts = SessionBuildOptions {
+        provider: Some(meerkat_core::Provider::from_name(provider)),
+        external_tools: Some(comms_tools.clone()),
+        override_builtins: Some(true),
+        override_shell: Some(true),
+        resume_session,
+        ..Default::default()
+    };
 
-    let builtin: CompositeDispatcher = factory
-        .build_composite_dispatcher(
-            Arc::new(MemoryTaskStore::new()),
-            &builtin_config,
-            None,
-            Some(shell_config),
-            None,
-            Some(sid),
-            Some(ops_registry),
-            false,
-        )
-        .await
-        .context("build composite dispatcher")?;
+    let req = CreateSessionRequest {
+        model: model.to_string(),
+        prompt: ContentInput::Text(String::new()),
+        render_metadata: None,
+        system_prompt: Some(system_prompt.to_string()),
+        max_tokens: None,
+        event_tx: None,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::Defer,
+        build: Some(build_opts),
+        labels: None,
+    };
 
-    Ok(Arc::new(CommsToolDispatcher::with_inner(
-        node.router.clone(),
-        node.trusted.clone(),
-        Arc::new(builtin),
-    )))
+    let result = service.create_session(req).await
+        .map_err(|e| anyhow::anyhow!("create session: {e}"))?;
+
+    let session_id = result.session_id;
+    eprintln!("[target] session ready: {session_id}");
+
+    // Create executor and register with runtime adapter for Steer support
+    let executor = Box::new(TargetCoreExecutor::new(service.clone(), session_id.clone()));
+    runtime_adapter
+        .ensure_session_with_executor(session_id.clone(), executor)
+        .await;
+
+    Ok(session_id)
 }
+
+// ── CoreExecutor for runtime loop ────────────────────────────────────────────
+
+/// Bridges the RuntimeSessionAdapter's runtime loop to the PersistentSessionService.
+/// When the runtime loop dequeues an input (via DefaultPolicyTable routing),
+/// it calls `apply()` which translates the RunPrimitive into a `start_turn()`.
+struct TargetCoreExecutor {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+}
+
+impl TargetCoreExecutor {
+    fn new(
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        session_id: SessionId,
+    ) -> Self {
+        Self {
+            service,
+            session_id,
+        }
+    }
+}
+
+/// Extract prompt content from a `RunPrimitive`, preserving multimodal blocks.
+fn extract_prompt(primitive: &RunPrimitive) -> ContentInput {
+    match primitive {
+        RunPrimitive::StagedInput(staged) => {
+            let mut all_blocks = Vec::new();
+            for append in &staged.appends {
+                match &append.content {
+                    CoreRenderable::Text { text } => {
+                        all_blocks
+                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
+                    }
+                    CoreRenderable::Blocks { blocks } => {
+                        all_blocks.extend(blocks.iter().cloned());
+                    }
+                    _ => {}
+                }
+            }
+            if all_blocks.is_empty() {
+                ContentInput::Text(String::new())
+            } else if all_blocks.len() == 1 {
+                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
+                    ContentInput::Text(text.clone())
+                } else {
+                    ContentInput::Blocks(all_blocks)
+                }
+            } else {
+                ContentInput::Blocks(all_blocks)
+            }
+        }
+        RunPrimitive::ImmediateAppend(append) => match &append.content {
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
+        },
+        RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
+            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
+            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
+            _ => ContentInput::Text(String::new()),
+        },
+        _ => ContentInput::Text(String::new()),
+    }
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for TargetCoreExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let prompt = extract_prompt(&primitive);
+
+        let req = StartTurnRequest {
+            prompt,
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: HandlingMode::Queue,
+            event_tx: None,
+            skill_references: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.skill_references.clone()),
+            flow_tool_overlay: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.flow_tool_overlay.clone()),
+            additional_instructions: primitive
+                .turn_metadata()
+                .and_then(|meta| meta.additional_instructions.clone()),
+        };
+
+        let boundary = match &primitive {
+            RunPrimitive::StagedInput(staged) => staged.boundary,
+            _ => RunApplyBoundary::Immediate,
+        };
+        let input_ids = primitive.contributing_input_ids().to_vec();
+
+        self.service
+            .apply_runtime_turn(&self.session_id, run_id, req, boundary, input_ids)
+            .await
+            .map_err(|e| CoreExecutorError::ApplyFailed {
+                reason: e.to_string(),
+            })
+    }
+
+    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } => self
+                .service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::ControlFailed {
+                    reason: e.to_string(),
+                }),
+            RunControlCommand::StopRuntimeExecutor { .. } => {
+                let discard_result = self
+                    .service
+                    .discard_live_session(&self.session_id)
+                    .await;
+                runtime_adapter_unregister_noop();
+                match discard_result {
+                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+                    Err(err) => Err(CoreExecutorError::ControlFailed {
+                        reason: err.to_string(),
+                    }),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Placeholder for StopRuntimeExecutor — the target owns the adapter lifetime
+/// so explicit unregistration isn't needed during shutdown.
+fn runtime_adapter_unregister_noop() {}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -609,15 +895,6 @@ fn should_forward(event: &AgentEvent) -> bool {
             | AgentEvent::TurnStarted { .. }
             | AgentEvent::TurnCompleted { .. }
     )
-}
-
-fn is_dismiss(msg: &meerkat_comms::agent::types::CommsMessage) -> bool {
-    match &msg.content {
-        meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
-            body.trim().eq_ignore_ascii_case("DISMISS")
-        }
-        _ => false,
-    }
 }
 
 /// Probe our outbound IP toward a host via a non-sending UDP "connect".

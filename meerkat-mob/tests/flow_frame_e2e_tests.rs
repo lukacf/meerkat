@@ -1182,8 +1182,6 @@ async fn test_completed_loop_persisted_as_completed_not_running() {
 /// so advance_frame_steps_and_terminalize marks pre-crash steps as Completed not Skipped.
 #[tokio::test]
 async fn test_frame_outputs_seeded_from_persisted_state_on_resume() {
-    use meerkat_mob::store::MobRunStore as _;
-
     // First execution: run node-a and complete it (with a one-step frame).
     let executor = Arc::new(ScriptedStepExecutor::new(vec![StepScript {
         node_id: "node-a".into(),

@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&session_dir).await?;
     let factory = AgentFactory::new(&session_dir);
 
-    let mut tools = build_tools(&factory, &data_dir, &node).await?;
+    let mut tools = build_tools(&factory, &data_dir, &node, None).await?;
 
     // ── 4. Build agent (auto-resume most recent session) ──────────────────────
     let llm: Arc<dyn AgentLlmClient> = build_llm_client(&factory, &model, &provider).await?;
@@ -101,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(StoreAdapter::new(Arc::new(agent_store)));
 
     let mut agent = build_agent_fresh_or_resume(
-        &jsonl_store, &llm, &tools, &store, &model, &system_prompt, None,
+        &jsonl_store, &llm, &mut tools, &store, &model, &system_prompt,
+        &factory, &data_dir, &node,
     )
     .await;
 
@@ -356,9 +357,8 @@ async fn handle_command(
     node: &CommsNode,
 ) -> String {
     if cmd == "NEW_SESSION" {
-        // Rebuild tools with a fresh session-scoped dispatcher so background
-        // shell jobs and task tools are bound to the new session.
-        match build_tools(factory, data_dir, node).await {
+        // Rebuild tools with a fresh session scope.
+        match build_tools(factory, data_dir, node, None).await {
             Ok(t) => *tools = t,
             Err(e) => return format!("Failed to rebuild tools: {e}"),
         }
@@ -421,8 +421,8 @@ async fn handle_command(
                 match jsonl_store.load(&meta.id).await {
                     Ok(Some(session)) => {
                         let msg_count = session.messages().len();
-                        // Rebuild tools with fresh session scope
-                        match build_tools(factory, data_dir, node).await {
+                        // Rebuild tools scoped to the resumed session ID
+                        match build_tools(factory, data_dir, node, Some(meta.id.clone())).await {
                             Ok(t) => *tools = t,
                             Err(e) => return format!("Failed to rebuild tools: {e}"),
                         }
@@ -460,27 +460,18 @@ fn format_duration(d: std::time::Duration) -> String {
 }
 
 /// Build an agent, auto-resuming the most recent session if one exists.
+#[allow(clippy::too_many_arguments)]
 async fn build_agent_fresh_or_resume(
     jsonl_store: &JsonlStore,
     llm: &Arc<dyn AgentLlmClient>,
-    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+    tools: &mut Arc<dyn meerkat_core::AgentToolDispatcher>,
     store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
-    specific_session: Option<meerkat_core::session::Session>,
+    factory: &AgentFactory,
+    data_dir: &std::path::Path,
+    node: &CommsNode,
 ) -> meerkat::DynAgent {
-    // If a specific session was requested, use it
-    if let Some(session) = specific_session {
-        let msg_count = session.messages().len();
-        eprintln!("[target] resuming session with {msg_count} messages");
-        return AgentBuilder::new()
-            .model(model)
-            .system_prompt(system_prompt)
-            .resume_session(session)
-            .build(llm.clone(), tools.clone(), store.clone() as _)
-            .await;
-    }
-
     // Try to auto-resume the most recent session
     if let Ok(mut sessions) = jsonl_store.list(SessionFilter::default()).await {
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -492,6 +483,10 @@ async fn build_agent_fresh_or_resume(
                 "[target] auto-resuming session {} ({msg_count} messages)",
                 latest.id
             );
+            // Rebuild tools scoped to the resumed session ID
+            if let Ok(t) = build_tools(factory, data_dir, node, Some(latest.id.clone())).await {
+                *tools = t;
+            }
             return AgentBuilder::new()
                 .model(model)
                 .system_prompt(system_prompt)
@@ -512,13 +507,20 @@ async fn build_agent_fresh_or_resume(
 
 // ── Tool building ─────────────────────────────────────────────────────────────
 
-/// Build a fresh tools dispatcher with a new session-scoped `JobManager`.
-/// Called at startup and on `/new` / `/resume` to ensure shell background
-/// jobs and task tools are bound to the current session.
+/// Build a tools dispatcher scoped to a specific session.
+///
+/// `session_id`: pass `Some(id)` for resumed sessions so the shell
+/// `JobManager` is bound to the same session as the agent. Pass `None`
+/// for fresh sessions (a new `SessionId` is generated).
+///
+/// Task tools are deliberately excluded: their `MemoryTaskStore` backend
+/// does not survive restarts, so resumed sessions would reference task IDs
+/// that no longer exist.
 async fn build_tools(
     factory: &AgentFactory,
     data_dir: &std::path::Path,
     node: &CommsNode,
+    session_id: Option<meerkat_core::types::SessionId>,
 ) -> anyhow::Result<Arc<dyn meerkat_core::AgentToolDispatcher>> {
     let shell_config = ShellConfig {
         restrict_to_project: false,
@@ -527,8 +529,16 @@ async fn build_tools(
     let mut builtin_config = meerkat::BuiltinToolConfig::default();
     builtin_config.policy.enable.insert("shell".into());
     builtin_config.policy.enable.insert("shell_job_cancel".into());
+    // Disable task tools — MemoryTaskStore can't persist across restarts,
+    // so resumed sessions would have dangling task references.
+    builtin_config.policy.disable.insert("task_create".into());
+    builtin_config.policy.disable.insert("task_get".into());
+    builtin_config.policy.disable.insert("task_update".into());
+    builtin_config.policy.disable.insert("task_list".into());
 
-    let session_id = meerkat_core::types::SessionId::new().to_string();
+    let sid = session_id
+        .unwrap_or_default()
+        .to_string();
     let ops_registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
         Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
 
@@ -539,7 +549,7 @@ async fn build_tools(
             None,
             Some(shell_config),
             None,
-            Some(session_id),
+            Some(sid),
             Some(ops_registry),
             false,
         )

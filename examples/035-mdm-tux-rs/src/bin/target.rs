@@ -145,9 +145,14 @@ async fn main() -> anyhow::Result<()> {
     let llm: Arc<dyn AgentLlmClient> = build_llm_client(&factory, &model, &provider).await?;
     let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
 
-    let jsonl_store = Arc::new(JsonlStore::new(session_dir));
+    // Two store handles over the same directory:
+    // - jsonl_store: for list/load (session management commands)
+    // - store: wrapped in StoreAdapter for the agent's AgentSessionStore
+    let jsonl_store = JsonlStore::new(session_dir.clone());
     jsonl_store.init().await?;
-    let store = Arc::new(StoreAdapter::new(jsonl_store.clone()));
+    let agent_store = JsonlStore::new(session_dir);
+    agent_store.init().await?;
+    let store = Arc::new(StoreAdapter::new(Arc::new(agent_store)));
 
     let mut agent = build_agent_fresh_or_resume(
         &jsonl_store, &llm, &tools, &store, &model, &system_prompt, None,
@@ -234,10 +239,10 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_command(
     cmd: &str,
-    jsonl_store: &Arc<JsonlStore>,
+    jsonl_store: &JsonlStore,
     llm: &Arc<dyn AgentLlmClient>,
     tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
-    store: &Arc<StoreAdapter<Arc<JsonlStore>>>,
+    store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
     agent: &mut meerkat::DynAgent,
@@ -337,10 +342,10 @@ fn format_duration(d: std::time::Duration) -> String {
 
 /// Build an agent, auto-resuming the most recent session if one exists.
 async fn build_agent_fresh_or_resume(
-    jsonl_store: &Arc<JsonlStore>,
+    jsonl_store: &JsonlStore,
     llm: &Arc<dyn AgentLlmClient>,
     tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
-    store: &Arc<StoreAdapter<Arc<JsonlStore>>>,
+    store: &Arc<StoreAdapter<JsonlStore>>,
     model: &str,
     system_prompt: &str,
     specific_session: Option<meerkat_core::session::Session>,

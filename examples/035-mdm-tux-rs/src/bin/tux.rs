@@ -178,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     let port: u16 = args[0].parse().context("PORT must be a number")?;
+    anyhow::ensure!(port < 65535, "PORT must be < 65535 (registration uses PORT+1)");
     let model_override = find_flag(&args, "--model");
 
     let data_dir = PathBuf::from("/tmp/mdm-tux");
@@ -651,8 +652,13 @@ fn handle_key(
         KeyCode::Enter if !app.input.is_empty() => {
             let body = std::mem::take(&mut app.input);
 
-            // ── Slash commands ────────────────────────────────────────────
-            if body.starts_with('/') {
+            // ── Slash commands (only known ones — don't intercept /bin/ls etc.) ──
+            if body.starts_with('/')
+                && matches!(
+                    body.split_once(' ').map(|(c, _)| c).unwrap_or(&body),
+                    "/new" | "/resume" | "/help"
+                )
+            {
                 let parts: Vec<&str> = body.splitn(2, ' ').collect();
                 let slash = parts[0];
                 let arg = parts.get(1).unwrap_or(&"").trim();
@@ -702,9 +708,7 @@ fn handle_key(
                         app.push("  `/resume <N>`   — resume session N".into());
                         app.push("  `/help`         — show this help".into());
                     }
-                    _ => {
-                        app.push(format!("Unknown command: {slash} (try /help)"));
-                    }
+                    _ => unreachable!("guard above only admits known commands"),
                 }
                 return;
             }

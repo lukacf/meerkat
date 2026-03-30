@@ -89,7 +89,7 @@ schemars = { version = "1", features = ["derive"] }
 serde_yml = "0.0.12"
 
 # Enum utilities
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 inventory = "0.3"
 
 # CLI

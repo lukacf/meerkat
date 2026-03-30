@@ -452,18 +452,11 @@ fn tui_loop(
         while let Ok(ev) = event_rx.try_recv() {
             match ev {
                 TuiEvent::CommsMessage(s) => {
-                    // Extract the sender name from [COMMS MESSAGE from X]\n...
-                    // If this sender is currently being streamed, skip the
-                    // message — it's a duplicate from the agent's send tool.
+                    // Update last_seen for the sender
                     if let Some(rest) = s.strip_prefix("[COMMS MESSAGE from ")
                         && let Some((from, _body)) = rest.split_once("]\n")
                     {
                         app.last_seen.insert(from.to_string(), Instant::now());
-                        if app.busy_targets.contains(from)
-                            || app.streaming_text.contains_key(from)
-                        {
-                            continue;
-                        }
                     }
                     // Strip the raw prefix for clean display
                     let clean = s
@@ -598,7 +591,7 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
         }
         AgentEvent::RunFailed { error, .. } => {
             app.flush_streaming(from);
-            app.push(format!("[error] {error}"));
+            app.push(format!("[{from} error] {error}"));
             app.set_busy(from, false);
         }
         _ => {}
@@ -654,13 +647,17 @@ fn handle_key(
                     app.input.split_once(' ').map(|(c, _)| c).unwrap_or(&app.input),
                     "/new" | "/resume" | "/help"
                 );
-            if !is_slash {
-                match app.mode {
-                    Mode::Direct if app.targets.is_empty() => return,
-                    Mode::Hive if app.hive_planning => return,
-                    _ => {}
-                }
+            // Check if submission is possible before consuming input.
+            let selected_busy = !app.targets.is_empty()
+                && app.busy_targets.contains(&app.targets[app.selected]);
+            match app.mode {
+                Mode::Direct if app.targets.is_empty() => return,
+                Mode::Direct if selected_busy && !is_slash => return, // block overlapping runs
+                Mode::Direct if selected_busy && is_slash => return,  // block /new /resume on busy
+                Mode::Hive if app.hive_planning => return,
+                _ => {}
             }
+            // /help is always allowed (local-only, no target interaction)
 
             let body = std::mem::take(&mut app.input);
 
@@ -767,7 +764,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             } else {
                 inner_width.saturating_sub(2) // "  " continuation indent
             };
-            if avail == 0 { 1 } else { (line.len() / avail.max(1)) + 1 }
+            if avail == 0 || line.is_empty() { 1 } else { line.len().div_ceil(avail) }
         })
         .sum();
     let input_height = (input_lines.clamp(1, 8) as u16) + 2;

@@ -160,6 +160,22 @@ impl FlowFrameEngine {
                     .entry(k.clone())
                     .or_insert_with(|| v.clone());
             }
+            // [P2] When resuming a body frame mid-iteration, merge the step outputs
+            // already persisted for THIS iteration slot into step_outputs. Without this,
+            // a step that completed before the crash is invisible to sibling steps that
+            // run after the resume — conditions/templates inside the same iteration
+            // diverge from the pre-crash path (dogma Rule 13).
+            if let Some((loop_id, iteration)) = &loop_context {
+                if let Some(iters) = run.loop_iteration_outputs.get(loop_id) {
+                    if let Some(iter_out) = iters.get(*iteration as usize) {
+                        for (sid, out) in iter_out {
+                            ctx.step_outputs
+                                .entry(sid.clone())
+                                .or_insert_with(|| out.clone());
+                        }
+                    }
+                }
+            }
             ctx
         };
 
@@ -461,6 +477,63 @@ impl FlowFrameEngine {
         let mut iter_context = context.clone();
         let mut condition_met = false;
 
+        // Resume from the persisted iteration counter (dogma Rule 13: the store is
+        // authoritative for how far the loop progressed). On a fresh run, no
+        // LoopSnapshot exists so start_iteration == 0. On a resume, earlier iterations
+        // are already persisted — restarting from 0 would duplicate ledger entries
+        // and replay stale body-frame IDs into loop_outputs.
+        let start_iteration = {
+            let run = self
+                .run_store
+                .get_run(run_id)
+                .await?
+                .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            run.loops
+                .get(loop_instance_id)
+                .and_then(|snap| {
+                    snap.kernel_state
+                        .fields
+                        .get("current_iteration")
+                        .and_then(|v| {
+                            if let meerkat_machine_kernels::KernelValue::U64(n) = v {
+                                Some(*n)
+                            } else {
+                                None
+                            }
+                        })
+                })
+                .unwrap_or(0)
+        };
+
+        // Hydrate iter_context with outputs from already-completed iterations so
+        // the until-condition evaluator and downstream templates see the full history.
+        if start_iteration > 0 {
+            let run = self
+                .run_store
+                .get_run(run_id)
+                .await?
+                .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            if let Some(persisted_iters) = run.loop_iteration_outputs.get(loop_id) {
+                for (i, iter_out) in persisted_iters.iter().enumerate() {
+                    if (i as u64) < start_iteration {
+                        // Merge into step_outputs (last write wins, like runtime).
+                        for (sid, out) in iter_out {
+                            iter_context.step_outputs.insert(sid.clone(), out.clone());
+                        }
+                        // Append to loop_outputs history.
+                        iter_context
+                            .loop_outputs
+                            .entry(loop_id.clone())
+                            .or_insert_with(|| LoopContextHistory {
+                                iterations: Vec::new(),
+                            })
+                            .iterations
+                            .push(iter_out.clone());
+                    }
+                }
+            }
+        }
+
         // Check depth and active-frame count before recursing into the loop body frame.
         // In the sequential executor, active_body_frames == depth (each recursion level
         // adds one body frame). Both limits apply at the same site.
@@ -481,7 +554,7 @@ impl FlowFrameEngine {
             )));
         }
 
-        for iteration in 0..max_iterations as u64 {
+        for iteration in start_iteration..max_iterations as u64 {
             // Use "::" separator consistent with loop_instance_id construction.
             let body_frame_id =
                 FrameId::from(format!("{loop_instance_id}::iter-{iteration}").as_str());

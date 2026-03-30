@@ -525,10 +525,24 @@ impl FlowContext {
             })
             .collect();
 
+        // Seed step_outputs from root outputs, then project last-iteration
+        // outputs from each completed loop into step_outputs (dogma Rule 13:
+        // the projection must match what execute_frame_inner does at runtime —
+        // the last iteration's body step outputs are merged into step_outputs
+        // so that downstream steps/templates see them at steps.<id>).
+        let mut step_outputs = run.root_step_outputs.clone();
+        for (_loop_id, iterations) in &run.loop_iteration_outputs {
+            if let Some(last_iter) = iterations.last() {
+                for (sid, out) in last_iter {
+                    step_outputs.insert(sid.clone(), out.clone());
+                }
+            }
+        }
+
         FlowContext {
             run_id,
             activation_params,
-            step_outputs: run.root_step_outputs.clone(),
+            step_outputs,
             loop_outputs,
         }
     }

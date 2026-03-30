@@ -165,15 +165,14 @@ impl FlowFrameEngine {
             // a step that completed before the crash is invisible to sibling steps that
             // run after the resume — conditions/templates inside the same iteration
             // diverge from the pre-crash path (dogma Rule 13).
-            if let Some((loop_id, iteration)) = &loop_context {
-                if let Some(iters) = run.loop_iteration_outputs.get(loop_id) {
-                    if let Some(iter_out) = iters.get(*iteration as usize) {
-                        for (sid, out) in iter_out {
-                            ctx.step_outputs
-                                .entry(sid.clone())
-                                .or_insert_with(|| out.clone());
-                        }
-                    }
+            if let Some((loop_id, iteration)) = &loop_context
+                && let Some(iters) = run.loop_iteration_outputs.get(loop_id)
+                && let Some(iter_out) = iters.get(*iteration as usize)
+            {
+                for (sid, out) in iter_out {
+                    ctx.step_outputs
+                        .entry(sid.clone())
+                        .or_insert_with(|| out.clone());
                 }
             }
             ctx

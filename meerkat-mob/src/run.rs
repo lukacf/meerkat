@@ -531,7 +531,7 @@ impl FlowContext {
         // the last iteration's body step outputs are merged into step_outputs
         // so that downstream steps/templates see them at steps.<id>).
         let mut step_outputs = run.root_step_outputs.clone();
-        for (_loop_id, iterations) in &run.loop_iteration_outputs {
+        for iterations in run.loop_iteration_outputs.values() {
             if let Some(last_iter) = iterations.last() {
                 for (sid, out) in last_iter {
                     step_outputs.insert(sid.clone(), out.clone());

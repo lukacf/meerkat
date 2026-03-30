@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use crossterm::event::{
@@ -39,8 +39,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use mdm_tux::{
-    CMD_PREFIX, CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
-    load_or_generate_keypair, run_registration_server,
+    CMD_PREFIX, CommsNode, HEARTBEAT_PREFIX, STREAM_PREFIX, auto_detect, build_llm_client,
+    detect_provider, load_or_generate_keypair, run_registration_server,
 };
 
 // ── Event / command types ─────────────────────────────────────────────────────
@@ -54,6 +54,7 @@ enum AppCommand {
 
 enum TuiEvent {
     CommsMessage(String),
+    Heartbeat { from: String },
     HivePlanDone(String),
     HiveError(String),
     SendError(String),
@@ -83,6 +84,8 @@ struct App {
     busy_targets: HashSet<String>,
     /// Live streaming text per target (not yet in `output`).
     streaming_text: HashMap<String, String>,
+    /// Last time we received any activity from each target.
+    last_seen: HashMap<String, Instant>,
     /// Scroll state for the output panel.
     scroll_offset: u16,
     auto_scroll: bool,
@@ -239,6 +242,11 @@ async fn main() -> anyhow::Result<()> {
 
                 let tui_event = match &msg.content {
                     CommsContent::Message { body, .. }
+                        if body.starts_with(HEARTBEAT_PREFIX) =>
+                    {
+                        TuiEvent::Heartbeat { from: msg.from_peer.clone() }
+                    }
+                    CommsContent::Message { body, .. }
                         if body.starts_with(STREAM_PREFIX) =>
                     {
                         let json = &body[STREAM_PREFIX.len()..];
@@ -368,6 +376,7 @@ async fn main() -> anyhow::Result<()> {
         quit: false,
         busy_targets: HashSet::new(),
         streaming_text: HashMap::new(),
+        last_seen: HashMap::new(),
         scroll_offset: 0,
         auto_scroll: true,
         last_output_width: 80,
@@ -456,10 +465,13 @@ fn tui_loop(
                     // message — it's a duplicate from the agent's send tool.
                     if let Some(rest) = s.strip_prefix("[COMMS MESSAGE from ")
                         && let Some((from, _body)) = rest.split_once("]\n")
-                        && (app.busy_targets.contains(from)
-                            || app.streaming_text.contains_key(from))
                     {
-                        continue;
+                        app.last_seen.insert(from.to_string(), Instant::now());
+                        if app.busy_targets.contains(from)
+                            || app.streaming_text.contains_key(from)
+                        {
+                            continue;
+                        }
                     }
                     // Strip the raw prefix for clean display
                     let clean = s
@@ -468,6 +480,9 @@ fn tui_loop(
                         .map(|(from, body)| format!("[{from}] {body}"))
                         .unwrap_or(s);
                     app.push(clean);
+                }
+                TuiEvent::Heartbeat { from } => {
+                    app.last_seen.insert(from, Instant::now());
                 }
                 TuiEvent::HivePlanDone(s) => {
                     app.push(format!("[hive dispatched] {s}"));
@@ -479,10 +494,14 @@ fn tui_loop(
                 }
                 TuiEvent::SendError(e) => app.push(format!("[send error] {e}")),
                 TuiEvent::TargetRegistered { name } => {
+                    if !app.targets.contains(&name) {
+                        app.targets.push(name.clone());
+                    }
+                    app.last_seen.insert(name.clone(), Instant::now());
                     app.push(format!("[registered] target '{name}' connected"));
-                    app.targets.push(name);
                 }
                 TuiEvent::StreamEvent { from, event } => {
+                    app.last_seen.insert(from.clone(), Instant::now());
                     handle_stream_event(&mut app, &from, &event);
                 }
             }
@@ -794,7 +813,20 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
             let busy = app.busy_targets.contains(t);
             let prefix = if sel { "> " } else { "  " };
             let suffix = if busy { " [...]" } else { "" };
-            let style = if sel {
+
+            // Status color based on last_seen age
+            let age = app
+                .last_seen
+                .get(t)
+                .map(|ts| ts.elapsed())
+                .unwrap_or(Duration::MAX);
+            let style = if age > Duration::from_secs(60) {
+                // Offline — override all other styling
+                Style::default().fg(Color::DarkGray)
+            } else if age >= Duration::from_secs(35) {
+                // Stale
+                Style::default().fg(Color::Yellow)
+            } else if sel {
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)

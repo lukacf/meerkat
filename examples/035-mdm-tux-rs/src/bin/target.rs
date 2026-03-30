@@ -27,8 +27,8 @@ use meerkat_tools::builtin::shell::ShellConfig;
 use tokio::sync::mpsc;
 
 use mdm_tux::{
-    CMD_PREFIX, CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
-    load_or_generate_keypair, register_with_host,
+    CMD_PREFIX, CommsNode, HEARTBEAT_PREFIX, STREAM_PREFIX, auto_detect, build_llm_client,
+    detect_provider, load_or_generate_keypair, register_with_backoff,
 };
 
 const SYSTEM_PROMPT: &str = "\
@@ -80,31 +80,7 @@ async fn main() -> anyhow::Result<()> {
     println!("comms     : tcp://0.0.0.0:{comms_port}");
     println!("provider  : {provider} ({model})");
 
-    // ── 3. Register with TUX ──────────────────────────────────────────────────
-    let host_comms_port: u16 = host_addr
-        .rsplit(':')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .context("invalid HOST:PORT")?;
-    let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
-    let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
-    let advertised_addr = format!("tcp://{host_base}:{comms_port}");
-
-    println!("registering with {reg_addr} ...");
-    let resp =
-        register_with_host(&reg_addr, &name, &node.pubkey_string(), &advertised_addr).await?;
-    println!("paired with host '{}' ({})", resp.name, resp.pubkey);
-
-    let host_pubkey =
-        meerkat_comms::identity::PubKey::from_peer_id(&resp.pubkey).context("bad host pubkey")?;
-    node.add_peer(TrustedPeer {
-        name: resp.name,
-        pubkey: host_pubkey,
-        addr: format!("tcp://{host_addr}"),
-        meta: PeerMeta::default(),
-    });
-
-    // ── 4. Build tool dispatcher (shell + comms) ──────────────────────────────
+    // ── 3. Build tool dispatcher (shell + comms) ──────────────────────────────
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
     let factory = AgentFactory::new(&session_dir);
@@ -141,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(builtin),
     ));
 
-    // ── 5. Build agent (auto-resume most recent session) ──────────────────────
+    // ── 4. Build agent (auto-resume most recent session) ──────────────────────
     let llm: Arc<dyn AgentLlmClient> = build_llm_client(&factory, &model, &provider).await?;
     let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
 
@@ -159,19 +135,122 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
-    // ── 6. Listen for commands with streaming ─────────────────────────────────
-    println!("\nReady. Waiting for commands...\n");
+    // ── 5. Reconnection loop ─────────────────────────────────────────────────
+    let host_comms_port: u16 = host_addr
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .context("invalid HOST:PORT")?;
+    let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
+    let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
+    let advertised_addr = format!("tcp://{host_base}:{comms_port}");
 
     let router = node.router.clone();
     let mut node = node;
 
     loop {
-        let Some(msg) = node.recv_message().await else {
-            break;
+        // (Re-)register with TUX (retries with exponential backoff)
+        eprintln!("[target] registering with {reg_addr} ...");
+        let resp =
+            register_with_backoff(&reg_addr, &name, &node.pubkey_string(), &advertised_addr)
+                .await;
+        eprintln!("[target] paired with host '{}' ({})", resp.name, resp.pubkey);
+
+        let resp_name = resp.name.clone();
+
+        let host_pubkey = match meerkat_comms::identity::PubKey::from_peer_id(&resp.pubkey) {
+            Ok(pk) => pk,
+            Err(e) => {
+                eprintln!("[target] bad host pubkey: {e} — retrying registration");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
         };
+
+        // Remove ALL stale entries for this peer name before adding fresh one.
+        // Multiple entries accumulate from identity regeneration or restarts;
+        // router.send() resolves by name, so any stale entry could win.
+        {
+            let stale_keys: Vec<_> = node
+                .trusted
+                .read()
+                .peers
+                .iter()
+                .filter(|p| p.name == resp_name)
+                .map(|p| p.pubkey)
+                .collect();
+            for pk in stale_keys {
+                node.router.remove_trusted_peer(&pk);
+            }
+        }
+        node.add_peer(TrustedPeer {
+            name: resp_name,
+            pubkey: host_pubkey,
+            addr: format!("tcp://{host_addr}"),
+            meta: PeerMeta::default(),
+        });
+
+        // Disconnect signal: heartbeat + event forwarder can trigger reconnect
+        let (disconnect_tx, disconnect_rx) = tokio::sync::watch::channel(false);
+
+        // Spawn heartbeat (pings TUX every 10s, triggers disconnect on 3 failures)
+        let hb = spawn_heartbeat(router.clone(), "tux", disconnect_tx.clone());
+
+        eprintln!("[target] ready — waiting for commands\n");
+
+        // Run inbox loop (exits on disconnect signal or DISMISS command)
+        run_inbox_loop(
+            &mut agent,
+            &mut node,
+            &router,
+            disconnect_rx,
+            disconnect_tx,
+            &jsonl_store,
+            &llm,
+            &tools,
+            &store,
+            &model,
+            &system_prompt,
+        )
+        .await;
+
+        hb.abort();
+        eprintln!("[target] disconnected — reconnecting...");
+    }
+}
+
+// ── Inbox loop with select!-based disconnect ─────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn run_inbox_loop(
+    agent: &mut meerkat::DynAgent,
+    node: &mut CommsNode,
+    router: &Arc<meerkat_comms::Router>,
+    mut disconnect_rx: tokio::sync::watch::Receiver<bool>,
+    disconnect_tx: tokio::sync::watch::Sender<bool>,
+    jsonl_store: &JsonlStore,
+    llm: &Arc<dyn AgentLlmClient>,
+    tools: &Arc<impl meerkat_core::AgentToolDispatcher + 'static>,
+    store: &Arc<StoreAdapter<JsonlStore>>,
+    model: &str,
+    system_prompt: &str,
+) {
+    loop {
+        // select! over inbox message and disconnect signal
+        let msg = tokio::select! {
+            msg = node.recv_message() => match msg {
+                Some(m) => m,
+                None => break, // inbox closed
+            },
+            _ = disconnect_rx.changed() => {
+                if *disconnect_rx.borrow() { break; }
+                continue;
+            }
+        };
+
         if is_dismiss(&msg) {
-            println!("[target] received DISMISS — shutting down");
-            break;
+            eprintln!("[target] received DISMISS — shutting down");
+            std::process::exit(0);
         }
 
         let sender = msg.from_peer.clone();
@@ -180,46 +259,47 @@ async fn main() -> anyhow::Result<()> {
         if let meerkat_comms::agent::types::CommsContent::Message { ref body, .. } = msg.content
             && let Some(cmd) = body.strip_prefix(CMD_PREFIX)
         {
-                let cmd = cmd.trim();
-                eprintln!("[target] command: {cmd}");
+            let cmd = cmd.trim();
+            eprintln!("[target] command: {cmd}");
 
-                let response = handle_command(
-                    cmd,
-                    &jsonl_store,
-                    &llm,
-                    &tools,
-                    &store,
-                    &model,
-                    &system_prompt,
-                    &mut agent,
-                )
+            let response = handle_command(
+                cmd, jsonl_store, llm, tools, store, model, system_prompt, agent,
+            )
+            .await;
+
+            let _ = router
+                .send(&sender, MessageKind::Message { body: response, blocks: None })
                 .await;
-
-                let _ = router
-                    .send(
-                        &sender,
-                        MessageKind::Message { body: response, blocks: None },
-                    )
-                    .await;
-                continue;
+            continue;
         }
 
         eprintln!("[target] received message from '{sender}'");
 
-        // Normal message: run agent with streaming
+        // Normal message: run agent with streaming + disconnect-aware forwarder
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
         let fwd_router = router.clone();
         let fwd_sender = sender.clone();
+        let fwd_disconnect_tx = disconnect_tx.clone();
         let fwd_handle = tokio::spawn(async move {
+            let mut consecutive_failures = 0u32;
             while let Some(event) = event_rx.recv().await {
                 if should_forward(&event) {
                     let Ok(json) = serde_json::to_string(&event) else {
                         continue;
                     };
                     let body = format!("{STREAM_PREFIX}{json}");
-                    let _ = fwd_router
+                    match fwd_router
                         .send(&fwd_sender, MessageKind::Message { body, blocks: None })
-                        .await;
+                        .await
+                    {
+                        Ok(_) => consecutive_failures = 0,
+                        Err(_) => {
+                            consecutive_failures += 1;
+                            if consecutive_failures >= 3 {
+                                let _ = fwd_disconnect_tx.send(true);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -230,9 +310,47 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let _ = fwd_handle.await;
-    }
 
-    Ok(())
+        // Check disconnect flag after agent run completes
+        if *disconnect_rx.borrow() {
+            break;
+        }
+    }
+}
+
+// ── Heartbeat ────────────────────────────────────────────────────────────────
+
+/// Spawn a background heartbeat task that pings the peer every 10 seconds.
+/// On 3 consecutive send failures, triggers the disconnect signal.
+fn spawn_heartbeat(
+    router: Arc<meerkat_comms::Router>,
+    peer: &str,
+    disconnect_tx: tokio::sync::watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let peer = peer.to_owned();
+    tokio::spawn(async move {
+        let mut consecutive_failures = 0u32;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let body = format!("{HEARTBEAT_PREFIX}ping");
+            match router
+                .send(&peer, MessageKind::Message { body, blocks: None })
+                .await
+            {
+                Ok(_) => consecutive_failures = 0,
+                Err(_) => {
+                    consecutive_failures += 1;
+                    eprintln!(
+                        "[target] heartbeat failed ({consecutive_failures}/3)"
+                    );
+                    if consecutive_failures >= 3 {
+                        let _ = disconnect_tx.send(true);
+                        break;
+                    }
+                }
+            }
+        }
+    })
 }
 
 // ── Command handling ──────────────────────────────────────────────────────────

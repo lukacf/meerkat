@@ -292,6 +292,30 @@ pub const STREAM_PREFIX: &str = "__STREAM__\n";
 /// Body format: `__CMD__\n<COMMAND> [args...]`.
 pub const CMD_PREFIX: &str = "__CMD__\n";
 
+/// Prefix for heartbeat pings (target → TUX).
+pub const HEARTBEAT_PREFIX: &str = "__HEARTBEAT__\n";
+
+/// Register with backoff retry. Retries forever with exponential backoff
+/// (1s → 2s → 4s → ... → 30s cap) until the host accepts the registration.
+pub async fn register_with_backoff(
+    reg_addr: &str,
+    name: &str,
+    pubkey: &str,
+    comms_addr: &str,
+) -> RegResponse {
+    let mut delay = 1u64;
+    loop {
+        match register_with_host(reg_addr, name, pubkey, comms_addr).await {
+            Ok(resp) => return resp,
+            Err(e) => {
+                eprintln!("[target] registration failed: {e} — retrying in {delay}s");
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                delay = (delay * 2).min(30);
+            }
+        }
+    }
+}
+
 // ── Keypair helper ────────────────────────────────────────────────────────────
 
 /// Load or generate a persistent Ed25519 keypair from `dir`.

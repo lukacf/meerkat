@@ -585,9 +585,14 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
             } else if result.trim().is_empty() {
                 // Silent success (e.g. background job started with no output)
             } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
-                // Structured result — show the "message" field if present
+                // Structured result — prefer "message" field, fall back to compact JSON
                 if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
                     app.push(format!("  {msg}"));
+                } else {
+                    let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
+                    for line in pretty.lines().take(15) {
+                        app.push(format!("  {line}"));
+                    }
                 }
             } else {
                 // Plain text output — show first 15 lines

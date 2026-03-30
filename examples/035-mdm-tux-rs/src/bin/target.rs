@@ -122,15 +122,17 @@ async fn main() -> anyhow::Result<()> {
     let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
 
     // Discover our own IP as seen from the host by making a UDP "connection"
-    // (no traffic sent) and reading the local address. Falls back to 127.0.0.1.
-    let local_ip = {
-        let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok();
-        probe
-            .and_then(|s| s.connect(format!("{host_base}:{host_comms_port}")).ok().map(|_| s))
-            .and_then(|s| s.local_addr().ok())
-            .map(|a| a.ip().to_string())
-            .unwrap_or_else(|| "127.0.0.1".into())
-    };
+    // (no traffic sent) and reading the local address. Override with --advertise.
+    let local_ip = find_flag(&args, "--advertise").unwrap_or_else(|| {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")
+            .context("bind UDP probe socket")
+            .unwrap();
+        sock.connect(format!("{host_base}:{host_comms_port}"))
+            .with_context(|| format!("UDP probe to {host_base}:{host_comms_port} failed — \
+                use --advertise <IP> to specify this machine's reachable address"))
+            .unwrap();
+        sock.local_addr().unwrap().ip().to_string()
+    });
     let advertised_addr = format!("tcp://{local_ip}:{comms_port}");
 
     let router = node.router.clone();

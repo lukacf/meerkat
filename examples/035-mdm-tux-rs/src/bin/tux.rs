@@ -181,7 +181,13 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(port < 65535, "PORT must be < 65535 (registration uses PORT+1)");
     let model_override = find_flag(&args, "--model");
 
-    let data_dir = PathBuf::from("/tmp/mdm-tux");
+    let data_dir = find_flag(&args, "--data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".rkat/mdm/tux")
+        });
 
     // ── 1. Load or generate TUX identity ─────────────────────────────────────
     let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;

@@ -63,7 +63,13 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    let data_dir = PathBuf::from(format!("/tmp/mdm-target-{name}"));
+    let data_dir = find_flag(&args, "--data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(format!(".rkat/mdm/targets/{name}"))
+        });
 
     // ── 1. Load or generate identity ──────────────────────────────────────────
     let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;

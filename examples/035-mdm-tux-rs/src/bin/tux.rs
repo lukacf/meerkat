@@ -89,6 +89,9 @@ struct App {
     streaming_text: BTreeMap<String, String>,
     /// Last time we received any activity from each target.
     last_seen: HashMap<String, Instant>,
+    /// Messages queued for targets that are currently busy.
+    /// Sent one-at-a-time on RunCompleted.
+    queued_messages: VecDeque<(String, String)>, // (target, body)
     /// Scroll state for the output panel.
     scroll_offset: u16,
     auto_scroll: bool,
@@ -124,11 +127,17 @@ impl App {
 
     /// The label prefix shown before the input text (e.g. `[target] > `).
     fn input_label(&self) -> String {
+        let queued = self.queued_messages.len();
+        let queue_suffix = if queued > 0 {
+            format!(" +{queued} queued")
+        } else {
+            String::new()
+        };
         match self.mode {
             Mode::Direct if !self.targets.is_empty() => {
                 let t = &self.targets[self.selected];
                 if self.busy_targets.contains(t) {
-                    format!("[{t} ...processing] > ")
+                    format!("[{t} ...processing{queue_suffix}] > ")
                 } else {
                     format!("[{t}] > ")
                 }
@@ -371,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
         busy_targets: HashSet::new(),
         streaming_text: BTreeMap::new(),
         last_seen: HashMap::new(),
+        queued_messages: VecDeque::new(),
         scroll_offset: 0,
         auto_scroll: true,
     };
@@ -500,7 +510,7 @@ fn tui_loop(
                 }
                 TuiEvent::StreamEvent { from, event } => {
                     app.last_seen.insert(from.clone(), Instant::now());
-                    handle_stream_event(&mut app, &from, &event);
+                    handle_stream_event(&mut app, &from, &event, Some(&command_tx));
                 }
             }
         }
@@ -514,7 +524,12 @@ fn tui_loop(
     Ok(())
 }
 
-fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
+fn handle_stream_event(
+    app: &mut App,
+    from: &str,
+    event: &AgentEvent,
+    command_tx: Option<&mpsc::UnboundedSender<AppCommand>>,
+) {
     match event {
         AgentEvent::RunStarted { .. } => {
             app.set_busy(from, true);
@@ -588,6 +603,17 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
             app.flush_streaming(from);
             app.set_busy(from, false);
             app.push(String::new()); // blank line between turns
+
+            // Auto-send the next queued message for this target (if any).
+            if let Some(idx) = app.queued_messages.iter().position(|(t, _)| t == from) {
+                let (target, body) = app.queued_messages.remove(idx).expect("just found");
+                let display = body.replace('\n', " ");
+                app.push(format!("> [{target}] {display}"));
+                app.set_busy(&target, true);
+                if let Some(tx) = command_tx {
+                    let _ = tx.send(AppCommand::Send { target, body });
+                }
+            }
         }
         AgentEvent::RunFailed { error, .. } => {
             app.flush_streaming(from);
@@ -607,6 +633,16 @@ fn handle_key(
     match code {
         KeyCode::Tab => {
             app.mode = if app.mode == Mode::Direct { Mode::Hive } else { Mode::Direct };
+        }
+        // Alt+Up: pop last queued message back to the composer
+        KeyCode::Up if modifiers.contains(KeyModifiers::ALT) => {
+            if let Some((_, body)) = app.queued_messages.pop_back() {
+                app.input = body;
+                // Remove the "↳ queued:" line from output
+                if let Some(pos) = app.output.iter().rposition(|l| l.starts_with("  ↳ queued:")) {
+                    app.output.remove(pos);
+                }
+            }
         }
         KeyCode::Up if app.mode == Mode::Direct => {
             app.selected = app.selected.saturating_sub(1);
@@ -652,12 +688,20 @@ fn handle_key(
                 && app.busy_targets.contains(&app.targets[app.selected]);
             match app.mode {
                 Mode::Direct if app.targets.is_empty() => return,
-                Mode::Direct if selected_busy && !is_slash => return, // block overlapping runs
-                Mode::Direct if selected_busy && is_slash => return,  // block /new /resume on busy
+                // Slash commands blocked while target is busy (can't reset mid-run)
+                Mode::Direct if selected_busy && is_slash => return,
+                // Regular messages while busy → QUEUE (sent on RunCompleted)
+                Mode::Direct if selected_busy => {
+                    let target = app.targets[app.selected].clone();
+                    let body = std::mem::take(&mut app.input);
+                    let display = body.replace('\n', " ");
+                    app.push(format!("  ↳ queued: {display}"));
+                    app.queued_messages.push_back((target, body));
+                    return;
+                }
                 Mode::Hive if app.hive_planning => return,
                 _ => {}
             }
-            // /help is always allowed (local-only, no target interaction)
 
             let body = std::mem::take(&mut app.input);
 
@@ -805,7 +849,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             Span::raw(" "),
             Span::styled(" Hive ", h),
             Span::styled(
-                "  [Tab] toggle  [PgUp/Dn] scroll  [Esc] quit",
+                "  [Tab] toggle  [PgUp/Dn] scroll  [Alt+Up] unqueue  [Esc] quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ])),

@@ -17,7 +17,7 @@
 //! ## Keys
 //! Tab=mode  ↑/↓=target  PgUp/PgDn=scroll  End=auto-scroll  Esc=quit
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,15 +85,13 @@ struct App {
     /// Targets with an in-flight agent run.
     busy_targets: HashSet<String>,
     /// Live streaming text per target (not yet in `output`).
-    streaming_text: HashMap<String, String>,
+    /// BTreeMap for deterministic render order across frames.
+    streaming_text: BTreeMap<String, String>,
     /// Last time we received any activity from each target.
     last_seen: HashMap<String, Instant>,
     /// Scroll state for the output panel.
     scroll_offset: u16,
     auto_scroll: bool,
-    /// Cached output panel dimensions from last render.
-    last_output_width: u16,
-    last_output_height: u16,
 }
 
 impl App {
@@ -105,7 +103,6 @@ impl App {
                 self.output.pop_front();
             }
         }
-        self.update_scroll();
     }
 
     fn set_busy(&mut self, target: &str, busy: bool) {
@@ -142,21 +139,6 @@ impl App {
         }
     }
 
-    /// Recalculate scroll offset for auto-scroll mode.
-    fn update_scroll(&mut self) {
-        if !self.auto_scroll {
-            return;
-        }
-        let w = (self.last_output_width as usize).max(1);
-        let total: usize = self
-            .output
-            .iter()
-            .chain(self.streaming_text.values())
-            .map(|line| if line.is_empty() { 1 } else { line.len().div_ceil(w) })
-            .sum();
-        let vis = self.last_output_height as usize;
-        self.scroll_offset = total.saturating_sub(vis) as u16;
-    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -387,12 +369,10 @@ async fn main() -> anyhow::Result<()> {
         hive_planning: false,
         quit: false,
         busy_targets: HashSet::new(),
-        streaming_text: HashMap::new(),
+        streaming_text: BTreeMap::new(),
         last_seen: HashMap::new(),
         scroll_offset: 0,
         auto_scroll: true,
-        last_output_width: 80,
-        last_output_height: 20,
     };
 
     tokio::task::spawn_blocking(move || tui_loop(app, command_tx, event_rx))
@@ -552,7 +532,6 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
                 .entry(from.to_string())
                 .or_default()
                 .push_str(delta);
-            app.update_scroll();
         }
         AgentEvent::TextComplete { content, .. } => {
             // TextComplete carries the authoritative final text.
@@ -655,7 +634,6 @@ fn handle_key(
         }
         KeyCode::End => {
             app.auto_scroll = true;
-            app.update_scroll();
         }
         // Shift+Enter, Alt+Enter, or Ctrl+J → insert newline
         KeyCode::Enter
@@ -890,11 +868,10 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
 }
 
 fn render_output(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut App) {
-    // Cache dimensions for scroll calculations
-    app.last_output_width = area.width.saturating_sub(2);
-    app.last_output_height = area.height.saturating_sub(2);
+    let inner_width = area.width.saturating_sub(2);
+    let inner_height = area.height.saturating_sub(2);
 
-    // Join all output lines + live streaming text into one markdown string
+    // Join all output lines + live streaming text (BTreeMap = deterministic order)
     let mut md = String::new();
     for line in &app.output {
         md.push_str(line);
@@ -906,8 +883,28 @@ fn render_output(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut 
         }
     }
 
-    // Render markdown → styled ratatui Text (headings, bold, italic, code, lists)
+    // Render markdown → styled ratatui Text
     let text = tui_markdown::from_str(&md);
+
+    // Compute actual rendered height by counting lines after wrapping.
+    // This is the real content height that Paragraph will render.
+    let content_height: u16 = text
+        .lines
+        .iter()
+        .map(|line| {
+            let line_width: u16 = line.width() as u16;
+            if inner_width == 0 {
+                1
+            } else {
+                line_width.div_ceil(inner_width).max(1)
+            }
+        })
+        .sum();
+
+    // Auto-scroll: set offset so the bottom of content is visible
+    if app.auto_scroll {
+        app.scroll_offset = content_height.saturating_sub(inner_height);
+    }
 
     f.render_widget(
         Paragraph::new(text)

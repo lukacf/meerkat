@@ -3,7 +3,7 @@
 //! Ratatui-based terminal UI for managing remote Meerkat agents.
 //!
 //! ```text
-//! tux <PORT> [--model MODEL]
+//! mcm-tux <PORT> [--model MODEL]
 //! ```
 //!
 //! ## Modes
@@ -36,37 +36,106 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use mdm_tux::{
-    CommsNode, STREAM_PREFIX, auto_detect, build_llm_client, detect_provider,
-    load_or_generate_keypair, run_registration_server,
+    ClaimGrant, CommsNode, KennelPayload, KennelTargetState, ListScope, STREAM_PREFIX,
+    TargetListEntry, auto_detect, build_llm_client, build_signed_envelope, detect_provider,
+    load_or_generate_keypair, read_envelope, run_registration_server, verify_envelope,
+    write_envelope,
 };
+use tokio::io::BufReader;
+use tokio::net::TcpStream;
 
 /// Timeout for router.send() calls. Prevents a black-holed target from wedging
 /// the command loop (TCP connect can hang for minutes without this).
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ── Event / command types ─────────────────────────────────────────────────────
 
 enum AppCommand {
-    Send { target: String, body: String },
-    RunHive { prompt: String },
+    Send {
+        target: String,
+        body: String,
+    },
+    RunHive {
+        prompt: String,
+    },
     /// Slash command sent to a target (no busy indicator set).
-    SlashCmd { target: String, cmd: String },
+    SlashCmd {
+        target: String,
+        cmd: String,
+    },
     /// Drop the cached hive agent so the next RunHive starts fresh.
     ResetHive,
+    ClaimTarget {
+        target_id: String,
+    },
+    ReleaseTarget {
+        lease_id: String,
+    },
+}
+
+enum KennelClientCommand {
+    ClaimTarget { target_id: String },
+    ReleaseTarget { lease_id: String },
+    AttachConfirmed { lease_id: String },
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 enum TuiEvent {
     CommsMessage(String),
-    Heartbeat { from: String },
+    Heartbeat {
+        from: String,
+    },
     HivePlanDone(String),
     HiveError(String),
     SendError(String),
-    TargetRegistered { name: String },
+    TargetRegistered {
+        name: String,
+    },
     /// Streaming agent event from a target (text delta, tool call, etc.).
-    StreamEvent { from: String, event: AgentEvent },
+    StreamEvent {
+        from: String,
+        event: AgentEvent,
+    },
+    KennelAvailableTargets(Vec<TargetListEntry>),
+    KennelMineTargets(Vec<TargetListEntry>),
+    KennelClaimGranted(Vec<ClaimGrant>),
+    KennelClaimReleased {
+        target_id: String,
+        lease_id: String,
+        reason: String,
+    },
+    KennelAttached {
+        target_name: String,
+        lease_id: String,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransportMode {
+    Direct,
+    Kennel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KennelUiState {
+    Available,
+    Attaching,
+    ClaimedByMe,
+    ClaimUncertain,
+}
+
+#[derive(Clone)]
+struct PendingClaim {
+    target_id: String,
+    target_name: String,
+    target_pubkey: meerkat_comms::identity::PubKey,
+    target_direct_addr: String,
+    lease_id: String,
+    attached: bool,
 }
 
 // ── TUI application state ─────────────────────────────────────────────────────
@@ -78,8 +147,13 @@ enum Mode {
 }
 
 struct App {
+    transport: TransportMode,
     mode: Mode,
     targets: Vec<String>,
+    target_ids: HashMap<String, String>,
+    target_states: HashMap<String, KennelUiState>,
+    target_leases: HashMap<String, String>,
+    attaching_since: HashMap<String, Instant>,
     selected: usize,
     input: String,
     /// Completed output lines (ring buffer, max 1000).
@@ -131,7 +205,11 @@ impl App {
         match self.mode {
             Mode::Direct if !self.targets.is_empty() => {
                 let t = &self.targets[self.selected];
-                if self.busy_targets.contains(t) {
+                if self.transport == TransportMode::Kennel
+                    && !matches!(self.target_states.get(t), Some(KennelUiState::ClaimedByMe))
+                {
+                    format!("[{t} unavailable] > ")
+                } else if self.busy_targets.contains(t) {
                     format!("[{t} ...processing] > ")
                 } else {
                     format!("[{t}] > ")
@@ -142,7 +220,6 @@ impl App {
             _ => "[waiting for targets...] > ".into(),
         }
     }
-
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -151,20 +228,28 @@ impl App {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "warn,tui_markdown=error".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,tui_markdown=error".into()),
         )
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        eprintln!("Usage: tux <PORT> [--model MODEL]");
+        eprintln!("Usage: mcm-tux <PORT> [--model MODEL]");
+        eprintln!(
+            "   or: mcm-tux --kennel HOST:PORT --listen PORT [--advertise IP] [--model MODEL]"
+        );
         eprintln!("Direct mode: no API key needed");
         eprintln!("Hive mode: set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY");
         std::process::exit(1);
     }
+    if find_flag(&args, "--kennel").is_some() {
+        return run_kennel_tux(&args).await;
+    }
     let port: u16 = args[0].parse().context("PORT must be a number")?;
-    anyhow::ensure!(port < 65535, "PORT must be < 65535 (registration uses PORT+1)");
+    anyhow::ensure!(
+        port < 65535,
+        "PORT must be < 65535 (registration uses PORT+1)"
+    );
     let model_override = find_flag(&args, "--model");
 
     let data_dir = find_flag(&args, "--data-dir")
@@ -193,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("hive model: (none — Direct mode only)");
     }
-    println!("\nStart targets with: target <THIS_IP>:{port}\n");
+    println!("\nStart targets with: mcm-target <THIS_IP>:{port}\n");
 
     // ── 3. Channels ───────────────────────────────────────────────────────────
     let (command_tx, mut command_rx) = mpsc::unbounded_channel::<AppCommand>();
@@ -227,9 +312,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let msg = {
                     let peers = trusted.read();
-                    meerkat_comms::agent::types::CommsMessage::from_inbox_item(
-                        &item, &peers, true,
-                    )
+                    meerkat_comms::agent::types::CommsMessage::from_inbox_item(&item, &peers, true)
                 };
                 let Some(msg) = msg else {
                     continue;
@@ -237,20 +320,19 @@ async fn main() -> anyhow::Result<()> {
 
                 let tui_event = match &msg.content {
                     // Typed heartbeat request from target
-                    CommsContent::Request { intent, .. }
-                        if intent.as_str() == "heartbeat" =>
-                    {
-                        TuiEvent::Heartbeat { from: msg.from_peer.clone() }
+                    CommsContent::Request { intent, .. } if intent.as_str() == "heartbeat" => {
+                        TuiEvent::Heartbeat {
+                            from: msg.from_peer.clone(),
+                        }
                     }
                     // Streaming events (acknowledged tech debt — Phase 3 eliminates this)
-                    CommsContent::Message { body, .. }
-                        if body.starts_with(STREAM_PREFIX) =>
-                    {
+                    CommsContent::Message { body, .. } if body.starts_with(STREAM_PREFIX) => {
                         let json = &body[STREAM_PREFIX.len()..];
                         match serde_json::from_str::<AgentEvent>(json) {
-                            Ok(event) => {
-                                TuiEvent::StreamEvent { from: msg.from_peer.clone(), event }
-                            }
+                            Ok(event) => TuiEvent::StreamEvent {
+                                from: msg.from_peer.clone(),
+                                event,
+                            },
                             Err(_) => TuiEvent::CommsMessage(msg.to_user_message_text()),
                         }
                     }
@@ -266,7 +348,9 @@ async fn main() -> anyhow::Result<()> {
     // ── 6. Spawn command handler ──────────────────────────────────────────────
     let session_dir = data_dir.join("sessions");
     tokio::fs::create_dir_all(&session_dir).await?;
-    let hive_model = model_override.clone().or_else(|| auto_detect().map(|(m, _, _)| m));
+    let hive_model = model_override
+        .clone()
+        .or_else(|| auto_detect().map(|(m, _, _)| m));
     let hive_session_dir = session_dir.clone();
 
     tokio::spawn({
@@ -282,30 +366,16 @@ async fn main() -> anyhow::Result<()> {
             while let Some(cmd) = command_rx.recv().await {
                 match cmd {
                     AppCommand::Send { target, body } => {
-                        let tx = target_senders
-                            .entry(target.clone())
-                            .or_insert_with(|| {
-                                spawn_target_sender(
-                                    target.clone(),
-                                    router.clone(),
-                                    event_tx.clone(),
-                                )
-                            });
-                        let _ = tx
-                            .send(MessageKind::Message { body, blocks: None })
-                            .await;
+                        let tx = target_senders.entry(target.clone()).or_insert_with(|| {
+                            spawn_target_sender(target.clone(), router.clone(), event_tx.clone())
+                        });
+                        let _ = tx.send(MessageKind::Message { body, blocks: None }).await;
                     }
                     AppCommand::SlashCmd { target, cmd } => {
                         let params = serde_json::json!({ "cmd": cmd });
-                        let tx = target_senders
-                            .entry(target.clone())
-                            .or_insert_with(|| {
-                                spawn_target_sender(
-                                    target.clone(),
-                                    router.clone(),
-                                    event_tx.clone(),
-                                )
-                            });
+                        let tx = target_senders.entry(target.clone()).or_insert_with(|| {
+                            spawn_target_sender(target.clone(), router.clone(), event_tx.clone())
+                        });
                         let _ = tx
                             .send(MessageKind::Request {
                                 intent: "command".into(),
@@ -316,6 +386,7 @@ async fn main() -> anyhow::Result<()> {
                     AppCommand::ResetHive => {
                         hive_agent = None;
                     }
+                    AppCommand::ClaimTarget { .. } | AppCommand::ReleaseTarget { .. } => {}
                     AppCommand::RunHive { prompt } => {
                         if hive_agent.is_none() {
                             let Some(ref model) = hive_model else {
@@ -338,8 +409,7 @@ async fn main() -> anyhow::Result<()> {
                             {
                                 Ok(a) => hive_agent = Some(a),
                                 Err(e) => {
-                                    let _ =
-                                        event_tx.send(TuiEvent::HiveError(e.to_string())).await;
+                                    let _ = event_tx.send(TuiEvent::HiveError(e.to_string())).await;
                                     continue;
                                 }
                             }
@@ -368,8 +438,13 @@ async fn main() -> anyhow::Result<()> {
 
     // ── 8. Run TUI ────────────────────────────────────────────────────────────
     let app = App {
+        transport: TransportMode::Direct,
         mode: Mode::Direct,
         targets: Vec::new(),
+        target_ids: HashMap::new(),
+        target_states: HashMap::new(),
+        target_leases: HashMap::new(),
+        attaching_since: HashMap::new(),
         selected: 0,
         input: String::new(),
         output: VecDeque::new(),
@@ -410,9 +485,7 @@ fn spawn_target_sender(
                 }
                 Err(_) => {
                     let _ = event_tx
-                        .send(TuiEvent::SendError(format!(
-                            "[{target}] send timed out"
-                        )))
+                        .send(TuiEvent::SendError(format!("[{target}] send timed out")))
                         .await;
                 }
             }
@@ -430,8 +503,7 @@ async fn build_hive(
     let factory = AgentFactory::new(session_dir);
     let provider = detect_provider(model);
     let llm = build_llm_client(&factory, model, provider).await?;
-    let tools: Arc<dyn AgentToolDispatcher> =
-        Arc::new(CommsToolDispatcher::new(router, trusted));
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::new(router, trusted));
     let store = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
     store.init().await?;
     let hive_store: Arc<dyn AgentSessionStore> = Arc::new(StoreAdapter::new(store));
@@ -447,6 +519,561 @@ async fn build_hive(
         .build(llm, tools, hive_store)
         .await;
     Ok(agent)
+}
+
+fn current_attached_target_ids(
+    pending_claims: &parking_lot::RwLock<HashMap<String, PendingClaim>>,
+) -> Vec<String> {
+    pending_claims
+        .read()
+        .values()
+        .filter(|c| c.attached)
+        .map(|c| c.target_id.clone())
+        .collect()
+}
+
+async fn send_kennel_message(
+    write_half: &mut tokio::net::tcp::OwnedWriteHalf,
+    router: &Arc<meerkat_comms::Router>,
+    tux_id: &str,
+    payload: KennelPayload,
+) -> bool {
+    let Ok(env) = build_signed_envelope(router.keypair_arc().as_ref(), tux_id, payload) else {
+        return false;
+    };
+    write_envelope(write_half, &env).await.is_ok()
+}
+
+async fn spawn_command_processor(
+    mut command_rx: mpsc::UnboundedReceiver<AppCommand>,
+    kennel_tx: mpsc::UnboundedSender<KennelClientCommand>,
+    event_tx: mpsc::Sender<TuiEvent>,
+    router: Arc<meerkat_comms::Router>,
+    trusted_shared: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
+    hive_model: Option<String>,
+    hive_session_dir: PathBuf,
+) {
+    let mut hive_agent: Option<DynAgent> = None;
+    let mut target_senders: HashMap<String, mpsc::Sender<MessageKind>> = HashMap::new();
+
+    while let Some(cmd) = command_rx.recv().await {
+        match cmd {
+            AppCommand::Send { target, body } => {
+                let tx = target_senders.entry(target.clone()).or_insert_with(|| {
+                    spawn_target_sender(target.clone(), router.clone(), event_tx.clone())
+                });
+                let _ = tx.send(MessageKind::Message { body, blocks: None }).await;
+            }
+            AppCommand::SlashCmd { target, cmd } => {
+                let params = serde_json::json!({ "cmd": cmd });
+                let tx = target_senders.entry(target.clone()).or_insert_with(|| {
+                    spawn_target_sender(target.clone(), router.clone(), event_tx.clone())
+                });
+                let _ = tx
+                    .send(MessageKind::Request {
+                        intent: "command".into(),
+                        params,
+                    })
+                    .await;
+            }
+            AppCommand::ClaimTarget { target_id } => {
+                let _ = kennel_tx.send(KennelClientCommand::ClaimTarget { target_id });
+            }
+            AppCommand::ReleaseTarget { lease_id } => {
+                let _ = kennel_tx.send(KennelClientCommand::ReleaseTarget { lease_id });
+            }
+            AppCommand::ResetHive => {
+                hive_agent = None;
+            }
+            AppCommand::RunHive { prompt } => {
+                if hive_agent.is_none() {
+                    let Some(ref model) = hive_model else {
+                        let _ = event_tx.send(TuiEvent::HiveError(
+                            "no API key — set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY".into(),
+                        )).await;
+                        continue;
+                    };
+                    match build_hive(
+                        &hive_session_dir,
+                        model,
+                        router.clone(),
+                        trusted_shared.clone(),
+                    )
+                    .await
+                    {
+                        Ok(a) => hive_agent = Some(a),
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::HiveError(e.to_string())).await;
+                            continue;
+                        }
+                    }
+                }
+                let agent = hive_agent.as_mut().expect("just built");
+                let ev = match agent.run(prompt.into()).await {
+                    Ok(r) => TuiEvent::HivePlanDone(r.text),
+                    Err(e) => TuiEvent::HiveError(e.to_string()),
+                };
+                let _ = event_tx.send(ev).await;
+            }
+        }
+    }
+}
+
+async fn spawn_kennel_client(
+    mut kennel_rx: mpsc::UnboundedReceiver<KennelClientCommand>,
+    event_tx: mpsc::Sender<TuiEvent>,
+    router: Arc<meerkat_comms::Router>,
+    pending_claims: Arc<parking_lot::RwLock<HashMap<String, PendingClaim>>>,
+    kennel_addr: String,
+    tux_id: String,
+    direct_addr: String,
+) {
+    'outer: loop {
+        let stream =
+            match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&kennel_addr))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(e)) => {
+                    let _ = event_tx
+                        .send(TuiEvent::HiveError(format!("[kennel] connect failed: {e}")))
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(_) => {
+                    let _ = event_tx
+                        .send(TuiEvent::HiveError("[kennel] connect timed out".into()))
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        if !send_kennel_message(
+            &mut write_half,
+            &router,
+            &tux_id,
+            KennelPayload::TuxRegister {
+                tux_id: tux_id.clone(),
+                pubkey: tux_id.clone(),
+                direct_addr: direct_addr.clone(),
+                attached_target_ids: current_attached_target_ids(&pending_claims),
+            },
+        )
+        .await
+        {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        let Some(env) = read_envelope(&mut reader).await.ok().flatten() else {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+        let _ = verify_envelope(&env);
+
+        let rebound_targets = current_attached_target_ids(&pending_claims);
+        if !rebound_targets.is_empty()
+            && !send_kennel_message(
+                &mut write_half,
+                &router,
+                &tux_id,
+                KennelPayload::RebindTargets {
+                    target_ids: rebound_targets,
+                },
+            )
+            .await
+        {
+            let _ = event_tx
+                .send(TuiEvent::SendError("[kennel] disconnected".into()))
+                .await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+        let mut refresh = tokio::time::interval(Duration::from_secs(5));
+        let mut renew = tokio::time::interval(Duration::from_secs(15));
+
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::TuxHeartbeat).await {
+                        break;
+                    }
+                }
+                _ = refresh.tick() => {
+                    let mut refresh_ok = true;
+                    for scope in [ListScope::Available, ListScope::Mine] {
+                        if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ListTargets { scope }).await {
+                            refresh_ok = false;
+                            break;
+                        }
+                    }
+                    if !refresh_ok {
+                        break;
+                    }
+                }
+                _ = renew.tick() => {
+                    let lease_ids: Vec<String> = pending_claims.read().values().filter(|c| c.attached).map(|c| c.lease_id.clone()).collect();
+                    if !lease_ids.is_empty()
+                        && !send_kennel_message(
+                            &mut write_half,
+                            &router,
+                            &tux_id,
+                            KennelPayload::RenewLeases { lease_ids, lease_ttl_sec: None },
+                        ).await
+                    {
+                        break;
+                    }
+                }
+                maybe = read_envelope(&mut reader) => {
+                    let Some(env) = maybe.ok().flatten() else { break; };
+                    if verify_envelope(&env).is_err() { continue; }
+                    match env.payload {
+                        KennelPayload::TargetList { scope: ListScope::Available, targets } => {
+                            let _ = event_tx.send(TuiEvent::KennelAvailableTargets(targets)).await;
+                        }
+                        KennelPayload::TargetList { scope: ListScope::Mine, targets } => {
+                            let _ = event_tx.send(TuiEvent::KennelMineTargets(targets)).await;
+                        }
+                        KennelPayload::ClaimGranted { claims } => {
+                            {
+                                let mut guard = pending_claims.write();
+                                for claim in &claims {
+                                    if let Ok(pubkey) = meerkat_comms::identity::PubKey::from_peer_id(&claim.target_pubkey) {
+                                        guard.insert(claim.lease_id.clone(), PendingClaim {
+                                            target_id: claim.target_id.clone(),
+                                            target_name: claim.target_name.clone(),
+                                            target_pubkey: pubkey,
+                                            target_direct_addr: claim.target_direct_addr.clone(),
+                                            lease_id: claim.lease_id.clone(),
+                                            attached: false,
+                                        });
+                                        router.add_trusted_peer(meerkat_comms::TrustedPeer {
+                                            name: claim.target_name.clone(),
+                                            pubkey,
+                                            addr: claim.target_direct_addr.clone(),
+                                            meta: meerkat_comms::PeerMeta::default(),
+                                        });
+                                    }
+                                }
+                            }
+                            let ack_ids = claims.iter().map(|c| c.lease_id.clone()).collect();
+                            let _ = send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ClaimAck { lease_ids: ack_ids }).await;
+                            let _ = event_tx.send(TuiEvent::KennelClaimGranted(claims)).await;
+                        }
+                        KennelPayload::ClaimReleased { target_id, lease_id, reason } => {
+                            // Remove the target's trusted peer entry so hive
+                            // mode can't keep sending to an unowned machine.
+                            if let Some(claim) = pending_claims.write().remove(&lease_id) {
+                                router.remove_trusted_peer(&claim.target_pubkey);
+                            }
+                            let _ = event_tx.send(TuiEvent::KennelClaimReleased { target_id, lease_id, reason }).await;
+                        }
+                        KennelPayload::TargetLost { target_id, lease_id } => {
+                            if let Some(lease_id) = lease_id {
+                                if let Some(claim) = pending_claims.write().remove(&lease_id) {
+                                    router.remove_trusted_peer(&claim.target_pubkey);
+                                }
+                                let _ = event_tx.send(TuiEvent::KennelClaimReleased { target_id, lease_id, reason: "target_lost".into() }).await;
+                            }
+                        }
+                        KennelPayload::LeaseRebound { lease_id, target_id, .. } => {
+                            let target_name = {
+                                let mut guard = pending_claims.write();
+                                let old_key = guard
+                                    .iter()
+                                    .find_map(|(old_lease_id, claim)| {
+                                        (claim.target_id == target_id).then(|| old_lease_id.clone())
+                                    });
+                                if let Some(old_key) = old_key {
+                                    if let Some(mut claim) = guard.remove(&old_key) {
+                                        claim.attached = true;
+                                        claim.lease_id = lease_id.clone();
+                                        let target_name = claim.target_name.clone();
+                                        guard.insert(lease_id.clone(), claim);
+                                        Some(target_name)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some(target_name) = target_name {
+                                let _ = event_tx.send(TuiEvent::KennelAttached { target_name, lease_id }).await;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(cmd) = kennel_rx.recv() => {
+                    match cmd {
+                        KennelClientCommand::ClaimTarget { target_id } => {
+                            if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ClaimTargets { target_ids: vec![target_id], lease_ttl_sec: None }).await {
+                                break;
+                            }
+                        }
+                        KennelClientCommand::ReleaseTarget { lease_id } => {
+                            if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ReleaseTargets { lease_ids: vec![lease_id] }).await {
+                                break;
+                            }
+                        }
+                        KennelClientCommand::AttachConfirmed { lease_id } => {
+                            if let Some(claim) = pending_claims.write().get_mut(&lease_id) {
+                                claim.attached = true;
+                            }
+                            if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::AttachConfirmed { lease_id }).await {
+                                break;
+                            }
+                        }
+                        KennelClientCommand::Shutdown { reply } => {
+                            let lease_ids: Vec<String> = pending_claims.read().values().map(|c| c.lease_id.clone()).collect();
+                            if !lease_ids.is_empty() {
+                                let _ = send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ReleaseTargets { lease_ids }).await;
+                            }
+                            let _ = reply.send(());
+                            break 'outer;
+                        }
+                    }
+                }
+                else => break,
+            }
+        }
+
+        let _ = event_tx
+            .send(TuiEvent::SendError("[kennel] disconnected".into()))
+            .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
+    let kennel_addr = find_flag(args, "--kennel").context("--kennel HOST:PORT is required")?;
+    let port: u16 = find_flag(args, "--listen")
+        .context("--listen PORT is required in kennel mode")?
+        .parse()
+        .context("--listen PORT must be a number")?;
+    let model_override = find_flag(args, "--model");
+    let advertise = find_flag(args, "--advertise");
+    let data_dir = find_flag(args, "--data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".rkat/mdm/tux")
+        });
+
+    let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;
+    let mut node = CommsNode::new(keypair);
+    let comms_addr = format!("0.0.0.0:{port}");
+    let _ = node.listen(&comms_addr).await?;
+    let tux_id = node.pubkey_string();
+    let direct_ip = match advertise {
+        Some(ip) => ip,
+        None => {
+            let (host, kennel_port) = kennel_addr
+                .rsplit_once(':')
+                .context("invalid --kennel HOST:PORT")?;
+            let kennel_port: u16 = kennel_port.parse().context("invalid kennel port")?;
+            discover_local_ip(host, kennel_port).with_context(|| {
+                format!("failed to detect advertise address toward {kennel_addr}; use --advertise")
+            })?
+        }
+    };
+    let direct_addr = format!("tcp://{direct_ip}:{port}");
+
+    println!("=== MCM TUX — Kennel Mode ===");
+    println!("listen    : tcp://0.0.0.0:{port}");
+    println!("kennel    : {kennel_addr}");
+    println!("direct    : {direct_addr}");
+
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<AppCommand>();
+    let (event_tx, event_rx) = mpsc::channel::<TuiEvent>(256);
+    let (kennel_tx, kennel_rx) = mpsc::unbounded_channel::<KennelClientCommand>();
+
+    let router = node.router.clone();
+    let trusted_shared = node.trusted.clone();
+    let pending_claims: Arc<parking_lot::RwLock<HashMap<String, PendingClaim>>> =
+        Arc::new(parking_lot::RwLock::new(HashMap::new()));
+
+    tokio::spawn({
+        let event_tx = event_tx.clone();
+        let trusted = trusted_shared.clone();
+        let kennel_tx = kennel_tx.clone();
+        let pending_claims = pending_claims.clone();
+        let router = router.clone();
+        async move {
+            loop {
+                let Some(item) = node.recv_raw().await else {
+                    break;
+                };
+                let msg = {
+                    let peers = trusted.read();
+                    meerkat_comms::agent::types::CommsMessage::from_inbox_item(&item, &peers, true)
+                };
+                let Some(msg) = msg else {
+                    continue;
+                };
+
+                match &msg.content {
+                    CommsContent::Request { intent, params, .. }
+                        if intent.as_str() == "heartbeat" =>
+                    {
+                        let _ = event_tx
+                            .send(TuiEvent::Heartbeat {
+                                from: msg.from_peer.clone(),
+                            })
+                            .await;
+                    }
+                    CommsContent::Request { intent, params, .. }
+                        if intent.as_str() == "mcm.attach" =>
+                    {
+                        let lease_id = params
+                            .get("lease_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let target_id = params
+                            .get("target_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let matched = {
+                            let claims = pending_claims.read();
+                            claims
+                                .get(lease_id)
+                                .filter(|claim| {
+                                    claim.target_id == target_id
+                                        && claim.target_pubkey == msg.from_pubkey
+                                })
+                                .cloned()
+                        };
+                        if let Some(claim) = matched {
+                            let _ = router
+                                .send(
+                                    &msg.from_peer,
+                                    MessageKind::Request {
+                                        intent: "mcm.attach_ok".into(),
+                                        params: serde_json::json!({ "lease_id": lease_id }),
+                                    },
+                                )
+                                .await;
+                            let _ = kennel_tx.send(KennelClientCommand::AttachConfirmed {
+                                lease_id: lease_id.to_string(),
+                            });
+                            let _ = event_tx
+                                .send(TuiEvent::KennelAttached {
+                                    target_name: claim.target_name,
+                                    lease_id: lease_id.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                    CommsContent::Message { body, .. } if body.starts_with(STREAM_PREFIX) => {
+                        let json = &body[STREAM_PREFIX.len()..];
+                        match serde_json::from_str::<AgentEvent>(json) {
+                            Ok(event) => {
+                                let _ = event_tx
+                                    .send(TuiEvent::StreamEvent {
+                                        from: msg.from_peer.clone(),
+                                        event,
+                                    })
+                                    .await;
+                            }
+                            Err(_) => {
+                                let _ = event_tx
+                                    .send(TuiEvent::CommsMessage(msg.to_user_message_text()))
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = event_tx
+                            .send(TuiEvent::CommsMessage(msg.to_user_message_text()))
+                            .await;
+                    }
+                }
+            }
+        }
+    });
+
+    let session_dir = data_dir.join("sessions");
+    tokio::fs::create_dir_all(&session_dir).await?;
+    let hive_model = model_override
+        .clone()
+        .or_else(|| auto_detect().map(|(m, _, _)| m));
+    let hive_session_dir = session_dir.clone();
+
+    tokio::spawn({
+        let router = router.clone();
+        let trusted_shared = trusted_shared.clone();
+        let kennel_tx = kennel_tx.clone();
+        let event_tx = event_tx.clone();
+        async move {
+            spawn_command_processor(
+                command_rx,
+                kennel_tx,
+                event_tx,
+                router,
+                trusted_shared,
+                hive_model,
+                hive_session_dir,
+            )
+            .await;
+        }
+    });
+
+    tokio::spawn({
+        let event_tx = event_tx.clone();
+        let router = router.clone();
+        let pending_claims = pending_claims.clone();
+        let kennel_addr = kennel_addr.clone();
+        let tux_id = tux_id.clone();
+        let direct_addr = direct_addr.clone();
+        async move {
+            spawn_kennel_client(
+                kennel_rx,
+                event_tx,
+                router,
+                pending_claims,
+                kennel_addr,
+                tux_id,
+                direct_addr,
+            )
+            .await;
+        }
+    });
+
+    let app = App {
+        transport: TransportMode::Kennel,
+        mode: Mode::Direct,
+        targets: Vec::new(),
+        target_ids: HashMap::new(),
+        target_states: HashMap::new(),
+        target_leases: HashMap::new(),
+        attaching_since: HashMap::new(),
+        selected: 0,
+        input: String::new(),
+        output: VecDeque::new(),
+        hive_planning: false,
+        quit: false,
+        busy_targets: HashSet::new(),
+        streaming_text: BTreeMap::new(),
+        last_seen: HashMap::new(),
+        scroll_offset: 0,
+        auto_scroll: true,
+    };
+
+    tokio::task::spawn_blocking(move || tui_loop(app, command_tx, event_rx))
+        .await?
+        .context("TUI loop")?;
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let _ = kennel_tx.send(KennelClientCommand::Shutdown { reply: shutdown_tx });
+    let _ = tokio::time::timeout(Duration::from_secs(3), shutdown_rx).await;
+
+    Ok(())
 }
 
 // ── TUI loop (sync — no .await) ──────────────────────────────────────────────
@@ -519,7 +1146,10 @@ fn tui_loop(
                 TuiEvent::SendError(e) => {
                     // Extract target name from "[target] send failed: ..."
                     // and clear its busy state so it's not stuck processing.
-                    if let Some(name) = e.strip_prefix('[').and_then(|s| s.split_once(']').map(|(n, _)| n)) {
+                    if let Some(name) = e
+                        .strip_prefix('[')
+                        .and_then(|s| s.split_once(']').map(|(n, _)| n))
+                    {
                         app.set_busy(name, false);
                     }
                     app.push(format!("[send error] {e}"));
@@ -540,6 +1170,165 @@ fn tui_loop(
                 TuiEvent::StreamEvent { from, event } => {
                     app.last_seen.insert(from.clone(), Instant::now());
                     handle_stream_event(&mut app, &from, &event);
+                }
+                TuiEvent::KennelAvailableTargets(targets) => {
+                    let available_names: HashSet<String> =
+                        targets.iter().map(|t| t.name.clone()).collect();
+                    for target in targets {
+                        app.target_ids
+                            .insert(target.name.clone(), target.target_id.clone());
+                        app.target_states
+                            .entry(target.name.clone())
+                            .or_insert(KennelUiState::Available);
+                        if !matches!(
+                            app.target_states.get(&target.name),
+                            Some(KennelUiState::Attaching)
+                                | Some(KennelUiState::ClaimedByMe)
+                                | Some(KennelUiState::ClaimUncertain)
+                        ) {
+                            app.target_states
+                                .insert(target.name.clone(), KennelUiState::Available);
+                        }
+                        if !app.targets.contains(&target.name) {
+                            app.targets.push(target.name);
+                        }
+                    }
+                    app.targets.retain(|name| {
+                        if matches!(app.target_states.get(name), Some(KennelUiState::Available)) {
+                            available_names.contains(name)
+                        } else {
+                            true
+                        }
+                    });
+                    app.targets.sort();
+                    // Clamp selected index to prevent out-of-bounds panic
+                    // after targets are pruned during fleet churn.
+                    if !app.targets.is_empty() {
+                        app.selected = app.selected.min(app.targets.len() - 1);
+                    } else {
+                        app.selected = 0;
+                    }
+                }
+                TuiEvent::KennelMineTargets(targets) => {
+                    // The mine list is authoritative. Reconcile local claim
+                    // state: anything the kennel stopped reporting is no longer
+                    // owned by this TUX.
+                    let mine_names: HashSet<String> =
+                        targets.iter().map(|t| t.name.clone()).collect();
+
+                    // Clear stale claims not in the authoritative list.
+                    let stale_mine: Vec<String> = app
+                        .target_states
+                        .iter()
+                        .filter(|(_, state)| {
+                            matches!(
+                                state,
+                                KennelUiState::ClaimedByMe
+                                    | KennelUiState::Attaching
+                                    | KennelUiState::ClaimUncertain
+                            )
+                        })
+                        .map(|(name, _)| name.clone())
+                        .filter(|name| !mine_names.contains(name))
+                        .collect();
+                    for name in &stale_mine {
+                        app.target_states.insert(name.clone(), KennelUiState::Available);
+                        app.target_leases.remove(name);
+                        app.attaching_since.remove(name);
+                        app.set_busy(name, false);
+                        app.flush_streaming(name);
+                        app.push(format!("[{name}] claim no longer held — returned to available"));
+                    }
+
+                    // Upsert entries from the authoritative list.
+                    for target in targets {
+                        app.target_ids
+                            .insert(target.name.clone(), target.target_id.clone());
+                        if let Some(lease_id) = target.lease_id.clone() {
+                            app.target_leases.insert(target.name.clone(), lease_id);
+                        }
+                        let state = match target.state {
+                            KennelTargetState::PendingAttach => KennelUiState::Attaching,
+                            KennelTargetState::Claimed | KennelTargetState::RecoveringClaim => {
+                                KennelUiState::ClaimedByMe
+                            }
+                            KennelTargetState::Available => KennelUiState::Available,
+                        };
+                        app.target_states.insert(target.name.clone(), state);
+                        if !app.targets.contains(&target.name) {
+                            app.targets.push(target.name);
+                        }
+                    }
+                    app.targets.sort();
+                }
+                TuiEvent::KennelClaimGranted(claims) => {
+                    for claim in claims {
+                        app.target_ids
+                            .insert(claim.target_name.clone(), claim.target_id.clone());
+                        app.target_leases
+                            .insert(claim.target_name.clone(), claim.lease_id.clone());
+                        app.target_states
+                            .insert(claim.target_name.clone(), KennelUiState::Attaching);
+                        app.attaching_since
+                            .insert(claim.target_name.clone(), Instant::now());
+                        if !app.targets.contains(&claim.target_name) {
+                            app.targets.push(claim.target_name);
+                        }
+                    }
+                    app.targets.sort();
+                }
+                TuiEvent::KennelClaimReleased {
+                    target_id,
+                    lease_id,
+                    reason,
+                } => {
+                    let target_name = app.target_ids.iter().find_map(|(name, id)| {
+                        if id == &target_id {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(name) = target_name {
+                        app.target_states
+                            .insert(name.clone(), KennelUiState::Available);
+                        app.target_leases.remove(&name);
+                        app.attaching_since.remove(&name);
+                        app.set_busy(&name, false);
+                        app.flush_streaming(&name);
+                        app.push(format!("[{name}] kennel released claim: {reason}"));
+                    } else {
+                        app.push(format!("[kennel] claim released {lease_id}: {reason}"));
+                    }
+                }
+                TuiEvent::KennelAttached {
+                    target_name,
+                    lease_id,
+                } => {
+                    app.target_states
+                        .insert(target_name.clone(), KennelUiState::ClaimedByMe);
+                    app.target_leases.insert(target_name.clone(), lease_id);
+                    app.attaching_since.remove(&target_name);
+                    app.push(format!("[{target_name}] attached"));
+                }
+            }
+        }
+
+        if app.transport == TransportMode::Kennel {
+            let timed_out: Vec<String> = app
+                .attaching_since
+                .iter()
+                .filter(|(_, started)| started.elapsed() > LOCAL_ATTACH_TIMEOUT)
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in timed_out {
+                if matches!(app.target_states.get(&name), Some(KennelUiState::Attaching)) {
+                    app.target_states
+                        .insert(name.clone(), KennelUiState::ClaimUncertain);
+                    app.attaching_since.remove(&name);
+                    app.push(format!(
+                        "[{name}] attach still pending — kennel state unknown"
+                    ));
                 }
             }
         }
@@ -598,12 +1387,23 @@ fn handle_stream_event(app: &mut App, from: &str, event: &AgentEvent) {
             // For shell: show just the command. For others: compact args.
             let display = if name == "shell" {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-                let bg = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
-                if bg { format!("$ {cmd} &") } else { format!("$ {cmd}") }
+                let bg = args
+                    .get("background")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if bg {
+                    format!("$ {cmd} &")
+                } else {
+                    format!("$ {cmd}")
+                }
             } else {
                 let s = args.to_string();
                 let short: String = s.chars().take(80).collect();
-                if s.len() > 80 { format!("{short}...") } else { short }
+                if s.len() > 80 {
+                    format!("{short}...")
+                } else {
+                    short
+                }
             };
             app.push(format!("  [{name}] {display}"));
         }
@@ -665,7 +1465,11 @@ fn handle_key(
 ) {
     match code {
         KeyCode::Tab => {
-            app.mode = if app.mode == Mode::Direct { Mode::Hive } else { Mode::Direct };
+            app.mode = if app.mode == Mode::Direct {
+                Mode::Hive
+            } else {
+                Mode::Direct
+            };
         }
         KeyCode::Up if app.mode == Mode::Direct => {
             app.selected = app.selected.saturating_sub(1);
@@ -688,9 +1492,7 @@ fn handle_key(
             app.auto_scroll = true;
         }
         // Shift+Enter, Alt+Enter, or Ctrl+J → insert newline
-        KeyCode::Enter
-            if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-        {
+        KeyCode::Enter if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
             app.input.push('\n');
         }
         KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -703,16 +1505,30 @@ fn handle_key(
             // a valid target (Direct) or no in-flight hive plan (Hive).
             let is_slash = app.input.starts_with('/')
                 && matches!(
-                    app.input.split_once(' ').map(|(c, _)| c).unwrap_or(&app.input),
-                    "/new" | "/resume" | "/help"
+                    app.input
+                        .split_once(' ')
+                        .map(|(c, _)| c)
+                        .unwrap_or(&app.input),
+                    "/new" | "/resume" | "/help" | "/claim" | "/release"
                 );
             // Check if submission is possible before consuming input.
-            let selected_busy = !app.targets.is_empty()
-                && app.busy_targets.contains(&app.targets[app.selected]);
+            let selected_busy =
+                !app.targets.is_empty() && app.busy_targets.contains(&app.targets[app.selected]);
             match app.mode {
                 Mode::Direct if app.targets.is_empty() && !is_slash => return,
                 // Slash commands blocked while target is busy (can't reset mid-run)
                 Mode::Direct if selected_busy && is_slash => return,
+                Mode::Direct
+                    if app.transport == TransportMode::Kennel
+                        && !is_slash
+                        && !app.targets.is_empty()
+                        && !matches!(
+                            app.target_states.get(&app.targets[app.selected]),
+                            Some(KennelUiState::ClaimedByMe)
+                        ) =>
+                {
+                    return;
+                }
                 // Regular messages while busy: send immediately via comms.
                 // The target's inbox loop is sequential — the message queues
                 // in the comms inbox and runs after the current turn finishes.
@@ -739,7 +1555,9 @@ fn handle_key(
                             let _ = command_tx.send(AppCommand::ResetHive);
                             return;
                         }
-                        if app.targets.is_empty() { return; }
+                        if app.targets.is_empty() {
+                            return;
+                        }
                         let target = app.targets[app.selected].clone();
                         // Don't clear output yet — wait for the target to confirm.
                         // Clearing before the command succeeds would lose unrelated
@@ -751,7 +1569,9 @@ fn handle_key(
                         });
                     }
                     "/resume" if arg.is_empty() => {
-                        if app.targets.is_empty() { return; }
+                        if app.targets.is_empty() {
+                            return;
+                        }
                         let target = app.targets[app.selected].clone();
                         app.push(format!("> /resume ({target})"));
                         let _ = command_tx.send(AppCommand::SlashCmd {
@@ -760,7 +1580,9 @@ fn handle_key(
                         });
                     }
                     "/resume" => {
-                        if app.targets.is_empty() { return; }
+                        if app.targets.is_empty() {
+                            return;
+                        }
                         let target = app.targets[app.selected].clone();
                         app.push(format!("> /resume {arg} ({target})"));
                         let _ = command_tx.send(AppCommand::SlashCmd {
@@ -770,10 +1592,40 @@ fn handle_key(
                     }
                     "/help" => {
                         app.push("**Commands:**".into());
+                        if app.transport == TransportMode::Kennel {
+                            app.push(
+                                "  `/claim`        — claim selected target from kennel".into(),
+                            );
+                            app.push(
+                                "  `/release`      — release selected target back to kennel".into(),
+                            );
+                        }
                         app.push("  `/new`          — start a fresh session".into());
                         app.push("  `/resume`       — list past sessions".into());
                         app.push("  `/resume <N>`   — resume session N".into());
                         app.push("  `/help`         — show this help".into());
+                    }
+                    "/claim" => {
+                        if app.transport != TransportMode::Kennel || app.targets.is_empty() {
+                            return;
+                        }
+                        let target = app.targets[app.selected].clone();
+                        let Some(target_id) = app.target_ids.get(&target).cloned() else {
+                            return;
+                        };
+                        app.push(format!("> /claim ({target})"));
+                        let _ = command_tx.send(AppCommand::ClaimTarget { target_id });
+                    }
+                    "/release" => {
+                        if app.transport != TransportMode::Kennel || app.targets.is_empty() {
+                            return;
+                        }
+                        let target = app.targets[app.selected].clone();
+                        let Some(lease_id) = app.target_leases.get(&target).cloned() else {
+                            return;
+                        };
+                        app.push(format!("> /release ({target})"));
+                        let _ = command_tx.send(AppCommand::ReleaseTarget { lease_id });
                     }
                     _ => unreachable!("guard above only admits known commands"),
                 }
@@ -833,7 +1685,11 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             } else {
                 inner_width.saturating_sub(2) // "  " continuation indent
             };
-            if avail == 0 || line.is_empty() { 1 } else { line.len().div_ceil(avail) }
+            if avail == 0 || line.is_empty() {
+                1
+            } else {
+                line.len().div_ceil(avail)
+            }
         })
         .sum();
     let input_height = (input_lines.clamp(1, 8) as u16) + 2;
@@ -901,7 +1757,20 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
             let sel = app.mode == Mode::Direct && i == app.selected;
             let busy = app.busy_targets.contains(t);
             let prefix = if sel { "> " } else { "  " };
-            let suffix = if busy { " [...]" } else { "" };
+            let suffix = if app.transport == TransportMode::Kennel {
+                match app.target_states.get(t).copied() {
+                    Some(KennelUiState::Attaching) => " [attaching...]",
+                    Some(KennelUiState::ClaimedByMe) if busy => " [mine ...]",
+                    Some(KennelUiState::ClaimedByMe) => " [mine]",
+                    Some(KennelUiState::ClaimUncertain) => " [claim?]",
+                    _ if busy => " [...]",
+                    _ => "",
+                }
+            } else if busy {
+                " [...]"
+            } else {
+                ""
+            };
 
             // Status color based on last_seen age
             let age = app
@@ -915,6 +1784,10 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
             } else if age >= Duration::from_secs(35) {
                 // Stale
                 Style::default().fg(Color::Yellow)
+            } else if app.transport == TransportMode::Kennel
+                && matches!(app.target_states.get(t), Some(KennelUiState::ClaimedByMe))
+            {
+                Style::default().fg(Color::Green)
             } else if sel {
                 Style::default()
                     .fg(Color::Cyan)
@@ -994,7 +1867,8 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
     }
     // Cursor on the last line
     if let Some(last) = lines.last_mut() {
-        last.spans.push(Span::styled("_", Style::default().fg(Color::DarkGray)));
+        last.spans
+            .push(Span::styled("_", Style::default().fg(Color::DarkGray)));
     }
     let title = "COMMAND  [Ctrl+J: newline]".to_string();
     f.render_widget(
@@ -1009,4 +1883,11 @@ fn find_flag(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind UDP probe socket")?;
+    sock.connect(format!("{host}:{port}"))
+        .with_context(|| format!("UDP probe to {host}:{port}"))?;
+    Ok(sock.local_addr()?.ip().to_string())
 }

@@ -14,13 +14,15 @@
 //! session or `/resume` to pick from past sessions.
 //!
 //! ```text
-//! target <HOST:PORT> [--name NAME] [--model MODEL]
+//! mcm-target <HOST:PORT> [--name NAME] [--model MODEL]
 //! ```
 //!
 //! Set one of: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use futures::StreamExt;
@@ -39,17 +41,20 @@ use meerkat_core::service::{
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
 use meerkat_core::{AgentEvent, AgentToolDispatcher, Config};
+use meerkat_runtime::RuntimeSessionAdapter;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention, PeerInput,
 };
-use meerkat_runtime::RuntimeSessionAdapter;
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
-    CommsNode, STREAM_PREFIX, auto_detect, detect_provider, load_or_generate_keypair,
-    register_with_backoff,
+    CommsNode, KennelPayload, STREAM_PREFIX, auto_detect, build_signed_envelope, detect_provider,
+    load_or_generate_keypair, read_envelope, register_with_backoff, verify_envelope,
+    write_envelope,
 };
+use tokio::io::BufReader;
+use tokio::net::TcpStream;
 
 const SYSTEM_PROMPT: &str = "\
 You are a managed system agent named '{name}' controlled by a human operator via TUX.
@@ -65,9 +70,15 @@ async fn main() -> anyhow::Result<()> {
     // ── Parse CLI args ────────────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        eprintln!("Usage: target <HOST:PORT> [--name NAME] [--model MODEL]");
+        eprintln!("Usage: mcm-target <HOST:PORT> [--name NAME] [--model MODEL]");
+        eprintln!(
+            "   or: mcm-target --kennel HOST:PORT [--advertise IP] [--name NAME] [--model MODEL]"
+        );
         eprintln!("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY");
         std::process::exit(1);
+    }
+    if find_flag(&args, "--kennel").is_some() {
+        return run_kennel_mode(&args).await;
     }
     let host_addr = &args[0];
     let name = find_flag(&args, "--name")
@@ -130,8 +141,10 @@ async fn main() -> anyhow::Result<()> {
     let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
 
     // Comms tools: send/peers tools backed by the CommsNode's router
-    let comms_tools: Arc<dyn AgentToolDispatcher> =
-        Arc::new(CommsToolDispatcher::new(node.router.clone(), node.trusted.clone()));
+    let comms_tools: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::new(
+        node.router.clone(),
+        node.trusted.clone(),
+    ));
 
     // ── 4. Create or auto-resume session ──────────────────────────────────────
     let mut current_session_id = create_or_resume_session(
@@ -146,7 +159,9 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // ── 5. Subscribe to session events for forwarding ─────────────────────────
-    let mut event_stream = service.subscribe_session_events(&current_session_id).await
+    let mut event_stream = service
+        .subscribe_session_events(&current_session_id)
+        .await
         .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
 
     // ── 6. Reconnection loop ─────────────────────────────────────────────────
@@ -155,7 +170,10 @@ async fn main() -> anyhow::Result<()> {
         .next()
         .and_then(|s| s.parse().ok())
         .context("invalid HOST:PORT")?;
-    let host_base = host_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_addr);
+    let host_base = host_addr
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_addr);
     let reg_addr = format!("{host_base}:{}", host_comms_port + 1);
 
     let explicit_ip = find_flag(&args, "--advertise");
@@ -183,21 +201,20 @@ async fn main() -> anyhow::Result<()> {
 
         // (Re-)register with TUX (retries with exponential backoff)
         eprintln!("[target] registering with {reg_addr} ...");
-        let resp = match register_with_backoff(
-            &reg_addr,
-            &name,
-            &node.pubkey_string(),
-            &advertised_addr,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[target] fatal: {e}");
-                std::process::exit(1);
-            }
-        };
-        eprintln!("[target] paired with host '{}' ({})", resp.name, resp.pubkey);
+        let resp =
+            match register_with_backoff(&reg_addr, &name, &node.pubkey_string(), &advertised_addr)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[target] fatal: {e}");
+                    std::process::exit(1);
+                }
+            };
+        eprintln!(
+            "[target] paired with host '{}' ({})",
+            resp.name, resp.pubkey
+        );
 
         let resp_name = resp.name.clone();
 
@@ -285,105 +302,23 @@ async fn run_inbox_loop(
         tokio::select! {
             msg = node.recv_message() => {
                 let Some(msg) = msg else { break };
-
-                let sender = msg.from_peer.clone();
-
-                // ── Typed MessageKind classification ──────────────────────
-                match &msg.content {
-                    // DISMISS request
-                    meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-                        if intent.as_str() == "dismiss" =>
-                    {
-                        eprintln!("[target] received DISMISS — shutting down");
-                        std::process::exit(0);
-                    }
-
-                    // Slash command request
-                    meerkat_comms::agent::types::CommsContent::Request { intent, params, .. }
-                        if intent.as_str() == "command" =>
-                    {
-                        let cmd = params
-                            .get("cmd")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        eprintln!("[target] command: {cmd}");
-
-                        let response = handle_command(
-                            cmd,
-                            service,
-                            runtime_adapter,
-                            jsonl_store,
-                            model,
-                            system_prompt,
-                            comms_tools,
-                            provider,
-                            current_session_id,
-                            event_stream,
-                        )
-                        .await;
-
-                        let _ = router
-                            .send(&sender, MessageKind::Message { body: response, blocks: None })
-                            .await;
-                    }
-
-                    // Heartbeat request — no-op (TUX manages heartbeat state)
-                    meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-                        if intent.as_str() == "heartbeat" =>
-                    {
-                        // Heartbeats from TUX are just keep-alives, nothing to do
-                    }
-
-                    // Regular message → route through runtime with Steer
-                    meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
-                        eprintln!("[target] received message from '{sender}'");
-
-                        let peer_input = Input::Peer(PeerInput {
-                            header: InputHeader {
-                                id: meerkat_core::lifecycle::InputId::new(),
-                                timestamp: chrono::Utc::now(),
-                                source: InputOrigin::Peer {
-                                    peer_id: sender.clone(),
-                                    runtime_id: None,
-                                },
-                                durability: InputDurability::Ephemeral,
-                                visibility: InputVisibility::default(),
-                                idempotency_key: None,
-                                supersession_key: None,
-                                correlation_id: None,
-                            },
-                            convention: Some(PeerConvention::Message),
-                            body: body.clone(),
-                            blocks: None,
-                            handling_mode: Some(HandlingMode::Steer),
-                        });
-
-                        match runtime_adapter.accept_input(current_session_id, peer_input).await {
-                            Ok(outcome) => {
-                                tracing::debug!(?outcome, "input accepted");
-                            }
-                            Err(e) => {
-                                eprintln!("[target] accept_input error: {e}");
-                                // Fallback: start a direct turn via the service
-                                let req = StartTurnRequest {
-                                    prompt: ContentInput::Text(body.clone()),
-                                    system_prompt: None,
-                                    render_metadata: None,
-                                    handling_mode: HandlingMode::Queue,
-                                    event_tx: None,
-                                    skill_references: None,
-                                    flow_tool_overlay: None,
-                                    additional_instructions: None,
-                                };
-                                if let Err(e) = service.start_turn(current_session_id, req).await {
-                                    eprintln!("[target] fallback start_turn error: {e}");
-                                }
-                            }
-                        }
-                    }
-
-                    // Other content types — ignore
-                    _ => {}
+                match handle_target_message(
+                    &msg,
+                    router,
+                    service,
+                    runtime_adapter,
+                    jsonl_store,
+                    model,
+                    system_prompt,
+                    comms_tools,
+                    provider,
+                    current_session_id,
+                    event_stream,
+                    false,
+                )
+                .await {
+                    TargetLoopAction::Continue => {}
+                    TargetLoopAction::ExitProcess => std::process::exit(0),
                 }
             }
 
@@ -391,28 +326,8 @@ async fn run_inbox_loop(
             event = event_stream.next() => {
                 let Some(envelope) = event else { continue };
                 let event = &envelope.payload;
-                if should_forward(event) {
-                    let Ok(json) = serde_json::to_string(event) else {
-                        continue;
-                    };
-                    let body = format!("{STREAM_PREFIX}{json}");
-                    // Timeout prevents a black-holed TUX from blocking the
-                    // inbox loop, which would stop it from observing the
-                    // heartbeat's disconnect signal via disconnect_rx.
-                    let send_fut = router
-                        .send("tux", MessageKind::Message { body, blocks: None });
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        send_fut,
-                    )
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        _ => {
-                            // Event forwarding failure or timeout — signal disconnect
-                            let _ = disconnect_tx.send(true);
-                        }
-                    }
+                if should_forward(event) && !forward_stream_event(router, "tux", event).await {
+                    let _ = disconnect_tx.send(true);
                 }
             }
 
@@ -421,6 +336,152 @@ async fn run_inbox_loop(
             }
         }
     }
+}
+
+enum TargetLoopAction {
+    Continue,
+    ExitProcess,
+}
+
+use mdm_tux::machines::target_attachment::{
+    self,
+    State as TaState,
+    Event as TaEvent,
+    Effect as TaEffect,
+};
+
+/// Derive the caller's exit info from the machine's terminal state.
+fn adopted_exit_hint(terminal: &TaState) -> Option<String> {
+    match terminal {
+        TaState::DirectLost { tux_id } => tux_id.clone(),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_target_message(
+    msg: &meerkat_comms::agent::types::CommsMessage,
+    router: &Arc<meerkat_comms::Router>,
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    jsonl_store: &JsonlStore,
+    model: &str,
+    system_prompt: &str,
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+    current_session_id: &mut SessionId,
+    event_stream: &mut meerkat_core::comms::EventStream,
+    ignore_attach_ok: bool,
+) -> TargetLoopAction {
+    let sender = msg.from_peer.clone();
+    match &msg.content {
+        meerkat_comms::agent::types::CommsContent::Request { intent, .. }
+            if intent.as_str() == "dismiss" =>
+        {
+            eprintln!("[target] received DISMISS — shutting down");
+            return TargetLoopAction::ExitProcess;
+        }
+        meerkat_comms::agent::types::CommsContent::Request { intent, params, .. }
+            if intent.as_str() == "command" =>
+        {
+            let cmd = params.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+            eprintln!("[target] command: {cmd}");
+
+            let response = handle_command(
+                cmd,
+                service,
+                runtime_adapter,
+                jsonl_store,
+                model,
+                system_prompt,
+                comms_tools,
+                provider,
+                current_session_id,
+                event_stream,
+            )
+            .await;
+
+            // Timeout-guard the reply to prevent a half-open controller from
+            // wedging the inbox loop (same bound as heartbeat/event sends).
+            let reply_fut = router.send(
+                &sender,
+                MessageKind::Message { body: response, blocks: None },
+            );
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                reply_fut,
+            ).await;
+        }
+        meerkat_comms::agent::types::CommsContent::Request { intent, .. }
+            if intent.as_str() == "heartbeat"
+                || (ignore_attach_ok && intent.as_str() == "mcm.attach_ok") => {}
+        meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
+            eprintln!("[target] received message from '{sender}'");
+
+            let peer_input = Input::Peer(PeerInput {
+                header: InputHeader {
+                    id: meerkat_core::lifecycle::InputId::new(),
+                    timestamp: chrono::Utc::now(),
+                    source: InputOrigin::Peer {
+                        peer_id: sender.clone(),
+                        runtime_id: None,
+                    },
+                    durability: InputDurability::Ephemeral,
+                    visibility: InputVisibility::default(),
+                    idempotency_key: None,
+                    supersession_key: None,
+                    correlation_id: None,
+                },
+                convention: Some(PeerConvention::Message),
+                body: body.clone(),
+                blocks: None,
+                handling_mode: Some(HandlingMode::Steer),
+            });
+
+            match runtime_adapter
+                .accept_input(current_session_id, peer_input)
+                .await
+            {
+                Ok(outcome) => {
+                    tracing::debug!(?outcome, "input accepted");
+                }
+                Err(e) => {
+                    eprintln!("[target] accept_input error: {e}");
+                    let req = StartTurnRequest {
+                        prompt: ContentInput::Text(body.clone()),
+                        system_prompt: None,
+                        render_metadata: None,
+                        handling_mode: HandlingMode::Queue,
+                        event_tx: None,
+                        skill_references: None,
+                        flow_tool_overlay: None,
+                        additional_instructions: None,
+                    };
+                    if let Err(e) = service.start_turn(current_session_id, req).await {
+                        eprintln!("[target] fallback start_turn error: {e}");
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    TargetLoopAction::Continue
+}
+
+async fn forward_stream_event(
+    router: &Arc<meerkat_comms::Router>,
+    peer: &str,
+    event: &AgentEvent,
+) -> bool {
+    let Ok(json) = serde_json::to_string(event) else {
+        return true;
+    };
+    let body = format!("{STREAM_PREFIX}{json}");
+    let send_fut = router.send(peer, MessageKind::Message { body, blocks: None });
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), send_fut).await,
+        Ok(Ok(_))
+    )
 }
 
 // ── Heartbeat ────────────────────────────────────────────────────────────────
@@ -448,16 +509,12 @@ fn spawn_heartbeat(
                     params: serde_json::Value::Null,
                 },
             );
-            let failed = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                send_fut,
-            )
-            .await
-            {
-                Ok(Ok(_)) => false,
-                Ok(Err(_)) => true,  // send error
-                Err(_) => true,      // timeout
-            };
+            let failed =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), send_fut).await {
+                    Ok(Ok(_)) => false,
+                    Ok(Err(_)) => true, // send error
+                    Err(_) => true,     // timeout
+                };
             if failed {
                 consecutive_failures += 1;
                 eprintln!("[target] heartbeat failed ({consecutive_failures}/3)");
@@ -629,7 +686,16 @@ async fn create_or_resume_session(
     }
 
     eprintln!("[target] starting fresh session");
-    setup_session(service, runtime_adapter, None, model, system_prompt, comms_tools, provider).await
+    setup_session(
+        service,
+        runtime_adapter,
+        None,
+        model,
+        system_prompt,
+        comms_tools,
+        provider,
+    )
+    .await
 }
 
 /// Switch to a new or resumed session. Drops the old event subscription,
@@ -667,15 +733,16 @@ async fn switch_session(
         .await
         .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
 
-    // Only tear down the old session after the new one is fully set up.
-    // This prevents degraded state if the new session fails to create.
-    // Unregister from the runtime adapter (detaches the runtime loop) AND
-    // discard from the session service (frees the max_sessions slot).
-    runtime_adapter.unregister_session(&old_session_id).await;
-    if let Err(e) = service.discard_live_session(&old_session_id).await {
-        // NotFound is expected if the session was never materialized or already archived.
-        if !matches!(e, SessionError::NotFound { .. }) {
-            eprintln!("[target] warning: discard old session {old_session_id}: {e}");
+    // Only tear down the old session if we actually switched to a different one.
+    // Resuming the current session (new_id == old) is a valid no-op — tearing
+    // it down would destroy the session we just re-opened.
+    if new_id != old_session_id {
+        runtime_adapter.unregister_session(&old_session_id).await;
+        if let Err(e) = service.discard_live_session(&old_session_id).await {
+            // NotFound is expected if the session was never materialized or already archived.
+            if !matches!(e, SessionError::NotFound { .. }) {
+                eprintln!("[target] warning: discard old session {old_session_id}: {e}");
+            }
         }
     }
 
@@ -728,7 +795,9 @@ async fn setup_session(
         labels: None,
     };
 
-    let result = service.create_session(req).await
+    let result = service
+        .create_session(req)
+        .await
         .map_err(|e| anyhow::anyhow!("create session: {e}"))?;
 
     let session_id = result.session_id;
@@ -850,18 +919,15 @@ impl CoreExecutor for TargetCoreExecutor {
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::ControlFailed {
-                    reason: e.to_string(),
-                }),
+            RunControlCommand::CancelCurrentRun { .. } => {
+                self.service.interrupt(&self.session_id).await.map_err(|e| {
+                    CoreExecutorError::ControlFailed {
+                        reason: e.to_string(),
+                    }
+                })
+            }
             RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = self
-                    .service
-                    .discard_live_session(&self.session_id)
-                    .await;
+                let discard_result = self.service.discard_live_session(&self.session_id).await;
                 runtime_adapter_unregister_noop();
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
@@ -880,6 +946,497 @@ impl CoreExecutor for TargetCoreExecutor {
 fn runtime_adapter_unregister_noop() {}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ActiveAdoption {
+    lease_id: String,
+    target_id: String,
+    tux_id: String,
+    tux_pubkey: String,
+    tux_direct_addr: String,
+}
+
+fn current_tux_attachment(
+    node: &CommsNode,
+    lease_id: String,
+    target_id: String,
+    tux_id: String,
+) -> Option<ActiveAdoption> {
+    let peer = node
+        .trusted
+        .read()
+        .peers
+        .iter()
+        .find(|p| p.name == "tux")
+        .cloned()?;
+    Some(ActiveAdoption {
+        lease_id,
+        target_id,
+        tux_id,
+        tux_pubkey: peer.pubkey.to_peer_id(),
+        tux_direct_addr: peer.addr,
+    })
+}
+
+async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
+    let kennel_addr = find_flag(args, "--kennel").context("--kennel HOST:PORT is required")?;
+    let name = find_flag(args, "--name")
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+    let (model, provider) = match find_flag(args, "--model") {
+        Some(m) => {
+            let p = detect_provider(&m);
+            (m, p.to_string())
+        }
+        None => match auto_detect() {
+            Some((m, p, _)) => (m, p),
+            None => bail!("set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY"),
+        },
+    };
+    let data_dir = find_flag(args, "--data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(format!(".rkat/mdm/targets/{name}"))
+        });
+
+    let keypair = load_or_generate_keypair(&data_dir.join("identity")).await?;
+    let node = CommsNode::new(keypair);
+    let comms_addr = node.listen("0.0.0.0:0").await?;
+    let comms_port = comms_addr.port();
+    let target_id = node.pubkey_string();
+
+    let session_dir = data_dir.join("sessions");
+    tokio::fs::create_dir_all(&session_dir).await?;
+    let factory = AgentFactory::new(&session_dir).shell(true).builtins(true);
+    let config = Config::default();
+    let jsonl_store = JsonlStore::new(session_dir.clone());
+    jsonl_store.init().await?;
+    let bundle_store = JsonlStore::new(session_dir.clone());
+    bundle_store.init().await?;
+    let persistence = PersistenceBundle::new(
+        Arc::new(bundle_store) as Arc<dyn SessionStore>,
+        None,
+        Arc::new(MemoryBlobStore::new()),
+    );
+    let runtime_adapter = persistence.runtime_adapter();
+    let service: Arc<PersistentSessionService<FactoryAgentBuilder>> =
+        Arc::new(build_persistent_service(factory, config, 10, persistence));
+    let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
+    let comms_tools: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::new(
+        node.router.clone(),
+        node.trusted.clone(),
+    ));
+    let mut current_session_id = create_or_resume_session(
+        &service,
+        &runtime_adapter,
+        &jsonl_store,
+        &model,
+        &system_prompt,
+        &comms_tools,
+        &provider,
+    )
+    .await?;
+    let mut event_stream = service
+        .subscribe_session_events(&current_session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
+
+    let explicit_ip = find_flag(args, "--advertise");
+    let mut node = node;
+    let router = node.router.clone();
+
+    println!("=== MCM Target: {name} ===");
+    println!("comms     : tcp://0.0.0.0:{comms_port}");
+    println!("kennel    : {kennel_addr}");
+    println!("provider  : {provider} ({model})");
+
+    let mut attached_tux_hint: Option<String> = None;
+
+    loop {
+        let (kennel_host, kennel_port) = kennel_addr
+            .rsplit_once(':')
+            .context("invalid --kennel HOST:PORT")?;
+        let kennel_port: u16 = kennel_port.parse().context("invalid kennel port")?;
+        let local_ip = match &explicit_ip {
+            Some(ip) => ip.clone(),
+            None => match discover_local_ip(kennel_host, kennel_port) {
+                Ok(ip) => ip,
+                Err(e) => {
+                    eprintln!(
+                        "[target] kennel address probe failed: {e} — retrying in 5s \
+                        (use --advertise <IP> to skip)"
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            },
+        };
+        let advertised_addr = format!("tcp://{local_ip}:{comms_port}");
+
+        let stream =
+            match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&kennel_addr))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(e)) => {
+                    eprintln!("[target] kennel connect failed: {e} — retrying in 2s");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!("[target] kennel connect timed out — retrying in 2s");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let register = build_signed_envelope(
+            node.router.keypair_arc().as_ref(),
+            &target_id,
+            KennelPayload::TargetRegister {
+                target_id: target_id.clone(),
+                name: name.clone(),
+                pubkey: target_id.clone(),
+                direct_addr: advertised_addr.clone(),
+                labels: Default::default(),
+                capabilities: BTreeMap::from([
+                    ("shell".to_string(), true),
+                    ("runtime".to_string(), true),
+                ]),
+                attached_tux_id: attached_tux_hint.clone(),
+            },
+        )?;
+        if let Err(e) = write_envelope(&mut write_half, &register).await {
+            eprintln!("[target] kennel register failed: {e} — retrying");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        let Some(env) = read_envelope(&mut reader).await? else {
+            eprintln!("[target] kennel closed during register");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+        let _ = verify_envelope(&env)?;
+
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    let hb = build_signed_envelope(
+                        node.router.keypair_arc().as_ref(),
+                        &target_id,
+                        KennelPayload::TargetHeartbeat,
+                    )?;
+                    if write_envelope(&mut write_half, &hb).await.is_err() {
+                        break;
+                    }
+                }
+                maybe = read_envelope(&mut reader) => {
+                    let Some(env) = maybe? else { break; };
+                    let _ = verify_envelope(&env)?;
+                    match env.payload {
+                        KennelPayload::Adopted {
+                            lease_id,
+                            target_id: adopted_target_id,
+                            tux_id,
+                            tux_pubkey,
+                            tux_direct_addr,
+                            ..
+                        } => {
+                            if adopted_target_id != target_id {
+                                continue;
+                            }
+                            let adoption = ActiveAdoption {
+                                lease_id,
+                                target_id: adopted_target_id,
+                                tux_id,
+                                tux_pubkey,
+                                tux_direct_addr,
+                            };
+                            let adopted_exit = run_adopted_loop(
+                                &mut node,
+                                &router,
+                                &mut reader,
+                                &mut write_half,
+                                adoption,
+                                true,
+                                &service,
+                                &runtime_adapter,
+                                &jsonl_store,
+                                &model,
+                                &system_prompt,
+                                &comms_tools,
+                                &provider,
+                                &mut current_session_id,
+                                &mut event_stream,
+                            ).await?;
+
+                            attached_tux_hint = adopted_exit_hint(&adopted_exit);
+
+                            let re_register = build_signed_envelope(
+                                node.router.keypair_arc().as_ref(),
+                                &target_id,
+                                KennelPayload::TargetRegister {
+                                    target_id: target_id.clone(),
+                                    name: name.clone(),
+                                    pubkey: target_id.clone(),
+                                    direct_addr: advertised_addr.clone(),
+                                    labels: Default::default(),
+                                    capabilities: BTreeMap::from([
+                                        ("shell".to_string(), true),
+                                        ("runtime".to_string(), true),
+                                    ]),
+                                    attached_tux_id: attached_tux_hint.clone(),
+                                },
+                            )?;
+                            let _ = write_envelope(&mut write_half, &re_register).await;
+                        }
+                        KennelPayload::LeaseRebound {
+                            lease_id,
+                            target_id: rebound_target_id,
+                            tux_id,
+                            tux_pubkey,
+                            tux_direct_addr,
+                            ..
+                        } => {
+                            if rebound_target_id != target_id {
+                                continue;
+                            }
+                            // Use the fresh TUX endpoint from the kennel, not
+                            // stale cached peer data. TUX may have reconnected
+                            // with a different --listen/--advertise address.
+                            let adoption = ActiveAdoption {
+                                lease_id,
+                                target_id: rebound_target_id,
+                                tux_id,
+                                tux_pubkey,
+                                tux_direct_addr,
+                            };
+                            let adopted_exit = run_adopted_loop(
+                                &mut node,
+                                &router,
+                                &mut reader,
+                                &mut write_half,
+                                adoption,
+                                false,
+                                &service,
+                                &runtime_adapter,
+                                &jsonl_store,
+                                &model,
+                                &system_prompt,
+                                &comms_tools,
+                                &provider,
+                                &mut current_session_id,
+                                &mut event_stream,
+                            ).await?;
+
+                            attached_tux_hint = adopted_exit_hint(&adopted_exit);
+
+                            let re_register = build_signed_envelope(
+                                node.router.keypair_arc().as_ref(),
+                                &target_id,
+                                KennelPayload::TargetRegister {
+                                    target_id: target_id.clone(),
+                                    name: name.clone(),
+                                    pubkey: target_id.clone(),
+                                    direct_addr: advertised_addr.clone(),
+                                    labels: Default::default(),
+                                    capabilities: BTreeMap::from([
+                                        ("shell".to_string(), true),
+                                        ("runtime".to_string(), true),
+                                    ]),
+                                    attached_tux_id: attached_tux_hint.clone(),
+                                },
+                            )?;
+                            let _ = write_envelope(&mut write_half, &re_register).await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        eprintln!("[target] kennel disconnected — reconnecting...");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_adopted_loop(
+    node: &mut CommsNode,
+    router: &Arc<meerkat_comms::Router>,
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    write_half: &mut tokio::net::tcp::OwnedWriteHalf,
+    adoption: ActiveAdoption,
+    attach_required: bool,
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<RuntimeSessionAdapter>,
+    jsonl_store: &JsonlStore,
+    model: &str,
+    system_prompt: &str,
+    comms_tools: &Arc<dyn AgentToolDispatcher>,
+    provider: &str,
+    current_session_id: &mut SessionId,
+    event_stream: &mut meerkat_core::comms::EventStream,
+) -> anyhow::Result<TaState> {
+    // Initialize the machine based on whether this is a fresh adoption or a rebound.
+    let mut machine_state = if attach_required {
+        // Fresh adoption: Idle → Attaching via Adopted event
+        let (state, effects) = target_attachment::transition(
+            TaState::Idle,
+            TaEvent::Adopted {
+                lease_id: adoption.lease_id.clone(),
+                tux_id: adoption.tux_id.clone(),
+                tux_pubkey: adoption.tux_pubkey.clone(),
+                tux_direct_addr: adoption.tux_direct_addr.clone(),
+            },
+        ).map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
+
+        // Process InitiateDirectLink effect
+        for eff in &effects {
+            if let TaEffect::InitiateDirectLink { tux_pubkey, tux_direct_addr, lease_id, .. } = eff {
+                let tux_pk = meerkat_comms::identity::PubKey::from_peer_id(tux_pubkey)
+                    .context("parse adopted tux pubkey")?;
+                let stale_keys: Vec<_> = node.trusted.read().peers.iter()
+                    .filter(|p| p.name == "tux").map(|p| p.pubkey).collect();
+                for pk in stale_keys { node.router.remove_trusted_peer(&pk); }
+                node.add_peer(TrustedPeer {
+                    name: "tux".into(), pubkey: tux_pk,
+                    addr: tux_direct_addr.clone(), meta: PeerMeta::default(),
+                });
+                let attach_fut = router.send("tux", MessageKind::Request {
+                    intent: "mcm.attach".into(),
+                    params: serde_json::json!({ "lease_id": lease_id, "target_id": adoption.target_id }),
+                });
+                match tokio::time::timeout(Duration::from_secs(10), attach_fut).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("[target] attach to tux failed: {e}");
+                        let (s, _) = target_attachment::transition(state.clone(), TaEvent::AttachSendFailed)
+                            .unwrap_or((TaState::AttachFailed, vec![]));
+                        return Ok(s);
+                    }
+                    Err(_) => {
+                        eprintln!("[target] attach to tux timed out");
+                        let (s, _) = target_attachment::transition(state.clone(), TaEvent::AttachSendFailed)
+                            .unwrap_or((TaState::AttachFailed, vec![]));
+                        return Ok(s);
+                    }
+                }
+            }
+        }
+
+        // Stay in Attaching — transition to Attached only when we receive
+        // mcm.attach_ok from TUX. This prevents entering Attached state if TUX
+        // restarted between ClaimGranted and the attach handshake.
+        state
+    } else {
+        // Rebound: Idle → Attached via LeaseRebound
+        let (state, _) = target_attachment::transition(
+            TaState::Idle,
+            TaEvent::LeaseRebound { lease_id: adoption.lease_id.clone(), tux_id: adoption.tux_id.clone() },
+        ).map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
+        state
+    };
+
+    let (disconnect_tx, mut disconnect_rx) = tokio::sync::watch::channel(false);
+    let hb = spawn_heartbeat(router.clone(), "tux", disconnect_tx.clone());
+    let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
+
+    loop {
+        // Derive kennel_alive from machine state
+        let kennel_alive = matches!(
+            &machine_state,
+            TaState::Attached { kennel_alive: true, .. }
+        );
+
+        tokio::select! {
+            msg = node.recv_message() => {
+                let Some(msg) = msg else {
+                    hb.abort();
+                    let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
+                        .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
+                    return Ok(s);
+                };
+                // Check for mcm.attach_ok to transition Attaching → Attached.
+                // This must happen before the generic handler since it swallows attach_ok.
+                if let meerkat_comms::agent::types::CommsContent::Request { intent, .. } = &msg.content
+                    && intent.as_str() == "mcm.attach_ok"
+                    && matches!(machine_state, TaState::Attaching { .. })
+                {
+                    if let Ok((s, _)) = target_attachment::transition(
+                        machine_state.clone(), TaEvent::DirectLinkEstablished,
+                    ) {
+                        machine_state = s;
+                    }
+                    continue;
+                }
+                match handle_target_message(
+                    &msg, router, service, runtime_adapter, jsonl_store, model,
+                    system_prompt, comms_tools, provider, current_session_id, event_stream, true,
+                ).await {
+                    TargetLoopAction::Continue => {}
+                    TargetLoopAction::ExitProcess => std::process::exit(0),
+                }
+            }
+            event = event_stream.next() => {
+                let Some(envelope) = event else { continue };
+                let ev = &envelope.payload;
+                if should_forward(ev) && !forward_stream_event(router, "tux", ev).await {
+                    hb.abort();
+                    let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
+                        .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
+                    return Ok(s);
+                }
+            }
+            _ = kennel_heartbeat.tick(), if kennel_alive => {
+                let kennel_hb = build_signed_envelope(
+                    node.router.keypair_arc().as_ref(), &adoption.target_id,
+                    KennelPayload::TargetHeartbeat,
+                )?;
+                if write_envelope(write_half, &kennel_hb).await.is_err() {
+                    eprintln!("[target] kennel control lost — continuing direct session");
+                    if let Ok((s, _)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelHeartbeatFailed) {
+                        machine_state = s;
+                    }
+                }
+            }
+            maybe = read_envelope(reader), if kennel_alive => {
+                match maybe {
+                    Ok(Some(env)) => {
+                        if verify_envelope(&env).is_ok() {
+                            if let KennelPayload::Released { lease_id, .. } = env.payload
+                                && (lease_id.is_empty() || lease_id == adoption.lease_id)
+                            {
+                                hb.abort();
+                                let (s, _) = target_attachment::transition(machine_state, TaEvent::KennelReleased { lease_id })
+                                    .unwrap_or((TaState::Released, vec![]));
+                                return Ok(s);
+                            }
+                        }
+                    }
+                    _ => {
+                        eprintln!("[target] kennel control lost — continuing direct session");
+                        if let Ok((s, _)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelDisconnected) {
+                            machine_state = s;
+                        }
+                    }
+                }
+            }
+            _ = disconnect_rx.changed() => {
+                if *disconnect_rx.borrow() {
+                    hb.abort();
+                    let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
+                        .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
+                    return Ok(s);
+                }
+            }
+        }
+    }
+}
 
 fn should_forward(event: &AgentEvent) -> bool {
     matches!(

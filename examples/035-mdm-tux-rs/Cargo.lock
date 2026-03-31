@@ -2405,6 +2405,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "crossterm",
  "dirs",
@@ -2421,11 +2422,13 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
  "tui-markdown",
+ "uuid",
 ]
 
 [[package]]

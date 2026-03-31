@@ -9,15 +9,17 @@ use meerkat::{AgentFactory, AnthropicClient, GeminiClient, OpenAiClient};
 use meerkat_comms::agent::types::CommsMessage;
 use meerkat_comms::identity::Keypair;
 use meerkat_comms::router::CommsConfig;
-use meerkat_comms::{
-    Inbox, InboxItem, InboxSender, PeerMeta, Router, TrustedPeer, TrustedPeers,
-};
+use meerkat_comms::{Inbox, InboxItem, InboxSender, PeerMeta, Router, TrustedPeer, TrustedPeers};
 use meerkat_core::AgentLlmClient;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+
+pub mod kennel;
+pub mod machines;
+pub use kennel::*;
 
 // ── Provider auto-detection ───────────────────────────────────────────────────
 
@@ -118,7 +120,13 @@ impl CommsNode {
         ));
         let trusted = router.shared_trusted_peers();
         let keypair = router.keypair_arc();
-        Self { router, trusted, inbox, inbox_sender, keypair }
+        Self {
+            router,
+            trusted,
+            inbox,
+            inbox_sender,
+            keypair,
+        }
     }
 
     /// Start the TCP comms listener on `addr`. Returns the actual bound address
@@ -246,7 +254,9 @@ pub async fn run_registration_server(
     trusted: Arc<RwLock<TrustedPeers>>,
     new_target_tx: tokio::sync::mpsc::Sender<(String, String)>, // (name, addr) for TUI
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(&reg_addr).await.with_context(|| format!("bind reg {reg_addr}"))?;
+    let listener = TcpListener::bind(&reg_addr)
+        .await
+        .with_context(|| format!("bind reg {reg_addr}"))?;
     loop {
         let (stream, _peer) = listener.accept().await?;
         let pubkey = node_pubkey.clone();
@@ -313,13 +323,20 @@ async fn handle_registration(
         return Ok(());
     }
 
-    let resp = RegResponse { name: "tux".into(), pubkey: host_pubkey.into(), error: None };
+    let resp = RegResponse {
+        name: "tux".into(),
+        pubkey: host_pubkey.into(),
+        error: None,
+    };
     let mut resp_json = serde_json::to_string(&resp)?;
     resp_json.push('\n');
     writer.write_all(resp_json.as_bytes()).await?;
     writer.flush().await?;
 
-    eprintln!("[reg] registered target '{}' at {}", req.name, req.comms_addr);
+    eprintln!(
+        "[reg] registered target '{}' at {}",
+        req.name, req.comms_addr
+    );
     let _ = new_target_tx.send((req.name, req.comms_addr)).await;
     Ok(())
 }

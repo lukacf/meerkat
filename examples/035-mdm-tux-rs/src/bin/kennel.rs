@@ -153,15 +153,17 @@ async fn handle_connection(
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 register_target(
                     &state,
-                    target_id,
-                    name,
-                    pubkey,
-                    direct_addr,
-                    labels,
-                    capabilities,
-                    attached_tux_id.as_deref(),
-                    now_ms,
-                    tx.clone(),
+                    RegisterTargetArgs {
+                        target_id: target_id.clone(),
+                        name: name.clone(),
+                        pubkey: pubkey.clone(),
+                        direct_addr: direct_addr.clone(),
+                        labels: labels.clone(),
+                        capabilities: capabilities.clone(),
+                        attached_tux_id: attached_tux_id.clone(),
+                        now_ms,
+                        tx: tx.clone(),
+                    },
                     &keypair,
                     &kennel_id,
                 )?;
@@ -337,22 +339,29 @@ async fn handle_connection(
 
 // ── Machine-backed operations ────────────────────────────────────────────────
 
-fn register_target(
-    state: &Arc<Mutex<KennelState>>,
-    target_id: &str,
-    name: &str,
-    pubkey: &str,
-    direct_addr: &str,
-    labels: &BTreeMap<String, String>,
-    capabilities: &BTreeMap<String, bool>,
-    attached_tux_id: Option<&str>,
+struct RegisterTargetArgs {
+    target_id: String,
+    name: String,
+    pubkey: String,
+    direct_addr: String,
+    labels: BTreeMap<String, String>,
+    capabilities: BTreeMap<String, bool>,
+    attached_tux_id: Option<String>,
     now_ms: i64,
     tx: mpsc::UnboundedSender<SignedKennelEnvelope>,
+}
+
+fn register_target(
+    state: &Arc<Mutex<KennelState>>,
+    args: RegisterTargetArgs,
     keypair: &meerkat_comms::identity::Keypair,
     kennel_id: &str,
 ) -> anyhow::Result<()> {
+    let RegisterTargetArgs {
+        target_id, name, pubkey, direct_addr, labels, capabilities,
+        attached_tux_id, now_ms, tx,
+    } = args;
     let mut guard = state.lock();
-    // Name conflict check
     if let Some(existing) = guard
         .targets
         .values()
@@ -366,12 +375,12 @@ fn register_target(
     }
 
     // Use the machine for state initialization — never construct states directly.
-    let new_initial_state = match attached_tux_id {
+    let new_initial_state = match &attached_tux_id {
         Some(tux_id) => {
             let (state, _effects) = kennel_lease::transition(
                 State::Available,
                 Event::TargetReregisteredWithAttachment {
-                    tux_id: tux_id.to_string(),
+                    tux_id: tux_id.clone(),
                     recover_deadline_ms: now_ms + RECOVERY_WINDOW_MS,
                 },
             )
@@ -383,37 +392,26 @@ fn register_target(
 
     // If target is re-registering with a different address while claimed,
     // run the TargetAddressChanged transition on the OLD state first.
-    if let Some(existing) = guard.targets.get(target_id) {
-        let addr_changed = existing.direct_addr != direct_addr;
-        if addr_changed && !matches!(existing.lease_state, State::Available) {
-            // Transition the old state to release the stale claim
-            if let Ok((new_state, effects)) = kennel_lease::transition(
-                existing.lease_state.clone(),
-                Event::TargetAddressChanged,
-            ) {
-                // Apply effects before overwriting the target record
-                dispatch_effects(
-                    &effects,
-                    &mut guard,
-                    target_id,
-                    keypair,
-                    kennel_id,
-                );
-                // Don't use new_state — we'll set the initial state below
-                let _ = new_state;
-            }
-        }
+    if let Some(existing) = guard.targets.get(&target_id)
+        && existing.direct_addr != direct_addr
+        && !matches!(existing.lease_state, State::Available)
+        && let Ok((_new_state, effects)) = kennel_lease::transition(
+            existing.lease_state.clone(),
+            Event::TargetAddressChanged,
+        )
+    {
+        dispatch_effects(&effects, &mut guard, &target_id, keypair, kennel_id);
     }
 
     guard.targets.insert(
-        target_id.to_string(),
+        target_id.clone(),
         TargetRecord {
-            target_id: target_id.to_string(),
-            name: name.to_string(),
-            pubkey: pubkey.to_string(),
-            direct_addr: direct_addr.to_string(),
-            labels: labels.clone(),
-            capabilities: capabilities.clone(),
+            target_id,
+            name,
+            pubkey,
+            direct_addr,
+            labels,
+            capabilities,
             tx,
             lease_state: new_initial_state,
         },
@@ -648,17 +646,13 @@ fn handle_target_disconnect(
         for effect in &effects {
             match effect {
                 Effect::SendTargetLostToTux { tux_id, lease_id } => {
-                    if let Some(tux) = state.tuxes.get(tux_id) {
-                        if let Ok(env) = build_signed_envelope(
-                            keypair,
-                            kennel_id,
-                            KennelPayload::TargetLost {
-                                target_id: target_id.to_string(),
-                                lease_id: lease_id.clone(),
-                            },
-                        ) {
-                            let _ = tux.tx.send(env);
-                        }
+                    if let Some(tux) = state.tuxes.get(tux_id)
+                        && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::TargetLost {
+                            target_id: target_id.to_string(),
+                            lease_id: lease_id.clone(),
+                        })
+                    {
+                        let _ = tux.tx.send(env);
                     }
                 }
                 Effect::RemoveLease { lease_id } => {
@@ -749,106 +743,69 @@ fn dispatch_effects(
 ) {
     for effect in effects {
         match effect {
-            Effect::SendAdoptedToTarget {
-                lease_id,
-                tux_id,
-                expires_at_ms,
-            } => {
+            Effect::SendAdoptedToTarget { lease_id, tux_id, expires_at_ms } => {
                 let tux = state.tuxes.get(tux_id);
-                if let Some(target) = state.targets.get(target_id) {
-                    if let Ok(env) = build_signed_envelope(
-                        keypair,
-                        kennel_id,
-                        KennelPayload::Adopted {
-                            lease_id: lease_id.clone(),
-                            target_id: target_id.to_string(),
-                            tux_id: tux_id.clone(),
-                            tux_pubkey: tux.map(|t| t.pubkey.clone()).unwrap_or_default(),
-                            tux_direct_addr: tux
-                                .map(|t| t.direct_addr.clone())
-                                .unwrap_or_default(),
-                            expires_at_ms: *expires_at_ms,
-                        },
-                    ) {
-                        let _ = target.tx.send(env);
-                    }
+                if let Some(target) = state.targets.get(target_id)
+                    && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::Adopted {
+                        lease_id: lease_id.clone(),
+                        target_id: target_id.to_string(),
+                        tux_id: tux_id.clone(),
+                        tux_pubkey: tux.map(|t| t.pubkey.clone()).unwrap_or_default(),
+                        tux_direct_addr: tux.map(|t| t.direct_addr.clone()).unwrap_or_default(),
+                        expires_at_ms: *expires_at_ms,
+                    })
+                {
+                    let _ = target.tx.send(env);
                 }
             }
             Effect::SendReleasedToTarget { lease_id, reason } => {
-                if let Some(target) = state.targets.get(target_id) {
-                    if let Ok(env) = build_signed_envelope(
-                        keypair,
-                        kennel_id,
-                        KennelPayload::Released {
-                            lease_id: lease_id.clone(),
-                            reason: reason.clone(),
-                        },
-                    ) {
-                        let _ = target.tx.send(env);
-                    }
+                if let Some(target) = state.targets.get(target_id)
+                    && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::Released {
+                        lease_id: lease_id.clone(),
+                        reason: reason.clone(),
+                    })
+                {
+                    let _ = target.tx.send(env);
                 }
             }
-            Effect::SendClaimReleasedToTux {
-                lease_id,
-                tux_id,
-                reason,
-            } => {
-                if let Some(tux) = state.tuxes.get(tux_id) {
-                    if let Ok(env) = build_signed_envelope(
-                        keypair,
-                        kennel_id,
-                        KennelPayload::ClaimReleased {
-                            lease_id: lease_id.clone(),
-                            target_id: target_id.to_string(),
-                            reason: reason.clone(),
-                        },
-                    ) {
-                        let _ = tux.tx.send(env);
-                    }
+            Effect::SendClaimReleasedToTux { lease_id, tux_id, reason } => {
+                if let Some(tux) = state.tuxes.get(tux_id)
+                    && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::ClaimReleased {
+                        lease_id: lease_id.clone(),
+                        target_id: target_id.to_string(),
+                        reason: reason.clone(),
+                    })
+                {
+                    let _ = tux.tx.send(env);
                 }
             }
             Effect::SendTargetLostToTux { tux_id, lease_id } => {
-                if let Some(tux) = state.tuxes.get(tux_id) {
-                    if let Ok(env) = build_signed_envelope(
-                        keypair,
-                        kennel_id,
-                        KennelPayload::TargetLost {
-                            target_id: target_id.to_string(),
-                            lease_id: lease_id.clone(),
-                        },
-                    ) {
-                        let _ = tux.tx.send(env);
-                    }
+                if let Some(tux) = state.tuxes.get(tux_id)
+                    && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::TargetLost {
+                        target_id: target_id.to_string(),
+                        lease_id: lease_id.clone(),
+                    })
+                {
+                    let _ = tux.tx.send(env);
                 }
             }
-            Effect::SendLeaseRebound {
-                lease_id,
-                tux_id,
-                expires_at_ms,
-            } => {
-                // Include the TUX's current endpoint so the target uses
-                // the fresh address, not a stale cached one.
+            Effect::SendLeaseRebound { lease_id, tux_id, expires_at_ms } => {
                 let tux_info = state.tuxes.get(tux_id);
                 let tux_pubkey = tux_info.map(|t| t.pubkey.clone()).unwrap_or_default();
                 let tux_direct_addr = tux_info.map(|t| t.direct_addr.clone()).unwrap_or_default();
-                if let Some(target) = state.targets.get(target_id) {
-                    if let Ok(env) = build_signed_envelope(
-                        keypair,
-                        kennel_id,
-                        KennelPayload::LeaseRebound {
-                            lease_id: lease_id.clone(),
-                            target_id: target_id.to_string(),
-                            tux_id: tux_id.clone(),
-                            tux_pubkey,
-                            tux_direct_addr,
-                            expires_at_ms: *expires_at_ms,
-                        },
-                    ) {
-                        let _ = target.tx.send(env.clone());
-                        // Also send to TUX
-                        if let Some(tux) = state.tuxes.get(tux_id) {
-                            let _ = tux.tx.send(env);
-                        }
+                if let Some(target) = state.targets.get(target_id)
+                    && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::LeaseRebound {
+                        lease_id: lease_id.clone(),
+                        target_id: target_id.to_string(),
+                        tux_id: tux_id.clone(),
+                        tux_pubkey,
+                        tux_direct_addr,
+                        expires_at_ms: *expires_at_ms,
+                    })
+                {
+                    let _ = target.tx.send(env.clone());
+                    if let Some(tux) = state.tuxes.get(tux_id) {
+                        let _ = tux.tx.send(env);
                     }
                 }
             }

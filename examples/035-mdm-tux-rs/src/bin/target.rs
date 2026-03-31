@@ -956,28 +956,6 @@ struct ActiveAdoption {
     tux_direct_addr: String,
 }
 
-fn current_tux_attachment(
-    node: &CommsNode,
-    lease_id: String,
-    target_id: String,
-    tux_id: String,
-) -> Option<ActiveAdoption> {
-    let peer = node
-        .trusted
-        .read()
-        .peers
-        .iter()
-        .find(|p| p.name == "tux")
-        .cloned()?;
-    Some(ActiveAdoption {
-        lease_id,
-        target_id,
-        tux_id,
-        tux_pubkey: peer.pubkey.to_peer_id(),
-        tux_direct_addr: peer.addr,
-    })
-}
-
 async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let kennel_addr = find_flag(args, "--kennel").context("--kennel HOST:PORT is required")?;
     let name = find_flag(args, "--name")
@@ -1407,15 +1385,14 @@ async fn run_adopted_loop(
             maybe = read_envelope(reader), if kennel_alive => {
                 match maybe {
                     Ok(Some(env)) => {
-                        if verify_envelope(&env).is_ok() {
-                            if let KennelPayload::Released { lease_id, .. } = env.payload
-                                && (lease_id.is_empty() || lease_id == adoption.lease_id)
-                            {
-                                hb.abort();
-                                let (s, _) = target_attachment::transition(machine_state, TaEvent::KennelReleased { lease_id })
-                                    .unwrap_or((TaState::Released, vec![]));
-                                return Ok(s);
-                            }
+                        if verify_envelope(&env).is_ok()
+                            && let KennelPayload::Released { lease_id, .. } = env.payload
+                            && (lease_id.is_empty() || lease_id == adoption.lease_id)
+                        {
+                            hb.abort();
+                            let (s, _) = target_attachment::transition(machine_state, TaEvent::KennelReleased { lease_id })
+                                .unwrap_or((TaState::Released, vec![]));
+                            return Ok(s);
                         }
                     }
                     _ => {

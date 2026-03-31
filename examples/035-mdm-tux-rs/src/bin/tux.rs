@@ -133,7 +133,6 @@ struct PendingClaim {
     target_id: String,
     target_name: String,
     target_pubkey: meerkat_comms::identity::PubKey,
-    target_direct_addr: String,
     lease_id: String,
     attached: bool,
 }
@@ -747,7 +746,6 @@ async fn spawn_kennel_client(
                                             target_id: claim.target_id.clone(),
                                             target_name: claim.target_name.clone(),
                                             target_pubkey: pubkey,
-                                            target_direct_addr: claim.target_direct_addr.clone(),
                                             lease_id: claim.lease_id.clone(),
                                             attached: false,
                                         });
@@ -772,14 +770,19 @@ async fn spawn_kennel_client(
                             }
                             let _ = event_tx.send(TuiEvent::KennelClaimReleased { target_id, lease_id, reason }).await;
                         }
-                        KennelPayload::TargetLost { target_id, lease_id } => {
-                            if let Some(lease_id) = lease_id {
-                                if let Some(claim) = pending_claims.write().remove(&lease_id) {
-                                    router.remove_trusted_peer(&claim.target_pubkey);
-                                }
-                                let _ = event_tx.send(TuiEvent::KennelClaimReleased { target_id, lease_id, reason: "target_lost".into() }).await;
+                        KennelPayload::TargetLost { target_id, lease_id: Some(lease_id) } => {
+                            if let Some(claim) = pending_claims.write().remove(&lease_id) {
+                                router.remove_trusted_peer(&claim.target_pubkey);
                             }
+                            let _ = event_tx
+                                .send(TuiEvent::KennelClaimReleased {
+                                    target_id,
+                                    lease_id,
+                                    reason: "target_lost".into(),
+                                })
+                                .await;
                         }
+                        KennelPayload::TargetLost { .. } => {}
                         KennelPayload::LeaseRebound { lease_id, target_id, .. } => {
                             let target_name = {
                                 let mut guard = pending_claims.write();

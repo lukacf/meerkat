@@ -1356,16 +1356,21 @@ async fn run_adopted_loop(
                     return Ok(s);
                 };
                 // Check for mcm.attach_ok to transition Attaching → Attached.
-                // This must happen before the generic handler since it swallows attach_ok.
-                if let meerkat_comms::agent::types::CommsContent::Request { intent, .. } = &msg.content
+                // Validate that the lease_id matches the current adoption to
+                // reject stale acks from previous attach attempts.
+                if let meerkat_comms::agent::types::CommsContent::Request { intent, params, .. } = &msg.content
                     && intent.as_str() == "mcm.attach_ok"
-                    && matches!(machine_state, TaState::Attaching { .. })
+                    && let TaState::Attaching { lease_id: current_lid, .. } = &machine_state
                 {
-                    if let Ok((s, _)) = target_attachment::transition(
-                        machine_state.clone(), TaEvent::DirectLinkEstablished,
-                    ) {
+                    let ack_lid = params.get("lease_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if ack_lid == current_lid
+                        && let Ok((s, _)) = target_attachment::transition(
+                            machine_state.clone(), TaEvent::DirectLinkEstablished,
+                        )
+                    {
                         machine_state = s;
                     }
+                    // Stale or mismatched ack — silently drop
                     continue;
                 }
                 match handle_target_message(

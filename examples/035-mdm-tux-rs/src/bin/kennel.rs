@@ -662,13 +662,14 @@ fn handle_target_disconnect(
     // TUX can rebind. Without this, a transient kennel control blip
     // permanently destroys the claim even though the direct session is alive.
     match &target.lease_state {
-        State::Claimed { tux_id, .. } => {
-            let now_ms = chrono::Utc::now().timestamp_millis();
+        State::Claimed { tux_id, expires_at_ms, .. } => {
             let tux_id = tux_id.clone();
+            // Use the original lease TTL as the recovery deadline.
+            let recover_deadline_ms = *expires_at_ms;
             if let Some(target) = state.targets.get_mut(target_id) {
                 target.lease_state = State::RecoveringClaim {
                     tux_id,
-                    recover_deadline_ms: now_ms + RECOVERY_WINDOW_MS,
+                    recover_deadline_ms,
                 };
             }
             // Clean up the old lease index entry — a fresh one is created on rebind
@@ -727,7 +728,6 @@ fn handle_tux_disconnect(
     // For non-Claimed targets (AwaitingAck, AwaitingAttach, RecoveringClaim):
     // release immediately since these are in-flight handshakes that can't
     // complete without the TUX.
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let target_ids: Vec<String> = state.targets.keys().cloned().collect();
     for target_id in target_ids {
         let Some(target) = state.targets.get(&target_id) else {
@@ -735,9 +735,12 @@ fn handle_tux_disconnect(
         };
         match &target.lease_state {
             State::Claimed { tux_id: owner, expires_at_ms, .. } if owner == tux_id => {
-                // Transition to RecoveringClaim. Use the lease TTL as the
-                // recovery deadline so expired leases don't linger forever.
-                let recover_deadline_ms = (*expires_at_ms).max(now_ms + RECOVERY_WINDOW_MS);
+                // Transition to RecoveringClaim. Recovery deadline is bounded
+                // by the original lease TTL — don't extend a near-expired
+                // lease by an extra 60s, which would block other TUXes from
+                // reclaiming the target when the original TTL should have
+                // already expired.
+                let recover_deadline_ms = *expires_at_ms;
                 let owner = owner.clone();
                 // Clean up old lease index
                 let stale: Vec<String> = state.lease_index.iter()

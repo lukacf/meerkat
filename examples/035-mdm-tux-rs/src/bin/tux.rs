@@ -853,6 +853,9 @@ async fn spawn_kennel_client(
                             }
                         }
                         KennelClientCommand::ReleaseTarget { lease_id } => {
+                            // Remove the claim locally BEFORE sending so a
+                            // reconnect can't rebind a user-released target.
+                            pending_claims.write().remove(&lease_id);
                             if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ReleaseTargets { lease_ids: vec![lease_id] }).await {
                                 break;
                             }

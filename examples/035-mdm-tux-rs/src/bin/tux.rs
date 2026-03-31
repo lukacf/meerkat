@@ -650,6 +650,14 @@ async fn spawn_kennel_client(
             };
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
+        // On reconnect, drop in-flight claims (attached=false) that can't
+        // complete because the old kennel session is gone. Without this,
+        // a target's mcm.attach for a stale claim creates a ghost session
+        // that the kennel knows nothing about.
+        {
+            let mut guard = pending_claims.write();
+            guard.retain(|_, claim| claim.attached);
+        }
         if !send_kennel_message(
             &mut write_half,
             &router,
@@ -978,15 +986,17 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
                                 .cloned()
                         };
                         if let Some(claim) = matched {
-                            let _ = router
-                                .send(
+                            let _ = tokio::time::timeout(
+                                SEND_TIMEOUT,
+                                router.send(
                                     &msg.from_peer,
                                     MessageKind::Request {
                                         intent: "mcm.attach_ok".into(),
                                         params: serde_json::json!({ "lease_id": lease_id }),
                                     },
-                                )
-                                .await;
+                                ),
+                            )
+                            .await;
                             let _ = kennel_tx.send(KennelClientCommand::AttachConfirmed {
                                 lease_id: lease_id.to_string(),
                             });

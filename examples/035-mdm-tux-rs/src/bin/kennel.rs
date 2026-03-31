@@ -390,17 +390,31 @@ fn register_target(
         None => State::Available,
     };
 
-    // If target is re-registering with a different address while claimed,
-    // run the TargetAddressChanged transition on the OLD state first.
-    if let Some(existing) = guard.targets.get(&target_id)
-        && existing.direct_addr != direct_addr
-        && !matches!(existing.lease_state, State::Available)
-        && let Ok((_new_state, effects)) = kennel_lease::transition(
-            existing.lease_state.clone(),
-            Event::TargetAddressChanged,
-        )
-    {
-        dispatch_effects(&effects, &mut guard, &target_id, keypair, kennel_id);
+    // Extract cleanup data from the old record before mutating guard.
+    let old_record_info = guard.targets.get(&target_id).map(|existing| {
+        let old_lease_id = match &existing.lease_state {
+            State::AwaitingAck { lease_id, .. }
+            | State::AwaitingAttach { lease_id, .. }
+            | State::Claimed { lease_id, .. } => Some(lease_id.clone()),
+            _ => None,
+        };
+        let addr_changed = existing.direct_addr != direct_addr;
+        let old_state = existing.lease_state.clone();
+        (old_lease_id, addr_changed, old_state)
+    });
+    if let Some((old_lease_id, addr_changed, old_state)) = old_record_info {
+        // Clean up orphaned lease_index entries from the old state.
+        if let Some(lid) = &old_lease_id {
+            guard.lease_index.remove(lid);
+        }
+        // If address changed while claimed, notify TUX via TargetAddressChanged.
+        if addr_changed
+            && !matches!(old_state, State::Available)
+            && let Ok((_new_state, effects)) =
+                kennel_lease::transition(old_state, Event::TargetAddressChanged)
+        {
+            dispatch_effects(&effects, &mut guard, &target_id, keypair, kennel_id);
+        }
     }
 
     guard.targets.insert(

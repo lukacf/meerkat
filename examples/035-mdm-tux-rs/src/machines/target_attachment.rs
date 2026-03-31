@@ -141,6 +141,9 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         (State::Attaching { .. }, Event::KennelDisconnected) => {
             Ok((State::AttachFailed, vec![Effect::ReregisterClean]))
         }
+        (State::Attaching { .. }, Event::KennelHeartbeatFailed) => {
+            Ok((State::AttachFailed, vec![Effect::ReregisterClean]))
+        }
         (State::Attaching { .. }, Event::AttachSendFailed) => {
             Ok((State::AttachFailed, vec![]))
         }
@@ -351,5 +354,15 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().reason, "terminal state");
+    }
+
+    #[test]
+    fn attaching_kennel_heartbeat_failed() {
+        let (state, effects) = transition(
+            State::Attaching { lease_id: lid(), tux_id: tid() },
+            Event::KennelHeartbeatFailed,
+        ).unwrap();
+        assert_eq!(state, State::AttachFailed);
+        assert_eq!(effects, vec![Effect::ReregisterClean]);
     }
 }

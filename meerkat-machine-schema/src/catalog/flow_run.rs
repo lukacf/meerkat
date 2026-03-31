@@ -1979,7 +1979,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 ],
             },
         ],
-        ci_step_limit: Some(0),
+        ci_step_limit: Some(2),
         effect_dispositions: vec![
             disposition("EmitFlowRunNotice", EffectDisposition::External),
             disposition("EmitStepNotice", EffectDisposition::External),

@@ -194,24 +194,55 @@ impl FlowFrameEngine {
                 .unwrap_or_default(),
         };
 
-        // [P1] Fail any Running nodes left by a previous process crash.
-        // When a node is admitted (popped from ready_queue → Running) and the
-        // process dies before the step completes, the persisted frame has an
-        // empty ready_queue with at least one Running node. Those in-flight
-        // step handles are gone — we fail the nodes now so that their dependents
-        // become eligible for skip/fail admission in the loop below.
-        // Ref: dogma Rule 3 — the machine's node_status is the authoritative
-        // source of which nodes are running; do not infer completion from queue size.
+        // [P1] Resolve Running nodes left by a previous process crash.
+        // Consult the authoritative source for each running node's kind:
+        //  - Step nodes: in-flight work is lost → fail the node.
+        //  - Loop nodes: check the persisted LoopSnapshot. If the loop already
+        //    reached a terminal phase (Completed/Exhausted), complete the node.
+        //    If still Running or absent, fail it. (Dogma Rule 13: the LoopSnapshot
+        //    is the authoritative source; the frame's node_status is stale.)
         loop {
             let snap = self.require_frame(run_id, frame_id).await?;
             let running = running_node_ids(&snap.kernel_state);
             if running.is_empty() {
                 break;
             }
+            let run_for_loops = self
+                .run_store
+                .get_run(run_id)
+                .await?
+                .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
             for node_id in &running {
-                self.frame_kernel
-                    .fail_node(run_id, frame_id, node_id)
-                    .await?;
+                let is_loop = spec
+                    .nodes
+                    .get(node_id)
+                    .is_some_and(|n| matches!(n, FlowNodeSpec::RepeatUntil(_)));
+                if is_loop {
+                    // Check if the persisted loop snapshot is already terminal.
+                    let loop_instance_id =
+                        LoopInstanceId::from(format!("{frame_id}::{node_id}").as_str());
+                    let loop_terminal =
+                        run_for_loops
+                            .loops
+                            .get(&loop_instance_id)
+                            .is_some_and(|ls| {
+                                matches!(ls.kernel_state.phase.as_str(), "Completed" | "Exhausted")
+                            });
+                    if loop_terminal {
+                        self.frame_kernel
+                            .complete_node(run_id, frame_id, node_id)
+                            .await?;
+                    } else {
+                        self.frame_kernel
+                            .fail_node(run_id, frame_id, node_id)
+                            .await?;
+                    }
+                } else {
+                    // Step node: in-flight work is gone.
+                    self.frame_kernel
+                        .fail_node(run_id, frame_id, node_id)
+                        .await?;
+                }
             }
         }
 

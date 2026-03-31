@@ -1613,9 +1613,26 @@ struct FlowTurnExecutorAdapter {
     run_store: Arc<dyn crate::store::MobRunStore>,
     emitter: MobEventEmitter,
     topology: Arc<MobTopologyService>,
+    supervisor: Supervisor,
 }
 
 impl FlowTurnExecutorAdapter {
+    /// Escalate to supervisor if configured (mirrors flat-step path's maybe_escalate_supervisor).
+    async fn maybe_escalate(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        reason: &str,
+    ) -> Result<(), MobError> {
+        if self.config.supervisor.is_none() {
+            return Ok(());
+        }
+        self.supervisor
+            .escalate(&self.config, run_id, step_id, reason)
+            .await?;
+        self.supervisor.force_reset().await
+    }
+
     fn new(
         executor: Arc<dyn FlowTurnExecutor>,
         handle: MobHandle,
@@ -1624,6 +1641,7 @@ impl FlowTurnExecutorAdapter {
         emitter: MobEventEmitter,
         topology: Arc<MobTopologyService>,
     ) -> Self {
+        let supervisor = Supervisor::new(handle.clone(), emitter.clone());
         Self {
             executor,
             handle,
@@ -1631,6 +1649,7 @@ impl FlowTurnExecutorAdapter {
             run_store,
             emitter,
             topology,
+            supervisor,
         }
     }
 }
@@ -1845,6 +1864,7 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                                 self.emitter
                                     .step_failed(run_id.clone(), step_id.clone(), reason.clone())
                                     .await?;
+                                self.maybe_escalate(run_id, step_id, &reason).await?;
                                 return Err(MobError::SchemaValidation {
                                     step_id: step_id.clone(),
                                     message: reason,
@@ -1918,6 +1938,7 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                             self.emitter
                                 .step_failed(run_id.clone(), step_id.clone(), reason.clone())
                                 .await?;
+                            self.maybe_escalate(run_id, step_id, &reason).await?;
                             return Err(MobError::Internal(format!(
                                 "output parse failed for step '{step_id}' after {attempt} retries: {reason}"
                             )));
@@ -1963,6 +1984,7 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                     self.emitter
                         .step_failed(run_id.clone(), step_id.clone(), reason.clone())
                         .await?;
+                    self.maybe_escalate(run_id, step_id, &reason).await?;
                     return Err(MobError::Internal(format!(
                         "step '{step_id}' failed after {attempt} retries: {reason}"
                     )));
@@ -1994,6 +2016,7 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                     self.emitter
                         .step_failed(run_id.clone(), step_id.clone(), reason.clone())
                         .await?;
+                    self.maybe_escalate(run_id, step_id, &reason).await?;
                     return Err(MobError::Internal(reason));
                 }
             }

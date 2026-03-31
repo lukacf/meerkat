@@ -78,6 +78,7 @@ impl SpecValidator {
         spec: &FrameSpec,
         depth: usize,
         seen_loop_ids: &mut BTreeSet<crate::ids::LoopId>,
+        seen_step_ids: &mut BTreeSet<StepId>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         if depth > 32 {
@@ -97,6 +98,22 @@ impl SpecValidator {
 
             match node_spec {
                 FlowNodeSpec::Step(step_spec) => {
+                    // StepId must be unique across the entire flow graph so that
+                    // from_run_aggregate's iteration order doesn't change steps.* values
+                    // after a restart (dogma Rule 1).
+                    if !seen_step_ids.insert(step_spec.step_id.clone()) {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::FlowCycleDetected,
+                            message: format!(
+                                "duplicate step_id '{}' in flow '{flow_name}'; \
+                                 step IDs must be unique across the entire frame graph \
+                                 (including loop bodies) to ensure deterministic resume",
+                                step_spec.step_id
+                            ),
+                            location: Some(format!("{node_loc}.step_id")),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
                     // step_id must exist in the enclosing flow.steps (it drives execution).
                     if !flow.steps.contains_key(&step_spec.step_id) {
                         diagnostics.push(Diagnostic {
@@ -166,6 +183,7 @@ impl SpecValidator {
                         &repeat_spec.body,
                         depth + 1,
                         seen_loop_ids,
+                        seen_step_ids,
                         diagnostics,
                     );
                 }
@@ -318,6 +336,7 @@ impl SpecValidator {
         // Validate root FrameSpec if present.
         if let Some(root) = &flow.root {
             let mut seen_loop_ids = BTreeSet::new();
+            let mut seen_step_ids = BTreeSet::new();
             Self::validate_frame_spec(
                 definition,
                 flow_name,
@@ -326,6 +345,7 @@ impl SpecValidator {
                 root,
                 0,
                 &mut seen_loop_ids,
+                &mut seen_step_ids,
                 diagnostics,
             );
         }

@@ -56,6 +56,13 @@ use mdm_tux::{
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
+use mdm_tux::machines::target_session_binding::{
+    self,
+    Effect as SessionBindingEffect,
+    Event as SessionBindingEvent,
+    State as SessionBindingState,
+};
+
 const SYSTEM_PROMPT: &str = "\
 You are a managed system agent named '{name}' controlled by a human operator via TUX.
 Execute user requests using your available tools. Respond conversationally.
@@ -163,6 +170,13 @@ async fn main() -> anyhow::Result<()> {
         .subscribe_session_events(&current_session_id)
         .await
         .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
+    let (mut session_binding_state, _) = target_session_binding::transition(
+        SessionBindingState::Unbound,
+        SessionBindingEvent::BootResolved {
+            session_id: current_session_id.clone(),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("session binding bootstrap: {e}"))?;
 
     // ── 6. Reconnection loop ─────────────────────────────────────────────────
     let host_comms_port: u16 = host_addr
@@ -269,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
             &system_prompt,
             &comms_tools,
             &provider,
+            &mut session_binding_state,
             &mut current_session_id,
             &mut event_stream,
         )
@@ -294,6 +309,7 @@ async fn run_inbox_loop(
     system_prompt: &str,
     comms_tools: &Arc<dyn AgentToolDispatcher>,
     provider: &str,
+    session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
 ) {
@@ -312,6 +328,7 @@ async fn run_inbox_loop(
                     system_prompt,
                     comms_tools,
                     provider,
+                    session_binding_state,
                     current_session_id,
                     event_stream,
                     false,
@@ -343,6 +360,12 @@ enum TargetLoopAction {
     ExitProcess,
 }
 
+fn active_session_id(binding_state: &SessionBindingState) -> &SessionId {
+    binding_state
+        .current_session_id()
+        .expect("target session binding must be bound during runtime")
+}
+
 use mdm_tux::machines::target_attachment::{
     self,
     State as TaState,
@@ -358,6 +381,75 @@ fn adopted_exit_hint(terminal: &TaState) -> Option<String> {
     }
 }
 
+#[allow(dead_code)] // Will be used when all effect processing is centralized
+async fn apply_target_attachment_effects(
+    node: &mut CommsNode,
+    router: &Arc<meerkat_comms::Router>,
+    effects: &[TaEffect],
+    heartbeat: &mut Option<tokio::task::JoinHandle<()>>,
+    disconnect_tx: &tokio::sync::watch::Sender<bool>,
+) -> anyhow::Result<bool> {
+    for effect in effects {
+        match effect {
+            TaEffect::EnsureTuxPeer {
+                tux_pubkey,
+                tux_direct_addr,
+            } => {
+                let tux_pk = meerkat_comms::identity::PubKey::from_peer_id(tux_pubkey)
+                    .context("parse adopted tux pubkey")?;
+                let stale_keys: Vec<_> = node
+                    .trusted
+                    .read()
+                    .peers
+                    .iter()
+                    .filter(|p| p.name == "tux")
+                    .map(|p| p.pubkey)
+                    .collect();
+                for pk in stale_keys {
+                    node.router.remove_trusted_peer(&pk);
+                }
+                node.add_peer(TrustedPeer {
+                    name: "tux".into(),
+                    pubkey: tux_pk,
+                    addr: tux_direct_addr.clone(),
+                    meta: PeerMeta::default(),
+                });
+            }
+            TaEffect::SendAttachRequest { target_id, lease_id } => {
+                let attach_fut = router.send(
+                    "tux",
+                    MessageKind::Request {
+                        intent: "mcm.attach".into(),
+                        params: serde_json::json!({ "lease_id": lease_id, "target_id": target_id }),
+                    },
+                );
+                if !matches!(
+                    tokio::time::timeout(Duration::from_secs(10), attach_fut).await,
+                    Ok(Ok(_))
+                ) {
+                    return Ok(false);
+                }
+            }
+            TaEffect::StartDirectHeartbeat => {
+                if heartbeat.is_none() {
+                    *heartbeat = Some(spawn_heartbeat(
+                        router.clone(),
+                        "tux",
+                        disconnect_tx.clone(),
+                    ));
+                }
+            }
+            TaEffect::StopDirectHeartbeat => {
+                if let Some(hb) = heartbeat.take() {
+                    hb.abort();
+                }
+            }
+            TaEffect::ReregisterWithHint { .. } | TaEffect::ReregisterClean => {}
+        }
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_target_message(
     msg: &meerkat_comms::agent::types::CommsMessage,
@@ -369,6 +461,7 @@ async fn handle_target_message(
     system_prompt: &str,
     comms_tools: &Arc<dyn AgentToolDispatcher>,
     provider: &str,
+    session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
     ignore_attach_ok: bool,
@@ -396,6 +489,7 @@ async fn handle_target_message(
                 system_prompt,
                 comms_tools,
                 provider,
+                session_binding_state,
                 current_session_id,
                 event_stream,
             )
@@ -439,7 +533,7 @@ async fn handle_target_message(
             });
 
             match runtime_adapter
-                .accept_input(current_session_id, peer_input)
+                .accept_input(active_session_id(session_binding_state), peer_input)
                 .await
             {
                 Ok(outcome) => {
@@ -457,7 +551,7 @@ async fn handle_target_message(
                         flow_tool_overlay: None,
                         additional_instructions: None,
                     };
-                    if let Err(e) = service.start_turn(current_session_id, req).await {
+                    if let Err(e) = service.start_turn(active_session_id(session_binding_state), req).await {
                         eprintln!("[target] fallback start_turn error: {e}");
                     }
                 }
@@ -541,6 +635,7 @@ async fn handle_command(
     system_prompt: &str,
     comms_tools: &Arc<dyn AgentToolDispatcher>,
     provider: &str,
+    session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
 ) -> String {
@@ -553,6 +648,7 @@ async fn handle_command(
             system_prompt,
             comms_tools,
             provider,
+            session_binding_state,
             current_session_id,
             event_stream,
         )
@@ -616,6 +712,7 @@ async fn handle_command(
                     system_prompt,
                     comms_tools,
                     provider,
+                    session_binding_state,
                     current_session_id,
                     event_stream,
                 )
@@ -710,44 +807,91 @@ async fn switch_session(
     system_prompt: &str,
     comms_tools: &Arc<dyn AgentToolDispatcher>,
     provider: &str,
+    session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
 ) -> anyhow::Result<SessionId> {
-    let old_session_id = current_session_id.clone();
-
-    // Create the new session first. If this fails, the old session stays
-    // fully registered with its runtime loop — no degraded state.
-    let new_id = setup_session(
-        service,
-        runtime_adapter,
-        resume_id,
-        model,
-        system_prompt,
-        comms_tools,
-        provider,
+    let request_event = match resume_id.clone() {
+        Some(session_id) => SessionBindingEvent::ResumeRequested { session_id },
+        None => SessionBindingEvent::CreateNewRequested,
+    };
+    let (next_state, effects) = target_session_binding::transition(
+        session_binding_state.clone(),
+        request_event,
     )
-    .await?;
+    .map_err(|e| anyhow::anyhow!("session binding request: {e}"))?;
+    *session_binding_state = next_state;
 
-    let new_event_stream = service
-        .subscribe_session_events(&new_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
+    let mut new_id: Option<SessionId> = None;
+    for effect in effects {
+        if let SessionBindingEffect::SetupSession { resume_id } = effect {
+            new_id = Some(
+                setup_session(
+                    service,
+                    runtime_adapter,
+                    resume_id,
+                    model,
+                    system_prompt,
+                    comms_tools,
+                    provider,
+                )
+                .await?,
+            );
+        }
+    }
+    let Some(new_id) = new_id else {
+        *current_session_id = active_session_id(session_binding_state).clone();
+        return Ok(current_session_id.clone());
+    };
 
-    // Only tear down the old session if we actually switched to a different one.
-    // Resuming the current session (new_id == old) is a valid no-op — tearing
-    // it down would destroy the session we just re-opened.
-    if new_id != old_session_id {
-        runtime_adapter.unregister_session(&old_session_id).await;
-        if let Err(e) = service.discard_live_session(&old_session_id).await {
-            // NotFound is expected if the session was never materialized or already archived.
-            if !matches!(e, SessionError::NotFound { .. }) {
-                eprintln!("[target] warning: discard old session {old_session_id}: {e}");
+    let (next_state, effects) = target_session_binding::transition(
+        session_binding_state.clone(),
+        SessionBindingEvent::SwitchPrepared {
+            session_id: new_id.clone(),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("session binding prepared: {e}"))?;
+    *session_binding_state = next_state;
+
+    let mut new_event_stream = None;
+    for effect in effects {
+        match effect {
+            SessionBindingEffect::SubscribeSessionEvents { session_id } => {
+                new_event_stream = Some(
+                    service
+                        .subscribe_session_events(&session_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?,
+                );
             }
+            SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
+                runtime_adapter.unregister_session(&session_id).await;
+            }
+            SessionBindingEffect::DiscardLiveSession { session_id } => {
+                if let Err(e) = service.discard_live_session(&session_id).await
+                    && !matches!(e, SessionError::NotFound { .. })
+                {
+                    eprintln!("[target] warning: discard old session {session_id}: {e}");
+                }
+            }
+            SessionBindingEffect::SetupSession { .. } => {}
         }
     }
 
-    *event_stream = new_event_stream;
-    *current_session_id = new_id.clone();
+    let (next_state, effects) = target_session_binding::transition(
+        session_binding_state.clone(),
+        SessionBindingEvent::SwitchCommitted {
+            session_id: new_id.clone(),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("session binding commit: {e}"))?;
+    debug_assert!(effects.is_empty());
+    *session_binding_state = next_state;
+
+    if let Some(stream) = new_event_stream {
+        *event_stream = stream;
+    }
+    *current_session_id = active_session_id(session_binding_state).clone();
 
     Ok(new_id)
 }
@@ -1019,6 +1163,13 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         .subscribe_session_events(&current_session_id)
         .await
         .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?;
+    let (mut session_binding_state, _) = target_session_binding::transition(
+        SessionBindingState::Unbound,
+        SessionBindingEvent::BootResolved {
+            session_id: current_session_id.clone(),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("session binding bootstrap: {e}"))?;
 
     let explicit_ip = find_flag(args, "--advertise");
     let mut node = node;
@@ -1148,6 +1299,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &system_prompt,
                                 &comms_tools,
                                 &provider,
+                                &mut session_binding_state,
                                 &mut current_session_id,
                                 &mut event_stream,
                             ).await?;
@@ -1207,6 +1359,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &system_prompt,
                                 &comms_tools,
                                 &provider,
+                                &mut session_binding_state,
                                 &mut current_session_id,
                                 &mut event_stream,
                             ).await?;
@@ -1257,125 +1410,85 @@ async fn run_adopted_loop(
     system_prompt: &str,
     comms_tools: &Arc<dyn AgentToolDispatcher>,
     provider: &str,
+    session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
 ) -> anyhow::Result<TaState> {
-    // Initialize the machine based on whether this is a fresh adoption or a rebound.
-    let mut machine_state = if attach_required {
-        // Fresh adoption: Idle → Attaching via Adopted event
-        let (state, effects) = target_attachment::transition(
-            TaState::Idle,
-            TaEvent::Adopted {
-                lease_id: adoption.lease_id.clone(),
-                tux_id: adoption.tux_id.clone(),
-                tux_pubkey: adoption.tux_pubkey.clone(),
-                tux_direct_addr: adoption.tux_direct_addr.clone(),
-            },
-        ).map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
-
-        // Process InitiateDirectLink effect
-        for eff in &effects {
-            if let TaEffect::InitiateDirectLink { tux_pubkey, tux_direct_addr, lease_id, .. } = eff {
-                let tux_pk = meerkat_comms::identity::PubKey::from_peer_id(tux_pubkey)
-                    .context("parse adopted tux pubkey")?;
-                let stale_keys: Vec<_> = node.trusted.read().peers.iter()
-                    .filter(|p| p.name == "tux").map(|p| p.pubkey).collect();
-                for pk in stale_keys { node.router.remove_trusted_peer(&pk); }
-                node.add_peer(TrustedPeer {
-                    name: "tux".into(), pubkey: tux_pk,
-                    addr: tux_direct_addr.clone(), meta: PeerMeta::default(),
-                });
-                let attach_fut = router.send("tux", MessageKind::Request {
-                    intent: "mcm.attach".into(),
-                    params: serde_json::json!({ "lease_id": lease_id, "target_id": adoption.target_id }),
-                });
-                match tokio::time::timeout(Duration::from_secs(10), attach_fut).await {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("[target] attach to tux failed: {e}");
-                        let (s, _) = target_attachment::transition(state.clone(), TaEvent::AttachSendFailed)
-                            .unwrap_or((TaState::AttachFailed, vec![]));
-                        return Ok(s);
-                    }
-                    Err(_) => {
-                        eprintln!("[target] attach to tux timed out");
-                        let (s, _) = target_attachment::transition(state.clone(), TaEvent::AttachSendFailed)
-                            .unwrap_or((TaState::AttachFailed, vec![]));
-                        return Ok(s);
-                    }
-                }
-            }
-        }
-
-        // Stay in Attaching — transition to Attached only when we receive
-        // mcm.attach_ok from TUX. This prevents entering Attached state if TUX
-        // restarted between ClaimGranted and the attach handshake.
-        state
-    } else {
-        // Rebound: Idle → Attached via LeaseRebound.
-        // Refresh the TUX peer with the fresh endpoint from the kennel
-        // before resuming direct I/O. TUX may have reconnected with a
-        // different --listen/--advertise address since the original claim.
-        let tux_pk = meerkat_comms::identity::PubKey::from_peer_id(&adoption.tux_pubkey)
-            .context("parse rebound tux pubkey")?;
-        let stale_keys: Vec<_> = node.trusted.read().peers.iter()
-            .filter(|p| p.name == "tux").map(|p| p.pubkey).collect();
-        for pk in stale_keys { node.router.remove_trusted_peer(&pk); }
-        node.add_peer(TrustedPeer {
-            name: "tux".into(), pubkey: tux_pk,
-            addr: adoption.tux_direct_addr.clone(), meta: PeerMeta::default(),
-        });
-
-        let (state, _) = target_attachment::transition(
-            TaState::Idle,
-            TaEvent::LeaseRebound { lease_id: adoption.lease_id.clone(), tux_id: adoption.tux_id.clone() },
-        ).map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
-        state
-    };
-
     let (disconnect_tx, mut disconnect_rx) = tokio::sync::watch::channel(false);
-    let hb = spawn_heartbeat(router.clone(), "tux", disconnect_tx.clone());
+    let mut heartbeat: Option<tokio::task::JoinHandle<()>> = None;
+    let initial_event = if attach_required {
+        TaEvent::Adopted {
+            target_id: adoption.target_id.clone(),
+            lease_id: adoption.lease_id.clone(),
+            tux_id: adoption.tux_id.clone(),
+            tux_pubkey: adoption.tux_pubkey.clone(),
+            tux_direct_addr: adoption.tux_direct_addr.clone(),
+        }
+    } else {
+        TaEvent::LeaseRebound {
+            target_id: adoption.target_id.clone(),
+            lease_id: adoption.lease_id.clone(),
+            tux_id: adoption.tux_id.clone(),
+            tux_pubkey: adoption.tux_pubkey.clone(),
+            tux_direct_addr: adoption.tux_direct_addr.clone(),
+        }
+    };
+    let (mut machine_state, effects) = target_attachment::transition(TaState::Idle, initial_event)
+        .map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
+    if !apply_target_attachment_effects(
+        node,
+        router,
+        &effects,
+        &mut heartbeat,
+        &disconnect_tx,
+    )
+    .await?
+    {
+        let (state, _effects) =
+            target_attachment::transition(machine_state, TaEvent::AttachSendFailed)
+                .unwrap_or((TaState::AttachFailed, vec![]));
+        return Ok(state);
+    }
+
     let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
 
     loop {
-        // Poll kennel arms when in Attaching (waiting for attach_ok while
-        // kennel may send Released for attach_timeout) or Attached with
-        // kennel still alive. Without this, attach-timeout releases are
-        // missed and the target stays stuck in the adopted loop.
-        let poll_kennel = matches!(
-            &machine_state,
-            TaState::Attaching { .. } | TaState::Attached { kennel_alive: true, .. }
-        );
+        let poll_kennel = matches!(&machine_state, TaState::Attaching { .. } | TaState::Attached { .. });
 
         tokio::select! {
             msg = node.recv_message() => {
                 let Some(msg) = msg else {
-                    hb.abort();
+                    if let Some(h) = heartbeat.take() { h.abort(); }
                     let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
                         .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
                     return Ok(s);
                 };
-                // Check for mcm.attach_ok to transition Attaching → Attached.
-                // Validate that the lease_id matches the current adoption to
-                // reject stale acks from previous attach attempts.
+                // mcm.attach_ok: lease correlation is machine-owned via DirectAttachAck.
+                // The machine rejects mismatched lease_ids and wrong states.
                 if let meerkat_comms::agent::types::CommsContent::Request { intent, params, .. } = &msg.content
                     && intent.as_str() == "mcm.attach_ok"
-                    && let TaState::Attaching { lease_id: current_lid, .. } = &machine_state
+                    && matches!(machine_state, TaState::Attaching { .. })
                 {
                     let ack_lid = params.get("lease_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if ack_lid == current_lid
-                        && let Ok((s, _)) = target_attachment::transition(
-                            machine_state.clone(), TaEvent::DirectLinkEstablished,
-                        )
-                    {
+                    if let Ok((s, effects)) = target_attachment::transition(
+                        machine_state.clone(),
+                        TaEvent::DirectAttachAck { lease_id: ack_lid.to_string() },
+                    ) {
                         machine_state = s;
+                        let _ = apply_target_attachment_effects(
+                            node,
+                            router,
+                            &effects,
+                            &mut heartbeat,
+                            &disconnect_tx,
+                        )
+                        .await?;
                     }
-                    // Stale or mismatched ack — silently drop
                     continue;
                 }
                 match handle_target_message(
                     &msg, router, service, runtime_adapter, jsonl_store, model,
-                    system_prompt, comms_tools, provider, current_session_id, event_stream, true,
+                    system_prompt, comms_tools, provider, session_binding_state, current_session_id, event_stream, true,
                 ).await {
                     TargetLoopAction::Continue => {}
                     TargetLoopAction::ExitProcess => std::process::exit(0),
@@ -1385,7 +1498,7 @@ async fn run_adopted_loop(
                 let Some(envelope) = event else { continue };
                 let ev = &envelope.payload;
                 if should_forward(ev) && !forward_stream_event(router, "tux", ev).await {
-                    hb.abort();
+                    if let Some(h) = heartbeat.take() { h.abort(); }
                     let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
                         .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
                     return Ok(s);
@@ -1398,17 +1511,21 @@ async fn run_adopted_loop(
                 )?;
                 if write_envelope(write_half, &kennel_hb).await.is_err() {
                     eprintln!("[target] kennel control lost");
-                    if let Ok((s, _)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelHeartbeatFailed) {
+                    if let Ok((s, effects)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelHeartbeatFailed) {
                         machine_state = s;
+                        let _ = apply_target_attachment_effects(
+                            node,
+                            router,
+                            &effects,
+                            &mut heartbeat,
+                            &disconnect_tx,
+                        )
+                        .await?;
                     }
-                    // If the machine reached a terminal state (e.g. AttachFailed
-                    // during Attaching), exit immediately instead of lingering
-                    // with a dead kennel and no re-registration path.
                     if machine_state.is_terminal() {
-                        hb.abort();
+                        if let Some(h) = heartbeat.take() { h.abort(); }
                         return Ok(machine_state);
                     }
-                    eprintln!("[target] continuing direct session");
                 }
             }
             maybe = read_envelope(reader), if poll_kennel => {
@@ -1416,9 +1533,8 @@ async fn run_adopted_loop(
                     Ok(Some(env)) => {
                         if verify_envelope(&env).is_ok()
                             && let KennelPayload::Released { lease_id, .. } = env.payload
-                            && (lease_id.is_empty() || lease_id == adoption.lease_id)
                         {
-                            hb.abort();
+                            if let Some(h) = heartbeat.take() { h.abort(); }
                             let (s, _) = target_attachment::transition(machine_state, TaEvent::KennelReleased { lease_id })
                                 .unwrap_or((TaState::Released, vec![]));
                             return Ok(s);
@@ -1426,20 +1542,27 @@ async fn run_adopted_loop(
                     }
                     _ => {
                         eprintln!("[target] kennel control lost");
-                        if let Ok((s, _)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelDisconnected) {
+                        if let Ok((s, effects)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelDisconnected) {
                             machine_state = s;
+                            let _ = apply_target_attachment_effects(
+                                node,
+                                router,
+                                &effects,
+                                &mut heartbeat,
+                                &disconnect_tx,
+                            )
+                            .await?;
                         }
                         if machine_state.is_terminal() {
-                            hb.abort();
+                            if let Some(h) = heartbeat.take() { h.abort(); }
                             return Ok(machine_state);
                         }
-                        eprintln!("[target] continuing direct session");
                     }
                 }
             }
             _ = disconnect_rx.changed() => {
                 if *disconnect_rx.borrow() {
-                    hb.abort();
+                    if let Some(h) = heartbeat.take() { h.abort(); }
                     let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
                         .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
                     return Ok(s);

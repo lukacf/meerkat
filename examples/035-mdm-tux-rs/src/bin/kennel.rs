@@ -649,30 +649,60 @@ fn handle_target_disconnect(
     kennel_id: &str,
     target_id: &str,
 ) {
-    let Some(target) = state.targets.remove(target_id) else {
+    let Some(target) = state.targets.get(target_id) else {
         return;
     };
-    if let Ok((_new_state, effects)) =
-        kennel_lease::transition(target.lease_state, Event::TargetDisconnected)
-    {
-        // Target is already removed — dispatch effects for TUX notifications only.
-        // We need to handle RemoveLease ourselves since the target is gone.
-        for effect in &effects {
-            match effect {
-                Effect::SendTargetLostToTux { tux_id, lease_id } => {
-                    if let Some(tux) = state.tuxes.get(tux_id)
-                        && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::TargetLost {
-                            target_id: target_id.to_string(),
-                            lease_id: lease_id.clone(),
-                        })
-                    {
-                        let _ = tux.tx.send(env);
+
+    // If the target has an active claim (Claimed), keep the record and
+    // transition to RecoveringClaim so the target can reconnect and the
+    // TUX can rebind. Without this, a transient kennel control blip
+    // permanently destroys the claim even though the direct session is alive.
+    match &target.lease_state {
+        State::Claimed { tux_id, .. } => {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let tux_id = tux_id.clone();
+            if let Some(target) = state.targets.get_mut(target_id) {
+                target.lease_state = State::RecoveringClaim {
+                    tux_id,
+                    recover_deadline_ms: now_ms + RECOVERY_WINDOW_MS,
+                };
+            }
+            // Clean up the old lease index entry — a fresh one is created on rebind
+            let stale_leases: Vec<String> = state
+                .lease_index
+                .iter()
+                .filter(|(_, tid)| *tid == target_id)
+                .map(|(lid, _)| lid.clone())
+                .collect();
+            for lid in stale_leases {
+                state.lease_index.remove(&lid);
+            }
+        }
+        _ => {
+            // Non-claimed: remove the target and notify TUX if there was an in-flight lease
+            let target = state.targets.remove(target_id);
+            if let Some(target) = target
+                && let Ok((_new_state, effects)) =
+                    kennel_lease::transition(target.lease_state, Event::TargetDisconnected)
+            {
+                for effect in &effects {
+                    match effect {
+                        Effect::SendTargetLostToTux { tux_id, lease_id } => {
+                            if let Some(tux) = state.tuxes.get(tux_id)
+                                && let Ok(env) = build_signed_envelope(keypair, kennel_id, KennelPayload::TargetLost {
+                                    target_id: target_id.to_string(),
+                                    lease_id: lease_id.clone(),
+                                })
+                            {
+                                let _ = tux.tx.send(env);
+                            }
+                        }
+                        Effect::RemoveLease { lease_id } => {
+                            state.lease_index.remove(lease_id);
+                        }
+                        _ => {}
                     }
                 }
-                Effect::RemoveLease { lease_id } => {
-                    state.lease_index.remove(lease_id);
-                }
-                _ => {}
             }
         }
     }
@@ -685,21 +715,27 @@ fn handle_tux_disconnect(
     tux_id: &str,
 ) {
     state.tuxes.remove(tux_id);
-    // Find all targets with leases owned by this TUX and transition them
+
+    // For Claimed targets: keep the lease alive. The TUX may reconnect and
+    // send RebindTargets. The lease TTL naturally expires via the janitor
+    // if the TUX never comes back — that IS the recovery deadline.
+    //
+    // For non-Claimed targets (AwaitingAck, AwaitingAttach, RecoveringClaim):
+    // release immediately since these are in-flight handshakes that can't
+    // complete without the TUX.
     let target_ids: Vec<String> = state.targets.keys().cloned().collect();
     for target_id in target_ids {
         let Some(target) = state.targets.get(&target_id) else {
             continue;
         };
-        // Only transition targets that have a lease for this TUX
-        let is_owned = match &target.lease_state {
+        let should_release = match &target.lease_state {
             State::AwaitingAck { tux_id: owner, .. }
             | State::AwaitingAttach { tux_id: owner, .. }
-            | State::Claimed { tux_id: owner, .. }
             | State::RecoveringClaim { tux_id: owner, .. } => owner == tux_id,
-            State::Available => false,
+            // Claimed: DON'T release — let TTL expire naturally or TUX rebind
+            State::Claimed { .. } | State::Available => false,
         };
-        if is_owned {
+        if should_release {
             apply_target_event(
                 state,
                 &target_id,

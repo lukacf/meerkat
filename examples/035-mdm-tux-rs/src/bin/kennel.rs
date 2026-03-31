@@ -389,7 +389,9 @@ fn register_target(
     let new_initial_state = match &attached_tux_id {
         Some(tux_id) => {
             let (state, _effects) = kennel_lease::transition(
-                State::Available,
+                State::Available {
+                    target_id: target_id.clone(),
+                },
                 Event::TargetReregisteredWithAttachment {
                     target_id: target_id.clone(),
                     tux_id: tux_id.clone(),
@@ -397,10 +399,17 @@ fn register_target(
                     recovery_window_ms: RECOVERY_WINDOW_MS,
                 },
             )
-            .unwrap_or((State::Available, vec![]));
+            .unwrap_or((
+                State::Available {
+                    target_id: target_id.clone(),
+                },
+                vec![],
+            ));
             state
         }
-        None => State::Available,
+        None => State::Available {
+            target_id: target_id.clone(),
+        },
     };
 
     // Extract cleanup data from the old record before mutating guard.
@@ -426,7 +435,7 @@ fn register_target(
         // bind port 0 on restart) and should be silently accepted — the
         // rebind path picks up the new address from the TargetRecord.
         if addr_changed
-            && !matches!(old_state, State::Available | State::RecoveringClaim { .. })
+            && !matches!(old_state, State::Available { .. } | State::RecoveringClaim { .. })
             && let Ok((_new_state, effects)) =
                 kennel_lease::transition(old_state, Event::TargetAddressChanged)
         {
@@ -454,7 +463,7 @@ fn list_targets(state: &KennelState, tux_id: &str, scope: ListScope) -> Vec<Targ
     let mut out = Vec::new();
     for target in state.targets.values() {
         let entry = match (&scope, &target.lease_state) {
-            (ListScope::Available, State::Available) => Some(TargetListEntry {
+            (ListScope::Available, State::Available { .. }) => Some(TargetListEntry {
                 target_id: target.target_id.clone(),
                 name: target.name.clone(),
                 state: KennelTargetState::Available,
@@ -702,7 +711,7 @@ fn handle_tux_disconnect(
             | State::AwaitingAttach { tux_id: owner, .. }
             | State::Claimed { tux_id: owner, .. }
             | State::RecoveringClaim { tux_id: owner, .. } => owner == tux_id,
-            State::Available => false,
+            State::Available { .. } => false,
         };
         if owner_matches {
             apply_target_event(
@@ -879,11 +888,7 @@ fn dispatch_effects(
                 state.lease_index.remove(lease_id);
             }
             Effect::DropTargetRecord { target_id: effect_tid } => {
-                // Use the effect's target_id if provided, otherwise fall
-                // back to the caller's target_id (for Available state which
-                // doesn't carry target_id).
-                let tid = if effect_tid.is_empty() { target_id } else { effect_tid.as_str() };
-                state.targets.remove(tid);
+                state.targets.remove(effect_tid);
             }
         }
     }
@@ -917,7 +922,7 @@ async fn run_janitor(
         // Available. These have a closed tx (dead TCP connection) and must
         // not appear in listings or accept new claims.
         guard.targets.retain(|_, target| {
-            if matches!(target.lease_state, State::Available) && target.tx.is_closed() {
+            if matches!(target.lease_state, State::Available { .. }) && target.tx.is_closed() {
                 false // remove phantom
             } else {
                 true

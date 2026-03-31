@@ -4,7 +4,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
-    Available,
+    Available { target_id: String },
     AwaitingAck {
         target_id: String,
         lease_id: String,
@@ -157,26 +157,31 @@ fn recovery_deadline(expires_at_ms: i64, now_ms: i64, recovery_window_ms: i64) -
 pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     match (state, event) {
         (
-            State::Available,
+            State::Available { target_id },
             Event::ClaimRequested {
-                target_id,
+                target_id: claim_target_id,
                 lease_id,
                 tux_id,
                 expires_at_ms,
                 ack_deadline_ms,
             },
-        ) => Ok((
-            State::AwaitingAck {
-                target_id,
-                lease_id,
-                tux_id,
-                expires_at_ms,
-                ack_deadline_ms,
-            },
-            vec![],
-        )),
+        ) => {
+            if claim_target_id != target_id {
+                return Err(err("Available", "ClaimRequested", "target_id mismatch"));
+            }
+            Ok((
+                State::AwaitingAck {
+                    target_id: claim_target_id,
+                    lease_id,
+                    tux_id,
+                    expires_at_ms,
+                    ack_deadline_ms,
+                },
+                vec![],
+            ))
+        }
         (
-            State::Available,
+            State::Available { target_id: available_target_id },
             Event::TargetReregisteredWithAttachment {
                 target_id,
                 tux_id,
@@ -184,6 +189,13 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 recovery_window_ms,
             },
         ) => {
+            if target_id != available_target_id {
+                return Err(err(
+                    "Available",
+                    "TargetReregisteredWithAttachment",
+                    "target_id mismatch",
+                ));
+            }
             let expires_at_ms = now_ms + recovery_window_ms;
             Ok((
                 State::RecoveringClaim {
@@ -197,15 +209,18 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 vec![],
             ))
         }
-        (State::Available, Event::TargetDisconnected { .. }) => {
+        (State::Available { target_id }, Event::TargetDisconnected { .. }) => {
             // An idle target that disconnects must be removed from the
             // registry immediately. Without DropTargetRecord, the dead
             // record stays in Available and can be claimed by a TUX,
             // leading to phantom targets and attach timeouts.
-            Ok((State::Available, vec![Effect::DropTargetRecord { target_id: String::new() }]))
+            Ok((
+                State::Available { target_id: target_id.clone() },
+                vec![Effect::DropTargetRecord { target_id }],
+            ))
         }
-        (State::Available, Event::Tick { .. }) => {
-            Ok((State::Available, vec![]))
+        (State::Available { target_id }, Event::Tick { .. }) => {
+            Ok((State::Available { target_id }, vec![]))
         }
 
         (
@@ -253,7 +268,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             },
             Event::Released { reason },
         ) => Ok((
-            State::Available,
+            State::Available { target_id: target_id.clone() },
             vec![
                 Effect::SendTargetReleased {
                     target_id: target_id.clone(),
@@ -281,7 +296,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         ) => {
             if now_ms >= ack_deadline_ms {
                 Ok((
-                    State::Available,
+                    State::Available { target_id: target_id.clone() },
                     vec![
                         Effect::SendClaimReleasedToTux {
                             target_id,
@@ -330,7 +345,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 ));
             }
             Ok((
-                State::Available,
+                State::Available { target_id: target_id.clone() },
                 vec![
                     Effect::SendTargetReleased {
                         target_id,
@@ -350,7 +365,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             },
             Event::TargetDisconnected { .. },
         ) => Ok((
-            State::Available,
+            State::Available { target_id: target_id.clone() },
             vec![
                 Effect::SendTargetLostToTux {
                     target_id: target_id.clone(),
@@ -404,7 +419,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             },
             Event::Released { reason },
         ) => Ok((
-            State::Available,
+            State::Available { target_id: target_id.clone() },
             vec![
                 Effect::SendTargetReleased {
                     target_id: target_id.clone(),
@@ -432,7 +447,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         ) => {
             if now_ms >= attach_deadline_ms {
                 Ok((
-                    State::Available,
+                    State::Available { target_id: target_id.clone() },
                     vec![
                         Effect::SendTargetReleased {
                             target_id: target_id.clone(),
@@ -486,7 +501,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 ));
             }
             Ok((
-                State::Available,
+                State::Available { target_id: target_id.clone() },
                 vec![
                     Effect::SendTargetReleased {
                         target_id,
@@ -506,7 +521,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             },
             Event::TargetDisconnected { .. },
         ) => Ok((
-            State::Available,
+            State::Available { target_id: target_id.clone() },
             vec![
                 Effect::SendTargetLostToTux {
                     target_id: target_id.clone(),
@@ -557,7 +572,9 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             },
             Event::Released { reason },
         ) => Ok((
-            State::Available,
+            State::Available {
+                target_id: target_id.clone(),
+            },
             vec![
                 Effect::SendTargetReleased {
                     target_id: target_id.clone(),
@@ -761,10 +778,12 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                     lease_id,
                     reason: "recovery_expired".into(),
                 });
-                Ok((State::Available, effects))
+                Ok((State::Available { target_id }, effects))
             } else {
-                effects.push(Effect::DropTargetRecord { target_id });
-                Ok((State::Available, effects))
+                effects.push(Effect::DropTargetRecord {
+                    target_id: target_id.clone(),
+                });
+                Ok((State::Available { target_id }, effects))
             }
         }
         (
@@ -828,16 +847,16 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             }
             if lease_id.is_some() {
                 effects.push(Effect::SendTargetReleased {
-                    target_id,
+                    target_id: target_id.clone(),
                     lease_id,
                     reason: "tux_disconnected".into(),
                 });
             }
-            Ok((State::Available, effects))
+            Ok((State::Available { target_id }, effects))
         }
         (state, event) => {
             let state_name = match &state {
-                State::Available => "Available",
+                State::Available { .. } => "Available",
                 State::AwaitingAck { .. } => "AwaitingAck",
                 State::AwaitingAttach { .. } => "AwaitingAttach",
                 State::Claimed { .. } => "Claimed",

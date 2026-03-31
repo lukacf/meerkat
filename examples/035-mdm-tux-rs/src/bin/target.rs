@@ -1325,10 +1325,13 @@ async fn run_adopted_loop(
     let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
 
     loop {
-        // Derive kennel_alive from machine state
-        let kennel_alive = matches!(
+        // Poll kennel arms when in Attaching (waiting for attach_ok while
+        // kennel may send Released for attach_timeout) or Attached with
+        // kennel still alive. Without this, attach-timeout releases are
+        // missed and the target stays stuck in the adopted loop.
+        let poll_kennel = matches!(
             &machine_state,
-            TaState::Attached { kennel_alive: true, .. }
+            TaState::Attaching { .. } | TaState::Attached { kennel_alive: true, .. }
         );
 
         tokio::select! {
@@ -1370,7 +1373,7 @@ async fn run_adopted_loop(
                     return Ok(s);
                 }
             }
-            _ = kennel_heartbeat.tick(), if kennel_alive => {
+            _ = kennel_heartbeat.tick(), if poll_kennel => {
                 let kennel_hb = build_signed_envelope(
                     node.router.keypair_arc().as_ref(), &adoption.target_id,
                     KennelPayload::TargetHeartbeat,
@@ -1382,7 +1385,7 @@ async fn run_adopted_loop(
                     }
                 }
             }
-            maybe = read_envelope(reader), if kennel_alive => {
+            maybe = read_envelope(reader), if poll_kennel => {
                 match maybe {
                     Ok(Some(env)) => {
                         if verify_envelope(&env).is_ok()

@@ -763,10 +763,23 @@ async fn spawn_kennel_client(
                             let _ = event_tx.send(TuiEvent::KennelClaimGranted(claims)).await;
                         }
                         KennelPayload::ClaimReleased { target_id, lease_id, reason } => {
-                            // Remove the target's trusted peer entry so hive
-                            // mode can't keep sending to an unowned machine.
-                            if let Some(claim) = pending_claims.write().remove(&lease_id) {
-                                router.remove_trusted_peer(&claim.target_pubkey);
+                            // Remove the target's trusted peer entry. Look up by
+                            // lease_id first; fall back to target_id scan when
+                            // lease_id is empty (recovery-expired releases).
+                            // Block-scope the lock guard so it's dropped before .await.
+                            {
+                                let mut guard = pending_claims.write();
+                                let removed = if !lease_id.is_empty() {
+                                    guard.remove(&lease_id)
+                                } else {
+                                    let key = guard.iter()
+                                        .find(|(_, c)| c.target_id == target_id)
+                                        .map(|(k, _)| k.clone());
+                                    key.and_then(|k| guard.remove(&k))
+                                };
+                                if let Some(claim) = removed {
+                                    router.remove_trusted_peer(&claim.target_pubkey);
+                                }
                             }
                             let _ = event_tx.send(TuiEvent::KennelClaimReleased { target_id, lease_id, reason }).await;
                         }

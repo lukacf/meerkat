@@ -87,14 +87,7 @@ impl FlowEngine {
                 step_outputs: IndexMap::new(),
                 loop_outputs: IndexMap::new(),
             };
-            let adapter = FlowTurnExecutorAdapter::new(
-                self.executor.clone(),
-                self.handle.clone(),
-                config.clone(),
-                self.run_store.clone(),
-                self.emitter.clone(),
-                self.topology.clone(),
-            );
+            let adapter = FlowTurnExecutorAdapter::new(self.clone(), config.clone());
             let max_depth = config
                 .limits
                 .as_ref()
@@ -610,6 +603,537 @@ impl FlowEngine {
         }
 
         Ok(())
+    }
+
+    /// Canonical step execution: condition -> topology -> targets -> dispatch ->
+    /// retry -> schema -> ledger -> events -> supervisor -> FanOut aggregation.
+    ///
+    /// Does NOT touch FlowRunMachine or FlowFrameMachine state -- those are
+    /// the caller's responsibility. Returns `StepGuardOutcome::Completed(output)`
+    /// on success or `StepGuardOutcome::Skipped { reason }` when the step's
+    /// condition evaluates to false.
+    ///
+    /// This is the SINGLE implementation of step execution. Both the flat-step
+    /// inner loop and the frame-based FlowTurnExecutorAdapter delegate here.
+    pub(crate) async fn execute_step_with_all_guards(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        step: &FlowStepSpec,
+        context: &FlowContext,
+        config: &FlowRunConfig,
+    ) -> Result<StepGuardOutcome, MobError> {
+        let supervisor = Supervisor::new(self.handle.clone(), self.emitter.clone());
+
+        // ── 1. Condition check ─────────────────────────────────────────────
+        if step
+            .condition
+            .as_ref()
+            .is_some_and(|cond| !evaluate_condition(cond, context))
+        {
+            let reason = "condition evaluated to false".to_string();
+            self.run_store
+                .append_step_entry(
+                    run_id,
+                    StepLedgerEntry {
+                        step_id: step_id.clone(),
+                        meerkat_id: MeerkatId::from(""),
+                        status: StepRunStatus::Skipped,
+                        output: None,
+                        timestamp: Utc::now(),
+                    },
+                )
+                .await?;
+            self.emitter
+                .step_skipped(run_id.clone(), step_id.clone(), reason.clone())
+                .await?;
+            return Ok(StepGuardOutcome::Skipped { reason });
+        }
+
+        // ── 2. Prompt rendering ────────────────────────────────────────────
+        let prompt = render_content_input_template(&step.message, context).map_err(|e| {
+            MobError::Internal(format!("template render failed for step '{step_id}': {e}"))
+        })?;
+
+        // ── 3. Topology check ──────────────────────────────────────────────
+        if let (Some(topology_spec), Some(from_role)) =
+            (&config.topology, &config.orchestrator_role)
+            && matches!(
+                self.topology.evaluate(from_role, &step.role),
+                PolicyDecision::Deny
+            )
+        {
+            if matches!(topology_spec.mode, PolicyMode::Strict) {
+                return Err(MobError::TopologyViolation {
+                    from_role: from_role.clone(),
+                    to_role: step.role.clone(),
+                });
+            }
+            self.emitter
+                .topology_violation(from_role.clone(), step.role.clone())
+                .await?;
+        }
+
+        // ── 4. Target selection ────────────────────────────────────────────
+        let mut targets: Vec<MeerkatId> = self
+            .handle
+            .list_runnable_members()
+            .await
+            .into_iter()
+            .filter(|entry| entry.profile == step.role)
+            .map(|entry| entry.meerkat_id)
+            .collect();
+        targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        // ── 5. OneToOne: truncate to 1 target ──────────────────────────────
+        if targets.len() > 1 && matches!(step.dispatch_mode, DispatchMode::OneToOne) {
+            targets.truncate(1);
+        }
+
+        // ── 6. Multi-target (FanOut/FanIn) ─────────────────────────────────
+        if targets.len() > 1 {
+            return self
+                .dispatch_multi_target_canonical(
+                    run_id,
+                    step_id,
+                    &targets,
+                    step,
+                    context,
+                    config,
+                    &supervisor,
+                )
+                .await;
+        }
+
+        // ── 7. Single-target dispatch with retry loop ──────────────────────
+        let target = targets.into_iter().next().ok_or_else(|| {
+            MobError::Internal(format!(
+                "no target available for role '{}' in step '{step_id}'",
+                step.role
+            ))
+        })?;
+
+        let step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
+        let flow_tool_overlay = step_tool_overlay(step);
+
+        let max_retries = config
+            .limits
+            .as_ref()
+            .and_then(|l| l.max_step_retries)
+            .unwrap_or(0) as usize;
+
+        let mut attempt = 0usize;
+        loop {
+            // ── 8. Per-dispatch: event + ledger entry ──────────────────────
+            self.emitter
+                .step_dispatched(run_id.clone(), step_id.clone(), target.clone())
+                .await?;
+            self.run_store
+                .append_step_entry_if_absent(
+                    run_id,
+                    StepLedgerEntry {
+                        step_id: step_id.clone(),
+                        meerkat_id: target.clone(),
+                        status: StepRunStatus::Dispatched,
+                        output: None,
+                        timestamp: Utc::now(),
+                    },
+                )
+                .await?;
+
+            let ticket = self
+                .executor
+                .dispatch(
+                    run_id,
+                    step_id,
+                    &target,
+                    prompt.clone(),
+                    flow_tool_overlay.clone(),
+                )
+                .await?;
+
+            match self.executor.await_terminal(ticket, step_timeout).await? {
+                FlowTurnOutcome::Completed { output } => {
+                    match parse_output_value(&output, step_id, &target, &step.output_format) {
+                        Ok(value) => {
+                            // ── 9. Schema validation ───────────────────────
+                            if let Some(schema_ref) = &step.expected_schema_ref
+                                && let Err(schema_err) =
+                                    validate_schema_ref(schema_ref, step_id, &value).await
+                            {
+                                let reason = schema_err.to_string();
+                                if attempt < max_retries {
+                                    attempt += 1;
+                                    self.emitter
+                                        .step_target_failed(
+                                            run_id.clone(),
+                                            step_id.clone(),
+                                            target.clone(),
+                                            reason.clone(),
+                                        )
+                                        .await?;
+                                    continue;
+                                }
+                                // ── 10. Terminal schema failure ─────────────
+                                self.run_store
+                                    .append_step_entry(
+                                        run_id,
+                                        StepLedgerEntry {
+                                            step_id: step_id.clone(),
+                                            meerkat_id: target.clone(),
+                                            status: StepRunStatus::Failed,
+                                            output: None,
+                                            timestamp: Utc::now(),
+                                        },
+                                    )
+                                    .await?;
+                                self.run_store
+                                    .append_failure_entry(
+                                        run_id,
+                                        FailureLedgerEntry {
+                                            step_id: step_id.clone(),
+                                            reason: reason.clone(),
+                                            timestamp: Utc::now(),
+                                        },
+                                    )
+                                    .await?;
+                                self.emitter
+                                    .step_failed(run_id.clone(), step_id.clone(), reason.clone())
+                                    .await?;
+                                // ── 11. Supervisor escalation ──────────────
+                                self.maybe_escalate_guard(
+                                    &supervisor,
+                                    config,
+                                    run_id,
+                                    step_id,
+                                    &reason,
+                                )
+                                .await?;
+                                return Err(MobError::SchemaValidation {
+                                    step_id: step_id.clone(),
+                                    message: reason,
+                                });
+                            }
+
+                            // ── 9 (success). Completed ledger + events ─────
+                            self.run_store
+                                .append_step_entry(
+                                    run_id,
+                                    StepLedgerEntry {
+                                        step_id: step_id.clone(),
+                                        meerkat_id: target.clone(),
+                                        status: StepRunStatus::Completed,
+                                        output: Some(value.clone()),
+                                        timestamp: Utc::now(),
+                                    },
+                                )
+                                .await?;
+                            self.emitter
+                                .step_target_completed(
+                                    run_id.clone(),
+                                    step_id.clone(),
+                                    target.clone(),
+                                )
+                                .await?;
+                            // ── 12. Final: step_completed ──────────────────
+                            self.emitter
+                                .step_completed(run_id.clone(), step_id.clone())
+                                .await?;
+                            return Ok(StepGuardOutcome::Completed(value));
+                        }
+                        Err(reason) => {
+                            if attempt < max_retries {
+                                attempt += 1;
+                                self.emitter
+                                    .step_target_failed(
+                                        run_id.clone(),
+                                        step_id.clone(),
+                                        target.clone(),
+                                        reason.clone(),
+                                    )
+                                    .await?;
+                                continue;
+                            }
+                            // Terminal parse failure
+                            self.run_store
+                                .append_step_entry(
+                                    run_id,
+                                    StepLedgerEntry {
+                                        step_id: step_id.clone(),
+                                        meerkat_id: target.clone(),
+                                        status: StepRunStatus::Failed,
+                                        output: None,
+                                        timestamp: Utc::now(),
+                                    },
+                                )
+                                .await?;
+                            self.run_store
+                                .append_failure_entry(
+                                    run_id,
+                                    FailureLedgerEntry {
+                                        step_id: step_id.clone(),
+                                        reason: reason.clone(),
+                                        timestamp: Utc::now(),
+                                    },
+                                )
+                                .await?;
+                            self.emitter
+                                .step_failed(run_id.clone(), step_id.clone(), reason.clone())
+                                .await?;
+                            self.maybe_escalate_guard(
+                                &supervisor,
+                                config,
+                                run_id,
+                                step_id,
+                                &reason,
+                            )
+                            .await?;
+                            return Err(MobError::Internal(format!(
+                                "output parse failed for step '{step_id}' after {attempt} retries: {reason}"
+                            )));
+                        }
+                    }
+                }
+                FlowTurnOutcome::Failed { reason } => {
+                    if attempt < max_retries {
+                        attempt += 1;
+                        self.emitter
+                            .step_target_failed(
+                                run_id.clone(),
+                                step_id.clone(),
+                                target.clone(),
+                                reason.clone(),
+                            )
+                            .await?;
+                        continue;
+                    }
+                    // Terminal failure
+                    self.run_store
+                        .append_step_entry(
+                            run_id,
+                            StepLedgerEntry {
+                                step_id: step_id.clone(),
+                                meerkat_id: target.clone(),
+                                status: StepRunStatus::Failed,
+                                output: None,
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.run_store
+                        .append_failure_entry(
+                            run_id,
+                            FailureLedgerEntry {
+                                step_id: step_id.clone(),
+                                reason: reason.clone(),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.emitter
+                        .step_failed(run_id.clone(), step_id.clone(), reason.clone())
+                        .await?;
+                    self.maybe_escalate_guard(&supervisor, config, run_id, step_id, &reason)
+                        .await?;
+                    return Err(MobError::Internal(format!(
+                        "step '{step_id}' failed after {attempt} retries: {reason}"
+                    )));
+                }
+                FlowTurnOutcome::Canceled => {
+                    let reason = format!("step '{step_id}' was canceled");
+                    self.run_store
+                        .append_step_entry(
+                            run_id,
+                            StepLedgerEntry {
+                                step_id: step_id.clone(),
+                                meerkat_id: target.clone(),
+                                status: StepRunStatus::Canceled,
+                                output: None,
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.run_store
+                        .append_failure_entry(
+                            run_id,
+                            FailureLedgerEntry {
+                                step_id: step_id.clone(),
+                                reason: reason.clone(),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.emitter
+                        .step_failed(run_id.clone(), step_id.clone(), reason.clone())
+                        .await?;
+                    self.maybe_escalate_guard(&supervisor, config, run_id, step_id, &reason)
+                        .await?;
+                    return Err(MobError::Internal(reason));
+                }
+            }
+        }
+    }
+
+    /// Multi-target dispatch for FanOut/FanIn, used by `execute_step_with_all_guards`.
+    /// Sequential dispatch: each target is dispatched and awaited before the next.
+    /// Returns the aggregated output matching the step's collection policy.
+    async fn dispatch_multi_target_canonical(
+        &self,
+        run_id: &RunId,
+        step_id: &StepId,
+        targets: &[MeerkatId],
+        step: &FlowStepSpec,
+        context: &FlowContext,
+        config: &FlowRunConfig,
+        supervisor: &Supervisor,
+    ) -> Result<StepGuardOutcome, MobError> {
+        let step_timeout = Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
+        let flow_tool_overlay = step_tool_overlay(step);
+        let prompt = render_content_input_template(&step.message, context).map_err(|e| {
+            MobError::Internal(format!("template render failed for step '{step_id}': {e}"))
+        })?;
+        let max_retries = config
+            .limits
+            .as_ref()
+            .and_then(|l| l.max_step_retries)
+            .unwrap_or(0) as usize;
+
+        let mut successes: Vec<(MeerkatId, Value)> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+
+        for target in targets {
+            self.emitter
+                .step_dispatched(run_id.clone(), step_id.clone(), target.clone())
+                .await?;
+            self.run_store
+                .append_step_entry_if_absent(
+                    run_id,
+                    StepLedgerEntry {
+                        step_id: step_id.clone(),
+                        meerkat_id: target.clone(),
+                        status: StepRunStatus::Dispatched,
+                        output: None,
+                        timestamp: Utc::now(),
+                    },
+                )
+                .await?;
+
+            let mut attempt = 0usize;
+            let result = loop {
+                let ticket = self
+                    .executor
+                    .dispatch(
+                        run_id,
+                        step_id,
+                        target,
+                        prompt.clone(),
+                        flow_tool_overlay.clone(),
+                    )
+                    .await?;
+
+                match self.executor.await_terminal(ticket, step_timeout).await? {
+                    FlowTurnOutcome::Completed { output } => {
+                        match parse_output_value(&output, step_id, target, &step.output_format) {
+                            Ok(value) => break Ok(value),
+                            Err(reason) => {
+                                if attempt < max_retries {
+                                    attempt += 1;
+                                    continue;
+                                }
+                                break Err(reason);
+                            }
+                        }
+                    }
+                    FlowTurnOutcome::Failed { reason } => {
+                        if attempt < max_retries {
+                            attempt += 1;
+                            continue;
+                        }
+                        break Err(reason);
+                    }
+                    FlowTurnOutcome::Canceled => break Err("canceled".into()),
+                }
+            };
+
+            match result {
+                Ok(value) => {
+                    self.run_store
+                        .append_step_entry(
+                            run_id,
+                            StepLedgerEntry {
+                                step_id: step_id.clone(),
+                                meerkat_id: target.clone(),
+                                status: StepRunStatus::Completed,
+                                output: Some(value.clone()),
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.emitter
+                        .step_target_completed(run_id.clone(), step_id.clone(), target.clone())
+                        .await?;
+                    successes.push((target.clone(), value));
+                }
+                Err(reason) => {
+                    self.run_store
+                        .append_step_entry(
+                            run_id,
+                            StepLedgerEntry {
+                                step_id: step_id.clone(),
+                                meerkat_id: target.clone(),
+                                status: StepRunStatus::Failed,
+                                output: None,
+                                timestamp: Utc::now(),
+                            },
+                        )
+                        .await?;
+                    self.emitter
+                        .step_target_failed(
+                            run_id.clone(),
+                            step_id.clone(),
+                            target.clone(),
+                            reason.clone(),
+                        )
+                        .await?;
+                    failures.push(reason);
+                }
+            }
+        }
+
+        if successes.is_empty() {
+            let combined = failures.join("; ");
+            self.emitter
+                .step_failed(run_id.clone(), step_id.clone(), combined.clone())
+                .await?;
+            self.maybe_escalate_guard(supervisor, config, run_id, step_id, &combined)
+                .await?;
+            return Err(MobError::Internal(format!(
+                "all targets failed for step '{step_id}': {combined}"
+            )));
+        }
+
+        // Aggregate output using the step's dispatch/collection policy.
+        let aggregate = aggregate_output(&step.dispatch_mode, &step.collection_policy, &successes);
+        self.emitter
+            .step_completed(run_id.clone(), step_id.clone())
+            .await?;
+        Ok(StepGuardOutcome::Completed(aggregate))
+    }
+
+    /// Supervisor escalation guard used by `execute_step_with_all_guards`.
+    async fn maybe_escalate_guard(
+        &self,
+        supervisor: &Supervisor,
+        config: &FlowRunConfig,
+        run_id: &RunId,
+        step_id: &StepId,
+        reason: &str,
+    ) -> Result<(), MobError> {
+        if config.supervisor.is_none() {
+            return Ok(());
+        }
+        supervisor.escalate(config, run_id, step_id, reason).await?;
+        supervisor.force_reset().await
     }
 
     async fn fail_run(
@@ -1148,6 +1672,13 @@ enum TargetExecutionResult {
     Canceled,
 }
 
+/// Outcome of canonical step execution via `execute_step_with_all_guards`.
+#[allow(dead_code)]
+pub(crate) enum StepGuardOutcome {
+    Completed(Value),
+    Skipped { reason: String },
+}
+
 #[derive(Debug, Clone)]
 struct StepNoticeEffect {
     step_id: StepId,
@@ -1622,60 +2153,18 @@ fn resolve_template_value<'a>(expression: &str, context: &'a FlowContext) -> Opt
 
 // ─── FlowTurnExecutorAdapter ────────────────────────────────────────────────
 
-/// Adapter that implements `FrameStepExecutor` by delegating to the existing
-/// `FlowTurnExecutor` infrastructure. Maps `FlowNodeId` + `StepId` to the v1
-/// dispatch/await flow, looking up role and message template from `FlowRunConfig`.
-///
-/// Carries ALL the same enforcement context as the flat-step path (dogma Rule 1):
-/// - Topology policy (checked before target selection).
-/// - Step ledger entries (Dispatched → Completed/Failed, with output and failure reason).
-/// - Failure ledger entries for exhausted-retry steps.
-/// - Retries transient failures up to `limits.max_step_retries`.
+/// Thin adapter that implements `FrameStepExecutor` by delegating to
+/// `FlowEngine::execute_step_with_all_guards`. All step execution logic
+/// (condition, topology, targets, dispatch, retry, schema, ledger, events,
+/// supervisor, FanOut aggregation) lives in the canonical method on FlowEngine.
 struct FlowTurnExecutorAdapter {
-    executor: Arc<dyn FlowTurnExecutor>,
-    handle: MobHandle,
+    engine: FlowEngine,
     config: FlowRunConfig,
-    run_store: Arc<dyn crate::store::MobRunStore>,
-    emitter: MobEventEmitter,
-    topology: Arc<MobTopologyService>,
-    supervisor: Supervisor,
 }
 
 impl FlowTurnExecutorAdapter {
-    /// Escalate to supervisor if configured (mirrors flat-step path's maybe_escalate_supervisor).
-    async fn maybe_escalate(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        reason: &str,
-    ) -> Result<(), MobError> {
-        if self.config.supervisor.is_none() {
-            return Ok(());
-        }
-        self.supervisor
-            .escalate(&self.config, run_id, step_id, reason)
-            .await?;
-        self.supervisor.force_reset().await
-    }
-
-    fn new(
-        executor: Arc<dyn FlowTurnExecutor>,
-        handle: MobHandle,
-        config: FlowRunConfig,
-        run_store: Arc<dyn crate::store::MobRunStore>,
-        emitter: MobEventEmitter,
-        topology: Arc<MobTopologyService>,
-    ) -> Self {
-        let supervisor = Supervisor::new(handle.clone(), emitter.clone());
-        Self {
-            executor,
-            handle,
-            config,
-            run_store,
-            emitter,
-            topology,
-            supervisor,
-        }
+    fn new(engine: FlowEngine, config: FlowRunConfig) -> Self {
+        Self { engine, config }
     }
 }
 
@@ -1690,7 +2179,6 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
         step_id: &StepId,
         context: &FlowContext,
     ) -> Result<super::flow_frame_engine::FrameStepResult, MobError> {
-        // Look up the step spec from the v1 steps map.
         let step = self
             .config
             .flow_spec
@@ -1698,501 +2186,23 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
             .get(step_id)
             .ok_or_else(|| {
                 MobError::Internal(format!(
-                    "FlowTurnExecutorAdapter: no FlowStepSpec found for step '{step_id}'. \
-                     Frame-based flows (root: Some(...)) must define step execution parameters \
-                     (role, message, timeout_ms) in flow_spec.steps, keyed by the same StepId \
-                     used in FrameStepSpec.step_id."
+                    "FlowTurnExecutorAdapter: no FlowStepSpec for step '{step_id}'"
                 ))
             })?
             .clone();
 
-        // Evaluate condition before dispatch. A false condition skips the step.
-        if step
-            .condition
-            .as_ref()
-            .is_some_and(|cond| !super::conditions::evaluate_condition(cond, context))
+        match self
+            .engine
+            .execute_step_with_all_guards(run_id, step_id, &step, context, &self.config)
+            .await?
         {
-            // Emit StepSkipped event and append Skipped ledger entry before returning
-            // (mirrors record_step_skipped in the flat-step path — Rule 1).
-            // No target is known yet (condition is evaluated before target selection),
-            // so meerkat_id is empty.
-            let reason = "condition evaluated to false".to_string();
-            self.run_store
-                .append_step_entry(
-                    run_id,
-                    StepLedgerEntry {
-                        step_id: step_id.clone(),
-                        meerkat_id: MeerkatId::from(""),
-                        status: StepRunStatus::Skipped,
-                        output: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await?;
-            self.emitter
-                .step_skipped(run_id.clone(), step_id.clone(), reason)
-                .await?;
-            return Ok(super::flow_frame_engine::FrameStepResult::Skipped);
-        }
-
-        // Render the prompt template.
-        let prompt = render_content_input_template(&step.message, context).map_err(|e| {
-            MobError::Internal(format!("template render failed for step '{step_id}': {e}"))
-        })?;
-
-        // Topology policy (mirrors flat-step path at flow.rs:261–288).
-        if let (Some(topology_spec), Some(from_role)) =
-            (&self.config.topology, &self.config.orchestrator_role)
-            && matches!(
-                self.topology.evaluate(from_role, &step.role),
-                PolicyDecision::Deny
-            )
-        {
-            if matches!(topology_spec.mode, PolicyMode::Strict) {
-                return Err(MobError::TopologyViolation {
-                    from_role: from_role.clone(),
-                    to_role: step.role.clone(),
-                });
+            StepGuardOutcome::Completed(output) => {
+                Ok(super::flow_frame_engine::FrameStepResult::Completed(output))
             }
-            self.emitter
-                .topology_violation(from_role.clone(), step.role.clone())
-                .await?;
-        }
-
-        // Select target(s) by role.
-        let mut targets: Vec<MeerkatId> = self
-            .handle
-            .list_runnable_members()
-            .await
-            .into_iter()
-            .filter(|entry| entry.profile == step.role)
-            .map(|entry| entry.meerkat_id)
-            .collect();
-        targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-
-        // OneToOne: pick the first sorted member (consistent with flat-step path).
-        if targets.len() > 1
-            && matches!(
-                step.dispatch_mode,
-                crate::definition::DispatchMode::OneToOne
-            )
-        {
-            targets.truncate(1);
-        }
-
-        // FanOut/FanIn with multiple targets: dispatch to each target sequentially
-        // (flat-step path does this concurrently, but sequential is semantically correct
-        // for collection policy evaluation). Aggregate the outputs afterward.
-        if targets.len() > 1 {
-            return self
-                .dispatch_multi_target(run_id, step_id, &targets, &step, context)
-                .await;
-        }
-
-        let target = targets.into_iter().next().ok_or_else(|| {
-            MobError::Internal(format!(
-                "no target available for role '{}' in step '{step_id}'",
-                step.role
-            ))
-        })?;
-
-        let step_timeout =
-            meerkat_core::time_compat::Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
-        let flow_tool_overlay = step_tool_overlay(&step);
-
-        let max_retries = self
-            .config
-            .limits
-            .as_ref()
-            .and_then(|l| l.max_step_retries)
-            .unwrap_or(0) as usize;
-
-        let mut attempt = 0usize;
-        loop {
-            // Lifecycle: emit dispatch event and append ledger entry.
-            self.emitter
-                .step_dispatched(run_id.clone(), step_id.clone(), target.clone())
-                .await?;
-            self.run_store
-                .append_step_entry_if_absent(
-                    run_id,
-                    crate::run::StepLedgerEntry {
-                        step_id: step_id.clone(),
-                        meerkat_id: target.clone(),
-                        status: crate::run::StepRunStatus::Dispatched,
-                        output: None,
-                        timestamp: chrono::Utc::now(),
-                    },
-                )
-                .await?;
-
-            let ticket = self
-                .executor
-                .dispatch(
-                    run_id,
-                    step_id,
-                    &target,
-                    prompt.clone(),
-                    flow_tool_overlay.clone(),
-                )
-                .await?;
-
-            match self.executor.await_terminal(ticket, step_timeout).await? {
-                FlowTurnOutcome::Completed { output } => {
-                    match parse_output_value(&output, step_id, &target, &step.output_format) {
-                        Ok(value) => {
-                            // Schema validation (mirrors flat-step path at flow.rs:453–468).
-                            // A step with expected_schema_ref must produce a conformant payload;
-                            // a schema-invalid response is a retryable failure (Rule 15).
-                            if let Some(schema_ref) = &step.expected_schema_ref
-                                && let Err(schema_err) =
-                                    validate_schema_ref(schema_ref, step_id, &value).await
-                            {
-                                let reason = schema_err.to_string();
-                                if attempt < max_retries {
-                                    attempt += 1;
-                                    self.emitter
-                                        .step_target_failed(
-                                            run_id.clone(),
-                                            step_id.clone(),
-                                            target.clone(),
-                                            reason.clone(),
-                                        )
-                                        .await?;
-                                    continue;
-                                }
-                                self.run_store
-                                    .append_step_entry(
-                                        run_id,
-                                        StepLedgerEntry {
-                                            step_id: step_id.clone(),
-                                            meerkat_id: target.clone(),
-                                            status: StepRunStatus::Failed,
-                                            output: None,
-                                            timestamp: Utc::now(),
-                                        },
-                                    )
-                                    .await?;
-                                self.run_store
-                                    .append_failure_entry(
-                                        run_id,
-                                        FailureLedgerEntry {
-                                            step_id: step_id.clone(),
-                                            reason: reason.clone(),
-                                            timestamp: Utc::now(),
-                                        },
-                                    )
-                                    .await?;
-                                self.emitter
-                                    .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                                    .await?;
-                                self.maybe_escalate(run_id, step_id, &reason).await?;
-                                return Err(MobError::SchemaValidation {
-                                    step_id: step_id.clone(),
-                                    message: reason,
-                                });
-                            }
-
-                            // Append a Completed ledger entry (mirrors apply_target_success_projection).
-                            // Note: we do NOT call put_step_output — that only mutates the existing
-                            // Dispatched entry. Callers (e.g. deliberate) read Completed entries.
-                            self.run_store
-                                .append_step_entry(
-                                    run_id,
-                                    StepLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        meerkat_id: target.clone(),
-                                        status: StepRunStatus::Completed,
-                                        output: Some(value.clone()),
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
-                            self.emitter
-                                .step_target_completed(
-                                    run_id.clone(),
-                                    step_id.clone(),
-                                    target.clone(),
-                                )
-                                .await?;
-                            self.emitter
-                                .step_completed(run_id.clone(), step_id.clone())
-                                .await?;
-                            return Ok(super::flow_frame_engine::FrameStepResult::Completed(value));
-                        }
-                        Err(reason) => {
-                            if attempt < max_retries {
-                                attempt += 1;
-                                self.emitter
-                                    .step_target_failed(
-                                        run_id.clone(),
-                                        step_id.clone(),
-                                        target.clone(),
-                                        reason.clone(),
-                                    )
-                                    .await?;
-                                continue;
-                            }
-                            // Terminal failure — append Failed ledger + failure ledger entry
-                            // (mirrors apply_failure_projection in flat-step path).
-                            self.run_store
-                                .append_step_entry(
-                                    run_id,
-                                    StepLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        meerkat_id: target.clone(),
-                                        status: StepRunStatus::Failed,
-                                        output: None,
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
-                            self.run_store
-                                .append_failure_entry(
-                                    run_id,
-                                    FailureLedgerEntry {
-                                        step_id: step_id.clone(),
-                                        reason: reason.clone(),
-                                        timestamp: Utc::now(),
-                                    },
-                                )
-                                .await?;
-                            self.emitter
-                                .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                                .await?;
-                            self.maybe_escalate(run_id, step_id, &reason).await?;
-                            return Err(MobError::Internal(format!(
-                                "output parse failed for step '{step_id}' after {attempt} retries: {reason}"
-                            )));
-                        }
-                    }
-                }
-                FlowTurnOutcome::Failed { reason } => {
-                    if attempt < max_retries {
-                        attempt += 1;
-                        self.emitter
-                            .step_target_failed(
-                                run_id.clone(),
-                                step_id.clone(),
-                                target.clone(),
-                                reason.clone(),
-                            )
-                            .await?;
-                        continue;
-                    }
-                    // Terminal failure — append Failed ledger + failure ledger entry.
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: reason.clone(),
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    self.emitter
-                        .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                        .await?;
-                    self.maybe_escalate(run_id, step_id, &reason).await?;
-                    return Err(MobError::Internal(format!(
-                        "step '{step_id}' failed after {attempt} retries: {reason}"
-                    )));
-                }
-                FlowTurnOutcome::Canceled => {
-                    let reason = format!("step '{step_id}' was canceled");
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
-                                status: StepRunStatus::Canceled,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    self.run_store
-                        .append_failure_entry(
-                            run_id,
-                            FailureLedgerEntry {
-                                step_id: step_id.clone(),
-                                reason: reason.clone(),
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    self.emitter
-                        .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                        .await?;
-                    self.maybe_escalate(run_id, step_id, &reason).await?;
-                    return Err(MobError::Internal(reason));
-                }
+            StepGuardOutcome::Skipped { .. } => {
+                Ok(super::flow_frame_engine::FrameStepResult::Skipped)
             }
         }
-    }
-}
-
-impl FlowTurnExecutorAdapter {
-    /// Dispatch to multiple targets (FanOut/FanIn), collect results, and aggregate.
-    /// Sequential dispatch: each target is dispatched and awaited before the next.
-    /// Returns the aggregated output matching the step's collection policy.
-    #[allow(clippy::too_many_arguments)]
-    async fn dispatch_multi_target(
-        &self,
-        run_id: &RunId,
-        step_id: &StepId,
-        targets: &[MeerkatId],
-        step: &crate::definition::FlowStepSpec,
-        context: &FlowContext,
-    ) -> Result<super::flow_frame_engine::FrameStepResult, MobError> {
-        let step_timeout =
-            meerkat_core::time_compat::Duration::from_millis(step.timeout_ms.unwrap_or(30_000));
-        let flow_tool_overlay = step_tool_overlay(step);
-        let prompt = render_content_input_template(&step.message, context).map_err(|e| {
-            MobError::Internal(format!("template render failed for step '{step_id}': {e}"))
-        })?;
-        let max_retries = self
-            .config
-            .limits
-            .as_ref()
-            .and_then(|l| l.max_step_retries)
-            .unwrap_or(0) as usize;
-
-        let mut successes: Vec<(MeerkatId, serde_json::Value)> = Vec::new();
-        let mut failures: Vec<String> = Vec::new();
-
-        for target in targets {
-            self.emitter
-                .step_dispatched(run_id.clone(), step_id.clone(), target.clone())
-                .await?;
-            self.run_store
-                .append_step_entry_if_absent(
-                    run_id,
-                    StepLedgerEntry {
-                        step_id: step_id.clone(),
-                        meerkat_id: target.clone(),
-                        status: StepRunStatus::Dispatched,
-                        output: None,
-                        timestamp: Utc::now(),
-                    },
-                )
-                .await?;
-
-            let mut attempt = 0usize;
-            let result = loop {
-                let ticket = self
-                    .executor
-                    .dispatch(
-                        run_id,
-                        step_id,
-                        target,
-                        prompt.clone(),
-                        flow_tool_overlay.clone(),
-                    )
-                    .await?;
-
-                match self.executor.await_terminal(ticket, step_timeout).await? {
-                    FlowTurnOutcome::Completed { output } => {
-                        match parse_output_value(&output, step_id, target, &step.output_format) {
-                            Ok(value) => break Ok(value),
-                            Err(reason) => {
-                                if attempt < max_retries {
-                                    attempt += 1;
-                                    continue;
-                                }
-                                break Err(reason);
-                            }
-                        }
-                    }
-                    FlowTurnOutcome::Failed { reason } => {
-                        if attempt < max_retries {
-                            attempt += 1;
-                            continue;
-                        }
-                        break Err(reason);
-                    }
-                    FlowTurnOutcome::Canceled => break Err("canceled".into()),
-                }
-            };
-
-            match result {
-                Ok(value) => {
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
-                                status: StepRunStatus::Completed,
-                                output: Some(value.clone()),
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    self.emitter
-                        .step_target_completed(run_id.clone(), step_id.clone(), target.clone())
-                        .await?;
-                    successes.push((target.clone(), value));
-                }
-                Err(reason) => {
-                    self.run_store
-                        .append_step_entry(
-                            run_id,
-                            StepLedgerEntry {
-                                step_id: step_id.clone(),
-                                meerkat_id: target.clone(),
-                                status: StepRunStatus::Failed,
-                                output: None,
-                                timestamp: Utc::now(),
-                            },
-                        )
-                        .await?;
-                    self.emitter
-                        .step_target_failed(
-                            run_id.clone(),
-                            step_id.clone(),
-                            target.clone(),
-                            reason.clone(),
-                        )
-                        .await?;
-                    failures.push(reason);
-                }
-            }
-        }
-
-        if successes.is_empty() {
-            let combined = failures.join("; ");
-            self.emitter
-                .step_failed(run_id.clone(), step_id.clone(), combined.clone())
-                .await?;
-            self.maybe_escalate(run_id, step_id, &combined).await?;
-            return Err(MobError::Internal(format!(
-                "all targets failed for step '{step_id}': {combined}"
-            )));
-        }
-
-        // Aggregate output using the step's dispatch/collection policy.
-        let aggregate = aggregate_output(&step.dispatch_mode, &step.collection_policy, &successes);
-        self.emitter
-            .step_completed(run_id.clone(), step_id.clone())
-            .await?;
-        Ok(super::flow_frame_engine::FrameStepResult::Completed(
-            aggregate,
-        ))
     }
 }
 

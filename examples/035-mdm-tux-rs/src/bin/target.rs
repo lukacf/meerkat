@@ -1392,10 +1392,18 @@ async fn run_adopted_loop(
                     KennelPayload::TargetHeartbeat,
                 )?;
                 if write_envelope(write_half, &kennel_hb).await.is_err() {
-                    eprintln!("[target] kennel control lost — continuing direct session");
+                    eprintln!("[target] kennel control lost");
                     if let Ok((s, _)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelHeartbeatFailed) {
                         machine_state = s;
                     }
+                    // If the machine reached a terminal state (e.g. AttachFailed
+                    // during Attaching), exit immediately instead of lingering
+                    // with a dead kennel and no re-registration path.
+                    if machine_state.is_terminal() {
+                        hb.abort();
+                        return Ok(machine_state);
+                    }
+                    eprintln!("[target] continuing direct session");
                 }
             }
             maybe = read_envelope(reader), if poll_kennel => {
@@ -1412,10 +1420,15 @@ async fn run_adopted_loop(
                         }
                     }
                     _ => {
-                        eprintln!("[target] kennel control lost — continuing direct session");
+                        eprintln!("[target] kennel control lost");
                         if let Ok((s, _)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelDisconnected) {
                             machine_state = s;
                         }
+                        if machine_state.is_terminal() {
+                            hb.abort();
+                            return Ok(machine_state);
+                        }
+                        eprintln!("[target] continuing direct session");
                     }
                 }
             }

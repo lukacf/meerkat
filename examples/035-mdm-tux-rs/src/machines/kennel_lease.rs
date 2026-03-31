@@ -334,6 +334,17 @@ pub fn transition(
                 Ok((State::RecoveringClaim { tux_id, recover_deadline_ms }, vec![]))
             }
         }
+        (State::RecoveringClaim { tux_id, recover_deadline_ms }, Event::TuxDisconnected { tux_id: disc_tid }) => {
+            if disc_tid != tux_id {
+                return Ok((State::RecoveringClaim { tux_id, recover_deadline_ms }, vec![]));
+            }
+            // TUX is gone — no point waiting for rebind. Release immediately
+            // so the target returns to Available instead of being hidden for
+            // the full 60s recovery window.
+            Ok((State::Available, vec![
+                Effect::SendReleasedToTarget { lease_id: String::new(), reason: "tux_disconnected".into() },
+            ]))
+        }
         (State::RecoveringClaim { .. }, Event::TargetDisconnected) => {
             Ok((State::Available, vec![]))
         }
@@ -646,5 +657,25 @@ mod tests {
         ).unwrap();
         assert_eq!(state, State::Available);
         assert!(effects.contains(&Effect::SendReleasedToTarget { lease_id: lid(), reason: "target_address_changed".into() }));
+    }
+
+    #[test]
+    fn recovering_claim_tux_disconnected() {
+        let (state, effects) = transition(
+            State::RecoveringClaim { tux_id: tid(), recover_deadline_ms: 9999 },
+            Event::TuxDisconnected { tux_id: tid() },
+        ).unwrap();
+        assert_eq!(state, State::Available);
+        assert!(effects.contains(&Effect::SendReleasedToTarget { lease_id: String::new(), reason: "tux_disconnected".into() }));
+    }
+
+    #[test]
+    fn recovering_claim_wrong_tux_disconnected_noop() {
+        let state = State::RecoveringClaim { tux_id: tid(), recover_deadline_ms: 9999 };
+        let (new_state, effects) = transition(
+            state.clone(), Event::TuxDisconnected { tux_id: "other-tux".into() },
+        ).unwrap();
+        assert_eq!(new_state, state);
+        assert!(effects.is_empty());
     }
 }

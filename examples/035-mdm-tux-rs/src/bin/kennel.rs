@@ -878,8 +878,12 @@ fn dispatch_effects(
             Effect::RemoveLease { lease_id } => {
                 state.lease_index.remove(lease_id);
             }
-            Effect::DropTargetRecord { target_id } => {
-                state.targets.remove(target_id);
+            Effect::DropTargetRecord { target_id: effect_tid } => {
+                // Use the effect's target_id if provided, otherwise fall
+                // back to the caller's target_id (for Available state which
+                // doesn't carry target_id).
+                let tid = if effect_tid.is_empty() { target_id } else { effect_tid.as_str() };
+                state.targets.remove(tid);
             }
         }
     }

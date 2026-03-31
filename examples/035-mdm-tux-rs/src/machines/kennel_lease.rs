@@ -197,7 +197,14 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 vec![],
             ))
         }
-        (State::Available, Event::TargetDisconnected { .. } | Event::Tick { .. }) => {
+        (State::Available, Event::TargetDisconnected { .. }) => {
+            // An idle target that disconnects must be removed from the
+            // registry immediately. Without DropTargetRecord, the dead
+            // record stays in Available and can be claimed by a TUX,
+            // leading to phantom targets and attach timeouts.
+            Ok((State::Available, vec![Effect::DropTargetRecord { target_id: String::new() }]))
+        }
+        (State::Available, Event::Tick { .. }) => {
             Ok((State::Available, vec![]))
         }
 

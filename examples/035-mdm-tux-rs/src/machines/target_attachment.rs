@@ -323,10 +323,15 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 Effect::ReregisterWithHint { tux_id },
             ],
         )),
-        (State::Attached { .. }, Event::DirectLinkLost) => Ok((
-            State::DirectLost { tux_id: None },
-            vec![Effect::StopDirectHeartbeat],
-        )),
+        (State::Attached { tux_id, .. }, Event::DirectLinkLost) => {
+            // Always preserve tux_id so re-registration carries the claim
+            // hint. Without this, a transient direct-socket failure silently
+            // revokes the active lease on the kennel side.
+            Ok((
+                State::DirectLost { tux_id: Some(tux_id.clone()) },
+                vec![Effect::StopDirectHeartbeat, Effect::ReregisterWithHint { tux_id }],
+            ))
+        }
 
         (State::Released, event) => Err(err("Released", &format!("{event:?}"), "terminal state")),
         (State::AttachFailed, event) => {

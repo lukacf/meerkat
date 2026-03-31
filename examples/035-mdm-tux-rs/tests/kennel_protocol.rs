@@ -5,8 +5,8 @@
 
 use anyhow::Context;
 use mdm_tux::{
-    ClaimGrant, KennelPayload, KennelTargetState, ListScope, SignedKennelEnvelope,
-    TargetListEntry, build_signed_envelope, read_envelope, verify_envelope, write_envelope,
+    ClaimGrant, KennelPayload, KennelTargetState, ListScope, SignedKennelEnvelope, TargetListEntry,
+    build_signed_envelope, read_envelope, verify_envelope, write_envelope,
 };
 use meerkat_comms::identity::Keypair;
 use tokio::io::BufReader;
@@ -123,10 +123,8 @@ fn invalid_signature_rejected() {
     let signer_id = kp.public_key().to_peer_id();
     let mut env = build_signed_envelope(&kp, &signer_id, KennelPayload::TargetHeartbeat).unwrap();
     // Corrupt the signature
-    env.signature = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        vec![0u8; 64],
-    );
+    env.signature =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, vec![0u8; 64]);
     assert!(verify_envelope(&env).is_err());
 }
 
@@ -292,7 +290,11 @@ async fn kennel_full_claim_attach_release_cycle() {
 
     // Target should receive Released
     let resp = target.recv().await.unwrap();
-    let KennelPayload::Released { lease_id: rel_lid, reason } = resp else {
+    let KennelPayload::Released {
+        lease_id: rel_lid,
+        reason,
+    } = resp
+    else {
         panic!("expected Released, got {resp:?}");
     };
     assert_eq!(rel_lid, lease_id);
@@ -381,7 +383,11 @@ async fn kennel_target_disconnect_notifies_tux() {
 
     // TUX should receive TargetLost
     let resp = tux.recv().await.unwrap();
-    let KennelPayload::TargetLost { target_id, lease_id: lost_lid } = resp else {
+    let KennelPayload::TargetLost {
+        target_id,
+        lease_id: lost_lid,
+    } = resp
+    else {
         panic!("expected TargetLost, got {resp:?}");
     };
     assert_eq!(lost_lid, Some(lease_id));

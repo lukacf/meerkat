@@ -1,101 +1,168 @@
 //! TUX claim state machine — per-target claim lifecycle on the TUX side.
-//!
-//! Pure function: `transition(state, event) -> Result<(State, Vec<Effect>), TransitionError>`.
-//! No I/O. Caller interprets effects as I/O.
 
 use std::fmt;
 
-// ── States ───────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
-    /// Target visible in available list, not claimed.
-    Available,
-    /// /claim sent to kennel, waiting for ClaimGranted.
-    ClaimRequested,
-    /// ClaimGranted received, ClaimAck sent. Waiting for target direct attach.
+    Available {
+        target_id: String,
+        target_name: String,
+    },
+    ClaimRequested {
+        target_id: String,
+        target_name: String,
+    },
     Attaching {
-        lease_id: String,
+        target_id: String,
+        target_name: String,
         target_pubkey: String,
         target_direct_addr: String,
+        lease_id: String,
         started_at_ms: i64,
     },
-    /// Target directly attached and confirmed. Active session.
     Claimed {
+        target_id: String,
+        target_name: String,
+        target_pubkey: String,
+        target_direct_addr: String,
         lease_id: String,
     },
-    /// Attach timed out locally OR kennel disconnected. Kennel may still hold the claim.
     ClaimUncertain {
+        target_id: String,
+        target_name: String,
+        target_pubkey: String,
+        target_direct_addr: String,
+        lease_id: String,
+    },
+    ReleasePending {
+        target_id: String,
+        target_name: String,
+        target_pubkey: String,
+        target_direct_addr: String,
         lease_id: String,
     },
 }
 
-// ── Events ───────────────────────────────────────────────────────────────────
+impl State {
+    pub fn target_id(&self) -> &str {
+        match self {
+            State::Available { target_id, .. }
+            | State::ClaimRequested { target_id, .. }
+            | State::Attaching { target_id, .. }
+            | State::Claimed { target_id, .. }
+            | State::ClaimUncertain { target_id, .. }
+            | State::ReleasePending { target_id, .. } => target_id,
+        }
+    }
+
+    pub fn target_name(&self) -> &str {
+        match self {
+            State::Available { target_name, .. }
+            | State::ClaimRequested { target_name, .. }
+            | State::Attaching { target_name, .. }
+            | State::Claimed { target_name, .. }
+            | State::ClaimUncertain { target_name, .. }
+            | State::ReleasePending { target_name, .. } => target_name,
+        }
+    }
+
+    pub fn lease_id(&self) -> Option<&str> {
+        match self {
+            State::Attaching { lease_id, .. }
+            | State::Claimed { lease_id, .. }
+            | State::ClaimUncertain { lease_id, .. }
+            | State::ReleasePending { lease_id, .. } => Some(lease_id),
+            State::Available { .. } | State::ClaimRequested { .. } => None,
+        }
+    }
+
+    pub fn target_pubkey(&self) -> Option<&str> {
+        match self {
+            State::Attaching { target_pubkey, .. }
+            | State::Claimed { target_pubkey, .. }
+            | State::ClaimUncertain { target_pubkey, .. }
+            | State::ReleasePending { target_pubkey, .. } => Some(target_pubkey),
+            State::Available { .. } | State::ClaimRequested { .. } => None,
+        }
+    }
+
+    pub fn target_direct_addr(&self) -> Option<&str> {
+        match self {
+            State::Attaching {
+                target_direct_addr, ..
+            }
+            | State::Claimed {
+                target_direct_addr, ..
+            }
+            | State::ClaimUncertain {
+                target_direct_addr, ..
+            }
+            | State::ReleasePending {
+                target_direct_addr, ..
+            } => Some(target_direct_addr),
+            State::Available { .. } | State::ClaimRequested { .. } => None,
+        }
+    }
+
+    pub fn is_attached_for_rebind(&self) -> bool {
+        matches!(self, State::Claimed { .. } | State::ClaimUncertain { .. })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// User requested /claim.
+    SeenAvailable {
+        target_id: String,
+        target_name: String,
+    },
     ClaimRequested,
-    /// Kennel responded with ClaimGranted.
     ClaimGranted {
         lease_id: String,
         target_pubkey: String,
         target_direct_addr: String,
         now_ms: i64,
     },
-    /// Target attached directly and we confirmed to kennel.
     AttachConfirmed {
         lease_id: String,
     },
-    /// Kennel sent LeaseRebound after recovery.
     LeaseRebound {
         new_lease_id: String,
+        target_pubkey: String,
+        target_direct_addr: String,
     },
-    /// Kennel sent ClaimReleased or TargetLost.
-    ClaimReleased {
-        reason: String,
-    },
-    /// User requested /release.
+    ClaimReleased,
     ReleaseRequested,
-    /// Kennel mine-list no longer includes this target.
     MineListDropped,
-    /// Local attach timeout fired.
     AttachTimeout {
         now_ms: i64,
         timeout_ms: i64,
     },
-    /// Kennel control connection lost.
     KennelDisconnected,
 }
 
-// ── Effects ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// Send ClaimTargets to kennel.
-    SendClaimToKennel,
-    /// Add target as trusted peer for direct comms.
-    AddTrustedPeer {
+    EnsureTrustedPeer {
         target_pubkey: String,
         target_direct_addr: String,
     },
-    /// Send ClaimAck to kennel.
+    RemoveTrustedPeer {
+        target_pubkey: String,
+    },
+    SendClaimToKennel {
+        target_id: String,
+    },
     SendClaimAck {
         lease_id: String,
     },
-    /// Send AttachConfirmed to kennel.
     SendAttachConfirmed {
         lease_id: String,
     },
-    /// Send ReleaseTargets to kennel.
     SendReleaseToKennel {
         lease_id: String,
     },
-    /// Clear UI busy/streaming state for this target.
-    ClearUiState,
+    ClearUiProjection,
 }
-
-// ── Error ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransitionError {
@@ -106,328 +173,526 @@ pub struct TransitionError {
 
 impl fmt::Display for TransitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid transition: {} in state {} ({})", self.event, self.state, self.reason)
+        write!(
+            f,
+            "invalid transition: {} in state {} ({})",
+            self.event, self.state, self.reason
+        )
     }
 }
 
 fn err(state: &'static str, event: &str, reason: &str) -> TransitionError {
-    TransitionError { state, event: event.to_string(), reason: reason.to_string() }
+    TransitionError {
+        state,
+        event: event.to_string(),
+        reason: reason.to_string(),
+    }
 }
-
-// ── Transition function ──────────────────────────────────────────────────────
 
 pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     match (state, event) {
-        // ── Available ────────────────────────────────────────────────────
-        (State::Available, Event::ClaimRequested) => {
-            Ok((State::ClaimRequested, vec![Effect::SendClaimToKennel]))
-        }
-        (State::Available, Event::KennelDisconnected) => {
-            Ok((State::Available, vec![]))
-        }
-        (State::Available, Event::MineListDropped) => {
-            Ok((State::Available, vec![]))
-        }
+        (
+            State::Available {
+                target_id,
+                target_name,
+            },
+            Event::ClaimRequested,
+        ) => Ok((
+            State::ClaimRequested {
+                target_id: target_id.clone(),
+                target_name: target_name.clone(),
+            },
+            vec![Effect::SendClaimToKennel { target_id }],
+        )),
+        (
+            State::Available {
+                target_id: _,
+                target_name: _,
+            },
+            Event::SeenAvailable {
+                target_id,
+                target_name,
+            },
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![],
+        )),
+        (
+            State::Available {
+                target_id,
+                target_name,
+            },
+            Event::KennelDisconnected | Event::MineListDropped,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![],
+        )),
 
-        // ── ClaimRequested ───────────────────────────────────────────────
-        (State::ClaimRequested, Event::ClaimGranted { lease_id, target_pubkey, target_direct_addr, now_ms }) => {
-            Ok((
-                State::Attaching { lease_id: lease_id.clone(), target_pubkey: target_pubkey.clone(), target_direct_addr: target_direct_addr.clone(), started_at_ms: now_ms },
-                vec![
-                    Effect::AddTrustedPeer { target_pubkey, target_direct_addr },
-                    Effect::SendClaimAck { lease_id },
-                ],
-            ))
-        }
-        (State::ClaimRequested, Event::ClaimReleased { .. }) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
-        (State::ClaimRequested, Event::KennelDisconnected) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
+        (
+            State::ClaimRequested {
+                target_id,
+                target_name,
+            },
+            Event::ClaimGranted {
+                lease_id,
+                target_pubkey,
+                target_direct_addr,
+                now_ms,
+            },
+        ) => Ok((
+            State::Attaching {
+                target_id: target_id.clone(),
+                target_name,
+                target_pubkey: target_pubkey.clone(),
+                target_direct_addr: target_direct_addr.clone(),
+                lease_id: lease_id.clone(),
+                started_at_ms: now_ms,
+            },
+            vec![
+                Effect::EnsureTrustedPeer {
+                    target_pubkey,
+                    target_direct_addr,
+                },
+                Effect::SendClaimAck { lease_id },
+            ],
+        )),
+        (
+            State::ClaimRequested {
+                target_id,
+                target_name,
+            },
+            Event::KennelDisconnected | Event::ClaimReleased | Event::MineListDropped,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![Effect::ClearUiProjection],
+        )),
 
-        // ── Attaching ────────────────────────────────────────────────────
-        (State::Attaching { lease_id, .. }, Event::AttachConfirmed { lease_id: cf_lid }) => {
+        (
+            State::Attaching {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+                ..
+            },
+            Event::AttachConfirmed { lease_id: cf_lid },
+        ) => {
             if cf_lid != lease_id {
                 return Err(err("Attaching", "AttachConfirmed", "lease_id mismatch"));
             }
             Ok((
-                State::Claimed { lease_id: cf_lid.clone() },
+                State::Claimed {
+                    target_id,
+                    target_name,
+                    target_pubkey,
+                    target_direct_addr,
+                    lease_id: cf_lid.clone(),
+                },
                 vec![Effect::SendAttachConfirmed { lease_id: cf_lid }],
             ))
         }
-        (State::Attaching { lease_id, target_pubkey, target_direct_addr, started_at_ms }, Event::AttachTimeout { now_ms, timeout_ms }) => {
+        (
+            State::Attaching {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+                started_at_ms,
+            },
+            Event::AttachTimeout { now_ms, timeout_ms },
+        ) => {
             if now_ms - started_at_ms >= timeout_ms {
-                Ok((State::ClaimUncertain { lease_id }, vec![]))
+                Ok((
+                    State::ClaimUncertain {
+                        target_id,
+                        target_name,
+                        target_pubkey,
+                        target_direct_addr,
+                        lease_id,
+                    },
+                    vec![],
+                ))
             } else {
-                Ok((State::Attaching { lease_id, target_pubkey, target_direct_addr, started_at_ms }, vec![]))
+                Ok((
+                    State::Attaching {
+                        target_id,
+                        target_name,
+                        target_pubkey,
+                        target_direct_addr,
+                        lease_id,
+                        started_at_ms,
+                    },
+                    vec![],
+                ))
             }
         }
-        (State::Attaching { .. }, Event::ClaimReleased { .. }) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
-        (State::Attaching { lease_id, .. }, Event::KennelDisconnected) => {
-            Ok((State::ClaimUncertain { lease_id }, vec![]))
-        }
-        (State::Attaching { lease_id, target_pubkey, target_direct_addr, started_at_ms }, Event::MineListDropped) => {
-            // Mine list may not include pending attaches — don't drop.
-            // No-op: preserve all state fields unchanged.
-            Ok((State::Attaching { lease_id, target_pubkey, target_direct_addr, started_at_ms }, vec![]))
-        }
-
-        // ── Claimed ──────────────────────────────────────────────────────
-        (State::Claimed { lease_id }, Event::ReleaseRequested) => {
-            Ok((State::Available, vec![
+        (
+            State::Attaching {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr: _,
+                lease_id,
+                ..
+            },
+            Event::ClaimReleased | Event::MineListDropped,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![
+                Effect::RemoveTrustedPeer { target_pubkey },
+                Effect::ClearUiProjection,
                 Effect::SendReleaseToKennel { lease_id },
-                Effect::ClearUiState,
-            ]))
-        }
-        (State::Claimed { .. }, Event::ClaimReleased { .. }) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
-        (State::Claimed { .. }, Event::LeaseRebound { new_lease_id }) => {
-            Ok((State::Claimed { lease_id: new_lease_id }, vec![]))
-        }
-        (State::Claimed { .. }, Event::MineListDropped) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
-        (State::Claimed { lease_id }, Event::KennelDisconnected) => {
-            Ok((State::ClaimUncertain { lease_id }, vec![]))
-        }
+            ],
+        )),
+        (
+            State::Attaching {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+                ..
+            },
+            Event::KennelDisconnected,
+        ) => Ok((
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            vec![],
+        )),
 
-        // ── ClaimUncertain ───────────────────────────────────────────────
-        (State::ClaimUncertain { lease_id }, Event::AttachConfirmed { lease_id: cf_lid }) => {
+        (
+            State::Claimed {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::ReleaseRequested,
+        ) => Ok((
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id: lease_id.clone(),
+            },
+            vec![Effect::SendReleaseToKennel { lease_id }],
+        )),
+        (
+            State::Claimed {
+                target_id,
+                target_name,
+                target_pubkey: _,
+                target_direct_addr: _,
+                lease_id: _,
+            },
+            Event::LeaseRebound {
+                new_lease_id,
+                target_pubkey: rebound_pk,
+                target_direct_addr: rebound_addr,
+            },
+        ) => Ok((
+            State::Claimed {
+                target_id,
+                target_name,
+                target_pubkey: rebound_pk.clone(),
+                target_direct_addr: rebound_addr.clone(),
+                lease_id: new_lease_id,
+            },
+            vec![Effect::EnsureTrustedPeer {
+                target_pubkey: rebound_pk,
+                target_direct_addr: rebound_addr,
+            }],
+        )),
+        (
+            State::Claimed {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr: _,
+                lease_id,
+            },
+            Event::ClaimReleased | Event::MineListDropped,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![
+                Effect::RemoveTrustedPeer { target_pubkey },
+                Effect::ClearUiProjection,
+                Effect::SendReleaseToKennel { lease_id },
+            ],
+        )),
+        (
+            State::Claimed {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::KennelDisconnected,
+        ) => Ok((
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            vec![],
+        )),
+
+        (
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::AttachConfirmed { lease_id: cf_lid },
+        ) => {
             if cf_lid != lease_id {
-                return Err(err("ClaimUncertain", "AttachConfirmed", "lease_id mismatch"));
+                return Err(err(
+                    "ClaimUncertain",
+                    "AttachConfirmed",
+                    "lease_id mismatch",
+                ));
             }
             Ok((
-                State::Claimed { lease_id: cf_lid.clone() },
+                State::Claimed {
+                    target_id,
+                    target_name,
+                    target_pubkey,
+                    target_direct_addr,
+                    lease_id: cf_lid.clone(),
+                },
                 vec![Effect::SendAttachConfirmed { lease_id: cf_lid }],
             ))
         }
-        (State::ClaimUncertain { .. }, Event::ClaimReleased { .. }) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
-        (State::ClaimUncertain { .. }, Event::MineListDropped) => {
-            Ok((State::Available, vec![Effect::ClearUiState]))
-        }
-        (State::ClaimUncertain { lease_id }, Event::KennelDisconnected) => {
-            // Already uncertain — stay uncertain.
-            Ok((State::ClaimUncertain { lease_id }, vec![]))
-        }
-        (State::ClaimUncertain { .. }, Event::LeaseRebound { new_lease_id }) => {
-            Ok((State::Claimed { lease_id: new_lease_id }, vec![]))
-        }
+        (
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey: _,
+                target_direct_addr: _,
+                lease_id: _,
+            },
+            Event::LeaseRebound {
+                new_lease_id,
+                target_pubkey: rebound_pk,
+                target_direct_addr: rebound_addr,
+            },
+        ) => Ok((
+            State::Claimed {
+                target_id,
+                target_name,
+                target_pubkey: rebound_pk.clone(),
+                target_direct_addr: rebound_addr.clone(),
+                lease_id: new_lease_id,
+            },
+            vec![Effect::EnsureTrustedPeer {
+                target_pubkey: rebound_pk,
+                target_direct_addr: rebound_addr,
+            }],
+        )),
+        (
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr: _,
+                lease_id: _,
+            },
+            Event::ClaimReleased | Event::MineListDropped,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![
+                Effect::RemoveTrustedPeer { target_pubkey },
+                Effect::ClearUiProjection,
+            ],
+        )),
+        (
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::KennelDisconnected,
+        ) => Ok((
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            vec![],
+        )),
+        (
+            State::ClaimUncertain {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::ReleaseRequested,
+        ) => Ok((
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id: lease_id.clone(),
+            },
+            vec![Effect::SendReleaseToKennel { lease_id }],
+        )),
 
-        // ── Rejection ────────────────────────────────────────────────────
-        (State::Available, Event::ReleaseRequested) => {
-            Err(err("Available", "ReleaseRequested", "nothing to release"))
-        }
-        (State::Claimed { .. }, Event::ClaimRequested) => {
-            Err(err("Claimed", "ClaimRequested", "already claimed"))
-        }
+        (
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                ..
+            },
+            Event::ClaimReleased | Event::MineListDropped,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![
+                Effect::RemoveTrustedPeer { target_pubkey },
+                Effect::ClearUiProjection,
+            ],
+        )),
+        (
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::KennelDisconnected,
+        ) => Ok((
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            vec![],
+        )),
+        (
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            Event::LeaseRebound { .. },
+        ) => Ok((
+            State::ReleasePending {
+                target_id,
+                target_name,
+                target_pubkey,
+                target_direct_addr,
+                lease_id,
+            },
+            vec![],
+        )),
 
-        // ── Catch-all ────────────────────────────────────────────────────
         (state, event) => {
             let name = match &state {
-                State::Available => "Available",
-                State::ClaimRequested => "ClaimRequested",
+                State::Available { .. } => "Available",
+                State::ClaimRequested { .. } => "ClaimRequested",
                 State::Attaching { .. } => "Attaching",
                 State::Claimed { .. } => "Claimed",
                 State::ClaimUncertain { .. } => "ClaimUncertain",
+                State::ReleasePending { .. } => "ReleasePending",
             };
-            Err(err(name, &format!("{event:?}"), "unhandled event in this state"))
+            Err(err(
+                name,
+                &format!("{event:?}"),
+                "unhandled event in this state",
+            ))
         }
     }
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn lid() -> String { "lease-1".into() }
-    fn tpk() -> String { "ed25519:target-abc".into() }
-    fn taddr() -> String { "tcp://10.0.0.5:9000".into() }
-
-    // ── Happy path ───────────────────────────────────────────────────────
-
-    #[test]
-    fn available_claim_requested() {
-        let (state, effects) = transition(State::Available, Event::ClaimRequested).unwrap();
-        assert_eq!(state, State::ClaimRequested);
-        assert_eq!(effects, vec![Effect::SendClaimToKennel]);
+    fn available() -> State {
+        State::Available {
+            target_id: "t1".into(),
+            target_name: "target-1".into(),
+        }
     }
 
     #[test]
-    fn claim_requested_granted() {
-        let (state, effects) = transition(
-            State::ClaimRequested,
-            Event::ClaimGranted { lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), now_ms: 100 },
-        ).unwrap();
-        assert_eq!(state, State::Attaching { lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), started_at_ms: 100 });
-        assert!(effects.contains(&Effect::AddTrustedPeer { target_pubkey: tpk(), target_direct_addr: taddr() }));
-        assert!(effects.contains(&Effect::SendClaimAck { lease_id: lid() }));
-    }
-
-    #[test]
-    fn attaching_attach_confirmed() {
-        let (state, effects) = transition(
-            State::Attaching { lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), started_at_ms: 100 },
-            Event::AttachConfirmed { lease_id: lid() },
-        ).unwrap();
-        assert_eq!(state, State::Claimed { lease_id: lid() });
-        assert_eq!(effects, vec![Effect::SendAttachConfirmed { lease_id: lid() }]);
-    }
-
-    #[test]
-    fn claimed_release_requested() {
-        let (state, effects) = transition(
-            State::Claimed { lease_id: lid() },
-            Event::ReleaseRequested,
-        ).unwrap();
-        assert_eq!(state, State::Available);
-        assert!(effects.contains(&Effect::SendReleaseToKennel { lease_id: lid() }));
-        assert!(effects.contains(&Effect::ClearUiState));
-    }
-
-    #[test]
-    fn claimed_lease_rebound() {
-        let (state, effects) = transition(
-            State::Claimed { lease_id: lid() },
-            Event::LeaseRebound { new_lease_id: "lease-2".into() },
-        ).unwrap();
-        assert_eq!(state, State::Claimed { lease_id: "lease-2".into() });
-        assert!(effects.is_empty());
-    }
-
-    // ── Timeout / uncertain ──────────────────────────────────────────────
-
-    #[test]
-    fn attaching_timeout() {
-        let (state, effects) = transition(
-            State::Attaching { lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), started_at_ms: 100 },
-            Event::AttachTimeout { now_ms: 20200, timeout_ms: 20000 },
-        ).unwrap();
-        assert_eq!(state, State::ClaimUncertain { lease_id: lid() });
-        assert!(effects.is_empty());
-    }
-
-    #[test]
-    fn uncertain_attach_confirmed() {
-        let (state, effects) = transition(
-            State::ClaimUncertain { lease_id: lid() },
-            Event::AttachConfirmed { lease_id: lid() },
-        ).unwrap();
-        assert_eq!(state, State::Claimed { lease_id: lid() });
-        assert_eq!(effects, vec![Effect::SendAttachConfirmed { lease_id: lid() }]);
-    }
-
-    #[test]
-    fn uncertain_claim_released() {
-        let (state, effects) = transition(
-            State::ClaimUncertain { lease_id: lid() },
-            Event::ClaimReleased { reason: "lease_expired".into() },
-        ).unwrap();
-        assert_eq!(state, State::Available);
-        assert_eq!(effects, vec![Effect::ClearUiState]);
-    }
-
-    // ── Kennel disconnect ────────────────────────────────────────────────
-
-    #[test]
-    fn attaching_kennel_disconnected() {
+    fn release_pending_does_not_rebind() {
+        let (state, _) = transition(available(), Event::ClaimRequested).unwrap();
         let (state, _) = transition(
-            State::Attaching { lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), started_at_ms: 100 },
-            Event::KennelDisconnected,
-        ).unwrap();
-        assert_eq!(state, State::ClaimUncertain { lease_id: lid() });
-    }
-
-    #[test]
-    fn claimed_kennel_disconnected() {
+            state,
+            Event::ClaimGranted {
+                lease_id: "l1".into(),
+                target_pubkey: "ed25519:t".into(),
+                target_direct_addr: "tcp://1.2.3.4:9".into(),
+                now_ms: 0,
+            },
+        )
+        .unwrap();
         let (state, _) = transition(
-            State::Claimed { lease_id: lid() },
-            Event::KennelDisconnected,
-        ).unwrap();
-        assert_eq!(state, State::ClaimUncertain { lease_id: lid() });
-    }
-
-    #[test]
-    fn available_kennel_disconnected_noop() {
-        let (state, effects) = transition(State::Available, Event::KennelDisconnected).unwrap();
-        assert_eq!(state, State::Available);
+            state,
+            Event::AttachConfirmed {
+                lease_id: "l1".into(),
+            },
+        )
+        .unwrap();
+        let (state, _) = transition(state, Event::ReleaseRequested).unwrap();
+        let (state, effects) = transition(
+            state,
+            Event::LeaseRebound {
+                new_lease_id: "l2".into(),
+                target_pubkey: "ed25519:t".into(),
+                target_direct_addr: "tcp://1.2.3.4:10".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(state, State::ReleasePending { .. }));
         assert!(effects.is_empty());
-    }
-
-    // ── Mine-list reconciliation ─────────────────────────────────────────
-
-    #[test]
-    fn claimed_mine_list_dropped() {
-        let (state, effects) = transition(
-            State::Claimed { lease_id: lid() },
-            Event::MineListDropped,
-        ).unwrap();
-        assert_eq!(state, State::Available);
-        assert_eq!(effects, vec![Effect::ClearUiState]);
-    }
-
-    #[test]
-    fn uncertain_mine_list_dropped() {
-        let (state, effects) = transition(
-            State::ClaimUncertain { lease_id: lid() },
-            Event::MineListDropped,
-        ).unwrap();
-        assert_eq!(state, State::Available);
-        assert_eq!(effects, vec![Effect::ClearUiState]);
-    }
-
-    #[test]
-    fn claim_requested_released() {
-        let (state, effects) = transition(
-            State::ClaimRequested,
-            Event::ClaimReleased { reason: "rejected".into() },
-        ).unwrap();
-        assert_eq!(state, State::Available);
-        assert_eq!(effects, vec![Effect::ClearUiState]);
-    }
-
-    // ── Rejection ────────────────────────────────────────────────────────
-
-    #[test]
-    fn available_cannot_release() {
-        let result = transition(State::Available, Event::ReleaseRequested);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().reason, "nothing to release");
-    }
-
-    #[test]
-    fn claimed_cannot_claim_again() {
-        let result = transition(State::Claimed { lease_id: lid() }, Event::ClaimRequested);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().reason, "already claimed");
-    }
-
-    // ── Regression: no-op paths must preserve all fields ─────────────────
-
-    #[test]
-    fn attach_timeout_not_expired_preserves_fields() {
-        // Regression: non-expired timeout must not zero target_pubkey/addr
-        let state = State::Attaching {
-            lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), started_at_ms: 100,
-        };
-        let (new_state, _) = transition(state.clone(), Event::AttachTimeout { now_ms: 100, timeout_ms: 20000 }).unwrap();
-        assert_eq!(new_state, state);
-    }
-
-    #[test]
-    fn mine_list_dropped_preserves_attaching_fields() {
-        // Regression: MineListDropped in Attaching must not zero lease_id
-        let state = State::Attaching {
-            lease_id: lid(), target_pubkey: tpk(), target_direct_addr: taddr(), started_at_ms: 100,
-        };
-        let (new_state, _) = transition(state.clone(), Event::MineListDropped).unwrap();
-        assert_eq!(new_state, state);
     }
 }

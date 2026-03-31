@@ -29,36 +29,20 @@ impl State {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    BootResolved {
-        session_id: SessionId,
-    },
+    BootResolved { session_id: SessionId },
     CreateNewRequested,
-    ResumeRequested {
-        session_id: SessionId,
-    },
-    SwitchPrepared {
-        session_id: SessionId,
-    },
-    SwitchCommitted {
-        session_id: SessionId,
-    },
+    ResumeRequested { session_id: SessionId },
+    SwitchPrepared { session_id: SessionId },
+    SwitchCommitted { session_id: SessionId },
     SwitchFailed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    SetupSession {
-        resume_id: Option<SessionId>,
-    },
-    SubscribeSessionEvents {
-        session_id: SessionId,
-    },
-    UnregisterRuntimeSession {
-        session_id: SessionId,
-    },
-    DiscardLiveSession {
-        session_id: SessionId,
-    },
+    SetupSession { resume_id: Option<SessionId> },
+    SubscribeSessionEvents { session_id: SessionId },
+    UnregisterRuntimeSession { session_id: SessionId },
+    DiscardLiveSession { session_id: SessionId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,10 +70,7 @@ fn err(state: &'static str, event: &str, reason: &str) -> TransitionError {
     }
 }
 
-pub fn transition(
-    state: State,
-    event: Event,
-) -> Result<(State, Vec<Effect>), TransitionError> {
+pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     match (state, event) {
         (State::Unbound, Event::BootResolved { session_id }) => {
             Ok((State::Bound { session_id }, vec![]))
@@ -102,7 +83,12 @@ pub fn transition(
             },
             vec![Effect::SetupSession { resume_id: None }],
         )),
-        (State::Bound { session_id }, Event::ResumeRequested { session_id: resume_id }) => {
+        (
+            State::Bound { session_id },
+            Event::ResumeRequested {
+                session_id: resume_id,
+            },
+        ) => {
             if resume_id == session_id {
                 Ok((State::Bound { session_id }, vec![]))
             } else {
@@ -120,8 +106,7 @@ pub fn transition(
 
         (
             State::Switching {
-                from_session_id,
-                ..
+                from_session_id, ..
             },
             Event::SwitchPrepared { session_id },
         ) => {
@@ -150,10 +135,7 @@ pub fn transition(
                 ))
             }
         }
-        (
-            State::Switching { to_session_id, .. },
-            Event::SwitchCommitted { session_id },
-        ) => {
+        (State::Switching { to_session_id, .. }, Event::SwitchCommitted { session_id }) => {
             if session_id != to_session_id {
                 return Err(err("Switching", "SwitchCommitted", "session_id mismatch"));
             }
@@ -161,8 +143,7 @@ pub fn transition(
         }
         (
             State::Switching {
-                from_session_id,
-                ..
+                from_session_id, ..
             },
             Event::SwitchFailed,
         ) => Ok((
@@ -178,7 +159,11 @@ pub fn transition(
                 State::Bound { .. } => "Bound",
                 State::Switching { .. } => "Switching",
             };
-            Err(err(state_name, &format!("{event:?}"), "unhandled event in this state"))
+            Err(err(
+                state_name,
+                &format!("{event:?}"),
+                "unhandled event in this state",
+            ))
         }
     }
 }
@@ -194,8 +179,13 @@ mod tests {
     #[test]
     fn boot_binds_session() {
         let id = sid();
-        let (state, effects) =
-            transition(State::Unbound, Event::BootResolved { session_id: id.clone() }).unwrap();
+        let (state, effects) = transition(
+            State::Unbound,
+            Event::BootResolved {
+                session_id: id.clone(),
+            },
+        )
+        .unwrap();
         assert_eq!(state, State::Bound { session_id: id });
         assert!(effects.is_empty());
     }
@@ -227,8 +217,13 @@ mod tests {
             Event::CreateNewRequested,
         )
         .unwrap();
-        let (state, effects) =
-            transition(state, Event::SwitchPrepared { session_id: new.clone() }).unwrap();
+        let (state, effects) = transition(
+            state,
+            Event::SwitchPrepared {
+                session_id: new.clone(),
+            },
+        )
+        .unwrap();
         assert_eq!(
             state,
             State::Switching {

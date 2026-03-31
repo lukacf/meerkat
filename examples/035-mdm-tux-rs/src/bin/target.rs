@@ -57,9 +57,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
 use mdm_tux::machines::target_session_binding::{
-    self,
-    Effect as SessionBindingEffect,
-    Event as SessionBindingEvent,
+    self, Effect as SessionBindingEffect, Event as SessionBindingEvent,
     State as SessionBindingState,
 };
 
@@ -367,10 +365,7 @@ fn active_session_id(binding_state: &SessionBindingState) -> &SessionId {
 }
 
 use mdm_tux::machines::target_attachment::{
-    self,
-    State as TaState,
-    Event as TaEvent,
-    Effect as TaEffect,
+    self, Effect as TaEffect, Event as TaEvent, State as TaState,
 };
 
 /// Derive the caller's exit info from the machine's terminal state.
@@ -415,7 +410,10 @@ async fn apply_target_attachment_effects(
                     meta: PeerMeta::default(),
                 });
             }
-            TaEffect::SendAttachRequest { target_id, lease_id } => {
+            TaEffect::SendAttachRequest {
+                target_id,
+                lease_id,
+            } => {
                 let attach_fut = router.send(
                     "tux",
                     MessageKind::Request {
@@ -499,12 +497,12 @@ async fn handle_target_message(
             // wedging the inbox loop (same bound as heartbeat/event sends).
             let reply_fut = router.send(
                 &sender,
-                MessageKind::Message { body: response, blocks: None },
+                MessageKind::Message {
+                    body: response,
+                    blocks: None,
+                },
             );
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                reply_fut,
-            ).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), reply_fut).await;
         }
         meerkat_comms::agent::types::CommsContent::Request { intent, .. }
             if intent.as_str() == "heartbeat"
@@ -551,7 +549,10 @@ async fn handle_target_message(
                         flow_tool_overlay: None,
                         additional_instructions: None,
                     };
-                    if let Err(e) = service.start_turn(active_session_id(session_binding_state), req).await {
+                    if let Err(e) = service
+                        .start_turn(active_session_id(session_binding_state), req)
+                        .await
+                    {
                         eprintln!("[target] fallback start_turn error: {e}");
                     }
                 }
@@ -815,11 +816,9 @@ async fn switch_session(
         Some(session_id) => SessionBindingEvent::ResumeRequested { session_id },
         None => SessionBindingEvent::CreateNewRequested,
     };
-    let (next_state, effects) = target_session_binding::transition(
-        session_binding_state.clone(),
-        request_event,
-    )
-    .map_err(|e| anyhow::anyhow!("session binding request: {e}"))?;
+    let (next_state, effects) =
+        target_session_binding::transition(session_binding_state.clone(), request_event)
+            .map_err(|e| anyhow::anyhow!("session binding request: {e}"))?;
     *session_binding_state = next_state;
 
     let mut new_id: Option<SessionId> = None;
@@ -1435,14 +1434,8 @@ async fn run_adopted_loop(
     };
     let (mut machine_state, effects) = target_attachment::transition(TaState::Idle, initial_event)
         .map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
-    if !apply_target_attachment_effects(
-        node,
-        router,
-        &effects,
-        &mut heartbeat,
-        &disconnect_tx,
-    )
-    .await?
+    if !apply_target_attachment_effects(node, router, &effects, &mut heartbeat, &disconnect_tx)
+        .await?
     {
         let (state, _effects) =
             target_attachment::transition(machine_state, TaEvent::AttachSendFailed)
@@ -1453,7 +1446,10 @@ async fn run_adopted_loop(
     let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
 
     loop {
-        let poll_kennel = matches!(&machine_state, TaState::Attaching { .. } | TaState::Attached { .. });
+        let poll_kennel = matches!(
+            &machine_state,
+            TaState::Attaching { .. } | TaState::Attached { .. }
+        );
 
         tokio::select! {
             msg = node.recv_message() => {

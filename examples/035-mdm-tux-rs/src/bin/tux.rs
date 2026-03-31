@@ -38,6 +38,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use tokio::sync::{mpsc, oneshot};
 
+use mdm_tux::machines::tux_claim::{
+    self, Effect as ClaimEffect, Event as ClaimEvent, State as ClaimState,
+};
 use mdm_tux::{
     ClaimGrant, CommsNode, KennelPayload, KennelTargetState, ListScope, STREAM_PREFIX,
     TargetListEntry, auto_detect, build_llm_client, build_signed_envelope, detect_provider,
@@ -79,6 +82,7 @@ enum AppCommand {
 
 enum KennelClientCommand {
     ClaimTarget { target_id: String },
+    ClaimAck { lease_id: String },
     ReleaseTarget { lease_id: String },
     AttachConfirmed { lease_id: String },
     Shutdown { reply: oneshot::Sender<()> },
@@ -128,14 +132,7 @@ enum KennelUiState {
     ClaimUncertain,
 }
 
-#[derive(Clone)]
-struct PendingClaim {
-    target_id: String,
-    target_name: String,
-    target_pubkey: meerkat_comms::identity::PubKey,
-    lease_id: String,
-    attached: bool,
-}
+type ClaimRegistry = parking_lot::RwLock<HashMap<String, ClaimState>>;
 
 // ── TUI application state ─────────────────────────────────────────────────────
 
@@ -456,7 +453,7 @@ async fn main() -> anyhow::Result<()> {
         auto_scroll: true,
     };
 
-    tokio::task::spawn_blocking(move || tui_loop(app, command_tx, event_rx))
+    tokio::task::spawn_blocking(move || tui_loop(app, command_tx, event_rx, None))
         .await?
         .context("TUI loop")?;
 
@@ -520,15 +517,147 @@ async fn build_hive(
     Ok(agent)
 }
 
-fn current_attached_target_ids(
-    pending_claims: &parking_lot::RwLock<HashMap<String, PendingClaim>>,
-) -> Vec<String> {
-    pending_claims
+fn current_attached_target_ids(claims: &ClaimRegistry) -> Vec<String> {
+    claims
         .read()
         .values()
-        .filter(|c| c.attached)
-        .map(|c| c.target_id.clone())
+        .filter(|state| state.is_attached_for_rebind())
+        .map(|state| state.target_id().to_string())
         .collect()
+}
+
+fn claim_state_for_name(
+    app: &App,
+    claims: &ClaimRegistry,
+    target_name: &str,
+) -> Option<ClaimState> {
+    let target_id = app.target_ids.get(target_name)?;
+    claims.read().get(target_id).cloned()
+}
+
+fn rebuild_kennel_projection(app: &mut App, claims: &ClaimRegistry) {
+    app.target_states.clear();
+    app.target_leases.clear();
+    app.attaching_since.clear();
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    for state in claims.read().values() {
+        let target_name = state.target_name().to_string();
+        match state {
+            ClaimState::Available { .. } => {
+                app.target_states
+                    .insert(target_name, KennelUiState::Available);
+            }
+            ClaimState::ClaimRequested { .. } => {
+                app.target_states
+                    .insert(target_name.clone(), KennelUiState::Attaching);
+                app.attaching_since.insert(target_name, Instant::now());
+            }
+            ClaimState::Attaching {
+                lease_id,
+                started_at_ms,
+                ..
+            } => {
+                app.target_states
+                    .insert(target_name.clone(), KennelUiState::Attaching);
+                app.target_leases
+                    .insert(target_name.clone(), lease_id.clone());
+                let elapsed_ms = (now_ms - *started_at_ms).max(0) as u64;
+                let started = Instant::now()
+                    .checked_sub(Duration::from_millis(elapsed_ms))
+                    .unwrap_or_else(Instant::now);
+                app.attaching_since.insert(target_name, started);
+            }
+            ClaimState::Claimed { lease_id, .. } => {
+                app.target_states
+                    .insert(target_name.clone(), KennelUiState::ClaimedByMe);
+                app.target_leases.insert(target_name, lease_id.clone());
+            }
+            ClaimState::ClaimUncertain { lease_id, .. } => {
+                app.target_states
+                    .insert(target_name.clone(), KennelUiState::ClaimUncertain);
+                app.target_leases.insert(target_name, lease_id.clone());
+            }
+            ClaimState::ReleasePending { lease_id, .. } => {
+                app.target_states
+                    .insert(target_name.clone(), KennelUiState::ClaimedByMe);
+                app.target_leases.insert(target_name, lease_id.clone());
+            }
+        }
+    }
+}
+
+fn claim_lookup_by_lease(claims: &ClaimRegistry, lease_id: &str) -> Option<ClaimState> {
+    claims
+        .read()
+        .values()
+        .find(|state| state.lease_id() == Some(lease_id))
+        .cloned()
+}
+
+fn apply_claim_effects(
+    claims: &ClaimRegistry,
+    router: &Arc<meerkat_comms::Router>,
+    kennel_tx: Option<&mpsc::UnboundedSender<KennelClientCommand>>,
+    target_id: &str,
+    effects: &[ClaimEffect],
+) {
+    for effect in effects {
+        match effect {
+            ClaimEffect::EnsureTrustedPeer {
+                target_pubkey,
+                target_direct_addr,
+            } => {
+                if let Ok(pubkey) = meerkat_comms::identity::PubKey::from_peer_id(target_pubkey) {
+                    let target_name = claims
+                        .read()
+                        .get(target_id)
+                        .map(|state| state.target_name().to_string())
+                        .unwrap_or_else(|| target_id.to_string());
+                    router.add_trusted_peer(meerkat_comms::TrustedPeer {
+                        name: target_name,
+                        pubkey,
+                        addr: target_direct_addr.clone(),
+                        meta: meerkat_comms::PeerMeta::default(),
+                    });
+                }
+            }
+            ClaimEffect::RemoveTrustedPeer { target_pubkey } => {
+                if let Ok(pubkey) = meerkat_comms::identity::PubKey::from_peer_id(target_pubkey) {
+                    router.remove_trusted_peer(&pubkey);
+                }
+            }
+            ClaimEffect::SendClaimToKennel { target_id } => {
+                if let Some(kennel_tx) = kennel_tx {
+                    let _ = kennel_tx.send(KennelClientCommand::ClaimTarget {
+                        target_id: target_id.clone(),
+                    });
+                }
+            }
+            ClaimEffect::SendClaimAck { lease_id } => {
+                if let Some(kennel_tx) = kennel_tx {
+                    let _ = kennel_tx.send(KennelClientCommand::ClaimAck {
+                        lease_id: lease_id.clone(),
+                    });
+                }
+            }
+            ClaimEffect::SendAttachConfirmed { lease_id } => {
+                if let Some(kennel_tx) = kennel_tx {
+                    let _ = kennel_tx.send(KennelClientCommand::AttachConfirmed {
+                        lease_id: lease_id.clone(),
+                    });
+                }
+            }
+            ClaimEffect::SendReleaseToKennel { lease_id } => {
+                if let Some(kennel_tx) = kennel_tx {
+                    let _ = kennel_tx.send(KennelClientCommand::ReleaseTarget {
+                        lease_id: lease_id.clone(),
+                    });
+                }
+            }
+            ClaimEffect::ClearUiProjection => {}
+        }
+    }
 }
 
 async fn send_kennel_message(
@@ -543,12 +672,14 @@ async fn send_kennel_message(
     write_envelope(write_half, &env).await.is_ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_command_processor(
     mut command_rx: mpsc::UnboundedReceiver<AppCommand>,
     kennel_tx: mpsc::UnboundedSender<KennelClientCommand>,
     event_tx: mpsc::Sender<TuiEvent>,
     router: Arc<meerkat_comms::Router>,
     trusted_shared: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
+    claims: Arc<ClaimRegistry>,
     hive_model: Option<String>,
     hive_session_dir: PathBuf,
 ) {
@@ -576,10 +707,27 @@ async fn spawn_command_processor(
                     .await;
             }
             AppCommand::ClaimTarget { target_id } => {
-                let _ = kennel_tx.send(KennelClientCommand::ClaimTarget { target_id });
+                if let Some(state) = claims.read().get(&target_id).cloned()
+                    && let Ok((new_state, effects)) =
+                        tux_claim::transition(state, ClaimEvent::ClaimRequested)
+                {
+                    claims.write().insert(target_id.clone(), new_state);
+                    apply_claim_effects(&claims, &router, Some(&kennel_tx), &target_id, &effects);
+                }
             }
             AppCommand::ReleaseTarget { lease_id } => {
-                let _ = kennel_tx.send(KennelClientCommand::ReleaseTarget { lease_id });
+                if let Some(target_id) = claims
+                    .read()
+                    .iter()
+                    .find(|(_, state)| state.lease_id() == Some(lease_id.as_str()))
+                    .map(|(target_id, _)| target_id.clone())
+                    && let Some(state) = claims.read().get(&target_id).cloned()
+                    && let Ok((new_state, effects)) =
+                        tux_claim::transition(state, ClaimEvent::ReleaseRequested)
+                {
+                    claims.write().insert(target_id.clone(), new_state);
+                    apply_claim_effects(&claims, &router, Some(&kennel_tx), &target_id, &effects);
+                }
             }
             AppCommand::ResetHive => {
                 hive_agent = None;
@@ -618,11 +766,13 @@ async fn spawn_command_processor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_kennel_client(
     mut kennel_rx: mpsc::UnboundedReceiver<KennelClientCommand>,
+    kennel_cmd_tx: mpsc::UnboundedSender<KennelClientCommand>,
     event_tx: mpsc::Sender<TuiEvent>,
     router: Arc<meerkat_comms::Router>,
-    pending_claims: Arc<parking_lot::RwLock<HashMap<String, PendingClaim>>>,
+    claims: Arc<ClaimRegistry>,
     kennel_addr: String,
     tux_id: String,
     direct_addr: String,
@@ -655,8 +805,9 @@ async fn spawn_kennel_client(
         // a target's mcm.attach for a stale claim creates a ghost session
         // that the kennel knows nothing about.
         {
-            let mut guard = pending_claims.write();
-            guard.retain(|_, claim| claim.attached);
+            claims
+                .write()
+                .retain(|_, state| state.is_attached_for_rebind());
         }
         if !send_kennel_message(
             &mut write_half,
@@ -666,7 +817,7 @@ async fn spawn_kennel_client(
                 tux_id: tux_id.clone(),
                 pubkey: tux_id.clone(),
                 direct_addr: direct_addr.clone(),
-                attached_target_ids: current_attached_target_ids(&pending_claims),
+                attached_target_ids: current_attached_target_ids(&claims),
             },
         )
         .await
@@ -680,7 +831,7 @@ async fn spawn_kennel_client(
         };
         let _ = verify_envelope(&env);
 
-        let rebound_targets = current_attached_target_ids(&pending_claims);
+        let rebound_targets = current_attached_target_ids(&claims);
         if !rebound_targets.is_empty()
             && !send_kennel_message(
                 &mut write_half,
@@ -723,7 +874,9 @@ async fn spawn_kennel_client(
                     }
                 }
                 _ = renew.tick() => {
-                    let lease_ids: Vec<String> = pending_claims.read().values().filter(|c| c.attached).map(|c| c.lease_id.clone()).collect();
+                    let lease_ids: Vec<String> = claims.read().values().filter_map(|state| {
+                        state.is_attached_for_rebind().then(|| state.lease_id().map(ToString::to_string)).flatten()
+                    }).collect();
                     if !lease_ids.is_empty()
                         && !send_kennel_message(
                             &mut write_half,
@@ -745,55 +898,73 @@ async fn spawn_kennel_client(
                         KennelPayload::TargetList { scope: ListScope::Mine, targets } => {
                             let _ = event_tx.send(TuiEvent::KennelMineTargets(targets)).await;
                         }
-                        KennelPayload::ClaimGranted { claims } => {
+                        KennelPayload::ClaimGranted { claims: grants } => {
                             {
-                                let mut guard = pending_claims.write();
-                                for claim in &claims {
-                                    if let Ok(pubkey) = meerkat_comms::identity::PubKey::from_peer_id(&claim.target_pubkey) {
-                                        guard.insert(claim.lease_id.clone(), PendingClaim {
+                                let mut guard = claims.write();
+                                for claim in &grants {
+                                    let state = guard
+                                        .get(&claim.target_id)
+                                        .cloned()
+                                        .unwrap_or(ClaimState::Available {
                                             target_id: claim.target_id.clone(),
                                             target_name: claim.target_name.clone(),
-                                            target_pubkey: pubkey,
+                                        });
+                                    if let Ok((new_state, effects)) = tux_claim::transition(
+                                        state,
+                                        ClaimEvent::ClaimGranted {
                                             lease_id: claim.lease_id.clone(),
-                                            attached: false,
-                                        });
-                                        router.add_trusted_peer(meerkat_comms::TrustedPeer {
-                                            name: claim.target_name.clone(),
-                                            pubkey,
-                                            addr: claim.target_direct_addr.clone(),
-                                            meta: meerkat_comms::PeerMeta::default(),
-                                        });
+                                            target_pubkey: claim.target_pubkey.clone(),
+                                            target_direct_addr: claim.target_direct_addr.clone(),
+                                            now_ms: chrono::Utc::now().timestamp_millis(),
+                                        },
+                                    ) {
+                                        guard.insert(claim.target_id.clone(), new_state);
+                                        drop(guard);
+                                        apply_claim_effects(&claims, &router, Some(&kennel_cmd_tx), &claim.target_id, &effects);
+                                        guard = claims.write();
                                     }
                                 }
                             }
-                            let ack_ids = claims.iter().map(|c| c.lease_id.clone()).collect();
-                            let _ = send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ClaimAck { lease_ids: ack_ids }).await;
-                            let _ = event_tx.send(TuiEvent::KennelClaimGranted(claims)).await;
+                            let _ = event_tx.send(TuiEvent::KennelClaimGranted(grants)).await;
                         }
                         KennelPayload::ClaimReleased { target_id, lease_id, reason } => {
-                            // Remove the target's trusted peer entry. Look up by
-                            // lease_id first; fall back to target_id scan when
-                            // lease_id is empty (recovery-expired releases).
-                            // Block-scope the lock guard so it's dropped before .await.
+                            let claim_target_id = if !lease_id.is_empty() {
+                                claim_lookup_by_lease(&claims, &lease_id)
+                                    .map(|state| state.target_id().to_string())
+                            } else {
+                                Some(target_id.clone()).filter(|id| claims.read().contains_key(id))
+                            };
+                            if let Some(claim_target_id) = claim_target_id
+                                && let Some(state) = claims.read().get(&claim_target_id).cloned()
+                                && let Ok((new_state, effects)) =
+                                    tux_claim::transition(state, ClaimEvent::ClaimReleased)
                             {
-                                let mut guard = pending_claims.write();
-                                let removed = if !lease_id.is_empty() {
-                                    guard.remove(&lease_id)
-                                } else {
-                                    let key = guard.iter()
-                                        .find(|(_, c)| c.target_id == target_id)
-                                        .map(|(k, _)| k.clone());
-                                    key.and_then(|k| guard.remove(&k))
-                                };
-                                if let Some(claim) = removed {
-                                    router.remove_trusted_peer(&claim.target_pubkey);
-                                }
+                                claims.write().insert(claim_target_id.clone(), new_state);
+                                apply_claim_effects(
+                                    &claims,
+                                    &router,
+                                    Some(&kennel_cmd_tx),
+                                    &claim_target_id,
+                                    &effects,
+                                );
                             }
                             let _ = event_tx.send(TuiEvent::KennelClaimReleased { target_id, lease_id, reason }).await;
                         }
                         KennelPayload::TargetLost { target_id, lease_id: Some(lease_id) } => {
-                            if let Some(claim) = pending_claims.write().remove(&lease_id) {
-                                router.remove_trusted_peer(&claim.target_pubkey);
+                            if let Some(claim_target_id) = claim_lookup_by_lease(&claims, &lease_id)
+                                .map(|state| state.target_id().to_string())
+                                && let Some(state) = claims.read().get(&claim_target_id).cloned()
+                                && let Ok((new_state, effects)) =
+                                    tux_claim::transition(state, ClaimEvent::ClaimReleased)
+                            {
+                                claims.write().insert(claim_target_id.clone(), new_state);
+                                apply_claim_effects(
+                                    &claims,
+                                    &router,
+                                    Some(&kennel_cmd_tx),
+                                    &claim_target_id,
+                                    &effects,
+                                );
                             }
                             let _ = event_tx
                                 .send(TuiEvent::KennelClaimReleased {
@@ -805,38 +976,28 @@ async fn spawn_kennel_client(
                         }
                         KennelPayload::TargetLost { .. } => {}
                         KennelPayload::LeaseRebound { lease_id, target_id, target_pubkey, target_direct_addr, .. } => {
-                            let target_name = {
-                                let mut guard = pending_claims.write();
-                                let old_key = guard
-                                    .iter()
-                                    .find_map(|(old_lease_id, claim)| {
-                                        (claim.target_id == target_id).then(|| old_lease_id.clone())
-                                    });
-                                if let Some(old_key) = old_key {
-                                    if let Some(mut claim) = guard.remove(&old_key) {
-                                        // Refresh target peer with fresh routing data.
-                                        // The target may have restarted on a new port.
-                                        router.remove_trusted_peer(&claim.target_pubkey);
-                                        if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(&target_pubkey) {
-                                            claim.target_pubkey = pk;
-                                            router.add_trusted_peer(meerkat_comms::TrustedPeer {
-                                                name: claim.target_name.clone(),
-                                                pubkey: pk,
-                                                addr: target_direct_addr.clone(),
-                                                meta: meerkat_comms::PeerMeta::default(),
-                                            });
-                                        }
-                                        claim.attached = true;
-                                        claim.lease_id = lease_id.clone();
-                                        let target_name = claim.target_name.clone();
-                                        guard.insert(lease_id.clone(), claim);
-                                        Some(target_name)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
+                            let target_name = if let Some(state) = claims.read().get(&target_id).cloned()
+                                && let Ok((new_state, effects)) = tux_claim::transition(
+                                    state,
+                                    ClaimEvent::LeaseRebound {
+                                        new_lease_id: lease_id.clone(),
+                                        target_pubkey,
+                                        target_direct_addr,
+                                    },
+                                )
+                            {
+                                let target_name = new_state.target_name().to_string();
+                                claims.write().insert(target_id.clone(), new_state);
+                                apply_claim_effects(
+                                    &claims,
+                                    &router,
+                                    Some(&kennel_cmd_tx),
+                                    &target_id,
+                                    &effects,
+                                );
+                                Some(target_name)
+                            } else {
+                                None
                             };
                             if let Some(target_name) = target_name {
                                 let _ = event_tx.send(TuiEvent::KennelAttached { target_name, lease_id }).await;
@@ -848,28 +1009,50 @@ async fn spawn_kennel_client(
                 Some(cmd) = kennel_rx.recv() => {
                     match cmd {
                         KennelClientCommand::ClaimTarget { target_id } => {
-                            if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ClaimTargets { target_ids: vec![target_id], lease_ttl_sec: None }).await {
+                            if !send_kennel_message(
+                                &mut write_half,
+                                &router,
+                                &tux_id,
+                                KennelPayload::ClaimTargets {
+                                    target_ids: vec![target_id],
+                                    lease_ttl_sec: None,
+                                },
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        KennelClientCommand::ClaimAck { lease_id } => {
+                            if !send_kennel_message(
+                                &mut write_half,
+                                &router,
+                                &tux_id,
+                                KennelPayload::ClaimAck {
+                                    lease_ids: vec![lease_id],
+                                },
+                            )
+                            .await
+                            {
                                 break;
                             }
                         }
                         KennelClientCommand::ReleaseTarget { lease_id } => {
-                            // Remove the claim locally BEFORE sending so a
-                            // reconnect can't rebind a user-released target.
-                            pending_claims.write().remove(&lease_id);
                             if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ReleaseTargets { lease_ids: vec![lease_id] }).await {
                                 break;
                             }
                         }
                         KennelClientCommand::AttachConfirmed { lease_id } => {
-                            if let Some(claim) = pending_claims.write().get_mut(&lease_id) {
-                                claim.attached = true;
-                            }
                             if !send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::AttachConfirmed { lease_id }).await {
                                 break;
                             }
                         }
                         KennelClientCommand::Shutdown { reply } => {
-                            let lease_ids: Vec<String> = pending_claims.read().values().map(|c| c.lease_id.clone()).collect();
+                            let lease_ids: Vec<String> = claims
+                                .read()
+                                .values()
+                                .filter_map(|state| state.lease_id().map(ToString::to_string))
+                                .collect();
                             if !lease_ids.is_empty() {
                                 let _ = send_kennel_message(&mut write_half, &router, &tux_id, KennelPayload::ReleaseTargets { lease_ids }).await;
                             }
@@ -935,14 +1118,13 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
 
     let router = node.router.clone();
     let trusted_shared = node.trusted.clone();
-    let pending_claims: Arc<parking_lot::RwLock<HashMap<String, PendingClaim>>> =
-        Arc::new(parking_lot::RwLock::new(HashMap::new()));
+    let claims: Arc<ClaimRegistry> = Arc::new(parking_lot::RwLock::new(HashMap::new()));
 
     tokio::spawn({
         let event_tx = event_tx.clone();
         let trusted = trusted_shared.clone();
         let kennel_tx = kennel_tx.clone();
-        let pending_claims = pending_claims.clone();
+        let claims = claims.clone();
         let router = router.clone();
         async move {
             loop {
@@ -979,16 +1161,18 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         let matched = {
-                            let claims = pending_claims.read();
+                            let claims = claims.read();
                             claims
-                                .get(lease_id)
+                                .values()
+                                .find(|state| state.lease_id() == Some(lease_id))
                                 .filter(|claim| {
-                                    claim.target_id == target_id
-                                        && claim.target_pubkey == msg.from_pubkey
+                                    claim.target_id() == target_id
+                                        && claim.target_pubkey()
+                                            == Some(msg.from_pubkey.to_peer_id().as_str())
                                 })
                                 .cloned()
                         };
-                        if let Some(claim) = matched {
+                        if let Some(state) = matched {
                             let _ = tokio::time::timeout(
                                 SEND_TIMEOUT,
                                 router.send(
@@ -1000,15 +1184,29 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
                                 ),
                             )
                             .await;
-                            let _ = kennel_tx.send(KennelClientCommand::AttachConfirmed {
-                                lease_id: lease_id.to_string(),
-                            });
-                            let _ = event_tx
-                                .send(TuiEvent::KennelAttached {
-                                    target_name: claim.target_name,
+                            if let Ok((new_state, effects)) = tux_claim::transition(
+                                state,
+                                ClaimEvent::AttachConfirmed {
                                     lease_id: lease_id.to_string(),
-                                })
-                                .await;
+                                },
+                            ) {
+                                let target_id = new_state.target_id().to_string();
+                                let target_name = new_state.target_name().to_string();
+                                claims.write().insert(target_id.clone(), new_state);
+                                apply_claim_effects(
+                                    &claims,
+                                    &router,
+                                    Some(&kennel_tx),
+                                    &target_id,
+                                    &effects,
+                                );
+                                let _ = event_tx
+                                    .send(TuiEvent::KennelAttached {
+                                        target_name,
+                                        lease_id: lease_id.to_string(),
+                                    })
+                                    .await;
+                            }
                         }
                     }
                     CommsContent::Message { body, .. } if body.starts_with(STREAM_PREFIX) => {
@@ -1051,6 +1249,7 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
         let trusted_shared = trusted_shared.clone();
         let kennel_tx = kennel_tx.clone();
         let event_tx = event_tx.clone();
+        let claims = claims.clone();
         async move {
             spawn_command_processor(
                 command_rx,
@@ -1058,6 +1257,7 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
                 event_tx,
                 router,
                 trusted_shared,
+                claims,
                 hive_model,
                 hive_session_dir,
             )
@@ -1067,17 +1267,19 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
 
     tokio::spawn({
         let event_tx = event_tx.clone();
+        let kennel_cmd_tx = kennel_tx.clone();
         let router = router.clone();
-        let pending_claims = pending_claims.clone();
+        let claims = claims.clone();
         let kennel_addr = kennel_addr.clone();
         let tux_id = tux_id.clone();
         let direct_addr = direct_addr.clone();
         async move {
             spawn_kennel_client(
                 kennel_rx,
+                kennel_cmd_tx,
                 event_tx,
                 router,
-                pending_claims,
+                claims,
                 kennel_addr,
                 tux_id,
                 direct_addr,
@@ -1106,7 +1308,8 @@ async fn run_kennel_tux(args: &[String]) -> anyhow::Result<()> {
         auto_scroll: true,
     };
 
-    tokio::task::spawn_blocking(move || tui_loop(app, command_tx, event_rx))
+    let claims_for_tui = claims.clone();
+    tokio::task::spawn_blocking(move || tui_loop(app, command_tx, event_rx, Some(claims_for_tui)))
         .await?
         .context("TUI loop")?;
 
@@ -1123,6 +1326,7 @@ fn tui_loop(
     mut app: App,
     command_tx: mpsc::UnboundedSender<AppCommand>,
     mut event_rx: mpsc::Receiver<TuiEvent>,
+    claims: Option<Arc<ClaimRegistry>>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
 
@@ -1143,7 +1347,13 @@ fn tui_loop(
         if crossterm::event::poll(Duration::from_millis(16))? {
             match crossterm::event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key(&mut app, key.code, key.modifiers, &command_tx);
+                    handle_key(
+                        &mut app,
+                        key.code,
+                        key.modifiers,
+                        &command_tx,
+                        claims.as_deref(),
+                    );
                 }
                 Event::Paste(text) => {
                     let line_count = text.lines().count();
@@ -1273,12 +1483,15 @@ fn tui_loop(
                         .filter(|name| !mine_names.contains(name))
                         .collect();
                     for name in &stale_mine {
-                        app.target_states.insert(name.clone(), KennelUiState::Available);
+                        app.target_states
+                            .insert(name.clone(), KennelUiState::Available);
                         app.target_leases.remove(name);
                         app.attaching_since.remove(name);
                         app.set_busy(name, false);
                         app.flush_streaming(name);
-                        app.push(format!("[{name}] claim no longer held — returned to available"));
+                        app.push(format!(
+                            "[{name}] claim no longer held — returned to available"
+                        ));
                     }
 
                     // Upsert entries from the authoritative list.
@@ -1355,23 +1568,34 @@ fn tui_loop(
             }
         }
 
-        if app.transport == TransportMode::Kennel {
-            let timed_out: Vec<String> = app
-                .attaching_since
+        if app.transport == TransportMode::Kennel
+            && let Some(claims) = claims.as_deref()
+        {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let timeout_ms = LOCAL_ATTACH_TIMEOUT.as_millis() as i64;
+            let timed_out: Vec<String> = claims
+                .read()
                 .iter()
-                .filter(|(_, started)| started.elapsed() > LOCAL_ATTACH_TIMEOUT)
-                .map(|(name, _)| name.clone())
+                .filter_map(|(target_id, state)| match state {
+                    ClaimState::Attaching { started_at_ms, .. }
+                        if now_ms - *started_at_ms >= timeout_ms =>
+                    {
+                        Some(target_id.clone())
+                    }
+                    _ => None,
+                })
                 .collect();
-            for name in timed_out {
-                if matches!(app.target_states.get(&name), Some(KennelUiState::Attaching)) {
-                    app.target_states
-                        .insert(name.clone(), KennelUiState::ClaimUncertain);
-                    app.attaching_since.remove(&name);
-                    app.push(format!(
-                        "[{name}] attach still pending — kennel state unknown"
-                    ));
+            for target_id in timed_out {
+                if let Some(state) = claims.read().get(&target_id).cloned()
+                    && let Ok((new_state, _effects)) = tux_claim::transition(
+                        state,
+                        ClaimEvent::AttachTimeout { now_ms, timeout_ms },
+                    )
+                {
+                    claims.write().insert(target_id, new_state);
                 }
             }
+            rebuild_kennel_projection(&mut app, claims);
         }
 
         // Clear busy/streaming state for targets that stopped heartbeating.
@@ -1503,6 +1727,7 @@ fn handle_key(
     code: KeyCode,
     modifiers: KeyModifiers,
     command_tx: &mpsc::UnboundedSender<AppCommand>,
+    claims: Option<&ClaimRegistry>,
 ) {
     match code {
         KeyCode::Tab => {
@@ -1564,8 +1789,16 @@ fn handle_key(
                         && !is_slash
                         && !app.targets.is_empty()
                         && !matches!(
-                            app.target_states.get(&app.targets[app.selected]),
-                            Some(KennelUiState::ClaimedByMe)
+                            claims.and_then(|claims| claim_state_for_name(
+                                app,
+                                claims,
+                                &app.targets[app.selected]
+                            )),
+                            Some(
+                                ClaimState::Claimed { .. }
+                                    | ClaimState::ClaimUncertain { .. }
+                                    | ClaimState::ReleasePending { .. }
+                            )
                         ) =>
                 {
                     return;
@@ -1662,7 +1895,10 @@ fn handle_key(
                             return;
                         }
                         let target = app.targets[app.selected].clone();
-                        let Some(lease_id) = app.target_leases.get(&target).cloned() else {
+                        let Some(lease_id) = claims
+                            .and_then(|claims| claim_state_for_name(app, claims, &target))
+                            .and_then(|state| state.lease_id().map(ToString::to_string))
+                        else {
                             return;
                         };
                         app.push(format!("> /release ({target})"));

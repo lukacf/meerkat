@@ -33,7 +33,10 @@ pub enum State {
 
 impl State {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, State::Released | State::AttachFailed | State::DirectLost { .. })
+        matches!(
+            self,
+            State::Released | State::AttachFailed | State::DirectLost { .. }
+        )
     }
 }
 
@@ -92,17 +95,34 @@ pub struct TransitionError {
 
 impl fmt::Display for TransitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid transition: {} in state {} ({})", self.event, self.state, self.reason)
+        write!(
+            f,
+            "invalid transition: {} in state {} ({})",
+            self.event, self.state, self.reason
+        )
     }
 }
 
 fn err(state: &'static str, event: &str, reason: &str) -> TransitionError {
-    TransitionError { state, event: event.to_string(), reason: reason.to_string() }
+    TransitionError {
+        state,
+        event: event.to_string(),
+        reason: reason.to_string(),
+    }
 }
 
 pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     match (state, event) {
-        (State::Idle, Event::Adopted { target_id, lease_id, tux_id, tux_pubkey, tux_direct_addr }) => Ok((
+        (
+            State::Idle,
+            Event::Adopted {
+                target_id,
+                lease_id,
+                tux_id,
+                tux_pubkey,
+                tux_direct_addr,
+            },
+        ) => Ok((
             State::Attaching {
                 target_id: target_id.clone(),
                 lease_id: lease_id.clone(),
@@ -116,10 +136,22 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                     tux_pubkey,
                     tux_direct_addr,
                 },
-                Effect::SendAttachRequest { target_id, lease_id },
+                Effect::SendAttachRequest {
+                    target_id,
+                    lease_id,
+                },
             ],
         )),
-        (State::Idle, Event::LeaseRebound { target_id, lease_id, tux_id, tux_pubkey, tux_direct_addr }) => Ok((
+        (
+            State::Idle,
+            Event::LeaseRebound {
+                target_id,
+                lease_id,
+                tux_id,
+                tux_pubkey,
+                tux_direct_addr,
+            },
+        ) => Ok((
             State::Attached {
                 target_id,
                 lease_id,
@@ -200,8 +232,12 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
 
         (
             State::Attached {
+                target_id,
                 lease_id,
                 tux_id,
+                tux_pubkey,
+                tux_direct_addr,
+                kennel_alive,
                 ..
             },
             Event::KennelReleased { lease_id: rel_lid },
@@ -211,12 +247,12 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             } else {
                 Ok((
                     State::Attached {
-                        target_id: String::new(),
+                        target_id,
                         lease_id,
                         tux_id,
-                        tux_pubkey: String::new(),
-                        tux_direct_addr: String::new(),
-                        kennel_alive: true,
+                        tux_pubkey,
+                        tux_direct_addr,
+                        kennel_alive,
                     },
                     vec![],
                 ))
@@ -277,32 +313,28 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 ))
             }
         }
-        (
-            State::Attached {
-                tux_id,
-                ..
-            },
-            Event::KennelDisconnected,
-        )
-        | (
-            State::Attached {
-                tux_id,
-                ..
-            },
-            Event::KennelHeartbeatFailed,
-        ) => Ok((
+        (State::Attached { tux_id, .. }, Event::KennelDisconnected)
+        | (State::Attached { tux_id, .. }, Event::KennelHeartbeatFailed) => Ok((
             State::DirectLost {
                 tux_id: Some(tux_id.clone()),
             },
-            vec![Effect::StopDirectHeartbeat, Effect::ReregisterWithHint { tux_id }],
+            vec![
+                Effect::StopDirectHeartbeat,
+                Effect::ReregisterWithHint { tux_id },
+            ],
         )),
-        (State::Attached { .. }, Event::DirectLinkLost) => {
-            Ok((State::DirectLost { tux_id: None }, vec![Effect::StopDirectHeartbeat]))
-        }
+        (State::Attached { .. }, Event::DirectLinkLost) => Ok((
+            State::DirectLost { tux_id: None },
+            vec![Effect::StopDirectHeartbeat],
+        )),
 
         (State::Released, event) => Err(err("Released", &format!("{event:?}"), "terminal state")),
-        (State::AttachFailed, event) => Err(err("AttachFailed", &format!("{event:?}"), "terminal state")),
-        (State::DirectLost { .. }, event) => Err(err("DirectLost", &format!("{event:?}"), "terminal state")),
+        (State::AttachFailed, event) => {
+            Err(err("AttachFailed", &format!("{event:?}"), "terminal state"))
+        }
+        (State::DirectLost { .. }, event) => {
+            Err(err("DirectLost", &format!("{event:?}"), "terminal state"))
+        }
 
         (state, event) => {
             let name = match &state {
@@ -313,7 +345,11 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 State::AttachFailed => "AttachFailed",
                 State::DirectLost { .. } => "DirectLost",
             };
-            Err(err(name, &format!("{event:?}"), "unhandled event in this state"))
+            Err(err(
+                name,
+                &format!("{event:?}"),
+                "unhandled event in this state",
+            ))
         }
     }
 }

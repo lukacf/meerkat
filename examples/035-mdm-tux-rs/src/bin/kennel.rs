@@ -407,9 +407,13 @@ fn register_target(
         if let Some(lid) = &old_lease_id {
             guard.lease_index.remove(lid);
         }
-        // If address changed while claimed, notify TUX via TargetAddressChanged.
+        // If address changed while in an active claim (not RecoveringClaim),
+        // notify TUX via TargetAddressChanged so it can re-claim with the
+        // new address. RecoveringClaim address changes are expected (targets
+        // bind port 0 on restart) and should be silently accepted — the
+        // rebind path picks up the new address from the TargetRecord.
         if addr_changed
-            && !matches!(old_state, State::Available)
+            && !matches!(old_state, State::Available | State::RecoveringClaim { .. })
             && let Ok((_new_state, effects)) =
                 kennel_lease::transition(old_state, Event::TargetAddressChanged)
         {
@@ -716,35 +720,49 @@ fn handle_tux_disconnect(
 ) {
     state.tuxes.remove(tux_id);
 
-    // For Claimed targets: keep the lease alive. The TUX may reconnect and
-    // send RebindTargets. The lease TTL naturally expires via the janitor
-    // if the TUX never comes back — that IS the recovery deadline.
+    // For Claimed targets: move to RecoveringClaim so the TUX can rebind
+    // after reconnecting. The recovery deadline is the existing lease TTL
+    // (the janitor's Tick will expire it if the TUX never comes back).
     //
     // For non-Claimed targets (AwaitingAck, AwaitingAttach, RecoveringClaim):
     // release immediately since these are in-flight handshakes that can't
     // complete without the TUX.
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let target_ids: Vec<String> = state.targets.keys().cloned().collect();
     for target_id in target_ids {
         let Some(target) = state.targets.get(&target_id) else {
             continue;
         };
-        let should_release = match &target.lease_state {
+        match &target.lease_state {
+            State::Claimed { tux_id: owner, expires_at_ms, .. } if owner == tux_id => {
+                // Transition to RecoveringClaim. Use the lease TTL as the
+                // recovery deadline so expired leases don't linger forever.
+                let recover_deadline_ms = (*expires_at_ms).max(now_ms + RECOVERY_WINDOW_MS);
+                let owner = owner.clone();
+                // Clean up old lease index
+                let stale: Vec<String> = state.lease_index.iter()
+                    .filter(|(_, tid)| *tid == &target_id)
+                    .map(|(lid, _)| lid.clone()).collect();
+                for lid in stale { state.lease_index.remove(&lid); }
+                if let Some(t) = state.targets.get_mut(&target_id) {
+                    t.lease_state = State::RecoveringClaim {
+                        tux_id: owner,
+                        recover_deadline_ms,
+                    };
+                }
+            }
             State::AwaitingAck { tux_id: owner, .. }
             | State::AwaitingAttach { tux_id: owner, .. }
-            | State::RecoveringClaim { tux_id: owner, .. } => owner == tux_id,
-            // Claimed: DON'T release — let TTL expire naturally or TUX rebind
-            State::Claimed { .. } | State::Available => false,
-        };
-        if should_release {
-            apply_target_event(
-                state,
-                &target_id,
-                Event::TuxDisconnected {
-                    tux_id: tux_id.to_string(),
-                },
-                keypair,
-                kennel_id,
-            );
+            | State::RecoveringClaim { tux_id: owner, .. } if owner == tux_id => {
+                apply_target_event(
+                    state,
+                    &target_id,
+                    Event::TuxDisconnected { tux_id: tux_id.to_string() },
+                    keypair,
+                    kennel_id,
+                );
+            }
+            _ => {}
         }
     }
 }
@@ -891,6 +909,17 @@ async fn run_janitor(
                 &kennel_id,
             );
         }
+
+        // Remove phantom targets: disconnected records that expired back to
+        // Available. These have a closed tx (dead TCP connection) and must
+        // not appear in listings or accept new claims.
+        guard.targets.retain(|_, target| {
+            if matches!(target.lease_state, State::Available) && target.tx.is_closed() {
+                false // remove phantom
+            } else {
+                true
+            }
+        });
     }
 }
 

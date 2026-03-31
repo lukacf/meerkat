@@ -1227,19 +1227,19 @@ impl FlowEngine {
         let aggregate = aggregate_output(&step.dispatch_mode, &step.collection_policy, &successes);
 
         // Validate aggregated schema (mirrors flat-step path at flow.rs:453-468).
-        if let Some(schema_ref) = &step.expected_schema_ref {
-            if let Err(schema_err) = validate_schema_ref(schema_ref, step_id, &aggregate).await {
-                let reason = schema_err.to_string();
-                self.emitter
-                    .step_failed(run_id.clone(), step_id.clone(), reason.clone())
-                    .await?;
-                self.maybe_escalate_guard(supervisor, config, run_id, step_id, &reason)
-                    .await?;
-                return Err(MobError::SchemaValidation {
-                    step_id: step_id.clone(),
-                    message: reason,
-                });
-            }
+        if let Some(schema_ref) = &step.expected_schema_ref
+            && let Err(schema_err) = validate_schema_ref(schema_ref, step_id, &aggregate).await
+        {
+            let reason = schema_err.to_string();
+            self.emitter
+                .step_failed(run_id.clone(), step_id.clone(), reason.clone())
+                .await?;
+            self.maybe_escalate_guard(supervisor, config, run_id, step_id, &reason)
+                .await?;
+            return Err(MobError::SchemaValidation {
+                step_id: step_id.clone(),
+                message: reason,
+            });
         }
 
         self.emitter

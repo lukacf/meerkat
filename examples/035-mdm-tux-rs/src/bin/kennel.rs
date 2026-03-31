@@ -800,6 +800,8 @@ fn dispatch_effects(
                         tux_id: tux_id.clone(),
                         tux_pubkey,
                         tux_direct_addr,
+                        target_pubkey: target.pubkey.clone(),
+                        target_direct_addr: target.direct_addr.clone(),
                         expires_at_ms: *expires_at_ms,
                     })
                 {

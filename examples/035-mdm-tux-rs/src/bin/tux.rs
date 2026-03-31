@@ -796,7 +796,7 @@ async fn spawn_kennel_client(
                                 .await;
                         }
                         KennelPayload::TargetLost { .. } => {}
-                        KennelPayload::LeaseRebound { lease_id, target_id, .. } => {
+                        KennelPayload::LeaseRebound { lease_id, target_id, target_pubkey, target_direct_addr, .. } => {
                             let target_name = {
                                 let mut guard = pending_claims.write();
                                 let old_key = guard
@@ -806,6 +806,18 @@ async fn spawn_kennel_client(
                                     });
                                 if let Some(old_key) = old_key {
                                     if let Some(mut claim) = guard.remove(&old_key) {
+                                        // Refresh target peer with fresh routing data.
+                                        // The target may have restarted on a new port.
+                                        router.remove_trusted_peer(&claim.target_pubkey);
+                                        if let Ok(pk) = meerkat_comms::identity::PubKey::from_peer_id(&target_pubkey) {
+                                            claim.target_pubkey = pk;
+                                            router.add_trusted_peer(meerkat_comms::TrustedPeer {
+                                                name: claim.target_name.clone(),
+                                                pubkey: pk,
+                                                addr: target_direct_addr.clone(),
+                                                meta: meerkat_comms::PeerMeta::default(),
+                                            });
+                                        }
                                         claim.attached = true;
                                         claim.lease_id = lease_id.clone();
                                         let target_name = claim.target_name.clone();

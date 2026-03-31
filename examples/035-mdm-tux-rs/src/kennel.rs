@@ -137,6 +137,8 @@ pub enum KennelPayload {
         tux_id: String,
         tux_pubkey: String,
         tux_direct_addr: String,
+        target_pubkey: String,
+        target_direct_addr: String,
         expires_at_ms: i64,
     },
     Error {

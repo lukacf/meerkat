@@ -1312,7 +1312,20 @@ async fn run_adopted_loop(
         // restarted between ClaimGranted and the attach handshake.
         state
     } else {
-        // Rebound: Idle → Attached via LeaseRebound
+        // Rebound: Idle → Attached via LeaseRebound.
+        // Refresh the TUX peer with the fresh endpoint from the kennel
+        // before resuming direct I/O. TUX may have reconnected with a
+        // different --listen/--advertise address since the original claim.
+        let tux_pk = meerkat_comms::identity::PubKey::from_peer_id(&adoption.tux_pubkey)
+            .context("parse rebound tux pubkey")?;
+        let stale_keys: Vec<_> = node.trusted.read().peers.iter()
+            .filter(|p| p.name == "tux").map(|p| p.pubkey).collect();
+        for pk in stale_keys { node.router.remove_trusted_peer(&pk); }
+        node.add_peer(TrustedPeer {
+            name: "tux".into(), pubkey: tux_pk,
+            addr: adoption.tux_direct_addr.clone(), meta: PeerMeta::default(),
+        });
+
         let (state, _) = target_attachment::transition(
             TaState::Idle,
             TaEvent::LeaseRebound { lease_id: adoption.lease_id.clone(), tux_id: adoption.tux_id.clone() },

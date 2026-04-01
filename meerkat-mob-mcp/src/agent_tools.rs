@@ -79,15 +79,32 @@ impl AgentMobToolSurface {
         model: String,
         owner_session_id: SessionId,
     ) -> Self {
-        let tools = build_tool_defs();
         let mut owned = std::collections::HashSet::new();
         if let Some(ref id) = implicit_mob_id {
             owned.insert(id.clone());
         }
+        Self::new_with_owned(
+            state,
+            implicit_mob_id,
+            owned.into_iter().collect(),
+            model,
+            owner_session_id,
+        )
+    }
+
+    /// Create with a pre-populated set of owned mob IDs (for resume).
+    pub fn new_with_owned(
+        state: Arc<MobMcpState>,
+        implicit_mob_id: Option<MobId>,
+        owned_mob_ids: Vec<MobId>,
+        model: String,
+        owner_session_id: SessionId,
+    ) -> Self {
+        let tools = build_tool_defs();
         Self {
             state,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
-            owned_mob_ids: RwLock::new(owned),
+            owned_mob_ids: RwLock::new(owned_mob_ids.into_iter().collect()),
             tools,
             owner_session_id,
             model,
@@ -235,9 +252,13 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
+        // Tag with owner session so this mob is session-scoped and discoverable on resume.
+        let mut definition = args.definition;
+        definition.owner_session_id = Some(self.owner_session_id.to_string());
+
         let mob_id = self
             .state
-            .mob_create_definition(args.definition)
+            .mob_create_definition(definition)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -440,9 +461,12 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
     ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
         let session_id_str = args.session_id.to_string();
         let implicit_mob_id = self.state.find_implicit_mob(&session_id_str).await;
-        let surface = AgentMobToolSurface::new(
+        // Find all mobs owned by this session (implicit + explicit) for resume.
+        let owned_mob_ids = self.state.find_mobs_for_session(&session_id_str).await;
+        let surface = AgentMobToolSurface::new_with_owned(
             Arc::clone(&self.state),
             implicit_mob_id,
+            owned_mob_ids,
             args.model,
             args.session_id,
         );

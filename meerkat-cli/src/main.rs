@@ -4424,25 +4424,30 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
 
-    // Clean up any implicit mob owned by this session.
-    // Hydrate mob state from persisted registry so destroy can find the mob.
-    if config.tools.mob_enabled
-        && let Ok(mob_persistent) =
-            get_or_create_mob_persistent_service(scope, config.clone()).await
-    {
-        let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-            Arc::new(MobCliSessionService::new(mob_persistent));
-        if let Ok((state, _registry)) = hydrate_mob_state(
-            scope,
-            mob_service,
-            None,
-            None,
-            None,
-            std::collections::BTreeMap::new(),
-        )
-        .await
-        {
-            let _ = state.destroy_implicit_mob(&session_id.to_string()).await;
+    // Clean up mobs owned by this session from the persisted registry.
+    // We scan the registry file directly rather than hydrating into MobMcpState,
+    // because hydration only inserts seeded handles — the implicit/explicit mobs
+    // wouldn't be in the in-memory map.
+    if config.tools.mob_enabled {
+        let sid_str = session_id.to_string();
+        if let Ok(mut registry) = load_mob_registry(scope).await {
+            let owned_ids: Vec<String> = registry
+                .mobs
+                .iter()
+                .filter(|(_id, mob)| {
+                    mob.definition
+                        .as_ref()
+                        .and_then(|d| d.owner_session_id.as_deref())
+                        == Some(&sid_str)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            if !owned_ids.is_empty() {
+                for id in &owned_ids {
+                    registry.mobs.remove(id);
+                }
+                let _ = save_mob_registry(scope, &registry).await;
+            }
         }
     }
 

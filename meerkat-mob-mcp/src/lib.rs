@@ -619,11 +619,26 @@ impl MobMcpState {
     ///
     /// Checks the canonical `owner_session_id` field on the mob definition,
     /// not a cache. Works regardless of whether `delegate` has been called.
+    /// Check if a mob is an implicit delegation mob (vs an explicitly created one).
+    ///
+    /// Both implicit and explicit agent-created mobs carry `owner_session_id`,
+    /// but only implicit mobs use the `implicit-{session_id}` naming convention.
     pub async fn is_implicit_mob(&self, mob_id: &MobId) -> bool {
+        mob_id.to_string().starts_with("implicit-")
+    }
+
+    /// Find all mobs owned by the given session (both implicit and explicit).
+    pub async fn find_mobs_for_session(&self, session_id: &str) -> Vec<MobId> {
         let mobs = self.mobs.read().await;
-        mobs.get(mob_id)
-            .map(|m| m.handle.definition().owner_session_id.is_some())
-            .unwrap_or(false)
+        mobs.iter()
+            .filter_map(|(id, m)| {
+                if m.handle.definition().owner_session_id.as_deref() == Some(session_id) {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Get or create the implicit delegation mob for the given session.
@@ -656,15 +671,24 @@ impl MobMcpState {
         self.mob_create_definition(def).await
     }
 
-    /// Destroy the implicit delegation mob for the given session, if one exists.
+    /// Destroy all mobs owned by the given session (both implicit and explicit).
     ///
-    /// Called during session archive to clean up the implicit mob.
+    /// Called during session archive to clean up session-scoped mobs.
     pub async fn destroy_implicit_mob(&self, session_id: &str) -> Result<(), MobError> {
-        let mob_id = match self.find_implicit_mob(session_id).await {
-            Some(id) => id,
-            None => return Ok(()),
-        };
-        self.mob_destroy(&mob_id).await?;
+        let mob_ids = self.find_mobs_for_session(session_id).await;
+        if mob_ids.is_empty() {
+            return Ok(());
+        }
+        for mob_id in &mob_ids {
+            if let Err(error) = self.mob_destroy(mob_id).await {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to destroy session-owned mob during cleanup"
+                );
+            }
+        }
         // Prune the per-session lock to avoid unbounded growth in long-lived processes.
         let mut locks = self.implicit_mob_locks.lock().await;
         locks.remove(session_id);

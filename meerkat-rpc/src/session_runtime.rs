@@ -2000,6 +2000,7 @@ impl SessionRuntime {
                     self.registered_tools(),
                     tx,
                     self.callback_id_counter(),
+                    vec![],
                 ));
             build_config.external_tools = Some(dispatcher);
         }

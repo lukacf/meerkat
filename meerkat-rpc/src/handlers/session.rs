@@ -298,58 +298,22 @@ pub async fn handle_create(
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
 
-    // Wire callback tools. Two cases:
-    //
-    // 1. No inline tools: use the live global registered_tools list directly.
-    //    Tools added later via tools/register are picked up dynamically at
-    //    each turn boundary (via poll_external_updates).
-    //
-    // 2. Inline tools present: merge into a per-session snapshot (inline wins
-    //    on name collision). This snapshot is NOT shared with the global list
-    //    — inline tools are scoped to this session only. The tradeoff is that
-    //    sessions with inline tools do not get dynamic updates from later
-    //    tools/register calls, but this matches the original contract.
+    // Wire callback tools backed by the live registered_tools list.
+    // Tools added later via tools/register are picked up dynamically at each
+    // turn boundary (via poll_external_updates). Per-session inline tools
+    // (from params.external_tools) are held separately inside the dispatcher
+    // and take precedence on name collision with globals.
     {
         let inline_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
-
         if let Some(tx) = runtime.callback_request_tx() {
-            if inline_tools.is_empty() {
-                // Case 1: dynamic dispatcher backed by live global list.
-                let has_globals = runtime
-                    .registered_tools()
-                    .read()
-                    .map(|g| !g.is_empty())
-                    .unwrap_or(false);
-                if has_globals {
-                    let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                        Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                            runtime.registered_tools(),
-                            tx,
-                            runtime.callback_id_counter(),
-                        ));
-                    build_config.external_tools = Some(dispatcher);
-                }
-            } else {
-                // Case 2: per-session snapshot with inline + global merged.
-                let mut all_tools = inline_tools;
-                let mut seen: std::collections::HashSet<String> =
-                    all_tools.iter().map(|t| t.name.clone()).collect();
-                if let Ok(global) = runtime.registered_tools().read() {
-                    for tool in global.iter() {
-                        if seen.insert(tool.name.clone()) {
-                            all_tools.push(tool.clone());
-                        }
-                    }
-                }
-                let session_tools = Arc::new(std::sync::RwLock::new(all_tools));
-                let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                    Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                        session_tools,
-                        tx,
-                        runtime.callback_id_counter(),
-                    ));
-                build_config.external_tools = Some(dispatcher);
-            }
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                    runtime.registered_tools(),
+                    tx,
+                    runtime.callback_id_counter(),
+                    inline_tools,
+                ));
+            build_config.external_tools = Some(dispatcher);
         }
     }
 

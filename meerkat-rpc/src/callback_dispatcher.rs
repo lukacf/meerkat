@@ -8,7 +8,11 @@
 //! (the same one `tools/register` writes to), so tools registered after session
 //! materialization become visible at the next turn boundary via
 //! `poll_external_updates`.
+//!
+//! Per-session inline tools (from `session/create` `external_tools` param) are
+//! held separately and take precedence on name collision with globals.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 
@@ -33,32 +37,52 @@ const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30)
 /// Holds a shared reference to the global registered-tools list so that tools
 /// registered via `tools/register` after session creation are picked up
 /// dynamically at each turn boundary (via `poll_external_updates`).
+///
+/// Per-session `inline_tools` (from `session/create` `external_tools` param) are
+/// static and take precedence on name collision with globals. Most sessions have
+/// no inline tools (the field is empty).
 pub struct CallbackToolDispatcher {
     /// Live tool definitions — shared with `SessionRuntime::registered_tools_slot`.
     registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
+    /// Per-session inline tools (static, usually empty). Win on name collision.
+    inline_tools: Vec<ToolDef>,
+    /// Inline tool names cached for fast collision lookup.
+    inline_names: HashSet<String>,
     callback_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
     id_counter: Arc<AtomicU64>,
-    /// Snapshot of tool names from the last `poll_external_updates` (or creation).
+    /// Snapshot of global tool names from the last `poll_external_updates` (or creation).
     /// Used to detect additions/removals between polls.
-    last_seen: StdRwLock<Vec<String>>,
+    last_seen_globals: StdRwLock<HashSet<String>>,
 }
 
 impl CallbackToolDispatcher {
-    /// Create a new callback dispatcher backed by the live registered-tools list.
+    /// Create a callback dispatcher backed by the live registered-tools list.
+    ///
+    /// `inline_tools` are per-session static tools (from `session/create`
+    /// `external_tools` param). Pass empty vec for most sessions.
     pub fn new(
         registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
         callback_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
         id_counter: Arc<AtomicU64>,
+        inline_tools: Vec<ToolDef>,
     ) -> Self {
-        let last_seen = registered_tools
+        let inline_names: HashSet<String> = inline_tools.iter().map(|t| t.name.clone()).collect();
+        let last_seen_globals = registered_tools
             .read()
-            .map(|g| g.iter().map(|t| t.name.clone()).collect())
+            .map(|g| {
+                g.iter()
+                    .filter(|t| !inline_names.contains(&t.name))
+                    .map(|t| t.name.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         Self {
             registered_tools,
+            inline_tools,
+            inline_names,
             callback_tx,
             id_counter,
-            last_seen: StdRwLock::new(last_seen),
+            last_seen_globals: StdRwLock::new(last_seen_globals),
         }
     }
 
@@ -67,32 +91,50 @@ impl CallbackToolDispatcher {
         RpcId::Str(format!("srv-{n}"))
     }
 
-    fn current_tool_names(&self) -> Vec<String> {
+    /// Current global tool names excluding inline collisions.
+    fn current_global_names(&self) -> HashSet<String> {
         self.registered_tools
             .read()
-            .map(|g| g.iter().map(|t| t.name.clone()).collect())
+            .map(|g| {
+                g.iter()
+                    .filter(|t| !self.inline_names.contains(&t.name))
+                    .map(|t| t.name.clone())
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    fn is_known(&self, name: &str) -> bool {
+        if self.inline_names.contains(name) {
+            return true;
+        }
+        self.registered_tools
+            .read()
+            .map(|g| g.iter().any(|t| t.name == name))
+            .unwrap_or(false)
     }
 }
 
 #[async_trait]
 impl AgentToolDispatcher for CallbackToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        self.registered_tools
-            .read()
-            .map(|g| g.iter().map(|t| Arc::new(t.clone())).collect::<Vec<_>>())
-            .unwrap_or_default()
-            .into()
+        let mut result: Vec<Arc<ToolDef>> = self
+            .inline_tools
+            .iter()
+            .map(|t| Arc::new(t.clone()))
+            .collect();
+        if let Ok(global) = self.registered_tools.read() {
+            for t in global.iter() {
+                if !self.inline_names.contains(&t.name) {
+                    result.push(Arc::new(t.clone()));
+                }
+            }
+        }
+        result.into()
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        // Verify the tool is currently registered.
-        let known = self
-            .registered_tools
-            .read()
-            .map(|g| g.iter().any(|t| t.name == call.name))
-            .unwrap_or(false);
-        if !known {
+        if !self.is_known(call.name) {
             return Err(ToolError::not_found(call.name));
         }
 
@@ -138,7 +180,6 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
                 ToolError::execution_failed("Callback response channel dropped".to_string())
             })?;
 
-        // Parse the response result.
         if let Some(error) = response.error {
             return Err(ToolError::execution_failed(error.message));
         }
@@ -162,10 +203,15 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         Ok(ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into())
     }
 
-    /// Detect tools added/removed since last poll and emit deltas.
+    /// Detect global tools added/removed since last poll and emit deltas.
+    /// Inline tools are static and never produce deltas.
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
-        let current = self.current_tool_names();
-        let previous = self.last_seen.read().map(|g| g.clone()).unwrap_or_default();
+        let current = self.current_global_names();
+        let previous = self
+            .last_seen_globals
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
 
         if current == previous {
             return ExternalToolUpdate::default();
@@ -173,32 +219,26 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 
         let mut notices = Vec::new();
 
-        // Detect additions.
-        for name in &current {
-            if !previous.contains(name) {
-                notices.push(
-                    ExternalToolDelta::new(
-                        format!("callback:{name}"),
-                        ToolConfigChangeOperation::Add,
-                        ExternalToolDeltaPhase::Applied,
-                    )
-                    .with_tool_count(Some(1)),
-                );
-            }
-        }
-
-        // Detect removals.
-        for name in &previous {
-            if !current.contains(name) {
-                notices.push(ExternalToolDelta::new(
+        for name in current.difference(&previous) {
+            notices.push(
+                ExternalToolDelta::new(
                     format!("callback:{name}"),
-                    ToolConfigChangeOperation::Remove,
+                    ToolConfigChangeOperation::Add,
                     ExternalToolDeltaPhase::Applied,
-                ));
-            }
+                )
+                .with_tool_count(Some(1)),
+            );
         }
 
-        if let Ok(mut last) = self.last_seen.write() {
+        for name in previous.difference(&current) {
+            notices.push(ExternalToolDelta::new(
+                format!("callback:{name}"),
+                ToolConfigChangeOperation::Remove,
+                ExternalToolDeltaPhase::Applied,
+            ));
+        }
+
+        if let Ok(mut last) = self.last_seen_globals.write() {
             *last = current;
         }
 
@@ -229,9 +269,8 @@ mod tests {
         let id_counter = Arc::new(AtomicU64::new(0));
         let tools = Arc::new(StdRwLock::new(vec![make_tool_def("search")]));
 
-        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter);
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, vec![]);
 
-        // Spawn the dispatch in a task.
         let handle = tokio::spawn(async move {
             let args = RawValue::from_string("{\"q\":\"test\"}".to_string()).unwrap();
             let call = ToolCallView {
@@ -242,7 +281,6 @@ mod tests {
             dispatcher.dispatch(call).await
         });
 
-        // Receive the callback request and respond.
         let (request, response_tx) = callback_rx.recv().await.unwrap();
         assert_eq!(request.method, "tool/execute");
         assert_eq!(request.id, Some(RpcId::Str("srv-0".to_string())));
@@ -272,7 +310,7 @@ mod tests {
         let id_counter = Arc::new(AtomicU64::new(0));
         let tools = Arc::new(StdRwLock::new(vec![make_tool_def("slow")]));
 
-        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter);
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, vec![]);
 
         let args = RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {
@@ -281,14 +319,12 @@ mod tests {
             args: &args,
         };
 
-        // Use a very short timeout for testing.
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             dispatcher.dispatch(call),
         )
         .await;
 
-        // The dispatch itself should timeout or fail because no one responds.
         assert!(result.is_err() || result.unwrap().is_err());
     }
 
@@ -298,7 +334,8 @@ mod tests {
         let id_counter = Arc::new(AtomicU64::new(0));
         let tools = Arc::new(StdRwLock::new(vec![make_tool_def("a")]));
 
-        let dispatcher = CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter);
+        let dispatcher =
+            CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter, vec![]);
 
         // No change yet.
         let update = dispatcher.poll_external_updates().await;
@@ -332,7 +369,8 @@ mod tests {
         let id_counter = Arc::new(AtomicU64::new(0));
         let tools = Arc::new(StdRwLock::new(vec![make_tool_def("x")]));
 
-        let dispatcher = CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter);
+        let dispatcher =
+            CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter, vec![]);
         assert_eq!(dispatcher.tools().len(), 1);
 
         tools.write().unwrap().push(make_tool_def("y"));
@@ -340,5 +378,65 @@ mod tests {
 
         tools.write().unwrap().clear();
         assert_eq!(dispatcher.tools().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn inline_tools_take_precedence_over_globals() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        // Global has "shared" and "global_only"
+        let tools = Arc::new(StdRwLock::new(vec![
+            make_tool_def("shared"),
+            make_tool_def("global_only"),
+        ]));
+        // Inline has "shared" and "inline_only"
+        let inline = vec![make_tool_def("shared"), make_tool_def("inline_only")];
+
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, inline);
+
+        let names: Vec<String> = dispatcher.tools().iter().map(|t| t.name.clone()).collect();
+        // Should have: shared (from inline), inline_only, global_only
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"shared".to_string()));
+        assert!(names.contains(&"inline_only".to_string()));
+        assert!(names.contains(&"global_only".to_string()));
+
+        // "shared" appears exactly once (inline wins, global filtered)
+        assert_eq!(names.iter().filter(|n| *n == "shared").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn inline_tools_do_not_produce_poll_deltas() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![]));
+        let inline = vec![make_tool_def("static_tool")];
+
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, inline);
+
+        // Inline tool exists but should not produce a delta.
+        let update = dispatcher.poll_external_updates().await;
+        assert!(update.notices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dynamic_updates_work_with_inline_tools_present() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![]));
+        let inline = vec![make_tool_def("my_inline")];
+
+        let dispatcher =
+            CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter, inline);
+        assert_eq!(dispatcher.tools().len(), 1); // just inline
+
+        // Register a global tool later.
+        tools.write().unwrap().push(make_tool_def("late_global"));
+        assert_eq!(dispatcher.tools().len(), 2); // inline + late_global
+
+        let update = dispatcher.poll_external_updates().await;
+        assert_eq!(update.notices.len(), 1);
+        assert_eq!(update.notices[0].target, "callback:late_global");
+        assert_eq!(update.notices[0].operation, ToolConfigChangeOperation::Add);
     }
 }

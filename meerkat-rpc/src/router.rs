@@ -327,6 +327,7 @@ impl MethodRouter {
                             runtime.registered_tools(),
                             tx,
                             runtime.callback_id_counter(),
+                            vec![],
                         )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
                     )
                 }

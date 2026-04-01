@@ -57,6 +57,8 @@ pub struct AgentMobToolSurface {
     /// Pre-seeded on resume; otherwise set by first delegate via get_or_create_implicit_mob.
     /// Read-only cache — MobMcpState is the canonical owner.
     cached_implicit_mob_id: RwLock<Option<MobId>>,
+    /// Mobs owned by this session (implicit + explicitly created). Session-scoped access control.
+    owned_mob_ids: RwLock<std::collections::HashSet<MobId>>,
     tools: Arc<[Arc<ToolDef>]>,
     owner_session_id: SessionId,
     /// Model name inherited by implicit mob helpers.
@@ -78,9 +80,14 @@ impl AgentMobToolSurface {
         owner_session_id: SessionId,
     ) -> Self {
         let tools = build_tool_defs();
+        let mut owned = std::collections::HashSet::new();
+        if let Some(ref id) = implicit_mob_id {
+            owned.insert(id.clone());
+        }
         Self {
             state,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
+            owned_mob_ids: RwLock::new(owned),
             tools,
             owner_session_id,
             model,
@@ -126,6 +133,16 @@ impl AgentMobToolSurface {
         ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
 
+    /// Check if this session owns the given mob.
+    async fn owns_mob(&self, mob_id: &MobId) -> bool {
+        self.owned_mob_ids.read().await.contains(mob_id)
+    }
+
+    /// Register a mob as owned by this session.
+    async fn register_owned_mob(&self, mob_id: MobId) {
+        self.owned_mob_ids.write().await.insert(mob_id);
+    }
+
     /// Get or create the implicit mob for this agent's session.
     ///
     /// Returns (mob_id, first_delegate) where first_delegate is true if the
@@ -152,6 +169,9 @@ impl AgentMobToolSurface {
             *cache = Some(mob_id.clone());
             was_empty
         };
+
+        // Register as owned by this session
+        self.register_owned_mob(mob_id.clone()).await;
 
         Ok((mob_id, first_delegate))
     }
@@ -221,6 +241,8 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
+        self.register_owned_mob(mob_id.clone()).await;
+
         Self::encode_result(call, json!({"mob_id": mob_id}))
     }
 
@@ -240,10 +262,19 @@ impl AgentMobToolSurface {
             ));
         }
 
+        // Session-scoped: only allow destroying mobs created by this session
+        if !self.owns_mob(&mob_id).await {
+            return Err(ToolError::Other(format!(
+                "Mob '{mob_id}' is not owned by this session"
+            )));
+        }
+
         self.state
             .mob_destroy(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+
+        self.owned_mob_ids.write().await.remove(&mob_id);
 
         Self::encode_result(call, json!({"ok": true}))
     }
@@ -256,6 +287,12 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id);
+
+        if !self.owns_mob(&mob_id).await {
+            return Err(ToolError::Other(format!(
+                "Mob '{mob_id}' is not owned by this session"
+            )));
+        }
 
         let mut spec = SpawnMemberSpec::new(
             ProfileName::from(args.profile),
@@ -291,8 +328,15 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
+        let mob_id = MobId::from(args.mob_id);
+        if !self.owns_mob(&mob_id).await {
+            return Err(ToolError::Other(format!(
+                "Mob '{mob_id}' is not owned by this session"
+            )));
+        }
+
         self.state
-            .mob_retire(&MobId::from(args.mob_id), MeerkatId::from(args.member_id))
+            .mob_retire(&mob_id, MeerkatId::from(args.member_id))
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -307,9 +351,16 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
+        let mob_id = MobId::from(args.mob_id);
+        if !self.owns_mob(&mob_id).await {
+            return Err(ToolError::Other(format!(
+                "Mob '{mob_id}' is not owned by this session"
+            )));
+        }
+
         let snapshot = self
             .state
-            .mob_member_status(&MobId::from(args.mob_id), &MeerkatId::from(args.member_id))
+            .mob_member_status(&mob_id, &MeerkatId::from(args.member_id))
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -324,9 +375,16 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
+        let mob_id = MobId::from(args.mob_id);
+        if !self.owns_mob(&mob_id).await {
+            return Err(ToolError::Other(format!(
+                "Mob '{mob_id}' is not owned by this session"
+            )));
+        }
+
         let members = self
             .state
-            .mob_list_members(&MobId::from(args.mob_id))
+            .mob_list_members(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -337,9 +395,11 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let owned = self.owned_mob_ids.read().await;
         let mobs = self.state.mob_list().await;
         let mob_list: Vec<serde_json::Value> = mobs
             .into_iter()
+            .filter(|(id, _)| owned.contains(id))
             .map(|(id, status)| {
                 json!({
                     "mob_id": id,

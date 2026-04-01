@@ -313,16 +313,21 @@ pub fn compose_tools_with_comms(
         runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
     );
     let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
-    let gateway = meerkat_core::ToolGatewayBuilder::new()
-        .add_dispatcher(base_tools)
+    // Use DynamicToolComposite instead of a single ToolGateway so that
+    // base_tools with dynamic tool lists (e.g. CallbackToolDispatcher backed
+    // by a shared registry) can surface late additions via poll_external_updates.
+    // The comms surface is wrapped in its own ToolGateway for availability gating.
+    let comms_gateway = meerkat_core::ToolGatewayBuilder::new()
         .add_dispatcher_with_availability(Arc::new(comms_surface), availability)
         .build()?;
+    let composite =
+        meerkat_core::DynamicToolComposite::new(vec![base_tools, Arc::new(comms_gateway)]);
     let mut instructions = tool_usage_instructions;
     if !instructions.is_empty() {
         instructions.push_str("\n\n");
     }
     instructions.push_str(CommsToolSurface::usage_instructions());
-    Ok((Arc::new(gateway), instructions))
+    Ok((Arc::new(composite), instructions))
 }
 
 /// Prelude module for convenient imports

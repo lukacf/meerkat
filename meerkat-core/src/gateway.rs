@@ -498,6 +498,116 @@ impl AgentToolDispatcher for ToolGateway {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DynamicToolComposite
+// ---------------------------------------------------------------------------
+
+/// Composes multiple dispatchers with live tool list delegation.
+///
+/// Unlike [`ToolGateway`] (which caches the tool list at construction time),
+/// this composite calls `tools()` on each child dispatcher every time,
+/// enabling children with dynamic tool lists (e.g. callback tool dispatchers
+/// backed by a shared registry) to surface additions/removals between turns.
+///
+/// First-dispatcher-wins on name collision (consistent with `ToolGateway`).
+pub struct DynamicToolComposite {
+    dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
+}
+
+impl DynamicToolComposite {
+    pub fn new(dispatchers: Vec<Arc<dyn AgentToolDispatcher>>) -> Self {
+        Self { dispatchers }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl AgentToolDispatcher for DynamicToolComposite {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for d in &self.dispatchers {
+            for t in d.tools().iter() {
+                if seen.insert(t.name.clone()) {
+                    result.push(Arc::clone(t));
+                }
+            }
+        }
+        result.into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: crate::types::ToolCallView<'_>,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        for d in &self.dispatchers {
+            if d.tools().iter().any(|t| t.name == call.name) {
+                return d.dispatch(call).await;
+            }
+        }
+        Err(crate::error::ToolError::not_found(call.name))
+    }
+
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        let mut all_notices = Vec::new();
+        let mut all_pending = Vec::new();
+        for d in &self.dispatchers {
+            let update = d.poll_external_updates().await;
+            all_notices.extend(update.notices);
+            all_pending.extend(update.pending);
+        }
+        ExternalToolUpdate {
+            notices: all_notices,
+            pending: all_pending,
+        }
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.dispatchers.iter().any(|d| d.supports_wait_interrupt())
+    }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: crate::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        let mut rebound = Vec::with_capacity(owned.dispatchers.len());
+        for d in owned.dispatchers {
+            if d.supports_wait_interrupt() {
+                rebound.push(d.bind_wait_interrupt(rx.clone())?);
+            } else {
+                rebound.push(d);
+            }
+        }
+        Ok(Arc::new(DynamicToolComposite::new(rebound)))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.dispatchers
+            .iter()
+            .any(|d| d.supports_ops_lifecycle_binding())
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
+        owner_session_id: crate::types::SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::agent::OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
+        let mut rebound = Vec::with_capacity(owned.dispatchers.len());
+        for d in owned.dispatchers {
+            if d.supports_ops_lifecycle_binding() {
+                rebound.push(d.bind_ops_lifecycle(registry.clone(), owner_session_id.clone())?);
+            } else {
+                rebound.push(d);
+            }
+        }
+        Ok(Arc::new(DynamicToolComposite::new(rebound)))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

@@ -9,6 +9,12 @@ use std::collections::HashSet;
 // NameFilteredDispatcher
 // ---------------------------------------------------------------------------
 
+use meerkat_core::DynamicToolComposite;
+
+// ---------------------------------------------------------------------------
+// NameFilteredDispatcher
+// ---------------------------------------------------------------------------
+
 /// Wraps an inner dispatcher and hides tools whose names collide with
 /// profile-declared tools. Profile tools always win on name collision.
 pub(crate) struct NameFilteredDispatcher {
@@ -145,14 +151,12 @@ pub(super) fn compose_external_tools_for_profile(
         return Ok(dispatchers.pop());
     }
 
-    let mut gateway_builder = ToolGatewayBuilder::new();
-    for dispatcher in dispatchers {
-        gateway_builder = gateway_builder.add_dispatcher(dispatcher);
-    }
-    let gateway = gateway_builder
-        .build()
-        .map_err(|e| MobError::Internal(format!("failed to compose tool bundles: {e}")))?;
-    Ok(Some(Arc::new(gateway)))
+    // Use DynamicToolComposite instead of ToolGateway so that child
+    // dispatchers that support dynamic tool lists (e.g. CallbackToolDispatcher
+    // backed by a live registered_tools list) have their additions visible
+    // at each tools()/dispatch() call. ToolGateway caches the tool list at
+    // construction time which would freeze dynamic dispatchers.
+    Ok(Some(Arc::new(DynamicToolComposite::new(dispatchers))))
 }
 
 struct MobToolDispatcher {

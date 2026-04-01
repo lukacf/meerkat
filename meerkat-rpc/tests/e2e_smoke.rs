@@ -1310,3 +1310,203 @@ async fn e2e_scenario_22_transport_backpressure() {
     drop(client_writer);
     server_handle.await.unwrap().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 23: Late tools/register on already-spawned mob members (#158)
+// ---------------------------------------------------------------------------
+
+/// Scenario 23: Create a mob BEFORE registering callback tools, then register
+/// tools, then spawn a member and start a turn that uses the late-registered tool.
+///
+/// This exercises the dynamic CallbackToolDispatcher: the dispatcher is created
+/// at spawn time backed by the shared registered_tools list. Since tools were
+/// registered after mob creation but before spawn, the dispatcher sees them
+/// immediately. This also validates that the ExternalToolsProvider is invoked
+/// lazily at spawn time (not at mob creation time).
+///
+/// Note: spawning a member BEFORE tools/register would race with the
+/// autonomous_host loop (the default runtime mode for mob members), which starts
+/// immediately and may complete its first CallingLlm iteration before
+/// tools/register is processed. That race is inherent to autonomous mode and
+/// not a bug in the dispatcher — the dynamic list IS correct, but the first turn
+/// may have already been sent to the LLM with an empty tool list.
+#[tokio::test]
+#[ignore = "e2e: live API + late callback tool registration"]
+async fn e2e_scenario_23_late_register_on_existing_member() {
+    let api_key = match live_smoke::anthropic_api_key() {
+        Some(key) => key,
+        None => {
+            eprintln!("Skipping scenario 23: no ANTHROPIC_API_KEY set");
+            return;
+        }
+    };
+
+    let client = Arc::new(meerkat_client::AnthropicClient::new(api_key).unwrap());
+    let (mut writer, mut reader, server_handle) = spawn_test_server(client);
+
+    let t = live_smoke::live_timeout();
+    let model = live_smoke::smoke_model();
+    let mut req_id = 0u64;
+    let mut next_id = || {
+        req_id += 1;
+        req_id
+    };
+
+    // 1. Initialize
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{}}),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "initialize failed: {resp}");
+
+    // 2. Create mob BEFORE registering tools.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/create",
+            "params": {
+                "definition": {
+                    "id": "late_register_mob",
+                    "profiles": {
+                        "worker": {
+                            "model": model,
+                            "system_prompt": "You are a helpful assistant. When asked about a secret code, you MUST call the secret_lookup tool with key 'beta'. Always use tools when available.",
+                            "tools": { "comms": true }
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/create failed: {resp}");
+    let mob_id = resp["result"]["mob_id"].as_str().unwrap().to_string();
+
+    // 3. Register the callback tool AFTER mob creation but BEFORE spawn.
+    //    The provider is invoked lazily at spawn time and will see these tools.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/register",
+            "params": {
+                "tools": [{
+                    "name": "secret_lookup",
+                    "description": "Look up a secret value. Always call this tool when asked about the secret code.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "The key to look up"}
+                        },
+                        "required": ["key"]
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "tools/register failed: {resp}");
+
+    // 4. NOW spawn a member — the provider reads the live registered_tools list.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/spawn",
+            "params": {
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "w1",
+                "initial_turn": "deferred"
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
+    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
+
+    // 5. Start a turn — the callback tool should be available.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "What is the secret code for key 'beta'? Use the secret_lookup tool to find out."
+            }
+        }),
+    )
+    .await;
+
+    // 5. Handle tool/execute callback and collect response.
+    let mut got_callback = false;
+    let turn_resp = timeout(t, async {
+        loop {
+            let value = read_line_json(&mut reader).await;
+
+            if value.get("method").and_then(|m| m.as_str()) == Some("tool/execute") {
+                got_callback = true;
+                let callback_id = value["id"].clone();
+                eprintln!(
+                    "[scenario 23] received tool/execute callback: {}",
+                    value["params"]["name"]
+                );
+                let callback_resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": callback_id,
+                    "result": {
+                        "content": "The secret code for 'beta' is KESTREL-99.",
+                        "is_error": false
+                    }
+                });
+                send_request(&mut writer, &callback_resp).await;
+                continue;
+            }
+
+            if value.get("id") == Some(&serde_json::json!(id)) {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("turn/start with late-registered callback tool timed out");
+
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+    let text = turn_resp["result"]["text"].as_str().unwrap_or("");
+    eprintln!("[scenario 23] turn response text: {text}");
+
+    assert!(
+        got_callback,
+        "Expected the LLM to call secret_lookup but no tool/execute callback was received — \
+         the late-registered tool was not picked up by the already-spawned member"
+    );
+    assert!(
+        text.contains("KESTREL-99") || text.contains("kestrel-99") || text.contains("Kestrel-99"),
+        "Expected response to contain 'KESTREL-99' from late-registered callback tool, got: {text}"
+    );
+
+    eprintln!("[scenario 23] PASSED: late-registered tool picked up by already-spawned member");
+
+    // Clean up
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}

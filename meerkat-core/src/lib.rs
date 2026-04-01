@@ -113,7 +113,9 @@ pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
     EventTap, EventTapState, new_event_tap, tap_emit, tap_send_terminal, tap_try_send,
 };
-pub use gateway::{Availability, AvailabilityCheck, ToolGateway, ToolGatewayBuilder};
+pub use gateway::{
+    Availability, AvailabilityCheck, DynamicToolComposite, ToolGateway, ToolGatewayBuilder,
+};
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookLlmRequest,

@@ -247,6 +247,8 @@ pub struct MobToolsBuildArgs {
     pub session_id: crate::SessionId,
     /// Model name of the owning agent — inherited by implicit mob helpers.
     pub model: String,
+    /// Comms name of the owning agent (for building TrustedPeerSpec).
+    pub comms_name: Option<String>,
     /// Ops lifecycle registry for barrier/async-op tracking.
     pub ops_registry: Arc<dyn OpsLifecycleRegistry>,
     /// Optional comms runtime for auto-wiring spawned members.

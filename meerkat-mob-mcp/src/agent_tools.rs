@@ -63,6 +63,10 @@ pub struct AgentMobToolSurface {
     owner_session_id: SessionId,
     /// Model name inherited by implicit mob helpers.
     model: String,
+    /// Parent agent's comms name (for building TrustedPeerSpec when wiring helpers).
+    comms_name: Option<String>,
+    /// Parent agent's comms peer ID (ed25519 public key).
+    comms_peer_id: Option<String>,
 }
 
 impl AgentMobToolSurface {
@@ -78,6 +82,8 @@ impl AgentMobToolSurface {
         implicit_mob_id: Option<MobId>,
         model: String,
         owner_session_id: SessionId,
+        comms_name: Option<String>,
+        comms_peer_id: Option<String>,
     ) -> Self {
         let mut owned = std::collections::HashSet::new();
         if let Some(ref id) = implicit_mob_id {
@@ -89,6 +95,8 @@ impl AgentMobToolSurface {
             owned.into_iter().collect(),
             model,
             owner_session_id,
+            comms_name,
+            comms_peer_id,
         )
     }
 
@@ -99,6 +107,8 @@ impl AgentMobToolSurface {
         owned_mob_ids: Vec<MobId>,
         model: String,
         owner_session_id: SessionId,
+        comms_name: Option<String>,
+        comms_peer_id: Option<String>,
     ) -> Self {
         let tools = build_tool_defs();
         Self {
@@ -108,6 +118,8 @@ impl AgentMobToolSurface {
             tools,
             owner_session_id,
             model,
+            comms_name,
+            comms_peer_id,
         }
     }
 
@@ -215,17 +227,39 @@ impl AgentMobToolSurface {
         let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), meerkat_id.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
         spec.runtime_mode = Some(MobRuntimeMode::AutonomousHost);
-        spec.auto_wire_parent = true;
+        // Don't use auto_wire_parent — it requires an orchestrator member in the roster.
+        // We wire explicitly below using PeerTarget::External.
+        spec.auto_wire_parent = false;
         if let Some(instructions) = args.additional_instructions {
             spec.additional_instructions = Some(vec![instructions]);
         }
 
-        // Spawn via MobMcpState with ops lifecycle
+        // Spawn via MobMcpState
         let member_ref = self
             .state
             .mob_spawn_spec(&mob_id, spec)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+
+        // Wire the helper to the parent agent's comms identity.
+        // The parent is external to the mob (not a roster member), so we use
+        // PeerTarget::External with a TrustedPeerSpec built from the parent's comms info.
+        if let (Some(name), Some(peer_id)) = (&self.comms_name, &self.comms_peer_id)
+            && let Ok(parent_spec) = meerkat_core::comms::TrustedPeerSpec::new(
+                name.as_str(),
+                peer_id.as_str(),
+                format!("inproc://{name}"),
+            )
+        {
+            let _ = self
+                .state
+                .mob_wire(
+                    &mob_id,
+                    meerkat_id.clone(),
+                    meerkat_mob::PeerTarget::External(parent_spec),
+                )
+                .await;
+        }
 
         let mut result = json!({
             "mob_id": mob_id,
@@ -236,7 +270,7 @@ impl AgentMobToolSurface {
 
         if first_delegate {
             result["system_notice"] = json!(
-                "Implicit delegation mob created. Helpers are auto-wired to you via comms. \
+                "Implicit delegation mob created. Helpers are wired to you via comms. \
                  Use `send` to communicate. The mob persists across turns."
             );
         }
@@ -460,15 +494,37 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
         args: meerkat_core::service::MobToolsBuildArgs,
     ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
         let session_id_str = args.session_id.to_string();
-        let implicit_mob_id = self.state.find_implicit_mob(&session_id_str).await;
+        let mut implicit_mob_id = self.state.find_implicit_mob(&session_id_str).await;
+
+        // If the implicit mob exists but its delegate profile has a stale model
+        // (e.g. session resumed with --model override), destroy and recreate it
+        // so new helpers inherit the current model.
+        if let Some(ref mob_id) = implicit_mob_id
+            && let Ok(handle) = self.state.handle_for(mob_id).await
+        {
+            let profile_model = handle
+                .definition()
+                .profiles
+                .get(&ProfileName::from("delegate"))
+                .map(|p| p.model.as_str());
+            if profile_model != Some(&args.model) {
+                let _ = self.state.mob_destroy(mob_id).await;
+                implicit_mob_id = None;
+            }
+        }
+
         // Find all mobs owned by this session (implicit + explicit) for resume.
         let owned_mob_ids = self.state.find_mobs_for_session(&session_id_str).await;
+        // Extract parent comms identity for wiring helpers.
+        let comms_peer_id = args.comms_runtime.as_ref().and_then(|r| r.public_key());
         let surface = AgentMobToolSurface::new_with_owned(
             Arc::clone(&self.state),
             implicit_mob_id,
             owned_mob_ids,
             args.model,
             args.session_id,
+            args.comms_name,
+            comms_peer_id,
         );
         Ok(Arc::new(surface))
     }
@@ -946,6 +1002,8 @@ mod tests {
             None,
             "claude-sonnet-4-5".to_string(),
             SessionId::new(),
+            None,
+            None,
         );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
@@ -966,6 +1024,8 @@ mod tests {
             None,
             "claude-sonnet-4-5".to_string(),
             SessionId::new(),
+            None,
+            None,
         );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();

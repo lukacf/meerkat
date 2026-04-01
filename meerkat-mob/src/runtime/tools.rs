@@ -122,6 +122,11 @@ pub(super) fn compose_external_tools_for_profile(
 
     // Compose default external tools (e.g. callback tools from SDK) with
     // name-collision filtering: profile-declared tools always win.
+    //
+    // The dispatcher is always included even if it currently reports 0 tools,
+    // because it may be dynamic (e.g. CallbackToolDispatcher backed by a shared
+    // registry that gets populated later via tools/register). Dropping it here
+    // would permanently disconnect the session from late-registered tools.
     if let Some(ext) = default_external_tools {
         let profile_names: HashSet<String> = dispatchers
             .iter()
@@ -133,14 +138,10 @@ pub(super) fn compose_external_tools_for_profile(
             .filter(|t| profile_names.contains(&t.name))
             .map(|t| t.name.clone())
             .collect();
-        // Check if any tools remain after filtering
-        let remaining = ext.tools().iter().any(|t| !collisions.contains(&t.name));
-        if remaining {
-            if collisions.is_empty() {
-                dispatchers.push(ext);
-            } else {
-                dispatchers.push(Arc::new(NameFilteredDispatcher::new(ext, collisions)));
-            }
+        if collisions.is_empty() {
+            dispatchers.push(ext);
+        } else {
+            dispatchers.push(Arc::new(NameFilteredDispatcher::new(ext, collisions)));
         }
     }
 

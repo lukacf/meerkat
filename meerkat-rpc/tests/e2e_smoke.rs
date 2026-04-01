@@ -1315,23 +1315,19 @@ async fn e2e_scenario_22_transport_backpressure() {
 // Scenario 23: Late tools/register on already-spawned mob members (#158)
 // ---------------------------------------------------------------------------
 
-/// Scenario 23: Create a mob BEFORE registering callback tools, then register
-/// tools, then spawn a member and start a turn that uses the late-registered tool.
+/// Scenario 23: Spawn a mob member, THEN register callback tools, THEN start a
+/// turn and verify the already-materialized member can use the late-registered tool.
 ///
-/// This exercises the dynamic CallbackToolDispatcher: the dispatcher is created
-/// at spawn time backed by the shared registered_tools list. Since tools were
-/// registered after mob creation but before spawn, the dispatcher sees them
-/// immediately. This also validates that the ExternalToolsProvider is invoked
-/// lazily at spawn time (not at mob creation time).
+/// This proves post-spawn dynamic tool pickup: the `CallbackToolDispatcher` is
+/// backed by the shared `registered_tools` list and picks up additions via
+/// `poll_external_updates` at the next turn boundary.
 ///
-/// Note: spawning a member BEFORE tools/register would race with the
-/// autonomous_host loop (the default runtime mode for mob members), which starts
-/// immediately and may complete its first CallingLlm iteration before
-/// tools/register is processed. That race is inherent to autonomous mode and
-/// not a bug in the dispatcher — the dynamic list IS correct, but the first turn
-/// may have already been sent to the LLM with an empty tool list.
+/// The member is spawned with `initial_turn: "deferred"` to avoid the
+/// `autonomous_host` loop racing the first turn against `tools/register`.
+/// A separate explicit `turn/start` drives the LLM call after tools are
+/// registered. `runtime_mode: "turn_driven"` ensures no background loop starts.
 #[tokio::test]
-#[ignore = "e2e: live API + late callback tool registration"]
+#[ignore = "e2e: live API + post-spawn dynamic tool pickup"]
 async fn e2e_scenario_23_late_register_on_existing_member() {
     let api_key = match live_smoke::anthropic_api_key() {
         Some(key) => key,
@@ -1362,7 +1358,7 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "initialize failed: {resp}");
 
-    // 2. Create mob BEFORE registering tools.
+    // 2. Create mob.
     let id = next_id();
     send_request(
         &mut writer,
@@ -1376,6 +1372,7 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
                     "profiles": {
                         "worker": {
                             "model": model,
+                            "runtime_mode": "turn_driven",
                             "system_prompt": "You are a helpful assistant. When asked about a secret code, you MUST call the secret_lookup tool with key 'beta'. Always use tools when available.",
                             "tools": { "comms": true }
                         }
@@ -1389,8 +1386,29 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
     assert!(resp["error"].is_null(), "mob/create failed: {resp}");
     let mob_id = resp["result"]["mob_id"].as_str().unwrap().to_string();
 
-    // 3. Register the callback tool AFTER mob creation but BEFORE spawn.
-    //    The provider is invoked lazily at spawn time and will see these tools.
+    // 3. Spawn member BEFORE registering tools.
+    //    turn_driven mode prevents autonomous loop from racing.
+    let id = next_id();
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mob/spawn",
+            "params": {
+                "mob_id": mob_id,
+                "profile": "worker",
+                "meerkat_id": "w1",
+                "initial_turn": "deferred"
+            }
+        }),
+    )
+    .await;
+    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
+    assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
+    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
+
+    // 4. Register the callback tool AFTER the member already exists.
     let id = next_id();
     send_request(
         &mut writer,
@@ -1417,28 +1435,8 @@ async fn e2e_scenario_23_late_register_on_existing_member() {
     let resp = timeout(t, read_response(&mut reader)).await.unwrap();
     assert!(resp["error"].is_null(), "tools/register failed: {resp}");
 
-    // 4. NOW spawn a member — the provider reads the live registered_tools list.
-    let id = next_id();
-    send_request(
-        &mut writer,
-        &serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "mob/spawn",
-            "params": {
-                "mob_id": mob_id,
-                "profile": "worker",
-                "meerkat_id": "w1",
-                "initial_turn": "deferred"
-            }
-        }),
-    )
-    .await;
-    let resp = timeout(t, read_response(&mut reader)).await.unwrap();
-    assert!(resp["error"].is_null(), "mob/spawn failed: {resp}");
-    let session_id = resp["result"]["session_id"].as_str().unwrap().to_string();
-
-    // 5. Start a turn — the callback tool should be available.
+    // 5. Start a turn on the already-materialized member.
+    //    The dynamic dispatcher should pick up the late-registered tool.
     let id = next_id();
     send_request(
         &mut writer,

@@ -277,7 +277,10 @@ impl SessionRuntime {
     /// Set the mob state for implicit mob cleanup on session archive.
     #[cfg(feature = "mob")]
     pub fn set_mob_state(&self, state: Arc<meerkat_mob_mcp::MobMcpState>) {
-        *self.mob_state.write().unwrap_or_else(|e| e.into_inner()) = Some(state);
+        *self
+            .mob_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
     }
 
     /// Create a runtime that resolves config from a shared config store.
@@ -2271,7 +2274,7 @@ impl SessionRuntime {
             let mob_state = self
                 .mob_state
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(mob_state) = mob_state {
                 let _ = mob_state

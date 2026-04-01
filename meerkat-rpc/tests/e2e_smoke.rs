@@ -1276,10 +1276,10 @@ async fn e2e_scenario_22_transport_backpressure() {
             let value = read_line_json(&mut client_reader).await;
             if let Some(id) = value.get("id") {
                 responses_received += 1;
-                if value["error"].is_null() {
-                    if let Some(sid) = value["result"]["session_id"].as_str() {
-                        session_ids.push(sid.to_string());
-                    }
+                if value["error"].is_null()
+                    && let Some(sid) = value["result"]["session_id"].as_str()
+                {
+                    session_ids.push(sid.to_string());
                 }
                 eprintln!(
                     "[scenario 22] response #{responses_received} (id={id}): error={}",

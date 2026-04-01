@@ -121,6 +121,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
     #[cfg(feature = "mob")]
     /// Create a new RPC server with an optional skill runtime and explicit mob state.
+    ///
+    /// `callback_rx` is the receiver half of the callback channel, pre-created via
+    /// `SessionRuntime::init_callback_channel()`. This ensures the callback channel
+    /// exists before mob resume (so `ExternalToolsProvider` closures can read it),
+    /// while the server owns the receiver for the `tool/execute` dispatch loop.
     pub fn new_with_skill_runtime_and_mob_state(
         reader: R,
         writer: W,
@@ -128,22 +133,30 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         config_store: Arc<dyn ConfigStore>,
         skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
         mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+        callback_request_rx: mpsc::Receiver<(
+            crate::protocol::RpcRequest,
+            tokio::sync::oneshot::Sender<crate::protocol::RpcResponse>,
+        )>,
     ) -> Self {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
-        let (callback_request_tx, callback_request_rx) =
-            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
-        let callback_id_counter = Arc::new(AtomicU64::new(0));
-        let registered_tools = Arc::new(std::sync::RwLock::new(Vec::new()));
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
 
-        runtime.set_callback_channel(
-            callback_request_tx.clone(),
-            callback_id_counter.clone(),
-            registered_tools.clone(),
-        );
+        // Callback channel was pre-created by the caller via init_callback_channel().
+        // Read the shared state (tx, counter, tools) from the runtime.
+        // If somehow not initialized, the callback_request_rx the caller passed
+        // will never receive, but the server won't crash.
+        let callback_request_tx = runtime.callback_request_tx().unwrap_or_else(|| {
+            tracing::warn!(
+                "callback channel not pre-initialized on runtime; callback tools will not work"
+            );
+            let (tx, _) = mpsc::channel(1);
+            tx
+        });
+        let callback_id_counter = runtime.callback_id_counter();
+        let registered_tools = runtime.registered_tools();
 
         let router =
             MethodRouter::new_with_mob_state(runtime, config_store, notification_sink, mob_state)

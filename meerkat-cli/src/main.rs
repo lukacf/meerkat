@@ -6411,41 +6411,9 @@ where
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_config_runtime(config_runtime);
 
-    let mut builder = meerkat_mob::MobBuilder::from_mobpack(
-        archive.definition.clone(),
-        archive.skills.clone(),
-        meerkat_mob::MobStorage::in_memory(),
-    )
-    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-    .with_session_service(session_service.clone());
-    builder = builder.with_runtime_adapter(runtime_adapter.clone());
-    let handle = builder
-        .create()
-        .await
-        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-
-    if let Some(orchestrator) = &archive.definition.orchestrator {
-        let roster = handle.roster().await;
-        if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
-            handle
-                .member(&entry.meerkat_id)
-                .await
-                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
-                .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
-                .await
-                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
-        }
-    }
-
-    let deployed_mob_id = handle.mob_id().to_string();
-    persist_mob_handle_snapshot(
-        scope,
-        session_service.clone(),
-        &handle,
-        Some(archive.definition.clone()),
-    )
-    .await?;
-
+    // Set realm context before Arc-wrapping (requires &mut self).
+    // The mob_id is known from the definition before the handle is created.
+    let deployed_mob_id = archive.definition.id.to_string();
     runtime.set_realm_context(
         Some(scope.locator.realm_id.clone()),
         scope
@@ -6456,11 +6424,10 @@ where
     );
     let runtime = Arc::new(runtime);
 
-    let default_llm_client_provider = Some(Arc::new({
-        let runtime = runtime.clone();
-        move || runtime.default_llm_client()
-    })
-        as Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>);
+    // Pre-initialize the callback channel so the ExternalToolsProvider closure
+    // can read callback_request_tx() during mob creation and resume.
+    let callback_rx = runtime.init_callback_channel();
+
     let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
         let runtime = runtime.clone();
         move || {
@@ -6484,6 +6451,47 @@ where
             ) as Arc<dyn meerkat_core::AgentToolDispatcher>)
         }
     }));
+
+    let mut builder = meerkat_mob::MobBuilder::from_mobpack(
+        archive.definition.clone(),
+        archive.skills.clone(),
+        meerkat_mob::MobStorage::in_memory(),
+    )
+    .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+    .with_session_service(session_service.clone())
+    .with_default_external_tools_provider(external_tools_provider.clone());
+    builder = builder.with_runtime_adapter(runtime_adapter.clone());
+    let handle = builder
+        .create()
+        .await
+        .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+
+    if let Some(orchestrator) = &archive.definition.orchestrator {
+        let roster = handle.roster().await;
+        if let Some(entry) = roster.by_profile(&orchestrator.profile).next() {
+            handle
+                .member(&entry.meerkat_id)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?
+                .send(prompt.to_string(), meerkat_core::types::HandlingMode::Queue)
+                .await
+                .map_err(|err| anyhow::anyhow!("mob deploy failed: {err}"))?;
+        }
+    }
+
+    persist_mob_handle_snapshot(
+        scope,
+        session_service.clone(),
+        &handle,
+        Some(archive.definition.clone()),
+    )
+    .await?;
+
+    let default_llm_client_provider = Some(Arc::new({
+        let runtime = runtime.clone();
+        move || runtime.default_llm_client()
+    })
+        as Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>);
     let seeded_handles = std::collections::BTreeMap::from([(deployed_mob_id.clone(), handle)]);
     let (mob_state, _) = hydrate_mob_state(
         scope,
@@ -6502,6 +6510,7 @@ where
         config_store,
         skill_runtime,
         mob_state,
+        callback_rx,
     );
     server
         .run()

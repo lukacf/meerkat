@@ -67,6 +67,8 @@ impl StoreError {
 /// Convert [`StoreError`] to [`SessionStoreError`] at the trait boundary.
 ///
 /// Used as `.map_err(into_session_store_error)` in `SessionStore` trait impls.
+/// Only needed on native targets where the persistent store backends exist.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn into_session_store_error(e: StoreError) -> SessionStoreError {
     e.into_session_store_error()
 }

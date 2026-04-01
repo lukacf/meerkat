@@ -143,7 +143,18 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for MobError {
 
 impl From<crate::store::MobStoreError> for MobError {
     fn from(error: crate::store::MobStoreError) -> Self {
-        Self::StorageError(Box::new(error))
+        match error {
+            crate::store::MobStoreError::SpecRevisionConflict {
+                mob_id,
+                expected,
+                actual,
+            } => Self::SpecRevisionConflict {
+                mob_id,
+                expected,
+                actual,
+            },
+            other => Self::StorageError(Box::new(other)),
+        }
     }
 }
 

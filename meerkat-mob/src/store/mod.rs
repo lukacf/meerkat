@@ -38,6 +38,14 @@ pub enum MobStoreError {
     #[error("CAS conflict: {0}")]
     CasConflict(String),
 
+    /// Spec revision compare-and-swap failed (structured variant for typed conversion).
+    #[error("spec revision conflict for mob {mob_id}: expected {expected:?}, actual {actual}")]
+    SpecRevisionConflict {
+        mob_id: crate::ids::MobId,
+        expected: Option<u64>,
+        actual: u64,
+    },
+
     /// Serialization or deserialization failed.
     #[error("Serialization error: {0}")]
     Serialization(String),

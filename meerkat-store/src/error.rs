@@ -64,7 +64,9 @@ impl StoreError {
     }
 }
 
-/// Shorthand for `.map_err(StoreError::into_session_store_error)` in trait impls.
-pub(crate) fn sse(e: StoreError) -> SessionStoreError {
+/// Convert [`StoreError`] to [`SessionStoreError`] at the trait boundary.
+///
+/// Used as `.map_err(into_session_store_error)` in `SessionStore` trait impls.
+pub(crate) fn into_session_store_error(e: StoreError) -> SessionStoreError {
     e.into_session_store_error()
 }

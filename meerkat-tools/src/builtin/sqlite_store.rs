@@ -11,8 +11,9 @@ use super::types::{NewTask, Task, TaskError, TaskId, TaskStatus, TaskUpdate};
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
@@ -29,7 +30,7 @@ const CREATE_TASKS_SESSION_INDEX_SQL: &str = r"
 CREATE INDEX IF NOT EXISTS tasks_session_idx
 ON tasks(session_id)";
 
-fn open_connection(path: &Path) -> Result<Connection, TaskError> {
+fn open_connection(path: &Path, ensure_schema: bool) -> Result<Connection, TaskError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| TaskError::StorageError(format!("Failed to create directory: {e}")))?;
@@ -42,16 +43,28 @@ fn open_connection(path: &Path) -> Result<Connection, TaskError> {
         .map_err(|e| TaskError::StorageError(format!("Failed to set journal mode: {e}")))?;
     conn.pragma_update(None, "synchronous", "FULL")
         .map_err(|e| TaskError::StorageError(format!("Failed to set synchronous: {e}")))?;
-    conn.execute_batch(CREATE_TASKS_TABLE_SQL)
-        .map_err(|e| TaskError::StorageError(format!("Failed to create tasks table: {e}")))?;
-    conn.execute_batch(CREATE_TASKS_SESSION_INDEX_SQL)
-        .map_err(|e| TaskError::StorageError(format!("Failed to create index: {e}")))?;
+    if ensure_schema {
+        conn.execute_batch(CREATE_TASKS_TABLE_SQL)
+            .map_err(|e| TaskError::StorageError(format!("Failed to create tasks table: {e}")))?;
+        conn.execute_batch(CREATE_TASKS_SESSION_INDEX_SQL)
+            .map_err(|e| TaskError::StorageError(format!("Failed to create index: {e}")))?;
+    }
     Ok(conn)
 }
 
 fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, TaskError> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| TaskError::StorageError(format!("Failed to begin transaction: {e}")))
+}
+
+/// Open a connection, ensuring schema on first use (tracked by the flag).
+fn open_cached(path: &Path, schema_ensured: &AtomicBool) -> Result<Connection, TaskError> {
+    let need_schema = !schema_ensured.load(Ordering::Acquire);
+    let conn = open_connection(path, need_schema)?;
+    if need_schema {
+        schema_ensured.store(true, Ordering::Release);
+    }
+    Ok(conn)
 }
 
 fn se(e: impl std::fmt::Display) -> TaskError {
@@ -71,7 +84,7 @@ fn now_millis() -> i64 {
 pub struct SqliteTaskStore {
     path: PathBuf,
     session_id: Option<String>,
-    lock: Mutex<()>,
+    schema_ensured: Arc<AtomicBool>,
 }
 
 impl SqliteTaskStore {
@@ -82,7 +95,7 @@ impl SqliteTaskStore {
         Self {
             path: path.into(),
             session_id,
-            lock: Mutex::new(()),
+            schema_ensured: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -120,11 +133,11 @@ impl SqliteTaskStore {
 #[async_trait]
 impl TaskStore for SqliteTaskStore {
     async fn list(&self) -> Result<Vec<Task>, TaskError> {
-        let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let session_id = self.session_id.clone();
+        let schema = self.schema_ensured.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_cached(&path, &schema)?;
             let mut tasks = Vec::new();
             if let Some(sid) = &session_id {
                 let mut stmt = conn
@@ -156,12 +169,12 @@ impl TaskStore for SqliteTaskStore {
     }
 
     async fn get(&self, id: &TaskId) -> Result<Option<Task>, TaskError> {
-        let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let task_id = id.0.clone();
         let session_id = self.session_id.clone();
+        let schema = self.schema_ensured.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_connection(&path)?;
+            let conn = open_cached(&path, &schema)?;
             let bytes: Option<Vec<u8>> = if let Some(sid) = &session_id {
                 conn.query_row(
                     "SELECT task_json FROM tasks WHERE task_id = ?1 AND session_id = ?2",
@@ -189,8 +202,8 @@ impl TaskStore for SqliteTaskStore {
     }
 
     async fn create(&self, new_task: NewTask, session_id: Option<&str>) -> Result<Task, TaskError> {
-        let _guard = self.lock.lock().await;
         let path = self.path.clone();
+        let schema = self.schema_ensured.clone();
         // Use the store's session_id for scoping; the parameter session_id
         // is for tracking who created the task (created_by_session).
         let scope_session_id = self.session_id.clone();
@@ -216,7 +229,7 @@ impl TaskStore for SqliteTaskStore {
 
         let task_clone = task.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
+            let mut conn = open_cached(&path, &schema)?;
             let tx = begin_immediate(&mut conn)?;
             let json = Self::encode_task(&task_clone)?;
             let now_ms = now_millis();
@@ -240,14 +253,14 @@ impl TaskStore for SqliteTaskStore {
         update: TaskUpdate,
         session_id: Option<&str>,
     ) -> Result<Task, TaskError> {
-        let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let task_id = id.0.clone();
         let scope_session_id = self.session_id.clone();
         let tracking_session_id = session_id.map(String::from);
+        let schema = self.schema_ensured.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
+            let mut conn = open_cached(&path, &schema)?;
             let tx = begin_immediate(&mut conn)?;
 
             // Load existing task
@@ -337,13 +350,13 @@ impl TaskStore for SqliteTaskStore {
     }
 
     async fn delete(&self, id: &TaskId) -> Result<(), TaskError> {
-        let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let task_id = id.0.clone();
         let scope_session_id = self.session_id.clone();
+        let schema = self.schema_ensured.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut conn = open_connection(&path)?;
+            let mut conn = open_cached(&path, &schema)?;
             let tx = begin_immediate(&mut conn)?;
             let rows = if let Some(sid) = &scope_session_id {
                 tx.execute(

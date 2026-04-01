@@ -54,14 +54,16 @@ use meerkat_store::{SessionStore, StoreAdapter};
 use meerkat_tools::BuiltinDispatcherConfig;
 use meerkat_tools::CompositeDispatcherError;
 use meerkat_tools::EmptyToolDispatcher;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
 use meerkat_tools::builtin::FileTaskStore;
+#[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
+use meerkat_tools::builtin::MemoryTaskStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_tools::builtin::SqliteTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_tools::builtin::{
-    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore, ToolPolicyLayer,
-};
+use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, TaskStore, ToolPolicyLayer};
 #[cfg(all(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1951,8 +1953,16 @@ impl AgentFactory {
             };
         }
 
-        // Create a task store - use in-memory for simplicity; callers that need
-        // file-backed persistence should use the lower-level APIs.
+        // Create a task store.
+        // With session-store: SQLite-backed, scoped to the session so /resume
+        // restores the correct task set.
+        // Without: file-backed (project root) or in-memory fallback.
+        #[cfg(feature = "session-store")]
+        let task_store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::for_session(
+            self.store_path.join("tasks.db"),
+            &session_id,
+        ));
+        #[cfg(not(feature = "session-store"))]
         let task_store: Arc<dyn TaskStore> = match self.project_root.as_ref() {
             Some(root) => Arc::new(FileTaskStore::in_project(root)),
             None => Arc::new(MemoryTaskStore::new()),

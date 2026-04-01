@@ -299,9 +299,11 @@ impl MobSpecStore for InMemoryMobSpecStore {
         if let Some(expected) = revision
             && expected != current_revision
         {
-            return Err(MobStoreError::CasConflict(format!(
-                "spec revision conflict for mob {mob_id}: expected {revision:?}, actual {current_revision}"
-            )));
+            return Err(MobStoreError::SpecRevisionConflict {
+                mob_id: mob_id.clone(),
+                expected: revision,
+                actual: current_revision,
+            });
         }
 
         let next_revision = current_revision + 1;
@@ -533,7 +535,14 @@ mod tests {
             .put_spec(&mob_id, &definition, Some(1))
             .await
             .unwrap_err();
-        assert!(matches!(conflict, MobStoreError::CasConflict(_)));
+        assert!(matches!(
+            conflict,
+            MobStoreError::SpecRevisionConflict {
+                expected: Some(1),
+                actual: 2,
+                ..
+            }
+        ));
 
         assert!(!store.delete_spec(&mob_id, Some(1)).await.unwrap());
         assert!(store.delete_spec(&mob_id, Some(2)).await.unwrap());

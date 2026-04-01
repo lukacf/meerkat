@@ -789,9 +789,11 @@ impl MobSpecStore for SqliteMobSpecStore {
             if let Some(expected) = revision
                 && expected != current_revision
             {
-                return Err(MobStoreError::CasConflict(format!(
-                    "spec revision conflict for mob {mob_id}: expected {revision:?}, actual {current_revision}"
-                )));
+                return Err(MobStoreError::SpecRevisionConflict {
+                    mob_id,
+                    expected: revision,
+                    actual: current_revision,
+                });
             }
 
             let next_revision = current_revision + 1;
@@ -1079,7 +1081,10 @@ mod tests {
             .put_spec(&MobId::from("mob"), &definition, Some(0))
             .await
             .expect_err("revision conflict expected");
-        assert!(matches!(conflict, MobStoreError::CasConflict(_)));
+        assert!(matches!(
+            conflict,
+            MobStoreError::SpecRevisionConflict { .. }
+        ));
 
         let loaded = store.get_spec(&MobId::from("mob")).await.unwrap();
         assert!(loaded.is_some());

@@ -732,6 +732,11 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
+        // Session registration + RuntimeLoop attachment is owned by the
+        // provisioner's lazy `runtime_session_state()` init (called during
+        // provision_member and execute_runtime_input).  This method only
+        // handles autonomous-specific concerns: the keep-alive comms drain
+        // and the dispatch capability check.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let session_id = member_ref.session_id().ok_or_else(|| {
@@ -741,15 +746,6 @@ impl MobActor {
             })?;
 
             if let Some(adapter) = self.runtime_adapter.clone() {
-                adapter.register_session(session_id.clone()).await;
-                let executor = Box::new(super::actor_turn_executor::MobActorCoreExecutor::new(
-                    Arc::clone(&self.session_service),
-                    session_id.clone(),
-                ));
-                adapter
-                    .ensure_session_with_executor(session_id.clone(), executor)
-                    .await;
-
                 let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
                 let spawned = adapter
                     .maybe_spawn_comms_drain(session_id, true, comms_runtime)

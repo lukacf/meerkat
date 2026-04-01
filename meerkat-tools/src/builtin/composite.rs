@@ -434,6 +434,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        #[allow(unused_mut)] // mut needed on non-wasm32 for background_completions extend
         let mut update = if let Some(ref ext) = self.external {
             ext.poll_external_updates().await
         } else {

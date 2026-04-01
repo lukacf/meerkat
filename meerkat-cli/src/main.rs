@@ -2817,16 +2817,6 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
     }
 }
 
-#[cfg(test)]
-fn create_run_mob_external_tools(
-    session_service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
-) -> Arc<dyn AgentToolDispatcher> {
-    let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-        Arc::new(RunMobSessionService::new(session_service));
-    let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
-    Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(state))
-}
-
 struct RunMobToolsContext {
     state: Arc<meerkat_mob_mcp::MobMcpState>,
     known_mob_ids: std::collections::BTreeSet<String>,

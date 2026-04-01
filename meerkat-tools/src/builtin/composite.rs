@@ -434,11 +434,21 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
-        if let Some(ref ext) = self.external {
+        #[allow(unused_mut)] // mut needed on non-wasm32 for background_completions extend
+        let mut update = if let Some(ref ext) = self.external {
             ext.poll_external_updates().await
         } else {
             ExternalToolUpdate::default()
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref mgr) = self.job_manager {
+            update
+                .background_completions
+                .extend(mgr.drain_completed().await);
         }
+
+        update
     }
 
     fn bind_wait_interrupt(

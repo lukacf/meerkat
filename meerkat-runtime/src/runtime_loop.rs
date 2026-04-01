@@ -266,9 +266,23 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
     completions: Option<crate::session_adapter::SharedCompletionRegistry>,
+    detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            // Build a future for the detached-wake Notify if present.
+            // When a BackgroundToolOp completes, the ops lifecycle fires
+            // notify_one(). We select on it here to inject a ContinuationInput
+            // directly, eliminating the need for a separate waker task.
+            let detached_notified = async {
+                if let Some(ref state) = detached_wake {
+                    state.notify.notified().await;
+                } else {
+                    // No detached wake configured — never resolves.
+                    std::future::pending::<()>().await;
+                }
+            };
+
             tokio::select! {
                 biased;
                 maybe_command = control_rx.recv() => {
@@ -301,8 +315,45 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             {
                                 break;
                             }
+                            // Secondary wake path: re-check detached wake after
+                            // queue drain in case a completion arrived mid-turn.
+                            // The primary path is the `detached_notified` select
+                            // arm above (fires from idle). This secondary path
+                            // catches completions that arrive while the session
+                            // is already running — the select arm can't fire
+                            // during process_queue because biased select won't
+                            // poll lower arms while wake_rx is active. Both
+                            // paths coalesce: Notify permits are idempotent.
+                            maybe_signal_detached_wake(&driver, detached_wake.as_ref()).await;
                         }
                         None => break,
+                    }
+                }
+                () = detached_notified => {
+                    // A BackgroundToolOp completed while idle. Inject a
+                    // ContinuationInput into the driver and process it.
+                    if let Some(ref state) = detached_wake
+                        && state.pending.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        let input = crate::input::Input::Continuation(
+                            crate::input::ContinuationInput::detached_background_op_completed(),
+                        );
+                        let mut d = driver.lock().await;
+                        if d.as_driver_mut().accept_input(input).await.is_ok() {
+                            state.pending.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        drop(d);
+                        // Process the queued continuation
+                        if process_queue(
+                            &driver,
+                            &mut *executor,
+                            &mut control_rx,
+                            completions.as_ref(),
+                        )
+                        .await
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -315,6 +366,40 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             reg.resolve_all_terminated("runtime loop exited");
         }
     })
+}
+
+/// Signal the detached-op waker if the session is quiescent and a wake is pending.
+///
+/// Called after queue processing completes (session has returned to idle).
+/// INV-005: only signals when session is quiescent (Attached + no active inputs).
+/// INV-006: at most one wake cycle outstanding per session.
+async fn maybe_signal_detached_wake(
+    driver: &crate::session_adapter::SharedDriver,
+    wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
+) {
+    let Some(state) = wake_state else { return };
+
+    if !state.pending.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    if state.signaled.load(std::sync::atomic::Ordering::Acquire) {
+        return; // INV-006: at most one outstanding
+    }
+
+    // Verify quiescence: Attached/Idle + no active inputs
+    let d = driver.lock().await;
+    if !d.is_idle_or_attached() {
+        return;
+    }
+    if !d.as_driver().active_input_ids().is_empty() {
+        return;
+    }
+    drop(d);
+
+    state
+        .signaled
+        .store(true, std::sync::atomic::Ordering::Release);
+    state.notify.notify_one();
 }
 
 /// Process all queued inputs until the queue is empty.

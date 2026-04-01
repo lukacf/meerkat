@@ -7,17 +7,18 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::{Context, Poll};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::lifecycle::{RunId, WaitRequestId};
 use meerkat_core::ops_lifecycle::{
-    DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationLifecycleSnapshot,
-    OperationPeerHandle, OperationProgressUpdate, OperationResult, OperationSpec,
-    OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry, WaitAllResult,
-    WaitAllSatisfied,
+    DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationKind,
+    OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate, OperationResult,
+    OperationSpec, OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
+    WaitAllResult, WaitAllSatisfied,
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -101,6 +102,10 @@ struct ShellState {
     authority: OpsLifecycleAuthority,
     records: HashMap<OperationId, ShellRecord>,
     pending_wait: Option<PendingWaitState>,
+    /// Shared detached-op wake state. When a `BackgroundToolOp` reaches terminal,
+    /// sets pending and fires the Notify so the waker task can inject a
+    /// continuation into the quiescent session.
+    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
 }
 
 impl ShellState {
@@ -109,6 +114,7 @@ impl ShellState {
             authority: OpsLifecycleAuthority::new(max_completed, max_concurrent),
             records: HashMap::new(),
             pending_wait: None,
+            detached_wake: None,
         }
     }
 
@@ -168,6 +174,16 @@ impl ShellState {
                         shell.notify_watchers(&outcome);
                         shell.mark_completed();
                         self.authority.watchers_drained(operation_id, watcher_count);
+                    }
+                    // Arm + signal detached-op wake if this is a BackgroundToolOp terminal.
+                    if let Some(ref wake) = self.detached_wake
+                        && self
+                            .authority
+                            .operation(operation_id)
+                            .is_some_and(|op| op.kind() == OperationKind::BackgroundToolOp)
+                    {
+                        wake.pending.store(true, Ordering::Release);
+                        wake.notify.notify_one(); // wake the waker task directly
                     }
                 }
                 OpsLifecycleEffect::ExposeOperationPeer { .. } => {
@@ -289,6 +305,14 @@ impl RuntimeOpsLifecycleRegistry {
     pub fn with_config(config: OpsLifecycleConfig) -> Self {
         Self {
             state: RwLock::new(ShellState::new(config.max_completed, config.max_concurrent)),
+        }
+    }
+
+    /// Wire the detached-wake state so that `execute_effects` arms pending
+    /// and fires the Notify when a `BackgroundToolOp` reaches terminal.
+    pub fn set_detached_wake(&self, wake: Arc<crate::detached_wake::DetachedWakeState>) {
+        if let Ok(mut state) = self.state.write() {
+            state.detached_wake = Some(wake);
         }
     }
 

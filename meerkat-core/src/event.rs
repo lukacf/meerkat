@@ -76,6 +76,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::InteractionFailed { .. } => "interaction_failed",
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
+        AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
     }
 }
 
@@ -405,6 +406,14 @@ pub enum AgentEvent {
 
     /// Live tool configuration changed for this session.
     ToolConfigChanged { payload: ToolConfigChangedPayload },
+
+    /// A background shell job completed (or failed/cancelled/timed out).
+    BackgroundJobCompleted {
+        job_id: String,
+        display_name: String,
+        status: String,
+        detail: String,
+    },
 }
 
 /// Scope attribution frame for multi-agent streaming.
@@ -604,6 +613,14 @@ pub fn format_verbose_event_with_config(
         AgentEvent::CompactionFailed { error } => {
             Some(format!("  ✗ Compaction failed (continuing): {error}"))
         }
+        AgentEvent::BackgroundJobCompleted {
+            job_id,
+            display_name,
+            status,
+            detail,
+        } => Some(format!(
+            "  BG job {job_id} ({display_name}) {status}: {detail}"
+        )),
         _ => None,
     }
 }
@@ -716,6 +733,12 @@ mod tests {
                     persisted: false,
                     applied_at_turn: Some(12),
                 },
+            },
+            AgentEvent::BackgroundJobCompleted {
+                job_id: "j_123".to_string(),
+                display_name: "sleep 2".to_string(),
+                status: "completed".to_string(),
+                detail: "exit_code: 0".to_string(),
             },
         ];
 
@@ -889,6 +912,12 @@ mod tests {
                     applied_at_turn: Some(1),
                 },
             },
+            AgentEvent::BackgroundJobCompleted {
+                job_id: "j_123".to_string(),
+                display_name: "sleep 2".to_string(),
+                status: "completed".to_string(),
+                detail: "exit_code: 0".to_string(),
+            },
         ];
 
         let mut kinds = std::collections::BTreeSet::new();
@@ -901,7 +930,7 @@ mod tests {
             kinds.insert(kind);
         }
         assert!(
-            kinds.len() >= 31,
+            kinds.len() >= 32,
             "expected at least one discriminator per covered event variant"
         );
     }

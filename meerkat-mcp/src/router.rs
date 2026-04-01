@@ -788,6 +788,7 @@ impl McpRouter {
                 .map(|update| update.action)
                 .collect(),
             pending,
+            background_completions: Vec::new(),
         }
     }
 

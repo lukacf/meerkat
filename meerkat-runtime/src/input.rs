@@ -438,6 +438,32 @@ pub struct ContinuationInput {
 }
 
 impl ContinuationInput {
+    /// Build a continuation for waking an idle session after a detached
+    /// background operation reaches terminal state.
+    ///
+    /// Properties: `Derived` durability, invisible to transcript and operator,
+    /// `System` origin, `Steer` handling mode.
+    pub fn detached_background_op_completed() -> Self {
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Derived,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            reason: "detached_background_op_completed".to_string(),
+            handling_mode: HandlingMode::Steer,
+            request_id: None,
+        }
+    }
+
     /// Build the common runtime-owned continuation used after terminal peer
     /// response injection.
     pub fn terminal_peer_response(reason: impl Into<String>) -> Self {

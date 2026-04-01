@@ -100,6 +100,25 @@ impl OperationStatus {
     pub fn allows_terminalization(self) -> bool {
         matches!(self, Self::Provisioning | Self::Running | Self::Retiring)
     }
+
+    /// Stable string representation for app-facing surfaces.
+    ///
+    /// Unlike `Debug` format, this is an explicit mapping that won't
+    /// produce uncontrolled strings when new variants are added.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Provisioning => "provisioning",
+            Self::Running => "running",
+            Self::Retiring => "retiring",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Aborted => "aborted",
+            Self::Cancelled => "cancelled",
+            Self::Retired => "retired",
+            Self::Terminated => "terminated",
+        }
+    }
 }
 
 /// Public snapshot of one operation's lifecycle state.

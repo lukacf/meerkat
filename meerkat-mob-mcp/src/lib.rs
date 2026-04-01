@@ -3536,7 +3536,7 @@ timeout_ms = 1000
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
-        let mob_id = state.get_or_create_implicit_mob(&sid).await.unwrap();
+        let _mob_id = state.get_or_create_implicit_mob(&sid).await.unwrap();
         assert!(state.find_implicit_mob(&sid).await.is_some());
 
         state.destroy_implicit_mob(&sid).await.unwrap();

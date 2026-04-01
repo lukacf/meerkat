@@ -28,6 +28,8 @@ pub mod project;
 pub mod shell;
 #[cfg(feature = "skills")]
 pub mod skills;
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+pub mod sqlite_store;
 pub mod store;
 pub mod tasks;
 pub mod types;
@@ -45,6 +47,8 @@ pub use file_store::FileTaskStore;
 pub use memory_store::MemoryTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use project::{ensure_rkat_dir, ensure_rkat_dir_async, find_project_root};
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+pub use sqlite_store::SqliteTaskStore;
 pub use store::TaskStore;
 
 use async_trait::async_trait;

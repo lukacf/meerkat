@@ -199,8 +199,8 @@ pub use meerkat_client::OpenAiClient;
 #[cfg(feature = "gemini")]
 pub use meerkat_client::GeminiClient;
 
-// Re-export store types
-pub use meerkat_store::{SessionFilter, SessionStore, StoreError};
+// Re-export store types (trait + filter + error from core, backend error from meerkat-store)
+pub use meerkat_store::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 
 #[cfg(feature = "jsonl-store")]
 pub use meerkat_store::JsonlStore;
@@ -240,6 +240,8 @@ inventory::submit! {
 // Re-export builtin tools infrastructure
 #[cfg(feature = "comms")]
 pub use meerkat_tools::CommsToolSurface;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_tools::builtin::SqliteTaskStore;
 pub use meerkat_tools::{
     BuiltinTool, BuiltinToolConfig, BuiltinToolEntry, BuiltinToolError, CompositeDispatcher,
     CompositeDispatcherError, EnforcedToolPolicy, MemoryTaskStore, ResolvedToolPolicy, TaskStore,

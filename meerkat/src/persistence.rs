@@ -8,19 +8,19 @@ use meerkat_core::BlobStore;
 
 #[cfg(feature = "session-store")]
 use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore, RuntimeStoreError};
-#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-use meerkat_store::SqliteSessionStore;
-#[cfg(all(feature = "session-store", target_arch = "wasm32"))]
-use meerkat_store::StoreError;
 #[cfg(all(
     feature = "session-store",
     feature = "jsonl-store",
     not(target_arch = "wasm32")
 ))]
-use meerkat_store::{FsBlobStore, JsonlStore};
+use meerkat_store::JsonlStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_store::SqliteSessionStore;
+#[cfg(all(feature = "session-store", target_arch = "wasm32"))]
+use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{
-    RealmBackend, RealmManifest, RealmOrigin, RedbSessionStore, StoreError,
+    FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, RedbSessionStore, StoreError,
     ensure_realm_manifest_in, realm_paths_in,
 };
 
@@ -173,13 +173,6 @@ pub async fn open_realm_persistence_in(
                 blob_store,
             )
         }
-        #[cfg(not(feature = "jsonl-store"))]
-        RealmBackend::Jsonl => {
-            return Err(StoreError::Internal(
-                "jsonl realm opened without jsonl-store feature".to_string(),
-            )
-            .into());
-        }
         RealmBackend::Sqlite => {
             let sqlite_store = Arc::new(SqliteSessionStore::open(paths.sessions_sqlite_path)?);
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
@@ -230,7 +223,9 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::{Session, SessionId, SessionMeta};
     use meerkat_runtime::store::RuntimeStoreError;
-    use meerkat_store::{MemoryBlobStore, MemoryStore, SessionFilter};
+    #[cfg(feature = "memory-store")]
+    use meerkat_store::MemoryStore;
+    use meerkat_store::{MemoryBlobStore, SessionFilter, SessionStoreError};
     use tempfile::TempDir;
 
     struct WrappedStore {
@@ -239,19 +234,19 @@ mod tests {
 
     #[async_trait]
     impl SessionStore for WrappedStore {
-        async fn save(&self, session: &Session) -> Result<(), StoreError> {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
             self.inner.save(session).await
         }
 
-        async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
             self.inner.load(id).await
         }
 
-        async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+        async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
             self.inner.list(filter).await
         }
 
-        async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
             self.inner.delete(id).await
         }
     }
@@ -349,6 +344,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "memory-store")]
     #[test]
     fn memory_bundle_keeps_existing_session_store_behavior_without_runtime_companion()
     -> Result<(), Box<dyn std::error::Error>> {

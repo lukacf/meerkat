@@ -527,11 +527,14 @@ impl MobEventsView {
         after_cursor: u64,
         limit: usize,
     ) -> Result<Vec<crate::event::MobEvent>, MobError> {
-        self.inner.poll(after_cursor, limit).await
+        self.inner
+            .poll(after_cursor, limit)
+            .await
+            .map_err(MobError::from)
     }
 
     pub async fn replay_all(&self) -> Result<Vec<crate::event::MobEvent>, MobError> {
-        self.inner.replay_all().await
+        self.inner.replay_all().await.map_err(MobError::from)
     }
 }
 
@@ -561,7 +564,10 @@ impl MobHandle {
         after_cursor: u64,
         limit: usize,
     ) -> Result<Vec<crate::event::MobEvent>, MobError> {
-        self.events.poll(after_cursor, limit).await
+        self.events
+            .poll(after_cursor, limit)
+            .await
+            .map_err(MobError::from)
     }
 
     /// Current mob lifecycle state (lock-free read).

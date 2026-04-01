@@ -11,6 +11,7 @@ use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
 use crate::storage::MobStorage;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
+    MobStoreError,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1415,10 +1416,10 @@ impl FaultInjectedMobEventStore {
 
 #[async_trait]
 impl MobEventStore for FaultInjectedMobEventStore {
-    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
+    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let kind_label = Self::kind_label(&event.kind);
         if self.fail_on_kind.read().await.contains(kind_label) {
-            return Err(MobError::Internal(format!(
+            return Err(MobStoreError::Internal(format!(
                 "fault-injected append failure for {kind_label}"
             )));
         }
@@ -1435,7 +1436,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
         Ok(stored)
     }
 
-    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
+    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
         let events = self.events.read().await;
         Ok(events
             .iter()
@@ -1445,12 +1446,12 @@ impl MobEventStore for FaultInjectedMobEventStore {
             .collect())
     }
 
-    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
+    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         self.replay_calls.fetch_add(1, Ordering::Relaxed);
         Ok(self.events.read().await.clone())
     }
 
-    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let mut results = Vec::with_capacity(events.len());
         for event in events {
             results.push(self.append(event).await?);
@@ -1458,7 +1459,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
         Ok(results)
     }
 
-    async fn clear(&self) -> Result<(), MobError> {
+    async fn clear(&self) -> Result<(), MobStoreError> {
         self.events.write().await.clear();
         Ok(())
     }
@@ -1486,11 +1487,11 @@ impl RecordingRunStore {
 
 #[async_trait]
 impl MobRunStore for RecordingRunStore {
-    async fn create_run(&self, run: MobRun) -> Result<(), MobError> {
+    async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
         self.inner.create_run(run).await
     }
 
-    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobError> {
+    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
         self.inner.get_run(run_id).await
     }
 
@@ -1498,7 +1499,7 @@ impl MobRunStore for RecordingRunStore {
         &self,
         mob_id: &MobId,
         flow_id: Option<&crate::FlowId>,
-    ) -> Result<Vec<MobRun>, MobError> {
+    ) -> Result<Vec<MobRun>, MobStoreError> {
         self.inner.list_runs(mob_id, flow_id).await
     }
 
@@ -1507,7 +1508,7 @@ impl MobRunStore for RecordingRunStore {
         run_id: &RunId,
         expected: MobRunStatus,
         next: MobRunStatus,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         self.cas_history
             .write()
             .await
@@ -1520,7 +1521,7 @@ impl MobRunStore for RecordingRunStore {
         run_id: &RunId,
         expected: &meerkat_machine_kernels::KernelState,
         next: &meerkat_machine_kernels::KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         self.inner.cas_flow_state(run_id, expected, next).await
     }
 
@@ -1531,7 +1532,7 @@ impl MobRunStore for RecordingRunStore {
         expected_flow_state: &meerkat_machine_kernels::KernelState,
         next_status: MobRunStatus,
         next_flow_state: &meerkat_machine_kernels::KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         self.snapshot_cas_history.write().await.push((
             run_id.clone(),
             expected_status.clone(),
@@ -1552,7 +1553,7 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         self.inner.append_step_entry(run_id, entry).await
     }
 
@@ -1560,7 +1561,7 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         self.inner.append_step_entry_if_absent(run_id, entry).await
     }
 
@@ -1569,7 +1570,7 @@ impl MobRunStore for RecordingRunStore {
         run_id: &RunId,
         step_id: &crate::StepId,
         output: serde_json::Value,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         self.inner.put_step_output(run_id, step_id, output).await
     }
 
@@ -1577,7 +1578,7 @@ impl MobRunStore for RecordingRunStore {
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         self.inner.append_failure_entry(run_id, entry).await
     }
 }
@@ -6533,7 +6534,7 @@ async fn test_spawn_append_failure_rolls_back_runtime_state() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await;
     assert!(
-        matches!(result, Err(MobError::Internal(_))),
+        matches!(result, Err(MobError::StorageError(_))),
         "spawn should surface append failure"
     );
     assert!(
@@ -6797,7 +6798,7 @@ async fn test_retire_append_failure_is_retryable_without_side_effects() {
 
     let result = handle.retire(MeerkatId::from("w-1")).await;
     assert!(
-        matches!(result, Err(MobError::Internal(_))),
+        matches!(result, Err(MobError::StorageError(_))),
         "retire should surface append failure"
     );
     assert!(
@@ -7556,7 +7557,7 @@ async fn test_wire_append_failure_rolls_back_runtime_state() {
         .wire(MeerkatId::from("l-1"), MeerkatId::from("w-1"))
         .await;
     assert!(
-        matches!(result, Err(MobError::Internal(_))),
+        matches!(result, Err(MobError::StorageError(_))),
         "wire should surface append failure"
     );
 
@@ -8123,7 +8124,7 @@ async fn test_unwire_append_failure_restores_runtime_state() {
         .unwire(MeerkatId::from("l-1"), MeerkatId::from("w-1"))
         .await;
     assert!(
-        matches!(result, Err(MobError::Internal(_))),
+        matches!(result, Err(MobError::StorageError(_))),
         "unwire should surface append failure"
     );
 
@@ -8568,8 +8569,11 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         .await
         .expect_err("spawn should fail under injected auto-wire fault");
     assert!(
-        matches!(spawn_err, MobError::WiringError(_) | MobError::Internal(_)),
-        "spawn fault should surface as wiring/internal error"
+        matches!(
+            spawn_err,
+            MobError::WiringError(_) | MobError::StorageError(_)
+        ),
+        "spawn fault should surface as wiring/storage error"
     );
     assert!(
         spawn_handle
@@ -8614,7 +8618,7 @@ async fn test_fault_injected_lifecycle_operations_preserve_transactional_invaria
         .await
         .expect_err("unwire should fail when event append is fault-injected");
     assert!(
-        matches!(unwire_err, MobError::Internal(_)),
+        matches!(unwire_err, MobError::StorageError(_)),
         "unwire append fault should surface"
     );
     let u1 = unwire_handle
@@ -13811,7 +13815,7 @@ async fn test_reset_append_failure_transitions_to_stopped() {
 
     let result = handle.reset().await;
     assert!(
-        matches!(result, Err(MobError::Internal(_))),
+        matches!(result, Err(MobError::StorageError(_))),
         "reset should surface append failure"
     );
     assert_eq!(

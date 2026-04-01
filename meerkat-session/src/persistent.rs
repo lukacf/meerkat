@@ -1293,8 +1293,7 @@ mod tests {
     use meerkat_core::types::{ContentBlock, ContentInput, ImageData, Message, UserMessage};
     use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
     use meerkat_runtime::InMemoryRuntimeStore;
-    use meerkat_store::StoreError;
-    use meerkat_store::{MemoryBlobStore, MemoryStore};
+    use meerkat_store::{MemoryBlobStore, MemoryStore, SessionStoreError};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
@@ -1321,25 +1320,27 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionStore for FailSaveStore {
-        async fn save(&self, session: &Session) -> Result<(), StoreError> {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
             if self.fail_save.load(Ordering::Acquire) {
-                return Err(StoreError::Internal("forced save failure".to_string()));
+                return Err(SessionStoreError::Internal(
+                    "forced save failure".to_string(),
+                ));
             }
             self.inner.save(session).await
         }
 
-        async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
             self.inner.load(id).await
         }
 
         async fn list(
             &self,
             filter: meerkat_store::SessionFilter,
-        ) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
+        ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
             self.inner.list(filter).await
         }
 
-        async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
             self.inner.delete(id).await
         }
     }

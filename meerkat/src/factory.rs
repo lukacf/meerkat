@@ -54,14 +54,16 @@ use meerkat_store::{SessionStore, StoreAdapter};
 use meerkat_tools::BuiltinDispatcherConfig;
 use meerkat_tools::CompositeDispatcherError;
 use meerkat_tools::EmptyToolDispatcher;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
 use meerkat_tools::builtin::FileTaskStore;
+#[cfg(all(not(feature = "session-store"), not(target_arch = "wasm32")))]
+use meerkat_tools::builtin::MemoryTaskStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_tools::builtin::SqliteTaskStore;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_tools::builtin::shell::ShellConfig;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_tools::builtin::{
-    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, TaskStore, ToolPolicyLayer,
-};
+use meerkat_tools::builtin::{BuiltinToolConfig, CompositeDispatcher, TaskStore, ToolPolicyLayer};
 #[cfg(all(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use tokio::sync::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
@@ -97,7 +99,7 @@ impl EphemeralSessionStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for EphemeralSessionStore {
-    async fn save(&self, session: &Session) -> Result<(), meerkat_store::StoreError> {
+    async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
         self.sessions
             .write()
             .await
@@ -105,14 +107,17 @@ impl SessionStore for EphemeralSessionStore {
         Ok(())
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, meerkat_store::StoreError> {
+    async fn load(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
         Ok(self.sessions.read().await.get(id).cloned())
     }
 
     async fn list(
         &self,
         filter: SessionFilter,
-    ) -> Result<Vec<SessionMeta>, meerkat_store::StoreError> {
+    ) -> Result<Vec<SessionMeta>, meerkat_store::SessionStoreError> {
         let mut metas: Vec<SessionMeta> = self
             .sessions
             .read()
@@ -139,7 +144,7 @@ impl SessionStore for EphemeralSessionStore {
         Ok(metas)
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::StoreError> {
+    async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
         self.sessions.write().await.remove(id);
         Ok(())
     }
@@ -1948,8 +1953,16 @@ impl AgentFactory {
             };
         }
 
-        // Create a task store - use in-memory for simplicity; callers that need
-        // file-backed persistence should use the lower-level APIs.
+        // Create a task store.
+        // With session-store: SQLite-backed, scoped to the session so /resume
+        // restores the correct task set.
+        // Without: file-backed (project root) or in-memory fallback.
+        #[cfg(feature = "session-store")]
+        let task_store: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::for_session(
+            self.store_path.join("tasks.db"),
+            &session_id,
+        ));
+        #[cfg(not(feature = "session-store"))]
         let task_store: Arc<dyn TaskStore> = match self.project_root.as_ref() {
             Some(root) => Arc::new(FileTaskStore::in_project(root)),
             None => Arc::new(MemoryTaskStore::new()),

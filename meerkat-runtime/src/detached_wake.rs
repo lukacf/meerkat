@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::tokio::sync::Notify;
+use crate::tokio::task::JoinHandle;
 use meerkat_core::types::SessionId;
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 
 use crate::input::{ContinuationInput, Input};
 use crate::session_adapter::RuntimeSessionAdapter;

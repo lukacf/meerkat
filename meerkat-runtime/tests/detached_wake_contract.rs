@@ -409,10 +409,10 @@ fn unit_003_continuation_helper_builds_derived_invisible_steer() {
 fn unit_004_detached_wake_arms_only_for_background_tool_op() {
     let registry = RuntimeOpsLifecycleRegistry::new();
 
-    // Wire a detached wake pending flag
-    let wake_state = DetachedWakeState::new();
+    // Wire a detached wake state
+    let wake_state = Arc::new(DetachedWakeState::new());
     let pending = Arc::clone(&wake_state.pending);
-    registry.set_detached_wake_pending(pending.clone());
+    registry.set_detached_wake(Arc::clone(&wake_state));
 
     // Register and complete a BackgroundToolOp
     let bg_spec = background_spec("bg-arms");

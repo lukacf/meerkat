@@ -3456,6 +3456,14 @@ async fn run_agent(
                 .await;
         }
 
+        // Spawn the detached-op waker so background shell job completions
+        // inject a continuation and wake the idle keep-alive session.
+        if keep_alive {
+            runtime_adapter
+                .maybe_spawn_detached_op_waker(&session_id)
+                .await;
+        }
+
         match handle {
             Some(handle) => completion_outcome_to_result(handle.wait().await),
             None => {
@@ -3932,6 +3940,14 @@ async fn resume_session_with_llm_override(
             let comms_rt = service.comms_runtime(&session_id).await;
             resume_adapter
                 .maybe_spawn_comms_drain(&session_id, keep_alive, comms_rt)
+                .await;
+        }
+
+        // Spawn the detached-op waker so background shell job completions
+        // inject a continuation and wake the idle keep-alive session.
+        if keep_alive {
+            resume_adapter
+                .maybe_spawn_detached_op_waker(&session_id)
                 .await;
         }
 

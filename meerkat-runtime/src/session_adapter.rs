@@ -580,10 +580,11 @@ impl RuntimeSessionAdapter {
         };
 
         // Wire detached-op wake state: the ops lifecycle registry will set
-        // `pending = true` when a BackgroundToolOp reaches terminal, and the
-        // runtime loop will signal the Notify after queue processing completes.
+        // `pending = true` and fire `notify` when a BackgroundToolOp reaches
+        // terminal. The waker task (spawned via `maybe_spawn_detached_op_waker`)
+        // then injects a continuation through the canonical ingress seam.
         let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
-        ops_lifecycle.set_detached_wake_pending(Arc::clone(&detached_wake_state.pending));
+        ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
 
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);

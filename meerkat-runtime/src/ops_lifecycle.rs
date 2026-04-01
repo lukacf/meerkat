@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::{Context, Poll};
 
@@ -102,10 +102,10 @@ struct ShellState {
     authority: OpsLifecycleAuthority,
     records: HashMap<OperationId, ShellRecord>,
     pending_wait: Option<PendingWaitState>,
-    /// Shared flag for detached-op wake signaling. When a `BackgroundToolOp`
-    /// reaches terminal, this flag is set so the waker task can inject a
+    /// Shared detached-op wake state. When a `BackgroundToolOp` reaches terminal,
+    /// sets pending and fires the Notify so the waker task can inject a
     /// continuation into the quiescent session.
-    detached_wake_pending: Option<Arc<AtomicBool>>,
+    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
 }
 
 impl ShellState {
@@ -114,7 +114,7 @@ impl ShellState {
             authority: OpsLifecycleAuthority::new(max_completed, max_concurrent),
             records: HashMap::new(),
             pending_wait: None,
-            detached_wake_pending: None,
+            detached_wake: None,
         }
     }
 
@@ -175,14 +175,15 @@ impl ShellState {
                         shell.mark_completed();
                         self.authority.watchers_drained(operation_id, watcher_count);
                     }
-                    // Arm detached-op wake if this is a BackgroundToolOp terminal.
-                    if let Some(ref pending) = self.detached_wake_pending
+                    // Arm + signal detached-op wake if this is a BackgroundToolOp terminal.
+                    if let Some(ref wake) = self.detached_wake
                         && self
                             .authority
                             .operation(operation_id)
                             .is_some_and(|op| op.kind() == OperationKind::BackgroundToolOp)
                     {
-                        pending.store(true, Ordering::Release);
+                        wake.pending.store(true, Ordering::Release);
+                        wake.notify.notify_one(); // wake the waker task directly
                     }
                 }
                 OpsLifecycleEffect::ExposeOperationPeer { .. } => {
@@ -307,11 +308,11 @@ impl RuntimeOpsLifecycleRegistry {
         }
     }
 
-    /// Wire the detached-wake pending flag so that `execute_effects` arms it
-    /// when a `BackgroundToolOp` reaches terminal.
-    pub fn set_detached_wake_pending(&self, pending: Arc<AtomicBool>) {
+    /// Wire the detached-wake state so that `execute_effects` arms pending
+    /// and fires the Notify when a `BackgroundToolOp` reaches terminal.
+    pub fn set_detached_wake(&self, wake: Arc<crate::detached_wake::DetachedWakeState>) {
         if let Ok(mut state) = self.state.write() {
-            state.detached_wake_pending = Some(pending);
+            state.detached_wake = Some(wake);
         }
     }
 

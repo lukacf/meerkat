@@ -902,6 +902,21 @@ impl JobManager {
         completions
     }
 
+    /// UTF-8-safe tail truncation: returns the last `max_bytes` bytes
+    /// rounded forward to a char boundary so we never split a multibyte
+    /// code point.
+    fn str_tail(s: &str, max_bytes: usize) -> &str {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        let mut start = s.len() - max_bytes;
+        // Advance past any continuation bytes to reach a char boundary
+        while start < s.len() && !s.is_char_boundary(start) {
+            start += 1;
+        }
+        &s[start..]
+    }
+
     fn build_completion_detail(view: &BackgroundJob) -> String {
         let mut parts = Vec::new();
         match &view.status {
@@ -916,20 +931,10 @@ impl JobManager {
                 }
                 parts.push(format!("duration: {duration_secs:.1}s"));
                 if !stdout.is_empty() {
-                    let tail = if stdout.len() > 200 {
-                        &stdout[stdout.len() - 200..]
-                    } else {
-                        stdout.as_str()
-                    };
-                    parts.push(format!("stdout: {tail}"));
+                    parts.push(format!("stdout: {}", Self::str_tail(stdout, 200)));
                 }
                 if !stderr.is_empty() {
-                    let tail = if stderr.len() > 200 {
-                        &stderr[stderr.len() - 200..]
-                    } else {
-                        stderr.as_str()
-                    };
-                    parts.push(format!("stderr: {tail}"));
+                    parts.push(format!("stderr: {}", Self::str_tail(stderr, 200)));
                 }
             }
             JobStatus::Failed {

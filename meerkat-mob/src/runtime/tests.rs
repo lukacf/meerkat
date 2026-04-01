@@ -13986,3 +13986,347 @@ async fn test_retire_comms_failures_remain_best_effort() {
         "roster entry must be removed after best-effort comms failures"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NameFilteredDispatcher tests
+// ---------------------------------------------------------------------------
+
+/// A configurable dispatcher for testing name filtering and external tools.
+struct MultiToolDispatcher {
+    defs: Arc<[Arc<ToolDef>]>,
+}
+
+impl MultiToolDispatcher {
+    fn new(names: &[&str]) -> Self {
+        let defs: Vec<Arc<ToolDef>> = names
+            .iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    name: name.to_string(),
+                    description: format!("Tool {name}"),
+                    input_schema: serde_json::Value::Object(serde_json::Map::new()),
+                })
+            })
+            .collect();
+        Self { defs: defs.into() }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for MultiToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.defs)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if self.defs.iter().any(|d| d.name == call.name) {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                format!("{{\"tool\":\"{}\"}}", call.name),
+                false,
+            )
+            .into())
+        } else {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn test_name_filtered_dispatcher() {
+    use super::tools::NameFilteredDispatcher;
+
+    let inner = Arc::new(MultiToolDispatcher::new(&["a", "b", "c"]));
+    let excluded: HashSet<String> = ["b".to_string()].into_iter().collect();
+    let filtered = NameFilteredDispatcher::new(inner, excluded);
+
+    // tools() should return only ["a", "c"]
+    let tool_names: Vec<String> = filtered.tools().iter().map(|t| t.name.clone()).collect();
+    assert_eq!(tool_names.len(), 2);
+    assert!(tool_names.contains(&"a".to_string()));
+    assert!(tool_names.contains(&"c".to_string()));
+    assert!(!tool_names.contains(&"b".to_string()));
+
+    // dispatch("b") should error
+    let raw_args = RawValue::from_string("{}".to_string()).unwrap();
+    let result = filtered
+        .dispatch(ToolCallView {
+            id: "call-1",
+            name: "b",
+            args: &raw_args,
+        })
+        .await;
+    assert!(result.is_err(), "excluded tool should return not_found");
+
+    // dispatch("a") should succeed
+    let result = filtered
+        .dispatch(ToolCallView {
+            id: "call-2",
+            name: "a",
+            args: &raw_args,
+        })
+        .await;
+    assert!(result.is_ok(), "non-excluded tool should delegate to inner");
+
+    // supports_wait_interrupt delegates
+    assert!(
+        filtered.supports_wait_interrupt(),
+        "should delegate supports_wait_interrupt to inner"
+    );
+}
+
+#[tokio::test]
+async fn test_external_tools_provider_called_per_spawn() {
+    let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter_clone = counter.clone();
+    let provider: crate::ExternalToolsProvider = Arc::new(move || {
+        counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(Arc::new(MultiToolDispatcher::new(&["ext_tool"])) as Arc<dyn AgentToolDispatcher>)
+    });
+
+    let definition = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_default_external_tools_provider(Some(provider))
+        .create()
+        .await
+        .expect("create mob");
+
+    // Spawn 3 workers
+    for i in 1..=3 {
+        handle
+            .spawn(
+                ProfileName::from("worker"),
+                MeerkatId::from(format!("w-{i}")),
+                None,
+            )
+            .await
+            .expect("spawn");
+    }
+
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "provider should be called once per spawn"
+    );
+
+    // Verify external tools are visible on spawned sessions
+    let flags = service.recorded_external_tools_flags().await;
+    assert!(
+        flags.iter().all(|&f| f),
+        "all spawned sessions should have external tools"
+    );
+}
+
+#[tokio::test]
+async fn test_external_tools_name_collision_profile_wins() {
+    // Provider returns a dispatcher with tool "spawn_meerkat" (collides with mob tool)
+    let provider: crate::ExternalToolsProvider = Arc::new(|| {
+        Some(
+            Arc::new(MultiToolDispatcher::new(&["spawn_meerkat", "my_callback"]))
+                as Arc<dyn AgentToolDispatcher>,
+        )
+    });
+
+    let definition = sample_definition_with_mob_tools();
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_default_external_tools_provider(Some(provider))
+        .create()
+        .await
+        .expect("create mob");
+
+    let member_ref = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn should succeed despite name collision");
+
+    let session_id = member_ref.session_id().expect("session-backed").clone();
+    let tool_names = service.external_tool_names(&session_id).await;
+
+    // mob's spawn_meerkat should win — callback's spawn_meerkat should be filtered out
+    assert!(
+        tool_names.contains(&"spawn_meerkat".to_string()),
+        "mob's spawn_meerkat should be present"
+    );
+    // callback's unique tool should still be present
+    assert!(
+        tool_names.contains(&"my_callback".to_string()),
+        "non-colliding callback tool should be present"
+    );
+
+    // Dispatch spawn_meerkat — should hit the mob dispatcher, not the callback one
+    let raw_args = serde_json::json!({"profile": "worker", "meerkat_id": "w-test"});
+    let result = service
+        .dispatch_external_tool_outcome(&session_id, "spawn_meerkat", raw_args)
+        .await;
+    // The mob dispatcher will try to actually process the spawn — either succeeds
+    // or returns an execution error (not a not_found error).
+    match result {
+        Ok(_) => {} // mob dispatcher handled it
+        Err(ToolError::NotFound { .. }) => {
+            panic!("spawn_meerkat should NOT be routed to the filtered callback dispatcher")
+        }
+        Err(_) => {} // mob dispatcher handled it but spawn may fail for other reasons
+    }
+}
+
+#[tokio::test]
+async fn test_external_tools_late_registration() {
+    let tool_defs: Arc<std::sync::RwLock<Vec<&str>>> = Arc::new(std::sync::RwLock::new(Vec::new()));
+    let tool_defs_clone = tool_defs.clone();
+
+    let provider: crate::ExternalToolsProvider = Arc::new(move || {
+        let names = tool_defs_clone.read().expect("lock");
+        if names.is_empty() {
+            return None;
+        }
+        let defs: Vec<Arc<ToolDef>> = names
+            .iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    name: name.to_string(),
+                    description: format!("Tool {name}"),
+                    input_schema: serde_json::Value::Object(serde_json::Map::new()),
+                })
+            })
+            .collect();
+        struct DynDispatcher(Arc<[Arc<ToolDef>]>);
+        #[async_trait]
+        impl AgentToolDispatcher for DynDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.0)
+            }
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<ToolDispatchOutcome, ToolError> {
+                Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+            }
+        }
+        Some(Arc::new(DynDispatcher(defs.into())) as Arc<dyn AgentToolDispatcher>)
+    });
+
+    let definition = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_default_external_tools_provider(Some(provider))
+        .create()
+        .await
+        .expect("create mob");
+
+    // Spawn before registering tools — provider returns None
+    let _ref1 = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-before"),
+            None,
+        )
+        .await
+        .expect("spawn");
+    let flags = service.recorded_external_tools_flags().await;
+    assert!(
+        !flags[0],
+        "spawn before registration should have no external tools"
+    );
+
+    // Now register tools
+    {
+        let mut names = tool_defs.write().expect("lock");
+        names.push("late_tool_a");
+        names.push("late_tool_b");
+    }
+
+    // Spawn after registration — provider returns tools
+    let ref2 = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-after"),
+            None,
+        )
+        .await
+        .expect("spawn");
+    let flags = service.recorded_external_tools_flags().await;
+    assert!(
+        flags[1],
+        "spawn after registration should have external tools"
+    );
+
+    let session_id = ref2.session_id().expect("session-backed").clone();
+    let tool_names = service.external_tool_names(&session_id).await;
+    assert!(
+        tool_names.contains(&"late_tool_a".to_string()),
+        "late-registered tool should appear"
+    );
+    assert!(
+        tool_names.contains(&"late_tool_b".to_string()),
+        "late-registered tool should appear"
+    );
+}
+
+#[tokio::test]
+async fn test_restored_member_gets_external_tools() {
+    let provider: crate::ExternalToolsProvider =
+        Arc::new(|| Some(Arc::new(EchoBundleDispatcher) as Arc<dyn AgentToolDispatcher>));
+
+    let definition = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+
+    // Create mob and spawn a worker
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .with_default_external_tools_provider(Some(provider.clone()))
+        .create()
+        .await
+        .expect("create mob");
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+
+    let old_sid = handle
+        .get_member(&MeerkatId::from("w-1"))
+        .await
+        .expect("roster entry")
+        .session_id()
+        .cloned()
+        .expect("session-backed member");
+
+    // Stop and archive the session to simulate a stale state
+    handle.stop().await.expect("stop");
+    service.archive(&old_sid).await.expect("archive session");
+
+    // Resume with provider — restored member should get external tools
+    let _resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .with_default_external_tools_provider(Some(provider))
+        .resume()
+        .await
+        .expect("resume");
+
+    // The restore path creates a new session for the member.
+    // Check that the create_session call included external tools.
+    let flags = service.recorded_external_tools_flags().await;
+    // flags[0] = original spawn, flags[1] = restored session
+    assert!(
+        flags.len() >= 2,
+        "should have at least 2 create_session calls (original + restore)"
+    );
+    assert!(
+        flags[1],
+        "restored member should have external tools from provider"
+    );
+}

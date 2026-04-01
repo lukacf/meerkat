@@ -88,5 +88,14 @@ pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };
 
+/// Closure called at each member spawn to get a fresh snapshot of external tools.
+///
+/// Returns `None` when no external tools are registered yet (e.g. before SDK
+/// has called `tools/register`). The mob layer calls this lazily per-spawn so
+/// tools registered after mob creation are picked up.
+pub type ExternalToolsProvider = std::sync::Arc<
+    dyn Fn() -> Option<std::sync::Arc<dyn meerkat_core::agent::AgentToolDispatcher>> + Send + Sync,
+>;
+
 #[cfg(test)]
 mod tests;

@@ -2882,6 +2882,7 @@ async fn prepare_run_mob_tools(
         session_service,
         None,
         None,
+        None,
         std::collections::BTreeMap::new(),
     )
     .await?;
@@ -5071,6 +5072,7 @@ async fn hydrate_mob_state(
     session_service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     default_llm_client_provider: Option<LlmClientProvider>,
+    external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     seeded_handles: std::collections::BTreeMap<String, meerkat_mob::MobHandle>,
 ) -> anyhow::Result<(Arc<meerkat_mob_mcp::MobMcpState>, PersistedMobRegistry)> {
     let registry = load_mob_registry(scope).await?;
@@ -5080,7 +5082,8 @@ async fn hydrate_mob_state(
             session_service.clone(),
             runtime_adapter.clone(),
         )
-        .with_default_llm_client_provider(default_llm_client_provider),
+        .with_default_llm_client_provider(default_llm_client_provider)
+        .with_external_tools_provider(external_tools_provider.clone()),
     );
     for (mob_id, handle) in &seeded_handles {
         state
@@ -5136,6 +5139,7 @@ async fn hydrate_mob_state(
 
         let mut builder = meerkat_mob::MobBuilder::for_resume(storage)
             .with_session_service(session_service.clone())
+            .with_default_external_tools_provider(external_tools_provider.clone())
             .notify_orchestrator_on_resume(false);
         if let Some(adapter) = runtime_adapter.clone() {
             builder = builder.with_runtime_adapter(adapter);
@@ -5287,6 +5291,7 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
     let (state, mut registry) = hydrate_mob_state(
         scope,
         session_service,
+        None,
         None,
         None,
         std::collections::BTreeMap::new(),
@@ -6342,7 +6347,7 @@ async fn run_rpc_surface<R, W>(
 ) -> anyhow::Result<String>
 where
     R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
+    W: meerkat_rpc::transport::TransportWriter,
 {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let session_store = persistence.session_store();
@@ -6456,12 +6461,36 @@ where
         move || runtime.default_llm_client()
     })
         as Arc<dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync + 'static>);
+    let external_tools_provider: Option<meerkat_mob::ExternalToolsProvider> = Some(Arc::new({
+        let runtime = runtime.clone();
+        move || {
+            let tx = runtime.callback_request_tx()?;
+            let tools: Vec<meerkat_core::ToolDef> = runtime
+                .registered_tools()
+                .read()
+                .ok()?
+                .iter()
+                .cloned()
+                .collect();
+            if tools.is_empty() {
+                return None;
+            }
+            Some(Arc::new(
+                meerkat_rpc::callback_dispatcher::CallbackToolDispatcher::new(
+                    tools,
+                    tx,
+                    runtime.callback_id_counter(),
+                ),
+            ) as Arc<dyn meerkat_core::AgentToolDispatcher>)
+        }
+    }));
     let seeded_handles = std::collections::BTreeMap::from([(deployed_mob_id.clone(), handle)]);
     let (mob_state, _) = hydrate_mob_state(
         scope,
         session_service,
         Some(runtime_adapter),
         default_llm_client_provider,
+        external_tools_provider,
         seeded_handles,
     )
     .await?;

@@ -211,6 +211,7 @@ pub(super) struct MobActor {
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
+    pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
 }
 
 impl MobActor {
@@ -4852,7 +4853,16 @@ impl MobActor {
         &self,
         profile: &crate::profile::Profile,
     ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
-        compose_external_tools_for_profile(profile, &self.tool_bundles, self.mob_handle_for_tools())
+        let default_tools = self
+            .default_external_tools_provider
+            .as_ref()
+            .and_then(|p| p());
+        compose_external_tools_for_profile(
+            profile,
+            &self.tool_bundles,
+            self.mob_handle_for_tools(),
+            default_tools,
+        )
     }
 
     async fn retire_event_exists(

@@ -3,6 +3,87 @@ use meerkat_core::SessionId;
 use meerkat_core::agent::OpsLifecycleBindError;
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
+use std::collections::HashSet;
+
+// ---------------------------------------------------------------------------
+// NameFilteredDispatcher
+// ---------------------------------------------------------------------------
+
+/// Wraps an inner dispatcher and hides tools whose names collide with
+/// profile-declared tools. Profile tools always win on name collision.
+pub(crate) struct NameFilteredDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    excluded: HashSet<String>,
+}
+
+impl NameFilteredDispatcher {
+    pub(crate) fn new(inner: Arc<dyn AgentToolDispatcher>, excluded: HashSet<String>) -> Self {
+        Self { inner, excluded }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AgentToolDispatcher for NameFilteredDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        self.inner
+            .tools()
+            .iter()
+            .filter(|t| !self.excluded.contains(&t.name))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn dispatch(
+        &self,
+        call: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        if self.excluded.contains(call.name) {
+            return Err(ToolError::not_found(call.name));
+        }
+        self.inner.dispatch(call).await
+    }
+
+    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
+        self.inner.poll_external_updates().await
+    }
+
+    fn supports_wait_interrupt(&self) -> bool {
+        self.inner.supports_wait_interrupt()
+    }
+
+    fn bind_wait_interrupt(
+        self: Arc<Self>,
+        rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
+    {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        let rebound = owned.inner.bind_wait_interrupt(rx)?;
+        Ok(Arc::new(NameFilteredDispatcher {
+            inner: rebound,
+            excluded: owned.excluded,
+        }))
+    }
+
+    fn supports_ops_lifecycle_binding(&self) -> bool {
+        self.inner.supports_ops_lifecycle_binding()
+    }
+
+    fn bind_ops_lifecycle(
+        self: Arc<Self>,
+        registry: Arc<dyn OpsLifecycleRegistry>,
+        owner_session_id: SessionId,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+        let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
+        let rebound = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+        Ok(Arc::new(NameFilteredDispatcher {
+            inner: rebound,
+            excluded: owned.excluded,
+        }))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Mob tool dispatcher
@@ -12,6 +93,7 @@ pub(super) fn compose_external_tools_for_profile(
     profile: &crate::profile::Profile,
     tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     mob_handle: MobHandle,
+    default_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> Result<Option<Arc<dyn AgentToolDispatcher>>, MobError> {
     let mut dispatchers: Vec<Arc<dyn AgentToolDispatcher>> = Vec::new();
 
@@ -30,6 +112,30 @@ pub(super) fn compose_external_tools_for_profile(
             ))
         })?;
         dispatchers.push(dispatcher);
+    }
+
+    // Compose default external tools (e.g. callback tools from SDK) with
+    // name-collision filtering: profile-declared tools always win.
+    if let Some(ext) = default_external_tools {
+        let profile_names: HashSet<String> = dispatchers
+            .iter()
+            .flat_map(|d| d.tools().iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+            .collect();
+        let collisions: HashSet<String> = ext
+            .tools()
+            .iter()
+            .filter(|t| profile_names.contains(&t.name))
+            .map(|t| t.name.clone())
+            .collect();
+        // Check if any tools remain after filtering
+        let remaining = ext.tools().iter().any(|t| !collisions.contains(&t.name));
+        if remaining {
+            if collisions.is_empty() {
+                dispatchers.push(ext);
+            } else {
+                dispatchers.push(Arc::new(NameFilteredDispatcher::new(ext, collisions)));
+            }
+        }
     }
 
     if dispatchers.is_empty() {

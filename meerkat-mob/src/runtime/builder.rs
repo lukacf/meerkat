@@ -18,6 +18,7 @@ pub struct MobBuilder {
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
+    default_external_tools_provider: Option<crate::ExternalToolsProvider>,
 }
 
 enum BuilderMode {
@@ -47,6 +48,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
+            default_external_tools_provider: None,
         }
     }
 
@@ -88,6 +90,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: true,
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
+            default_external_tools_provider: None,
         }
     }
 
@@ -151,6 +154,16 @@ impl MobBuilder {
         self
     }
 
+    /// Set a provider closure that is called at each member spawn to get a fresh
+    /// snapshot of default external tools (e.g. callback tools from the SDK).
+    pub fn with_default_external_tools_provider(
+        mut self,
+        provider: Option<crate::ExternalToolsProvider>,
+    ) -> Self {
+        self.default_external_tools_provider = provider;
+        self
+    }
+
     /// Create the mob: emit MobCreated event, start the actor, return handle.
     pub async fn create(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
@@ -162,6 +175,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume: _,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         } = self;
 
         let definition = match mode {
@@ -226,6 +240,7 @@ impl MobBuilder {
             runtime_adapter,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         ))
     }
 
@@ -245,6 +260,7 @@ impl MobBuilder {
             notify_orchestrator_on_resume,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         } = self;
 
         if !matches!(mode, BuilderMode::Resume) {
@@ -376,6 +392,7 @@ impl MobBuilder {
                 default_llm_client.clone(),
                 &tool_bundles,
                 &preview_handle,
+                &default_external_tools_provider,
             )
             .await?;
         }
@@ -392,6 +409,7 @@ impl MobBuilder {
             runtime_adapter,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         ))
     }
 
@@ -423,6 +441,7 @@ impl MobBuilder {
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         tool_handle: &MobHandle,
+        default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
     ) -> Result<(), MobError> {
         tool_handle.restore_diagnostics.write().await.clear();
         let provisioner = MultiBackendProvisioner::new(
@@ -497,6 +516,7 @@ impl MobBuilder {
                     .profiles
                     .get(&entry.profile)
                     .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+                let default_ext = default_external_tools_provider.as_ref().and_then(|p| p());
                 let resumed_config =
                     build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
                         base: build::BuildAgentConfigParams {
@@ -509,6 +529,7 @@ impl MobBuilder {
                                 profile,
                                 tool_bundles,
                                 tool_handle.clone(),
+                                default_ext,
                             )?,
                             context: None,
                             labels: Some(entry.labels.clone()),
@@ -560,6 +581,7 @@ impl MobBuilder {
                 .profiles
                 .get(&entry.profile)
                 .ok_or_else(|| MobError::ProfileNotFound(entry.profile.clone()))?;
+            let default_ext_fresh = default_external_tools_provider.as_ref().and_then(|p| p());
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,
                 profile_name: &entry.profile,
@@ -570,6 +592,7 @@ impl MobBuilder {
                     profile,
                     tool_bundles,
                     tool_handle.clone(),
+                    default_ext_fresh,
                 )?,
                 context: None,
                 labels: None,
@@ -770,6 +793,7 @@ impl MobBuilder {
         runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
@@ -811,6 +835,7 @@ impl MobBuilder {
             runtime_adapter,
             tool_bundles,
             default_llm_client,
+            default_external_tools_provider,
         )
     }
 
@@ -824,6 +849,7 @@ impl MobBuilder {
         runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
+        default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
@@ -956,6 +982,7 @@ impl MobBuilder {
             task_board_service,
             spawn_policy,
             lifecycle_authority,
+            default_external_tools_provider,
         };
         tokio::spawn(actor.run(command_rx));
 

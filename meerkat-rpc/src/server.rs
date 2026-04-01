@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{RequestTerminal, SurfaceRequestExecutor, noop_request_action};
-use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use meerkat_core::ConfigStore;
@@ -19,7 +19,7 @@ use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
 use crate::router::{MethodRouter, NotificationSink};
 use crate::session_runtime::SessionRuntime;
-use crate::transport::{JsonlTransport, TransportError};
+use crate::transport::{BlockingWriter, JsonlTransport, TransportError, TransportWriter};
 
 struct LongRunningResponse {
     request_key: String,
@@ -60,7 +60,7 @@ pub struct RpcServer<R, W> {
     request_executor: SurfaceRequestExecutor,
 }
 
-impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> RpcServer<R, W> {
+impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     /// Create a new RPC server.
     ///
     /// The server reads JSON-RPC requests from `reader`, dispatches them
@@ -493,7 +493,7 @@ pub async fn serve_stdio_with_skill_runtime(
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
 ) -> Result<(), ServerError> {
     let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
+    let stdout = BlockingWriter::stdout();
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime);

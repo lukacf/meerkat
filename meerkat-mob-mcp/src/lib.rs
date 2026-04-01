@@ -82,6 +82,7 @@ pub struct MobMcpState {
     runtime_adapter: Option<Arc<meerkat_runtime::RuntimeSessionAdapter>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
+    external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
     mobs: RwLock<BTreeMap<MobId, ManagedMob>>,
 }
 
@@ -100,6 +101,7 @@ impl MobMcpState {
             runtime_adapter,
             default_llm_client: None,
             default_llm_client_provider: None,
+            external_tools_provider: None,
             mobs: RwLock::new(BTreeMap::new()),
         }
     }
@@ -114,6 +116,14 @@ impl MobMcpState {
         provider: Option<DefaultLlmClientProvider>,
     ) -> Self {
         self.default_llm_client_provider = provider;
+        self
+    }
+
+    pub fn with_external_tools_provider(
+        mut self,
+        provider: Option<meerkat_mob::ExternalToolsProvider>,
+    ) -> Self {
+        self.external_tools_provider = provider;
         self
     }
 
@@ -133,7 +143,8 @@ impl MobMcpState {
         let storage = MobStorage::in_memory();
         let mut builder = MobBuilder::new(definition.clone(), storage)
             .with_session_service(self.session_service.clone())
-            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions());
+            .allow_ephemeral_sessions(!self.session_service.supports_persistent_sessions())
+            .with_default_external_tools_provider(self.external_tools_provider.clone());
         if let Some(adapter) = &self.runtime_adapter {
             builder = builder.with_runtime_adapter(adapter.clone());
         }

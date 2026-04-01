@@ -311,16 +311,43 @@ impl MethodRouter {
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
         #[cfg(feature = "mob")]
-        let mob_state = Arc::new(
+        let mob_state = Arc::new({
+            let llm_provider: Arc<
+                dyn Fn() -> Option<Arc<dyn meerkat_client::LlmClient>> + Send + Sync,
+            > = Arc::new({
+                let runtime = runtime.clone();
+                move || runtime.default_llm_client()
+            });
+            let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
+                let runtime = runtime.clone();
+                move || {
+                    let tx = runtime.callback_request_tx()?;
+                    let tools: Vec<meerkat_core::ToolDef> = runtime
+                        .registered_tools()
+                        .read()
+                        .ok()?
+                        .iter()
+                        .cloned()
+                        .collect();
+                    if tools.is_empty() {
+                        return None;
+                    }
+                    Some(
+                        Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                            tools,
+                            tx,
+                            runtime.callback_id_counter(),
+                        )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+                    )
+                }
+            });
             meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
                 runtime.session_service(),
                 Some(runtime_adapter.clone()),
             )
-            .with_default_llm_client_provider(Some(Arc::new({
-                let runtime = runtime.clone();
-                move || runtime.default_llm_client()
-            }))),
-        );
+            .with_default_llm_client_provider(Some(llm_provider))
+            .with_external_tools_provider(Some(tools_provider))
+        });
         Self {
             runtime,
             config_store,

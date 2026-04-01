@@ -110,14 +110,14 @@ CRUD for user-created mob definitions. Saved to `.codemob-mcp/mobs/` and immedia
 | **architect** | 3 | Plan → critique → revise → ADR | Opus, GPT-5.4, Gemini 3.1 Pro |
 | **brainstorm** | 4 | 3 diverse ideators → ranked synthesis | Gemini 3.1 Pro, GPT-5.4, Gemini 3.1 Flash Lite, Opus |
 | **red-team** | 3 | Advocate + adversary → judge | Gemini 3.1 Flash Lite, GPT-5.4, Opus |
-| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-5.4, Gemini 3.1 Pro, GPT-5.4, Gemini 3.1 Flash Lite, Sonnet |
+| **rct** | 6 | Plan → implement → 3 parallel gate reviews → aggregate | Opus, GPT-5.4, Gemini 3.1 Pro, GPT-5.2, Gemini 3.1 Flash Lite, Sonnet |
 | **implement** | 2 | Implementer ↔ reviewer loop (max 3 rounds) | Sonnet, GPT-5.4 |
 
 ### Comms-based (autonomous debate)
 
 | Pack | Agents | Pattern | Default Models |
 |------|--------|---------|---------------|
-| **panel** | 5 | Free-form moderated debate (full mesh, moderator authority) | Opus, Gemini 3.1 Pro, GPT-5.4, Gemini 3.1 Flash Lite, GPT-5.4 |
+| **panel** | 5 | Free-form moderated debate (full mesh, moderator authority) | Opus, Gemini 3.1 Pro, GPT-5.4, Gemini 3.1 Flash Lite, Sonnet |
 
 Every agent in every pack uses a distinct model by default — different training data produces genuinely different perspectives.
 

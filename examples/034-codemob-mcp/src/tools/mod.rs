@@ -339,9 +339,11 @@ pub async fn handle_tool_call(
             .await
         }
         "list_sessions" => {
+            let mut labels = std::collections::BTreeMap::new();
+            labels.insert("source".into(), "consult".into());
             let sessions = state
                 .session_service
-                .list(SessionQuery::default())
+                .list(SessionQuery { labels: Some(labels), ..SessionQuery::default() })
                 .await
                 .map_err(|e| ToolCallError::internal(format!("List sessions failed: {e}")))?;
             let summaries: Vec<Value> = sessions.iter().map(format_session_summary).collect();

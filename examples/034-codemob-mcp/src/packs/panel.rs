@@ -34,7 +34,7 @@ impl Pack for PanelPack {
             ("purist",     "purist-skill",     "Architecture purist — demands clean design",      resolve_model(overrides, "purist", "gemini-3.1-pro-preview")),
             ("pragmatist", "pragmatist-skill", "Pragmatist — ship it and iterate",                resolve_model(overrides, "pragmatist", "gpt-5.4")),
             ("skeptic",    "skeptic-skill",    "Skeptic — doubts everything, finds edge cases",   resolve_model(overrides, "skeptic", "gemini-3.1-flash-lite-preview")),
-            ("veteran",    "veteran-skill",    "Industry veteran — 20 years of war stories",      resolve_model(overrides, "veteran", "gpt-5.4")),
+            ("veteran",    "veteran-skill",    "Industry veteran — 20 years of war stories",      resolve_model(overrides, "veteran", "claude-sonnet-4-6")),
         ];
 
         let tools = ToolConfig { builtins: true, shell: true, comms: true, ..ToolConfig::default() };

@@ -35,7 +35,7 @@ impl Pack for RctPack {
             ("orchestrator",       "rct-orchestrator-skill", "RCT pipeline orchestrator",      "claude-opus-4-6",        tools_with_shell.clone()),
             ("implementer",        "rct-implementer-skill",  "Implementation agent",            "gpt-5.4",               tools_with_shell.clone()),
             ("rct_guardian",       "rct-guardian-skill",     "RCT Guardian reviewer",           "gemini-3.1-pro-preview", tools_with_shell.clone()),
-            ("integration_sheriff","rct-sheriff-skill",      "Integration Sheriff reviewer",    "gpt-5.4",               tools_with_shell.clone()),
+            ("integration_sheriff","rct-sheriff-skill",      "Integration Sheriff reviewer",    "gpt-5.2",               tools_with_shell.clone()),
             ("spec_auditor",       "rct-auditor-skill",      "Spec Auditor reviewer",           "gemini-3.1-flash-lite-preview",  tools_with_shell.clone()),
             ("aggregator",         "rct-aggregator-skill",   "Gate verdict aggregator",         "claude-sonnet-4-6",      tools_comms_only),
         ];

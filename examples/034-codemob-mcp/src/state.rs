@@ -143,6 +143,11 @@ fn read_skill_dir(skill_dir: &Path) -> Option<String> {
 ///
 /// Searches project-level `.claude/skills/` then user-level `~/.claude/skills/`.
 /// Returns the content for each found skill; silently skips unknown names.
+///
+/// NOTE: No path sanitization — skill names are joined directly onto the search
+/// directories. This is safe in a trusted-caller MCP environment (the calling
+/// agent controls the input). Do not expose to untrusted clients without adding
+/// validation (e.g. reject names containing `/` or `..`).
 pub fn resolve_skills(names: &[String]) -> Vec<String> {
     let dirs = skill_search_dirs();
     names

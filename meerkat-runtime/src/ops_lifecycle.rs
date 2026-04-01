@@ -176,14 +176,13 @@ impl ShellState {
                         self.authority.watchers_drained(operation_id, watcher_count);
                     }
                     // Arm detached-op wake if this is a BackgroundToolOp terminal.
-                    if let Some(ref pending) = self.detached_wake_pending {
-                        if self
+                    if let Some(ref pending) = self.detached_wake_pending
+                        && self
                             .authority
                             .operation(operation_id)
                             .is_some_and(|op| op.kind() == OperationKind::BackgroundToolOp)
-                        {
-                            pending.store(true, Ordering::Release);
-                        }
+                    {
+                        pending.store(true, Ordering::Release);
                     }
                 }
                 OpsLifecycleEffect::ExposeOperationPeer { .. } => {

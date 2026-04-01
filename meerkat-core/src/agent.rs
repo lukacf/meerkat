@@ -824,7 +824,10 @@ mod tests {
             detail: "ok".into(),
             elapsed_ms: None,
         };
-        let json = serde_json::to_value(&completion).unwrap();
+        let json = match serde_json::to_value(&completion) {
+            Ok(v) => v,
+            Err(e) => panic!("serialization must not fail: {e}"),
+        };
         assert!(
             json.get("operation_id").is_none(),
             "operation_id must not appear in serialized DetachedOpCompletion (CONTRACT-003)"

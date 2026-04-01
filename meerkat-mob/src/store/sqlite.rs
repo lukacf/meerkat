@@ -636,7 +636,7 @@ impl MobRunStore for SqliteMobRunStore {
                 .optional()
                 .map_err(storage_error)?;
             let Some(bytes) = bytes else {
-                return Err(MobError::RunNotFound(run_id.clone()));
+                return Err(MobError::RunNotFound(run_id));
             };
             let mut run: MobRun = decode_json(&bytes)?;
             if let Some(entry) = run

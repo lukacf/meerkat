@@ -3,9 +3,14 @@
 //! When the agent invokes a callback tool, the dispatcher sends a `tool/execute`
 //! request to the client over the RPC transport and awaits the response. This
 //! enables Python/TypeScript SDKs to provide tool implementations.
+//!
+//! The tool list is **live**: it reads from a shared `Arc<RwLock<Vec<ToolDef>>>`
+//! (the same one `tools/register` writes to), so tools registered after session
+//! materialization become visible at the next turn boundary via
+//! `poll_external_updates`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use serde_json::value::RawValue;
 use tokio::sync::{mpsc, oneshot};
@@ -13,7 +18,9 @@ use tokio::sync::{mpsc, oneshot};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ToolDispatchOutcome;
+use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
+use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 
 use crate::protocol::{RpcId, RpcRequest, RpcResponse};
@@ -22,24 +29,36 @@ use crate::protocol::{RpcId, RpcRequest, RpcResponse};
 const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Dispatches tool calls to an external client via the RPC callback protocol.
+///
+/// Holds a shared reference to the global registered-tools list so that tools
+/// registered via `tools/register` after session creation are picked up
+/// dynamically at each turn boundary (via `poll_external_updates`).
 pub struct CallbackToolDispatcher {
-    tools: Arc<[Arc<ToolDef>]>,
+    /// Live tool definitions — shared with `SessionRuntime::registered_tools_slot`.
+    registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
     callback_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
     id_counter: Arc<AtomicU64>,
+    /// Snapshot of tool names from the last `poll_external_updates` (or creation).
+    /// Used to detect additions/removals between polls.
+    last_seen: StdRwLock<Vec<String>>,
 }
 
 impl CallbackToolDispatcher {
-    /// Create a new callback dispatcher with the given tool definitions and callback channel.
+    /// Create a new callback dispatcher backed by the live registered-tools list.
     pub fn new(
-        tools: Vec<ToolDef>,
+        registered_tools: Arc<StdRwLock<Vec<ToolDef>>>,
         callback_tx: mpsc::Sender<(RpcRequest, oneshot::Sender<RpcResponse>)>,
         id_counter: Arc<AtomicU64>,
     ) -> Self {
-        let tools: Arc<[Arc<ToolDef>]> = tools.into_iter().map(Arc::new).collect();
+        let last_seen = registered_tools
+            .read()
+            .map(|g| g.iter().map(|t| t.name.clone()).collect())
+            .unwrap_or_default();
         Self {
-            tools,
+            registered_tools,
             callback_tx,
             id_counter,
+            last_seen: StdRwLock::new(last_seen),
         }
     }
 
@@ -47,15 +66,36 @@ impl CallbackToolDispatcher {
         let n = self.id_counter.fetch_add(1, Ordering::Relaxed);
         RpcId::Str(format!("srv-{n}"))
     }
+
+    fn current_tool_names(&self) -> Vec<String> {
+        self.registered_tools
+            .read()
+            .map(|g| g.iter().map(|t| t.name.clone()).collect())
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
 impl AgentToolDispatcher for CallbackToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        self.tools.clone()
+        self.registered_tools
+            .read()
+            .map(|g| g.iter().map(|t| Arc::new(t.clone())).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into()
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        // Verify the tool is currently registered.
+        let known = self
+            .registered_tools
+            .read()
+            .map(|g| g.iter().any(|t| t.name == call.name))
+            .unwrap_or(false);
+        if !known {
+            return Err(ToolError::not_found(call.name));
+        }
+
         let request_id = self.next_id();
         let arguments: serde_json::Value = serde_json::from_str(call.args.get()).map_err(|e| {
             ToolError::invalid_arguments(call.name, format!("malformed tool-call arguments: {e}"))
@@ -121,6 +161,52 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
 
         Ok(ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into())
     }
+
+    /// Detect tools added/removed since last poll and emit deltas.
+    async fn poll_external_updates(&self) -> ExternalToolUpdate {
+        let current = self.current_tool_names();
+        let previous = self.last_seen.read().map(|g| g.clone()).unwrap_or_default();
+
+        if current == previous {
+            return ExternalToolUpdate::default();
+        }
+
+        let mut notices = Vec::new();
+
+        // Detect additions.
+        for name in &current {
+            if !previous.contains(name) {
+                notices.push(
+                    ExternalToolDelta::new(
+                        format!("callback:{name}"),
+                        ToolConfigChangeOperation::Add,
+                        ExternalToolDeltaPhase::Applied,
+                    )
+                    .with_tool_count(Some(1)),
+                );
+            }
+        }
+
+        // Detect removals.
+        for name in &previous {
+            if !current.contains(name) {
+                notices.push(ExternalToolDelta::new(
+                    format!("callback:{name}"),
+                    ToolConfigChangeOperation::Remove,
+                    ExternalToolDeltaPhase::Applied,
+                ));
+            }
+        }
+
+        if let Ok(mut last) = self.last_seen.write() {
+            *last = current;
+        }
+
+        ExternalToolUpdate {
+            notices,
+            pending: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,9 +227,9 @@ mod tests {
     async fn callback_dispatcher_sends_request_awaits_result() {
         let (callback_tx, mut callback_rx) = mpsc::channel(10);
         let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("search")]));
 
-        let dispatcher =
-            CallbackToolDispatcher::new(vec![make_tool_def("search")], callback_tx, id_counter);
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter);
 
         // Spawn the dispatch in a task.
         let handle = tokio::spawn(async move {
@@ -184,13 +270,9 @@ mod tests {
     async fn callback_dispatcher_timeout_returns_tool_error() {
         let (callback_tx, _callback_rx) = mpsc::channel(10);
         let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("slow")]));
 
-        // Create dispatcher but drop the receiver so the oneshot will never complete.
-        let dispatcher = CallbackToolDispatcher {
-            tools: vec![Arc::new(make_tool_def("slow"))].into(),
-            callback_tx,
-            id_counter,
-        };
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter);
 
         let args = RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {
@@ -208,5 +290,55 @@ mod tests {
 
         // The dispatch itself should timeout or fail because no one responds.
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn poll_external_updates_detects_additions_and_removals() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("a")]));
+
+        let dispatcher = CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter);
+
+        // No change yet.
+        let update = dispatcher.poll_external_updates().await;
+        assert!(update.notices.is_empty());
+
+        // Add a tool.
+        tools.write().unwrap().push(make_tool_def("b"));
+        let update = dispatcher.poll_external_updates().await;
+        assert_eq!(update.notices.len(), 1);
+        assert_eq!(update.notices[0].target, "callback:b");
+        assert_eq!(update.notices[0].operation, ToolConfigChangeOperation::Add);
+
+        // Remove original tool.
+        tools.write().unwrap().retain(|t| t.name != "a");
+        let update = dispatcher.poll_external_updates().await;
+        assert_eq!(update.notices.len(), 1);
+        assert_eq!(update.notices[0].target, "callback:a");
+        assert_eq!(
+            update.notices[0].operation,
+            ToolConfigChangeOperation::Remove
+        );
+
+        // No change.
+        let update = dispatcher.poll_external_updates().await;
+        assert!(update.notices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tools_reflects_live_registered_list() {
+        let (callback_tx, _rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("x")]));
+
+        let dispatcher = CallbackToolDispatcher::new(tools.clone(), callback_tx, id_counter);
+        assert_eq!(dispatcher.tools().len(), 1);
+
+        tools.write().unwrap().push(make_tool_def("y"));
+        assert_eq!(dispatcher.tools().len(), 2);
+
+        tools.write().unwrap().clear();
+        assert_eq!(dispatcher.tools().len(), 0);
     }
 }

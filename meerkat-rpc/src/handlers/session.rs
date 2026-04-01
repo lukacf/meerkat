@@ -298,28 +298,34 @@ pub async fn handle_create(
         .preload_skills
         .map(|ids| ids.into_iter().map(meerkat_core::skills::SkillId).collect());
 
-    // Wire callback tools if external_tools are provided or globally registered.
-    // Inline (per-session) tools take precedence over globals with the same name.
+    // Wire callback tools backed by the live registered_tools list.
+    // The dispatcher reads dynamically so tools added later via tools/register
+    // are picked up at each turn boundary (via poll_external_updates).
+    //
+    // Per-session inline tools (from params.external_tools) are pushed into
+    // the shared list with dedup (inline wins) because session/create is a
+    // single-client RPC surface — there's no isolation concern.
     {
-        let mut all_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
-        let mut seen: std::collections::HashSet<String> =
-            all_tools.iter().map(|t| t.name.clone()).collect();
-
-        // Merge globally registered tools, skipping duplicates (inline wins).
-        if let Ok(global) = runtime.registered_tools().read() {
-            for tool in global.iter() {
-                if seen.insert(tool.name.clone()) {
-                    all_tools.push(tool.clone());
-                }
+        let inline_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
+        if !inline_tools.is_empty() {
+            let inline_names: std::collections::HashSet<String> =
+                inline_tools.iter().map(|t| t.name.clone()).collect();
+            if let Ok(mut global) = runtime.registered_tools().write() {
+                // Remove globals that collide with inline (inline wins).
+                global.retain(|t| !inline_names.contains(&t.name));
+                global.extend(inline_tools);
             }
         }
 
-        if !all_tools.is_empty()
-            && let Some(tx) = runtime.callback_request_tx()
-        {
+        let has_tools = runtime
+            .registered_tools()
+            .read()
+            .map(|g| !g.is_empty())
+            .unwrap_or(false);
+        if has_tools && let Some(tx) = runtime.callback_request_tx() {
             let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
                 Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                    all_tools,
+                    runtime.registered_tools(),
                     tx,
                     runtime.callback_id_counter(),
                 ));

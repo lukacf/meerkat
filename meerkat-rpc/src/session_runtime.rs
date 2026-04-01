@@ -1991,25 +1991,17 @@ impl SessionRuntime {
             build_config.llm_client_override = Some(client.clone());
         }
 
-        // Restore callback tools from globally registered definitions.
-        // Note: per-session external_tools (from CreateSessionParams) are
-        // ephemeral in-process handlers and cannot survive a runtime restart.
-        // Only globally registered tools (via tools/register) are restored.
+        // Restore callback tools backed by the live registered_tools list.
+        // The dynamic dispatcher picks up tools registered later via
+        // tools/register at each turn boundary (poll_external_updates).
         if let Some(tx) = self.callback_request_tx() {
-            let tools: Vec<meerkat_core::ToolDef> = self
-                .registered_tools()
-                .read()
-                .map(|g| g.iter().cloned().collect())
-                .unwrap_or_default();
-            if !tools.is_empty() {
-                let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                    Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                        tools,
-                        tx,
-                        self.callback_id_counter(),
-                    ));
-                build_config.external_tools = Some(dispatcher);
-            }
+            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                    self.registered_tools(),
+                    tx,
+                    self.callback_id_counter(),
+                ));
+            build_config.external_tools = Some(dispatcher);
         }
 
         // Stage as pending and re-enter the materialization path.

@@ -6432,19 +6432,9 @@ where
         let runtime = runtime.clone();
         move || {
             let tx = runtime.callback_request_tx()?;
-            let tools: Vec<meerkat_core::ToolDef> = runtime
-                .registered_tools()
-                .read()
-                .ok()?
-                .iter()
-                .cloned()
-                .collect();
-            if tools.is_empty() {
-                return None;
-            }
             Some(Arc::new(
                 meerkat_rpc::callback_dispatcher::CallbackToolDispatcher::new(
-                    tools,
+                    runtime.registered_tools(),
                     tx,
                     runtime.callback_id_counter(),
                 ),

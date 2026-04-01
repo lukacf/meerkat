@@ -582,6 +582,7 @@ async fn apply_runtime_turn(
                 resume_override_mask: Default::default(),
                 call_timeout_override: Default::default(),
                 blob_store_override: None,
+                mob_tools: None,
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -2435,6 +2436,7 @@ async fn create_session_inner(
         },
         call_timeout_override: Default::default(),
         blob_store_override: None,
+        mob_tools: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -3009,6 +3011,7 @@ async fn continue_session_inner(
             },
             call_timeout_override: Default::default(),
             blob_store_override: None,
+            mob_tools: None,
         };
         let create_req = SvcCreateSessionRequest {
             model: req

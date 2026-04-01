@@ -48,7 +48,6 @@ use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -2834,6 +2833,7 @@ struct RunMobToolsContext {
 }
 
 impl RunMobToolsContext {
+    #[cfg(test)]
     fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> {
         Arc::new(meerkat_mob_mcp::MobMcpDispatcher::new(self.state.clone()))
     }
@@ -2893,10 +2893,12 @@ async fn prepare_run_mob_tools(
     })
 }
 
+#[cfg(test)]
 fn compose_external_tool_dispatchers(
     primary: Option<Arc<dyn AgentToolDispatcher>>,
     secondary: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> anyhow::Result<Option<Arc<dyn AgentToolDispatcher>>> {
+    use std::collections::HashSet;
     match (primary, secondary) {
         (None, None) => Ok(None),
         (Some(dispatcher), None) | (None, Some(dispatcher)) => Ok(Some(dispatcher)),
@@ -3264,15 +3266,15 @@ async fn run_agent(
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
-    let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools =
-        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
-            Ok(tools) => tools,
-            Err(err) => {
-                shutdown_mcp(&mcp_adapter).await;
-                return Err(err);
-            }
-        };
+    // Mob tools now flow through mob_tools (factory pattern), not external_tools.
+    // Only MCP tools remain as external_tools.
+    let external_tools = mcp_external_tools;
+    let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> =
+        run_mob_tools.as_ref().map(|ctx| {
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+                Arc::clone(&ctx.state),
+            )) as Arc<dyn meerkat_core::service::MobToolsFactory>
+        });
 
     let parsed_app_context = app_context
         .as_deref()
@@ -3331,6 +3333,7 @@ async fn run_agent(
         resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
         blob_store_override: None,
+        mob_tools: mob_tools_factory,
     };
 
     let parsed_labels = if labels.is_empty() {
@@ -3759,15 +3762,15 @@ async fn resume_session_with_llm_override(
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;
-    let mob_external_tools = run_mob_tools.as_ref().map(RunMobToolsContext::dispatcher);
-    let external_tools =
-        match compose_external_tool_dispatchers(mob_external_tools, mcp_external_tools) {
-            Ok(tools) => tools,
-            Err(err) => {
-                shutdown_mcp(&mcp_adapter).await;
-                return Err(err);
-            }
-        };
+    // Mob tools now flow through mob_tools (factory pattern), not external_tools.
+    // Only MCP tools remain as external_tools.
+    let external_tools = mcp_external_tools;
+    let mob_tools_factory: Option<Arc<dyn meerkat_core::service::MobToolsFactory>> =
+        run_mob_tools.as_ref().map(|ctx| {
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+                Arc::clone(&ctx.state),
+            )) as Arc<dyn meerkat_core::service::MobToolsFactory>
+        });
 
     let output_pipeline = CliOutputPipeline::new(
         stream,
@@ -3836,6 +3839,7 @@ async fn resume_session_with_llm_override(
         },
         call_timeout_override: Default::default(),
         blob_store_override: None,
+        mob_tools: mob_tools_factory,
     };
 
     let turn_result = async {
@@ -9166,15 +9170,17 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
     #[tokio::test]
     async fn test_run_session_build_wires_mob_tools_into_llm_request() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
-        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(true);
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(true)
+            .mob(true);
         let service = Arc::new(build_cli_service(factory, Config::default()));
 
-        let external_tools = compose_external_tool_dispatchers(
-            None,
-            Some(create_run_mob_external_tools(service.clone())),
-        )
-        .expect("external tool composition should succeed")
-        .expect("mob tools should be present");
+        // Create mob tools factory (new pattern: factory instead of external_tools)
+        let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+            Arc::new(RunMobSessionService::new(service.clone()));
+        let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
+        let mob_factory: Arc<dyn meerkat_core::service::MobToolsFactory> =
+            Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(mob_state));
 
         let captured_tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_system_prompt = Arc::new(Mutex::new(None::<String>));
@@ -9184,7 +9190,8 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
         ));
 
         let build = SessionBuildOptions {
-            external_tools: Some(external_tools),
+            mob_tools: Some(mob_factory),
+            override_mob: Some(true),
             llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                 llm_override,
             )),
@@ -9217,9 +9224,10 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             .cloned()
             .collect();
 
+        // Agent mob tools use different tool names than MobMcpDispatcher
+        assert!(names.contains("delegate"));
         assert!(names.contains("mob_create"));
         assert!(names.contains("mob_list"));
-        assert!(names.contains("meerkat_spawn"));
 
         let system_prompt = captured_system_prompt
             .lock()
@@ -9228,6 +9236,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             .expect("system prompt must be captured");
         assert!(system_prompt.contains("mob_list"));
         assert!(system_prompt.contains("mob_create"));
+        assert!(system_prompt.contains("delegate"));
     }
 
     async fn call_tool_json(

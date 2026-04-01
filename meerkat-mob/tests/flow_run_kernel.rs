@@ -99,6 +99,7 @@ fn owner_test_config() -> FlowRunConfig {
         }),
         spawn_policy: None,
         event_router: None,
+        owner_session_id: None,
     };
 
     FlowRunConfig::from_definition(FlowId::from("demo"), &definition).expect("flow config")

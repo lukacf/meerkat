@@ -361,6 +361,7 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
+            owner_session_id: None,
         }
     }
 
@@ -631,6 +632,7 @@ model = "claude-sonnet-4-5"
             limits: None,
             spawn_policy: None,
             event_router: None,
+            owner_session_id: None,
         };
         let diagnostics = validate_definition(&def);
         assert!(

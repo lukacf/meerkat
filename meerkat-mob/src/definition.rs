@@ -316,6 +316,10 @@ pub struct MobDefinition {
     /// Optional declarative event router configuration.
     #[serde(default)]
     pub event_router: Option<EventRouterConfig>,
+    /// If set, this mob is an implicit delegation mob owned by the given session.
+    /// Used for resume lookup and lifecycle scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<String>,
 }
 
 /// Helper struct for TOML deserialization of the `[mob]` section.
@@ -361,6 +365,50 @@ struct TomlDefinition {
 }
 
 impl MobDefinition {
+    /// Create a minimal implicit delegation mob owned by the given session.
+    ///
+    /// The mob is tagged with `owner_session_id` for session-indexed lookup
+    /// and has `auto_wire_orchestrator = true` so spawned members are
+    /// automatically wired to the lead agent.
+    pub fn implicit(session_id: &str) -> Self {
+        let mob_id = MobId::from(format!("implicit-{session_id}"));
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            ProfileName::from("delegate"),
+            Profile {
+                model: String::new(),
+                skills: Vec::new(),
+                tools: crate::profile::ToolConfig::default(),
+                peer_description: "Delegated sub-agent".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: crate::MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            },
+        );
+        Self {
+            id: mob_id,
+            orchestrator: None,
+            profiles,
+            mcp_servers: BTreeMap::new(),
+            wiring: WiringRules {
+                auto_wire_orchestrator: true,
+                role_wiring: Vec::new(),
+            },
+            skills: BTreeMap::new(),
+            backend: BackendConfig::default(),
+            flows: BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
+            spawn_policy: None,
+            event_router: None,
+            owner_session_id: Some(session_id.to_string()),
+        }
+    }
+
     /// Parse a mob definition from TOML content.
     pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
         let raw: TomlDefinition = toml::from_str(content)?;
@@ -384,6 +432,7 @@ impl MobDefinition {
             limits: raw.limits,
             spawn_policy: raw.spawn_policy,
             event_router: raw.event_router,
+            owner_session_id: None,
         })
     }
 }
@@ -555,6 +604,7 @@ path = "skills/reviewer.md"
             limits: None,
             spawn_policy: None,
             event_router: None,
+            owner_session_id: None,
         };
         let json = serde_json::to_string_pretty(&def).unwrap();
         let parsed: MobDefinition = serde_json::from_str(&json).unwrap();

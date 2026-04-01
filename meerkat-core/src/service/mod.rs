@@ -231,6 +231,39 @@ pub struct SessionBuildOptions {
     /// supplied by the caller. Resumed metadata then fills only the
     /// non-explicit fields.
     pub resume_override_mask: ResumeOverrideMask,
+    /// Late-binding mob tool factory, called inside `build_agent()` with
+    /// session-scoped args to produce the mob tool dispatcher.
+    ///
+    /// Surfaces that enable mob tools pass an `Arc<dyn MobToolsFactory>` here.
+    /// The factory calls [`MobToolsFactory::build_mob_tools`] during agent
+    /// construction with the session ID, ops lifecycle registry, and optional
+    /// comms runtime — then composes the result into the tool gateway.
+    pub mob_tools: Option<Arc<dyn MobToolsFactory>>,
+}
+
+/// Session-scoped arguments passed to [`MobToolsFactory::build_mob_tools`].
+pub struct MobToolsBuildArgs {
+    /// Session ID of the agent being built.
+    pub session_id: crate::SessionId,
+    /// Ops lifecycle registry for barrier/async-op tracking.
+    pub ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    /// Optional comms runtime for auto-wiring spawned members.
+    pub comms_runtime: Option<Arc<dyn crate::agent::CommsRuntime>>,
+}
+
+/// Factory trait for late-binding mob tool construction.
+///
+/// Implementations capture surface-specific state (e.g. `MobMcpState`) and
+/// receive session-scoped arguments from `build_agent()` at construction time.
+/// This avoids a cyclic dependency between the facade crate and `meerkat-mob-mcp`.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait MobToolsFactory: Send + Sync {
+    /// Build a mob tool dispatcher for the given session.
+    async fn build_mob_tools(
+        &self,
+        args: MobToolsBuildArgs,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Typed explicit-override intent for resumed-session metadata merges.
@@ -287,6 +320,7 @@ impl Default for SessionBuildOptions {
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
+            mob_tools: None,
         }
     }
 }
@@ -330,6 +364,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("additional_instructions", &self.additional_instructions)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
+            .field("mob_tools", &self.mob_tools.is_some())
             .finish()
     }
 }

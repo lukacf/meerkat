@@ -2471,6 +2471,7 @@ async fn handle_meerkat_run(
             ..Default::default()
         },
         blob_store_override: None,
+        mob_tools: None,
     };
 
     let req = CreateSessionRequest {
@@ -2747,6 +2748,7 @@ async fn handle_meerkat_resume(
             peer_meta: input.peer_meta.is_some(),
         },
         blob_store_override: None,
+        mob_tools: None,
     };
 
     let result = if needs_rebuild {

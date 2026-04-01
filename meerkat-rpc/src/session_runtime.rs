@@ -1377,6 +1377,7 @@ impl SessionRuntime {
             shell_env: None,
             resume_override_mask: Default::default(),
             blob_store_override: None,
+            mob_tools: None,
         };
         self.service
             .create_session(CreateSessionRequest {

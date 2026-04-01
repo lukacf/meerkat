@@ -174,6 +174,7 @@ fn pictionary_definition() -> MobDefinition {
         limits: None,
         spawn_policy: None,
         event_router: None,
+        owner_session_id: None,
     }
 }
 

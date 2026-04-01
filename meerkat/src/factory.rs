@@ -232,6 +232,10 @@ pub struct AgentBuildConfig {
     pub override_memory: Option<bool>,
     /// Per-build override for factory-level `enable_mob`.
     pub override_mob: Option<bool>,
+    /// Late-binding mob tool factory, invoked inside `build_agent()` with
+    /// session-scoped args (session ID, ops lifecycle, comms runtime) to produce
+    /// the mob tool dispatcher. Composed into the tool gateway after comms.
+    pub mob_tools: Option<Arc<dyn meerkat_core::service::MobToolsFactory>>,
     /// Skills to pre-load at build time (full body injected into system prompt).
     /// `None` = metadata-only inventory (agent discovers and loads via tools).
     /// `Some(ids)` = pre-load these skills into the system prompt.
@@ -334,6 +338,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
             .field("override_mob", &self.override_mob)
+            .field("mob_tools", &self.mob_tools.is_some())
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
             .field("backend", &self.backend)
@@ -388,6 +393,7 @@ impl AgentBuildConfig {
             override_shell: None,
             override_memory: None,
             override_mob: None,
+            mob_tools: None,
             preload_skills: None,
             realm_id: None,
             instance_id: None,
@@ -446,6 +452,7 @@ impl AgentBuildConfig {
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
         self.override_mob = build.override_mob;
+        self.mob_tools = build.mob_tools.clone();
         self.preload_skills = build.preload_skills.clone();
         self.realm_id = build.realm_id.clone();
         self.instance_id = build.instance_id.clone();
@@ -485,6 +492,7 @@ impl AgentBuildConfig {
             override_shell: self.override_shell,
             override_memory: self.override_memory,
             override_mob: self.override_mob,
+            mob_tools: self.mob_tools.clone(),
             preload_skills: self.preload_skills.clone(),
             realm_id: self.realm_id.clone(),
             instance_id: self.instance_id.clone(),
@@ -1525,6 +1533,44 @@ impl AgentFactory {
                     })?;
             tools = composed.0;
             tool_usage_instructions = composed.1;
+        }
+
+        // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
+        // already-composed comms gateway).
+        let effective_mob = build_config.override_mob.unwrap_or(self.enable_mob);
+        if effective_mob {
+            if let Some(mob_factory) = build_config.mob_tools.take() {
+                // Build comms runtime arg: clone from the comms phase if available.
+                #[cfg(feature = "comms")]
+                let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = comms_runtime
+                    .as_ref()
+                    .map(|r| Arc::clone(r) as Arc<dyn meerkat_core::agent::CommsRuntime>);
+                #[cfg(not(feature = "comms"))]
+                let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = None;
+
+                let mob_args = meerkat_core::service::MobToolsBuildArgs {
+                    session_id: session.id().clone(),
+                    ops_registry: Arc::clone(&ops_lifecycle),
+                    comms_runtime: mob_comms,
+                };
+                let mob_dispatcher = mob_factory
+                    .build_mob_tools(mob_args)
+                    .await
+                    .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
+                let mob_usage = render_tool_usage_instructions(mob_dispatcher.tools().as_ref());
+                let gateway = meerkat_core::ToolGatewayBuilder::new()
+                    .add_dispatcher(tools)
+                    .add_dispatcher(mob_dispatcher)
+                    .build()
+                    .map_err(|e| BuildAgentError::Config(format!("Mob tool composition: {e}")))?;
+                tools = Arc::new(gateway);
+                if !mob_usage.is_empty() {
+                    if !tool_usage_instructions.is_empty() {
+                        tool_usage_instructions.push_str("\n\n");
+                    }
+                    tool_usage_instructions.push_str(&mob_usage);
+                }
+            }
         }
 
         // 10. Resolve hooks (override > filesystem layered config)

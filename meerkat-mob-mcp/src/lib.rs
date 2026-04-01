@@ -631,7 +631,11 @@ impl MobMcpState {
     /// Uses a per-session mutex to ensure single-flight creation: the first
     /// caller creates the mob, concurrent callers block and receive the same
     /// mob ID. The mob is tagged with `owner_session_id` on its definition.
-    pub async fn get_or_create_implicit_mob(&self, session_id: &str) -> Result<MobId, MobError> {
+    pub async fn get_or_create_implicit_mob(
+        &self,
+        session_id: &str,
+        model: &str,
+    ) -> Result<MobId, MobError> {
         // Get or create a per-session lock
         let session_lock = {
             let mut locks = self.implicit_mob_locks.lock().await;
@@ -648,7 +652,7 @@ impl MobMcpState {
         }
 
         // Create and return
-        let def = MobDefinition::implicit(session_id);
+        let def = MobDefinition::implicit(session_id, model);
         self.mob_create_definition(def).await
     }
 
@@ -713,6 +717,9 @@ impl MobMcpState {
                         "scavenged orphaned implicit mob"
                     );
                     scavenged.push(mob_id);
+                    // Prune per-session lock to avoid unbounded growth.
+                    let mut locks = self.implicit_mob_locks.lock().await;
+                    locks.remove(&session_id.to_string());
                 }
             }
         }
@@ -3464,8 +3471,14 @@ timeout_ms = 1000
         let session_id = SessionId::new();
         let sid = session_id.to_string();
 
-        let mob_id_1 = state.get_or_create_implicit_mob(&sid).await.unwrap();
-        let mob_id_2 = state.get_or_create_implicit_mob(&sid).await.unwrap();
+        let mob_id_1 = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .unwrap();
+        let mob_id_2 = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .unwrap();
         assert_eq!(mob_id_1, mob_id_2, "second call must return same mob_id");
 
         let found = state.find_implicit_mob(&sid).await;
@@ -3478,8 +3491,14 @@ timeout_ms = 1000
         let sid_a = SessionId::new().to_string();
         let sid_b = SessionId::new().to_string();
 
-        let mob_a = state.get_or_create_implicit_mob(&sid_a).await.unwrap();
-        let mob_b = state.get_or_create_implicit_mob(&sid_b).await.unwrap();
+        let mob_a = state
+            .get_or_create_implicit_mob(&sid_a, "claude-sonnet-4-5")
+            .await
+            .unwrap();
+        let mob_b = state
+            .get_or_create_implicit_mob(&sid_b, "claude-sonnet-4-5")
+            .await
+            .unwrap();
         assert_ne!(mob_a, mob_b, "different sessions must get different mobs");
     }
 
@@ -3489,7 +3508,10 @@ timeout_ms = 1000
 
         // Create an implicit mob
         let sid = SessionId::new().to_string();
-        let implicit_id = state.get_or_create_implicit_mob(&sid).await.unwrap();
+        let implicit_id = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .unwrap();
 
         // Create an explicit mob via mob_create_definition
         let mut explicit_profiles = BTreeMap::new();
@@ -3536,7 +3558,10 @@ timeout_ms = 1000
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
-        let _mob_id = state.get_or_create_implicit_mob(&sid).await.unwrap();
+        let _mob_id = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .unwrap();
         assert!(state.find_implicit_mob(&sid).await.is_some());
 
         state.destroy_implicit_mob(&sid).await.unwrap();
@@ -3561,7 +3586,9 @@ timeout_ms = 1000
             let s = state.clone();
             let sid = sid.clone();
             handles.push(tokio::spawn(async move {
-                s.get_or_create_implicit_mob(&sid).await.unwrap()
+                s.get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+                    .await
+                    .unwrap()
             }));
         }
 
@@ -3604,7 +3631,10 @@ timeout_ms = 1000
             .await
             .unwrap();
         let sid = result.session_id.to_string();
-        let mob_id = state.get_or_create_implicit_mob(&sid).await.unwrap();
+        let mob_id = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .unwrap();
 
         // Session exists — scavenge should find nothing
         let scavenged = state.scavenge_orphaned_implicit_mobs().await;
@@ -3626,7 +3656,10 @@ timeout_ms = 1000
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
-        let mob_id = state.get_or_create_implicit_mob(&sid).await.unwrap();
+        let mob_id = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .unwrap();
         let handle = state.handle_for(&mob_id).await.unwrap();
         assert!(
             handle.definition().wiring.auto_wire_orchestrator,

@@ -245,6 +245,8 @@ pub struct SessionBuildOptions {
 pub struct MobToolsBuildArgs {
     /// Session ID of the agent being built.
     pub session_id: crate::SessionId,
+    /// Model name of the owning agent — inherited by implicit mob helpers.
+    pub model: String,
     /// Ops lifecycle registry for barrier/async-op tracking.
     pub ops_registry: Arc<dyn OpsLifecycleRegistry>,
     /// Optional comms runtime for auto-wiring spawned members.

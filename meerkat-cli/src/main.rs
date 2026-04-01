@@ -4417,12 +4417,24 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     let session_id = resolve_scoped_session_id(id, scope)?;
 
     let (config, _) = load_config(scope).await?;
-    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+    let (service, _runtime_adapter) = build_cli_persistent_service(scope, config.clone()).await?;
 
     service
         .archive(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+
+    // Clean up any implicit mob owned by this session.
+    if config.tools.mob_enabled {
+        if let Ok(mob_persistent) =
+            get_or_create_mob_persistent_service(scope, config.clone()).await
+        {
+            let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+                Arc::new(MobCliSessionService::new(mob_persistent));
+            let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_service));
+            let _ = state.destroy_implicit_mob(&session_id.to_string()).await;
+        }
+    }
 
     println!("Deleted session: {session_id}");
     println!(

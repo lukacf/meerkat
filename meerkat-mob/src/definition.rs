@@ -370,13 +370,13 @@ impl MobDefinition {
     /// The mob is tagged with `owner_session_id` for session-indexed lookup
     /// and has `auto_wire_orchestrator = true` so spawned members are
     /// automatically wired to the lead agent.
-    pub fn implicit(session_id: &str) -> Self {
+    pub fn implicit(session_id: &str, model: &str) -> Self {
         let mob_id = MobId::from(format!("implicit-{session_id}"));
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("delegate"),
             Profile {
-                model: String::new(),
+                model: model.to_string(),
                 skills: Vec::new(),
                 tools: crate::profile::ToolConfig::default(),
                 peer_description: "Delegated sub-agent".to_string(),

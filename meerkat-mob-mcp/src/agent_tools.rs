@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::AsyncOpRef;
-use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionQuery,
@@ -55,18 +54,13 @@ const TOOL_MOB_LIST: &str = "mob_list";
 /// for implicit delegation (lazy mob creation) and explicit orchestration.
 pub struct AgentMobToolSurface {
     state: Arc<MobMcpState>,
-    /// Comms runtime for the owning agent — will be used for explicit peer
-    /// wiring when the orchestrating agent needs to wire itself to mob members
-    /// beyond the auto_wire_parent path.
-    _comms_runtime: Option<Arc<dyn CoreCommsRuntime>>,
     /// Pre-seeded on resume; otherwise set by first delegate via get_or_create_implicit_mob.
     /// Read-only cache — MobMcpState is the canonical owner.
     cached_implicit_mob_id: RwLock<Option<MobId>>,
     tools: Arc<[Arc<ToolDef>]>,
     owner_session_id: SessionId,
-    /// Ops lifecycle registry — will be used for registering spawned member
-    /// operations as barriers on the owning agent's turn boundary.
-    _ops_registry: Arc<dyn OpsLifecycleRegistry>,
+    /// Model name inherited by implicit mob helpers.
+    model: String,
 }
 
 impl AgentMobToolSurface {
@@ -74,25 +68,22 @@ impl AgentMobToolSurface {
     ///
     /// # Arguments
     /// * `state` - Shared MobMcpState for mob lifecycle operations
-    /// * `comms_runtime` - Optional comms runtime for auto-wiring spawned members
     /// * `implicit_mob_id` - Pre-seeded implicit mob ID (resume case)
-    /// * `ops_registry` - Ops lifecycle registry for barrier operations
+    /// * `model` - Model name inherited by spawned helpers
     /// * `owner_session_id` - Session ID of the owning agent
     pub fn new(
         state: Arc<MobMcpState>,
-        comms_runtime: Option<Arc<dyn CoreCommsRuntime>>,
         implicit_mob_id: Option<MobId>,
-        ops_registry: Arc<dyn OpsLifecycleRegistry>,
+        model: String,
         owner_session_id: SessionId,
     ) -> Self {
         let tools = build_tool_defs();
         Self {
             state,
-            _comms_runtime: comms_runtime,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
             tools,
             owner_session_id,
-            _ops_registry: ops_registry,
+            model,
         }
     }
 
@@ -151,7 +142,7 @@ impl AgentMobToolSurface {
         // Slow path: create via single-flight on MobMcpState
         let mob_id: MobId = self
             .state
-            .get_or_create_implicit_mob(&self.owner_session_id.to_string())
+            .get_or_create_implicit_mob(&self.owner_session_id.to_string(), &self.model)
             .await?;
 
         // Check if we were the creator by seeing if cache was empty
@@ -183,8 +174,8 @@ impl AgentMobToolSurface {
             args.member_id
                 .unwrap_or_else(|| format!("helper-{}", uuid::Uuid::new_v4())),
         );
-        let profile = ProfileName::from(args.profile.unwrap_or_else(|| "delegate".to_string()));
-        let mut spec = SpawnMemberSpec::new(profile, meerkat_id.clone());
+        // Implicit mob always uses the "delegate" profile.
+        let mut spec = SpawnMemberSpec::new(ProfileName::from("delegate"), meerkat_id.clone());
         spec.initial_message = Some(ContentInput::Text(args.task));
         spec.runtime_mode = Some(MobRuntimeMode::AutonomousHost);
         spec.auto_wire_parent = true;
@@ -391,9 +382,8 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
         let implicit_mob_id = self.state.find_implicit_mob(&session_id_str).await;
         let surface = AgentMobToolSurface::new(
             Arc::clone(&self.state),
-            args.comms_runtime,
             implicit_mob_id,
-            args.ops_registry,
+            args.model,
             args.session_id,
         );
         Ok(Arc::new(surface))
@@ -447,10 +437,6 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
                     "task": {
                         "type": "string",
                         "description": "The task description/prompt for the helper"
-                    },
-                    "profile": {
-                        "type": "string",
-                        "description": "Profile name for the helper (default: 'helper')"
                     },
                     "member_id": {
                         "type": "string",
@@ -574,8 +560,6 @@ fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
 #[derive(Deserialize)]
 struct DelegateArgs {
     task: String,
-    #[serde(default)]
-    profile: Option<String>,
     #[serde(default)]
     member_id: Option<String>,
     #[serde(default)]
@@ -873,9 +857,12 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_unknown_tool_returns_not_found() {
         let state = MobMcpState::new_in_memory();
-        let ops_registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::default();
-        let surface =
-            AgentMobToolSurface::new(state, None, None, Arc::new(ops_registry), SessionId::new());
+        let surface = AgentMobToolSurface::new(
+            state,
+            None,
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+        );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {
@@ -890,9 +877,12 @@ mod tests {
     #[tokio::test]
     async fn test_mob_list_empty() {
         let state = MobMcpState::new_in_memory();
-        let ops_registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::default();
-        let surface =
-            AgentMobToolSurface::new(state, None, None, Arc::new(ops_registry), SessionId::new());
+        let surface = AgentMobToolSurface::new(
+            state,
+            None,
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+        );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {

@@ -1549,6 +1549,7 @@ impl AgentFactory {
 
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
+                model: model.clone(),
                 ops_registry: Arc::clone(&ops_lifecycle),
                 comms_runtime: mob_comms,
             };
@@ -1557,12 +1558,12 @@ impl AgentFactory {
                 .await
                 .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
             let mob_usage = render_tool_usage_instructions(mob_dispatcher.tools().as_ref());
-            let gateway = meerkat_core::ToolGatewayBuilder::new()
-                .add_dispatcher(tools)
-                .add_dispatcher(mob_dispatcher)
-                .build()
-                .map_err(|e| BuildAgentError::Config(format!("Mob tool composition: {e}")))?;
-            tools = Arc::new(gateway);
+            // Use DynamicToolComposite (not ToolGateway) so dynamic child
+            // dispatchers (e.g. callback tools) can surface additions between turns.
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                mob_dispatcher,
+            ]));
             if !mob_usage.is_empty() {
                 if !tool_usage_instructions.is_empty() {
                     tool_usage_instructions.push_str("\n\n");

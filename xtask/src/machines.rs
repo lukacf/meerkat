@@ -1540,53 +1540,53 @@ struct OwnerTestSpec {
 fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
     const PEER_COMMS: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_comms_kernel",
             filter: "peer_comms_kernel_preserves_reservation_and_trust_snapshot_for_trusted_requests",
         },
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_comms_kernel",
             filter: "peer_comms_kernel_classifies_inline_terminal_without_child_lifecycle_leakage",
         },
     ];
     const PEER_DIRECTORY_REACHABILITY: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
             filter: "peer_directory_reachability_kernel_reconcile_replaces_directory_snapshot",
         },
         OwnerTestSpec {
-            package: "meerkat-comms",
+            package: "meerkat-integration-tests",
             target: "peer_directory_reachability_kernel",
             filter: "peer_directory_reachability_kernel_records_send_failures_for_resolved_peers",
         },
     ];
     const TURN_EXECUTION: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-core",
+            package: "meerkat-integration-tests",
             target: "turn_execution_kernel",
             filter: "turn_execution_kernel_tool_loop_yields_back_to_llm_after_boundary",
         },
         OwnerTestSpec {
-            package: "meerkat-core",
+            package: "meerkat-integration-tests",
             target: "turn_execution_kernel",
             filter: "turn_execution_kernel_immediate_context_completes_without_llm_loop",
         },
         OwnerTestSpec {
-            package: "meerkat-core",
+            package: "meerkat-integration-tests",
             target: "turn_execution_kernel",
             filter: "turn_execution_kernel_cancel_and_failure_paths_emit_terminal_effects",
         },
     ];
     const EXTERNAL_TOOL_SURFACE: &[OwnerTestSpec] = &[
         OwnerTestSpec {
-            package: "meerkat-mcp",
+            package: "meerkat-integration-tests",
             target: "external_tool_surface_kernel",
             filter: "external_tool_surface_kernel_add_and_reload_emit_canonical_deltas",
         },
         OwnerTestSpec {
-            package: "meerkat-mcp",
+            package: "meerkat-integration-tests",
             target: "external_tool_surface_kernel",
             filter: "external_tool_surface_kernel_remove_drain_completion_and_forced_finalize_emit_deltas",
         },

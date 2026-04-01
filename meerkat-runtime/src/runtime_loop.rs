@@ -325,27 +325,27 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 () = detached_notified => {
                     // A BackgroundToolOp completed while idle. Inject a
                     // ContinuationInput into the driver and process it.
-                    if let Some(ref state) = detached_wake {
-                        if state.pending.load(std::sync::atomic::Ordering::Acquire) {
-                            let input = crate::input::Input::Continuation(
-                                crate::input::ContinuationInput::detached_background_op_completed(),
-                            );
-                            let mut d = driver.lock().await;
-                            if let Ok(_) = d.as_driver_mut().accept_input(input).await {
-                                state.pending.store(false, std::sync::atomic::Ordering::Release);
-                            }
-                            drop(d);
-                            // Process the queued continuation
-                            if process_queue(
-                                &driver,
-                                &mut *executor,
-                                &mut control_rx,
-                                completions.as_ref(),
-                            )
-                            .await
-                            {
-                                break;
-                            }
+                    if let Some(ref state) = detached_wake
+                        && state.pending.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        let input = crate::input::Input::Continuation(
+                            crate::input::ContinuationInput::detached_background_op_completed(),
+                        );
+                        let mut d = driver.lock().await;
+                        if d.as_driver_mut().accept_input(input).await.is_ok() {
+                            state.pending.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        drop(d);
+                        // Process the queued continuation
+                        if process_queue(
+                            &driver,
+                            &mut *executor,
+                            &mut control_rx,
+                            completions.as_ref(),
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
                 }

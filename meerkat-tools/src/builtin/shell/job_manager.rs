@@ -690,10 +690,10 @@ impl JobManager {
             // Update job status (preserve Cancelled if already set)
             {
                 let mut jobs_guard = jobs.lock().await;
-                if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
-                    if !matches!(job.view.status, JobStatus::Cancelled { .. }) {
-                        job.view.status = final_status;
-                    }
+                if let Some(job) = jobs_guard.get_mut(&job_id_clone)
+                    && !matches!(job.view.status, JobStatus::Cancelled { .. })
+                {
+                    job.view.status = final_status;
                 }
             }
 
@@ -978,9 +978,7 @@ impl JobManager {
             .iter()
             .filter(|(job_id, completed_time)| {
                 now.duration_since(**completed_time) > ttl
-                    && jobs_guard
-                        .get(job_id)
-                        .map_or(true, |j| j.completion_notified)
+                    && jobs_guard.get(job_id).is_none_or(|j| j.completion_notified)
             })
             .map(|(job_id, _)| job_id.clone())
             .collect();
@@ -998,11 +996,7 @@ impl JobManager {
         if max_completed > 0 && completed_at_guard.len() > max_completed {
             let mut evictable_jobs: Vec<(JobId, Instant)> = completed_at_guard
                 .iter()
-                .filter(|(job_id, _)| {
-                    jobs_guard
-                        .get(job_id)
-                        .map_or(true, |j| j.completion_notified)
-                })
+                .filter(|(job_id, _)| jobs_guard.get(job_id).is_none_or(|j| j.completion_notified))
                 .map(|(k, v)| (k.clone(), *v))
                 .collect();
 
@@ -2847,9 +2841,11 @@ mod tests {
     async fn choke_002_unnotified_completions_survive_cleanup() {
         // Setup: create JobManager with aggressive TTL (1 second) and max_completed=1
         let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
-        let mut config = ShellConfig::default();
-        config.completed_job_ttl_secs = 1;
-        config.max_completed_jobs = 1;
+        let config = ShellConfig {
+            completed_job_ttl_secs: 1,
+            max_completed_jobs: 1,
+            ..ShellConfig::default()
+        };
         let manager = JobManager::new(config)
             .with_owner_session_id(SessionId::new())
             .with_ops_registry(Arc::clone(&registry));
@@ -2916,9 +2912,11 @@ mod tests {
     async fn choke_002_overflow_cleanup_uses_filtered_evictable_subset() {
         // Setup: create JobManager with max_completed_jobs=2
         let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
-        let mut config = ShellConfig::default();
-        config.max_completed_jobs = 2;
-        config.completed_job_ttl_secs = 3600; // long TTL so only overflow triggers cleanup
+        let config = ShellConfig {
+            max_completed_jobs: 2,
+            completed_job_ttl_secs: 3600, // long TTL so only overflow triggers cleanup
+            ..ShellConfig::default()
+        };
         let manager = JobManager::new(config)
             .with_owner_session_id(SessionId::new())
             .with_ops_registry(Arc::clone(&registry));

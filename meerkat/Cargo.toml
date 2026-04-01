@@ -78,6 +78,7 @@ session-store = [
     "meerkat-runtime/redb-store",
     "meerkat-runtime/sqlite-store",
     "meerkat-store/sqlite",
+    "meerkat-tools/sqlite",
 ]
 session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]

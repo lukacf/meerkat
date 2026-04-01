@@ -23,6 +23,7 @@ impl MobEventEmitter {
                 kind,
             })
             .await
+            .map_err(MobError::from)
     }
 
     pub async fn flow_started(

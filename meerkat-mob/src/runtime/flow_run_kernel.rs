@@ -577,6 +577,7 @@ impl FlowRunMutator for FlowRunKernel {
                 &next_state,
             )
             .await
+            .map_err(MobError::from)
     }
 
     async fn dispatch_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
@@ -689,6 +690,7 @@ impl FlowRunMutator for FlowRunKernel {
         self.run_store
             .cas_flow_state(run_id, &run.flow_state, &next_state)
             .await
+            .map_err(MobError::from)
     }
 
     async fn record_target_success(

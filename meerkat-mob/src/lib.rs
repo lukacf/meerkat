@@ -79,7 +79,7 @@ pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobSpecStore,
+    MobSpecStore, MobStoreError,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores};

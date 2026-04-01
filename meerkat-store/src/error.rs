@@ -1,7 +1,12 @@
 //! Storage errors
 
-use meerkat_core::SessionId;
+use meerkat_core::{SessionId, SessionStoreError};
 
+/// Backend-specific error type used internally by meerkat-store implementations.
+///
+/// External consumers should use [`SessionStoreError`] (from `meerkat-core`) for
+/// the `SessionStore` trait boundary. This type carries backend-specific variants
+/// (redb, rusqlite) that the trait contract intentionally erases.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("IO error: {0}")]
@@ -44,4 +49,22 @@ pub enum StoreError {
         requested: String,
         existing: String,
     },
+}
+
+impl StoreError {
+    /// Convert to the backend-agnostic [`SessionStoreError`] at the trait boundary.
+    pub fn into_session_store_error(self) -> SessionStoreError {
+        match self {
+            StoreError::Io(e) => SessionStoreError::Io(e),
+            StoreError::Serialization(e) => SessionStoreError::Serialization(e.to_string()),
+            StoreError::NotFound(id) => SessionStoreError::NotFound(id),
+            StoreError::Corrupted(id) => SessionStoreError::Corrupted(id),
+            other => SessionStoreError::Internal(other.to_string()),
+        }
+    }
+}
+
+/// Shorthand for `.map_err(StoreError::into_session_store_error)` in trait impls.
+pub(crate) fn sse(e: StoreError) -> SessionStoreError {
+    e.into_session_store_error()
 }

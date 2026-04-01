@@ -1221,7 +1221,11 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::FlowStatus { run_id, reply_tx } => {
-                    let result = self.run_store.get_run(&run_id).await;
+                    let result = self
+                        .run_store
+                        .get_run(&run_id)
+                        .await
+                        .map_err(MobError::from);
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::FlowFinished { run_id } => {
@@ -2519,7 +2523,7 @@ impl MobActor {
                     "spawn append failed for '{meerkat_id}': {append_error}; archive compensation failed: {rollback_error}"
                 )));
             }
-            return Err(append_error);
+            return Err(MobError::from(append_error));
         }
 
         // Commit the provision: the member is now owned by the roster.
@@ -3438,7 +3442,7 @@ impl MobActor {
             })
             .await
         {
-            return Err(rollback.fail(append_error).await);
+            return Err(rollback.fail(MobError::from(append_error)).await);
         }
 
         {
@@ -3635,7 +3639,7 @@ impl MobActor {
             })
             .await
         {
-            return Err(rollback.fail(append_error).await);
+            return Err(rollback.fail(MobError::from(append_error)).await);
         }
 
         // Update roster
@@ -3745,7 +3749,7 @@ impl MobActor {
             })
             .await
         {
-            return Err(rollback.fail(append_error).await);
+            return Err(rollback.fail(MobError::from(append_error)).await);
         }
 
         {
@@ -3944,7 +3948,7 @@ impl MobActor {
             .await
         {
             self.fail_reset_to_stopped().await;
-            return Err(error);
+            return Err(MobError::from(error));
         }
 
         // Clear in-memory projections. Don't call cleanup_namespace() — it
@@ -5048,7 +5052,7 @@ impl MobActor {
             })
             .await
         {
-            return Err(rollback.fail(append_error).await);
+            return Err(rollback.fail(MobError::from(append_error)).await);
         }
 
         // Update roster

@@ -4,7 +4,8 @@
 //! - `sessions_by_id`: UUID bytes → session JSON
 //! - `sessions_by_updated`: inverted-timestamp + UUID → empty (for ordered listing)
 
-use crate::{SessionFilter, SessionStore, StoreError};
+use crate::error::sse;
+use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction};
@@ -131,9 +132,10 @@ impl RedbSessionStore {
     }
 }
 
-#[async_trait]
-impl SessionStore for RedbSessionStore {
-    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+// Private methods return StoreError (preserves internal ? chains).
+// Trait methods convert at the boundary via sse().
+impl RedbSessionStore {
+    async fn save_impl(&self, session: &Session) -> Result<(), StoreError> {
         let session = session.clone();
         let db = self.db.clone();
 
@@ -152,7 +154,7 @@ impl SessionStore for RedbSessionStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load_impl(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         let id_key = session_id_key(id);
         let db = self.db.clone();
 
@@ -180,7 +182,7 @@ impl SessionStore for RedbSessionStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+    async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
@@ -269,7 +271,7 @@ impl SessionStore for RedbSessionStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+    async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
         let id_key = session_id_key(id);
         let id_owned = id.clone();
         let db = self.db.clone();
@@ -305,6 +307,25 @@ impl SessionStore for RedbSessionStore {
         })
         .await
         .map_err(StoreError::Join)?
+    }
+}
+
+#[async_trait]
+impl SessionStore for RedbSessionStore {
+    async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+        self.save_impl(session).await.map_err(sse)
+    }
+
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+        self.load_impl(id).await.map_err(sse)
+    }
+
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
+        self.list_impl(filter).await.map_err(sse)
+    }
+
+    async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+        self.delete_impl(id).await.map_err(sse)
     }
 }
 

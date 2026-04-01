@@ -3,7 +3,7 @@
 //! Unlike the redb backend, SQLite uses WAL mode with no exclusive file lock,
 //! allowing the same database to be reopened after drop within the same process.
 
-use super::{MobEventStore, MobRunStore, MobSpecStore};
+use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent};
@@ -37,23 +37,21 @@ CREATE TABLE IF NOT EXISTS mob_specs (
     spec_json BLOB NOT NULL
 )";
 
-fn storage_error(error: impl std::fmt::Display) -> MobError {
-    MobError::StorageError(Box::<dyn std::error::Error + Send + Sync>::from(
-        error.to_string(),
-    ))
+fn se(error: impl std::fmt::Display) -> MobStoreError {
+    MobStoreError::Internal(error.to_string())
 }
 
-fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, MobError> {
-    serde_json::to_vec(value).map_err(storage_error)
+fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, MobStoreError> {
+    serde_json::to_vec(value).map_err(|e| MobStoreError::Serialization(e.to_string()))
 }
 
-fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MobError> {
-    serde_json::from_slice(bytes).map_err(storage_error)
+fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MobStoreError> {
+    serde_json::from_slice(bytes).map_err(|e| MobStoreError::Serialization(e.to_string()))
 }
 
-fn cursor_to_i64(value: u64) -> Result<i64, MobError> {
+fn cursor_to_i64(value: u64) -> Result<i64, MobStoreError> {
     i64::try_from(value)
-        .map_err(|_| MobError::Internal(format!("cursor value {value} exceeds i64::MAX")))
+        .map_err(|_| MobStoreError::Internal(format!("cursor value {value} exceeds i64::MAX")))
 }
 
 fn i64_to_cursor(value: i64) -> u64 {
@@ -62,36 +60,35 @@ fn i64_to_cursor(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
-fn open_connection(path: &Path) -> Result<Connection, MobError> {
+fn open_connection(path: &Path) -> Result<Connection, MobStoreError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(storage_error)?;
+        std::fs::create_dir_all(parent).map_err(se)?;
     }
-    let conn = Connection::open(path).map_err(storage_error)?;
+    let conn = Connection::open(path).map_err(se)?;
     conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
-        .map_err(storage_error)?;
+        .map_err(se)?;
     conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(storage_error)?;
+        .map_err(se)?;
     conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(storage_error)?;
-    conn.execute_batch(CREATE_SCHEMA_SQL)
-        .map_err(storage_error)?;
+        .map_err(se)?;
+    conn.execute_batch(CREATE_SCHEMA_SQL).map_err(se)?;
     Ok(conn)
 }
 
-fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, MobError> {
+fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, MobStoreError> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(storage_error)
+        .map_err(se)
 }
 
 async fn run_sqlite_task<T>(
-    task: impl FnOnce() -> Result<T, MobError> + Send + 'static,
-) -> Result<T, MobError>
+    task: impl FnOnce() -> Result<T, MobStoreError> + Send + 'static,
+) -> Result<T, MobStoreError>
 where
     T: Send + 'static,
 {
     tokio::task::spawn_blocking(task)
         .await
-        .map_err(|error| MobError::Internal(format!("sqlite task join failed: {error}")))?
+        .map_err(|error| MobStoreError::Internal(format!("sqlite task join failed: {error}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +149,7 @@ const EVENT_CURSOR_KEY: &str = "next_cursor";
 
 #[async_trait]
 impl MobEventStore for SqliteMobEventStore {
-    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
+    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
@@ -169,15 +166,15 @@ impl MobEventStore for SqliteMobEventStore {
                 "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
                 params![cursor_to_i64(cursor)?, encoded],
             )
-            .map_err(storage_error)?;
+            .map_err(se)?;
             set_next_cursor(&tx, cursor.saturating_add(1))?;
-            tx.commit().map_err(storage_error)?;
+            tx.commit().map_err(se)?;
             Ok(stored)
         })
         .await
     }
 
-    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
@@ -196,18 +193,18 @@ impl MobEventStore for SqliteMobEventStore {
                     "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
                     params![cursor_to_i64(cursor)?, encoded],
                 )
-                .map_err(storage_error)?;
+                .map_err(se)?;
                 results.push(stored);
                 cursor = cursor.saturating_add(1);
             }
             set_next_cursor(&tx, cursor)?;
-            tx.commit().map_err(storage_error)?;
+            tx.commit().map_err(se)?;
             Ok(results)
         })
         .await
     }
 
-    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
+    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let conn = open_connection(&path)?;
@@ -215,20 +212,19 @@ impl MobEventStore for SqliteMobEventStore {
                 .prepare(
                     "SELECT event_json FROM mob_events WHERE cursor > ?1 ORDER BY cursor LIMIT ?2",
                 )
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let rows = stmt
                 .query_map(
                     params![
                         cursor_to_i64(after_cursor)?,
-                        i64::try_from(limit)
-                            .map_err(|_| storage_error("limit exceeds i64::MAX"))?
+                        i64::try_from(limit).map_err(|_| se("limit exceeds i64::MAX"))?
                     ],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let mut result = Vec::new();
             for row in rows {
-                let bytes = row.map_err(storage_error)?;
+                let bytes = row.map_err(se)?;
                 result.push(decode_json(&bytes)?);
             }
             Ok(result)
@@ -236,19 +232,19 @@ impl MobEventStore for SqliteMobEventStore {
         .await
     }
 
-    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
+    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let conn = open_connection(&path)?;
             let mut stmt = conn
                 .prepare("SELECT event_json FROM mob_events ORDER BY cursor")
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let mut result = Vec::new();
             for row in rows {
-                let bytes = row.map_err(storage_error)?;
+                let bytes = row.map_err(se)?;
                 result.push(decode_json(&bytes)?);
             }
             Ok(result)
@@ -256,25 +252,24 @@ impl MobEventStore for SqliteMobEventStore {
         .await
     }
 
-    async fn clear(&self) -> Result<(), MobError> {
+    async fn clear(&self) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
-            tx.execute("DELETE FROM mob_events", [])
-                .map_err(storage_error)?;
+            tx.execute("DELETE FROM mob_events", []).map_err(se)?;
             tx.execute(
                 "INSERT OR REPLACE INTO mob_event_meta (key, value) VALUES (?1, ?2)",
                 params![EVENT_CURSOR_KEY, 1i64],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(())
         })
         .await
     }
 
-    async fn prune(&self, older_than: DateTime<Utc>) -> Result<u64, MobError> {
+    async fn prune(&self, older_than: DateTime<Utc>) -> Result<u64, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
@@ -284,12 +279,12 @@ impl MobEventStore for SqliteMobEventStore {
             // Events store timestamp inside JSON, so we must deserialize to check.
             let mut stmt = tx
                 .prepare("SELECT cursor, event_json FROM mob_events ORDER BY cursor")
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let rows: Vec<(i64, Vec<u8>)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(storage_error)?
+                .map_err(se)?
                 .collect::<Result<_, _>>()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             drop(stmt);
 
             let mut removed = 0u64;
@@ -300,18 +295,18 @@ impl MobEventStore for SqliteMobEventStore {
                         "DELETE FROM mob_events WHERE cursor = ?1",
                         params![cursor_val],
                     )
-                    .map_err(storage_error)?;
+                    .map_err(se)?;
                     removed = removed.saturating_add(1);
                 }
             }
-            tx.commit().map_err(storage_error)?;
+            tx.commit().map_err(se)?;
             Ok(removed)
         })
         .await
     }
 }
 
-fn get_next_cursor(conn: &Connection) -> Result<u64, MobError> {
+fn get_next_cursor(conn: &Connection) -> Result<u64, MobStoreError> {
     let result: Option<i64> = conn
         .query_row(
             "SELECT value FROM mob_event_meta WHERE key = ?1",
@@ -319,20 +314,20 @@ fn get_next_cursor(conn: &Connection) -> Result<u64, MobError> {
             |row| row.get(0),
         )
         .optional()
-        .map_err(storage_error)?;
+        .map_err(se)?;
     Ok(result.map_or(1, i64_to_cursor))
 }
 
-fn next_event_cursor(tx: &Transaction<'_>) -> Result<u64, MobError> {
+fn next_event_cursor(tx: &Transaction<'_>) -> Result<u64, MobStoreError> {
     get_next_cursor(tx)
 }
 
-fn set_next_cursor(conn: &Connection, value: u64) -> Result<(), MobError> {
+fn set_next_cursor(conn: &Connection, value: u64) -> Result<(), MobStoreError> {
     conn.execute(
         "INSERT OR REPLACE INTO mob_event_meta (key, value) VALUES (?1, ?2)",
         params![EVENT_CURSOR_KEY, cursor_to_i64(value)?],
     )
-    .map_err(storage_error)?;
+    .map_err(se)?;
     Ok(())
 }
 
@@ -355,7 +350,7 @@ impl std::fmt::Debug for SqliteMobRunStore {
 
 #[async_trait]
 impl MobRunStore for SqliteMobRunStore {
-    async fn create_run(&self, run: MobRun) -> Result<(), MobError> {
+    async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run.run_id.to_string();
         run_sqlite_task(move || {
@@ -369,10 +364,10 @@ impl MobRunStore for SqliteMobRunStore {
                     |_| Ok(true),
                 )
                 .optional()
-                .map_err(storage_error)?
+                .map_err(se)?
                 .unwrap_or(false);
             if exists {
-                return Err(MobError::Internal(format!(
+                return Err(MobStoreError::Internal(format!(
                     "run already exists: {}",
                     run.run_id
                 )));
@@ -383,14 +378,14 @@ impl MobRunStore for SqliteMobRunStore {
                 "INSERT INTO mob_runs (run_id, run_json) VALUES (?1, ?2)",
                 params![key, encoded],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(())
         })
         .await
     }
 
-    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobError> {
+    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         run_sqlite_task(move || {
@@ -402,7 +397,7 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             match bytes {
                 Some(b) => Ok(Some(decode_json(&b)?)),
                 None => Ok(None),
@@ -415,21 +410,19 @@ impl MobRunStore for SqliteMobRunStore {
         &self,
         mob_id: &MobId,
         flow_id: Option<&FlowId>,
-    ) -> Result<Vec<MobRun>, MobError> {
+    ) -> Result<Vec<MobRun>, MobStoreError> {
         let path = self.path.clone();
         let mob_id = mob_id.clone();
         let flow_id = flow_id.cloned();
         run_sqlite_task(move || {
             let conn = open_connection(&path)?;
-            let mut stmt = conn
-                .prepare("SELECT run_json FROM mob_runs")
-                .map_err(storage_error)?;
+            let mut stmt = conn.prepare("SELECT run_json FROM mob_runs").map_err(se)?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let mut runs = Vec::new();
             for row in rows {
-                let bytes = row.map_err(storage_error)?;
+                let bytes = row.map_err(se)?;
                 let run: MobRun = decode_json(&bytes)?;
                 if run.mob_id == mob_id && flow_id.as_ref().is_none_or(|fid| run.flow_id == *fid) {
                     runs.push(run);
@@ -445,7 +438,7 @@ impl MobRunStore for SqliteMobRunStore {
         run_id: &RunId,
         expected: MobRunStatus,
         next: MobRunStatus,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         run_sqlite_task(move || {
@@ -458,7 +451,7 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
@@ -476,8 +469,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(true)
         })
         .await
@@ -488,7 +481,7 @@ impl MobRunStore for SqliteMobRunStore {
         run_id: &RunId,
         expected: &KernelState,
         next: &KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         let expected = expected.clone();
@@ -503,7 +496,7 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
@@ -517,8 +510,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(true)
         })
         .await
@@ -531,7 +524,7 @@ impl MobRunStore for SqliteMobRunStore {
         expected_flow_state: &KernelState,
         next_status: MobRunStatus,
         next_flow_state: &KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         let expected_flow_state = expected_flow_state.clone();
@@ -546,7 +539,7 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
@@ -568,8 +561,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(true)
         })
         .await
@@ -579,7 +572,7 @@ impl MobRunStore for SqliteMobRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         let run_id = run_id.clone();
@@ -593,9 +586,9 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
-                return Err(MobError::RunNotFound(run_id));
+                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
             run.step_ledger.push(entry);
@@ -604,8 +597,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(())
         })
         .await
@@ -615,7 +608,7 @@ impl MobRunStore for SqliteMobRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         let run_id = run_id.clone();
@@ -629,9 +622,9 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
-                return Err(MobError::RunNotFound(run_id));
+                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
             let is_duplicate = run.step_ledger.iter().any(|existing| {
@@ -648,8 +641,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(true)
         })
         .await
@@ -660,7 +653,7 @@ impl MobRunStore for SqliteMobRunStore {
         run_id: &RunId,
         step_id: &StepId,
         output: serde_json::Value,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         let run_id = run_id.clone();
@@ -675,9 +668,9 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
-                return Err(MobError::RunNotFound(run_id));
+                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
             if let Some(entry) = run
@@ -688,7 +681,7 @@ impl MobRunStore for SqliteMobRunStore {
             {
                 entry.output = Some(output);
             } else {
-                return Err(MobError::Internal(format!(
+                return Err(MobStoreError::Internal(format!(
                     "cannot set output for unknown step '{step_id}' in run '{run_id}'"
                 )));
             }
@@ -697,8 +690,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(())
         })
         .await
@@ -708,7 +701,7 @@ impl MobRunStore for SqliteMobRunStore {
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let key = run_id.to_string();
         let run_id = run_id.clone();
@@ -722,9 +715,9 @@ impl MobRunStore for SqliteMobRunStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
-                return Err(MobError::RunNotFound(run_id));
+                return Err(MobStoreError::NotFound(format!("run not found: {run_id}")));
             };
             let mut run: MobRun = decode_json(&bytes)?;
             run.failure_ledger.push(entry);
@@ -733,8 +726,8 @@ impl MobRunStore for SqliteMobRunStore {
                 "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
                 params![encoded, key],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(())
         })
         .await
@@ -771,7 +764,7 @@ impl MobSpecStore for SqliteMobSpecStore {
         mob_id: &MobId,
         definition: &MobDefinition,
         revision: Option<u64>,
-    ) -> Result<u64, MobError> {
+    ) -> Result<u64, MobStoreError> {
         let path = self.path.clone();
         let key = mob_id.to_string();
         let mob_id = mob_id.clone();
@@ -787,7 +780,7 @@ impl MobSpecStore for SqliteMobSpecStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let current_revision = match current {
                 Some(bytes) => decode_json::<StoredSpec>(&bytes)?.revision,
                 None => 0,
@@ -796,11 +789,9 @@ impl MobSpecStore for SqliteMobSpecStore {
             if let Some(expected) = revision
                 && expected != current_revision
             {
-                return Err(MobError::SpecRevisionConflict {
-                    mob_id,
-                    expected: revision,
-                    actual: current_revision,
-                });
+                return Err(MobStoreError::CasConflict(format!(
+                    "spec revision conflict for mob {mob_id}: expected {revision:?}, actual {current_revision}"
+                )));
             }
 
             let next_revision = current_revision + 1;
@@ -813,14 +804,17 @@ impl MobSpecStore for SqliteMobSpecStore {
                 "INSERT OR REPLACE INTO mob_specs (mob_id, spec_json) VALUES (?1, ?2)",
                 params![key, encoded],
             )
-            .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(next_revision)
         })
         .await
     }
 
-    async fn get_spec(&self, mob_id: &MobId) -> Result<Option<(MobDefinition, u64)>, MobError> {
+    async fn get_spec(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<(MobDefinition, u64)>, MobStoreError> {
         let path = self.path.clone();
         let key = mob_id.to_string();
         run_sqlite_task(move || {
@@ -832,7 +826,7 @@ impl MobSpecStore for SqliteMobSpecStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             match bytes {
                 Some(b) => {
                     let stored: StoredSpec = decode_json(&b)?;
@@ -844,19 +838,17 @@ impl MobSpecStore for SqliteMobSpecStore {
         .await
     }
 
-    async fn list_specs(&self) -> Result<Vec<MobId>, MobError> {
+    async fn list_specs(&self) -> Result<Vec<MobId>, MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {
             let conn = open_connection(&path)?;
-            let mut stmt = conn
-                .prepare("SELECT mob_id FROM mob_specs")
-                .map_err(storage_error)?;
+            let mut stmt = conn.prepare("SELECT mob_id FROM mob_specs").map_err(se)?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let mut result = Vec::new();
             for row in rows {
-                let id = row.map_err(storage_error)?;
+                let id = row.map_err(se)?;
                 result.push(MobId::from(id));
             }
             Ok(result)
@@ -864,7 +856,11 @@ impl MobSpecStore for SqliteMobSpecStore {
         .await
     }
 
-    async fn delete_spec(&self, mob_id: &MobId, revision: Option<u64>) -> Result<bool, MobError> {
+    async fn delete_spec(
+        &self,
+        mob_id: &MobId,
+        revision: Option<u64>,
+    ) -> Result<bool, MobStoreError> {
         let path = self.path.clone();
         let key = mob_id.to_string();
         run_sqlite_task(move || {
@@ -878,7 +874,7 @@ impl MobSpecStore for SqliteMobSpecStore {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(storage_error)?;
+                .map_err(se)?;
             let Some(bytes) = bytes else {
                 return Ok(false);
             };
@@ -890,8 +886,8 @@ impl MobSpecStore for SqliteMobSpecStore {
             }
 
             tx.execute("DELETE FROM mob_specs WHERE mob_id = ?1", params![key])
-                .map_err(storage_error)?;
-            tx.commit().map_err(storage_error)?;
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
             Ok(true)
         })
         .await
@@ -1083,7 +1079,7 @@ mod tests {
             .put_spec(&MobId::from("mob"), &definition, Some(0))
             .await
             .expect_err("revision conflict expected");
-        assert!(matches!(conflict, MobError::SpecRevisionConflict { .. }));
+        assert!(matches!(conflict, MobStoreError::CasConflict(_)));
 
         let loaded = store.get_spec(&MobId::from("mob")).await.unwrap();
         assert!(loaded.is_some());

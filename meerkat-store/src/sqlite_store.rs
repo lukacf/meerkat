@@ -1,6 +1,7 @@
 //! SQLite-backed session store.
 
-use crate::{SessionFilter, SessionStore, StoreError};
+use crate::error::sse;
+use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::{Session, SessionId, SessionMeta};
@@ -124,9 +125,10 @@ impl SqliteSessionStore {
     }
 }
 
-#[async_trait]
-impl SessionStore for SqliteSessionStore {
-    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+// Private methods return StoreError (preserves internal ? chains).
+// Trait methods convert at the boundary via sse().
+impl SqliteSessionStore {
+    async fn save_impl(&self, session: &Session) -> Result<(), StoreError> {
         let path = self.path.clone();
         let session = session.clone();
         tokio::task::spawn_blocking(move || {
@@ -140,7 +142,7 @@ impl SessionStore for SqliteSessionStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load_impl(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         let path = self.path.clone();
         let session_id = id.to_string();
         tokio::task::spawn_blocking(move || {
@@ -158,7 +160,7 @@ impl SessionStore for SqliteSessionStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+    async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_connection(&path)?;
@@ -218,7 +220,7 @@ impl SessionStore for SqliteSessionStore {
         .map_err(StoreError::Join)?
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+    async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.path.clone();
         let session_id = id.to_string();
         tokio::task::spawn_blocking(move || {
@@ -233,6 +235,25 @@ impl SessionStore for SqliteSessionStore {
         })
         .await
         .map_err(StoreError::Join)?
+    }
+}
+
+#[async_trait]
+impl SessionStore for SqliteSessionStore {
+    async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+        self.save_impl(session).await.map_err(sse)
+    }
+
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+        self.load_impl(id).await.map_err(sse)
+    }
+
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
+        self.list_impl(filter).await.map_err(sse)
+    }
+
+    async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+        self.delete_impl(id).await.map_err(sse)
     }
 }
 

@@ -18,7 +18,7 @@ use meerkat_core::{
     Config, Provider, ProviderConfig, Session, SessionId, SessionMetadata, SessionTooling,
     UserMessage,
 };
-use meerkat_store::{SessionFilter, SessionStore, StoreError};
+use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -949,24 +949,24 @@ impl TrackingSessionStore {
 
 #[async_trait]
 impl SessionStore for TrackingSessionStore {
-    async fn save(&self, _session: &Session) -> Result<(), StoreError> {
+    async fn save(&self, _session: &Session) -> Result<(), SessionStoreError> {
         self.save_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
-    async fn load(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load(&self, _id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         Ok(None)
     }
 
     async fn list(
         &self,
         _filter: SessionFilter,
-    ) -> Result<Vec<meerkat_core::SessionMeta>, StoreError> {
+    ) -> Result<Vec<meerkat_core::SessionMeta>, SessionStoreError> {
         Ok(vec![])
     }
 
-    async fn delete(&self, _id: &SessionId) -> Result<(), StoreError> {
+    async fn delete(&self, _id: &SessionId) -> Result<(), SessionStoreError> {
         Ok(())
     }
 }

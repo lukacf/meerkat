@@ -2,8 +2,9 @@
 //!
 //! Each session is stored as a single file with the session as JSON.
 
+use crate::error::sse;
 use crate::index::RedbSessionIndex;
-use crate::{SessionFilter, SessionStore, StoreError};
+use crate::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 use async_trait::async_trait;
 use meerkat_core::{Session, SessionId, SessionMeta};
 use std::path::PathBuf;
@@ -229,9 +230,10 @@ impl JsonlStore {
     }
 }
 
-#[async_trait]
-impl SessionStore for JsonlStore {
-    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+// Private methods return StoreError (preserves internal ? chains).
+// Trait methods convert at the boundary via sse().
+impl JsonlStore {
+    async fn save_impl(&self, session: &Session) -> Result<(), StoreError> {
         // Ensure directory exists
         self.init().await?;
 
@@ -281,7 +283,7 @@ impl SessionStore for JsonlStore {
         Ok(())
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load_impl(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         let path = self.session_path(id);
 
         // Use async file open and handle NotFound instead of sync path.exists()
@@ -300,7 +302,7 @@ impl SessionStore for JsonlStore {
         Ok(Some(session))
     }
 
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+    async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
         let index = self.index().await?;
         let result = spawn_blocking(move || index.list_meta(filter)).await;
         match result {
@@ -310,7 +312,7 @@ impl SessionStore for JsonlStore {
         }
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+    async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.session_path(id);
         let meta_path = self.metadata_path(id);
 
@@ -337,6 +339,25 @@ impl SessionStore for JsonlStore {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SessionStore for JsonlStore {
+    async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
+        self.save_impl(session).await.map_err(sse)
+    }
+
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
+        self.load_impl(id).await.map_err(sse)
+    }
+
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
+        self.list_impl(filter).await.map_err(sse)
+    }
+
+    async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
+        self.delete_impl(id).await.map_err(sse)
     }
 }
 

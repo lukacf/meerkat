@@ -32,6 +32,11 @@ pub use adapter::StoreAdapter;
 pub use blob::MemoryBlobStore;
 pub use error::StoreError;
 
+// Re-export the canonical trait, filter, and error from meerkat-core.
+// Custom storage backends depend only on meerkat-core; existing consumers
+// of meerkat-store see no change.
+pub use meerkat_core::{SessionFilter, SessionStore, SessionStoreError};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use blob::FsBlobStore;
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,45 +54,6 @@ pub use realm::{
 pub use redb_store::RedbSessionStore;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub use sqlite_store::SqliteSessionStore;
-
-use async_trait::async_trait;
-use meerkat_core::time_compat::SystemTime;
-use meerkat_core::{Session, SessionId, SessionMeta};
-
-/// Filter for listing sessions
-#[derive(Debug, Clone, Default)]
-pub struct SessionFilter {
-    /// Only sessions created after this time
-    pub created_after: Option<SystemTime>,
-    /// Only sessions updated after this time
-    pub updated_after: Option<SystemTime>,
-    /// Maximum number of results
-    pub limit: Option<usize>,
-    /// Offset for pagination
-    pub offset: Option<usize>,
-}
-
-/// Abstraction over session storage backends
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait SessionStore: Send + Sync {
-    /// Save a session (create or update)
-    async fn save(&self, session: &Session) -> Result<(), StoreError>;
-
-    /// Load a session by ID
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError>;
-
-    /// List sessions matching filter
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError>;
-
-    /// Delete a session
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError>;
-
-    /// Check if a session exists
-    async fn exists(&self, id: &SessionId) -> Result<bool, StoreError> {
-        Ok(self.load(id).await?.is_some())
-    }
-}
 
 #[cfg(all(feature = "jsonl", not(target_arch = "wasm32")))]
 pub use jsonl::JsonlStore;

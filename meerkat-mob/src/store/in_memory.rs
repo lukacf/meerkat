@@ -1,8 +1,7 @@
 //! In-memory store implementations.
 
-use super::{MobEventStore, MobRunStore, MobSpecStore};
+use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
 use crate::definition::MobDefinition;
-use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent};
 use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FailureLedgerEntry, MobRun, MobRunStatus, StepLedgerEntry};
@@ -31,7 +30,7 @@ impl InMemoryMobEventStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobEventStore for InMemoryMobEventStore {
-    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobError> {
+    async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let mut events = self.events.write().await;
         let cursor = events.last().map_or(1, |existing| existing.cursor + 1);
         let stored = MobEvent {
@@ -44,7 +43,7 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(stored)
     }
 
-    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobError> {
+    async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let mut events = self.events.write().await;
         let mut results = Vec::with_capacity(batch.len());
         for event in batch {
@@ -61,7 +60,7 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(results)
     }
 
-    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobError> {
+    async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
         let events = self.events.read().await;
         Ok(events
             .iter()
@@ -71,16 +70,16 @@ impl MobEventStore for InMemoryMobEventStore {
             .collect())
     }
 
-    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobError> {
+    async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         Ok(self.events.read().await.clone())
     }
 
-    async fn clear(&self) -> Result<(), MobError> {
+    async fn clear(&self) -> Result<(), MobStoreError> {
         self.events.write().await.clear();
         Ok(())
     }
 
-    async fn prune(&self, older_than: DateTime<Utc>) -> Result<u64, MobError> {
+    async fn prune(&self, older_than: DateTime<Utc>) -> Result<u64, MobStoreError> {
         let mut events = self.events.write().await;
         let before = events.len();
         events.retain(|event| event.timestamp >= older_than);
@@ -103,10 +102,10 @@ impl InMemoryMobRunStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobRunStore for InMemoryMobRunStore {
-    async fn create_run(&self, run: MobRun) -> Result<(), MobError> {
+    async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         if runs.contains_key(&run.run_id) {
-            return Err(MobError::Internal(format!(
+            return Err(MobStoreError::Internal(format!(
                 "run already exists: {}",
                 run.run_id
             )));
@@ -115,7 +114,7 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(())
     }
 
-    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobError> {
+    async fn get_run(&self, run_id: &RunId) -> Result<Option<MobRun>, MobStoreError> {
         Ok(self.runs.read().await.get(run_id).cloned())
     }
 
@@ -123,7 +122,7 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         mob_id: &MobId,
         flow_id: Option<&FlowId>,
-    ) -> Result<Vec<MobRun>, MobError> {
+    ) -> Result<Vec<MobRun>, MobStoreError> {
         Ok(self
             .runs
             .read()
@@ -142,7 +141,7 @@ impl MobRunStore for InMemoryMobRunStore {
         run_id: &RunId,
         expected: MobRunStatus,
         next: MobRunStatus,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
             return Ok(false);
@@ -163,7 +162,7 @@ impl MobRunStore for InMemoryMobRunStore {
         run_id: &RunId,
         expected: &KernelState,
         next: &KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
             return Ok(false);
@@ -182,7 +181,7 @@ impl MobRunStore for InMemoryMobRunStore {
         expected_flow_state: &KernelState,
         next_status: MobRunStatus,
         next_flow_state: &KernelState,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let Some(run) = runs.get_mut(run_id) else {
             return Ok(false);
@@ -206,11 +205,11 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         run.step_ledger.push(entry);
         Ok(())
     }
@@ -219,11 +218,11 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         entry: StepLedgerEntry,
-    ) -> Result<bool, MobError> {
+    ) -> Result<bool, MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         let is_duplicate = run.step_ledger.iter().any(|existing| {
             existing.step_id == entry.step_id
                 && existing.meerkat_id == entry.meerkat_id
@@ -241,11 +240,11 @@ impl MobRunStore for InMemoryMobRunStore {
         run_id: &RunId,
         step_id: &StepId,
         output: serde_json::Value,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         if let Some(entry) = run
             .step_ledger
             .iter_mut()
@@ -255,7 +254,7 @@ impl MobRunStore for InMemoryMobRunStore {
             entry.output = Some(output);
             return Ok(());
         }
-        Err(MobError::Internal(format!(
+        Err(MobStoreError::Internal(format!(
             "cannot set output for unknown step '{step_id}' in run '{run_id}'"
         )))
     }
@@ -264,11 +263,11 @@ impl MobRunStore for InMemoryMobRunStore {
         &self,
         run_id: &RunId,
         entry: FailureLedgerEntry,
-    ) -> Result<(), MobError> {
+    ) -> Result<(), MobStoreError> {
         let mut runs = self.runs.write().await;
         let run = runs
             .get_mut(run_id)
-            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
         run.failure_ledger.push(entry);
         Ok(())
     }
@@ -294,17 +293,15 @@ impl MobSpecStore for InMemoryMobSpecStore {
         mob_id: &MobId,
         definition: &MobDefinition,
         revision: Option<u64>,
-    ) -> Result<u64, MobError> {
+    ) -> Result<u64, MobStoreError> {
         let mut specs = self.specs.write().await;
         let current_revision = specs.get(mob_id).map_or(0, |(_, rev)| *rev);
         if let Some(expected) = revision
             && expected != current_revision
         {
-            return Err(MobError::SpecRevisionConflict {
-                mob_id: mob_id.clone(),
-                expected: revision,
-                actual: current_revision,
-            });
+            return Err(MobStoreError::CasConflict(format!(
+                "spec revision conflict for mob {mob_id}: expected {revision:?}, actual {current_revision}"
+            )));
         }
 
         let next_revision = current_revision + 1;
@@ -312,15 +309,22 @@ impl MobSpecStore for InMemoryMobSpecStore {
         Ok(next_revision)
     }
 
-    async fn get_spec(&self, mob_id: &MobId) -> Result<Option<(MobDefinition, u64)>, MobError> {
+    async fn get_spec(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<(MobDefinition, u64)>, MobStoreError> {
         Ok(self.specs.read().await.get(mob_id).cloned())
     }
 
-    async fn list_specs(&self) -> Result<Vec<MobId>, MobError> {
+    async fn list_specs(&self) -> Result<Vec<MobId>, MobStoreError> {
         Ok(self.specs.read().await.keys().cloned().collect())
     }
 
-    async fn delete_spec(&self, mob_id: &MobId, revision: Option<u64>) -> Result<bool, MobError> {
+    async fn delete_spec(
+        &self,
+        mob_id: &MobId,
+        revision: Option<u64>,
+    ) -> Result<bool, MobStoreError> {
         let mut specs = self.specs.write().await;
         let Some((_, current_revision)) = specs.get(mob_id) else {
             return Ok(false);
@@ -529,14 +533,7 @@ mod tests {
             .put_spec(&mob_id, &definition, Some(1))
             .await
             .unwrap_err();
-        assert!(matches!(
-            conflict,
-            MobError::SpecRevisionConflict {
-                expected: Some(1),
-                actual: 2,
-                ..
-            }
-        ));
+        assert!(matches!(conflict, MobStoreError::CasConflict(_)));
 
         assert!(!store.delete_spec(&mob_id, Some(1)).await.unwrap());
         assert!(store.delete_spec(&mob_id, Some(2)).await.unwrap());

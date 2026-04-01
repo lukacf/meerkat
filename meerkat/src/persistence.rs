@@ -230,7 +230,7 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::{Session, SessionId, SessionMeta};
     use meerkat_runtime::store::RuntimeStoreError;
-    use meerkat_store::{MemoryBlobStore, MemoryStore, SessionFilter};
+    use meerkat_store::{MemoryBlobStore, MemoryStore, SessionFilter, SessionStoreError};
     use tempfile::TempDir;
 
     struct WrappedStore {
@@ -239,19 +239,19 @@ mod tests {
 
     #[async_trait]
     impl SessionStore for WrappedStore {
-        async fn save(&self, session: &Session) -> Result<(), StoreError> {
+        async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
             self.inner.save(session).await
         }
 
-        async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+        async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
             self.inner.load(id).await
         }
 
-        async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+        async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
             self.inner.list(filter).await
         }
 
-        async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+        async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
             self.inner.delete(id).await
         }
     }

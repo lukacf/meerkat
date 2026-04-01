@@ -50,6 +50,7 @@ pub mod runtime_bootstrap;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod session_store;
 pub mod skills;
 pub mod skills_config;
 pub mod state;
@@ -170,6 +171,7 @@ pub use session::{
     SessionLlmIdentity, SessionMeta, SessionMetadata, SessionSystemContextState, SessionTooling,
     SystemContextStageError,
 };
+pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope, ToolScopeHandle,

@@ -97,7 +97,7 @@ impl EphemeralSessionStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl SessionStore for EphemeralSessionStore {
-    async fn save(&self, session: &Session) -> Result<(), meerkat_store::StoreError> {
+    async fn save(&self, session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
         self.sessions
             .write()
             .await
@@ -105,14 +105,17 @@ impl SessionStore for EphemeralSessionStore {
         Ok(())
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, meerkat_store::StoreError> {
+    async fn load(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
         Ok(self.sessions.read().await.get(id).cloned())
     }
 
     async fn list(
         &self,
         filter: SessionFilter,
-    ) -> Result<Vec<SessionMeta>, meerkat_store::StoreError> {
+    ) -> Result<Vec<SessionMeta>, meerkat_store::SessionStoreError> {
         let mut metas: Vec<SessionMeta> = self
             .sessions
             .read()
@@ -139,7 +142,7 @@ impl SessionStore for EphemeralSessionStore {
         Ok(metas)
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::StoreError> {
+    async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
         self.sessions.write().await.remove(id);
         Ok(())
     }

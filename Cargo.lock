@@ -2983,6 +2983,7 @@ dependencies = [
  "meerkat-skills",
  "nix 0.29.0",
  "parking_lot",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

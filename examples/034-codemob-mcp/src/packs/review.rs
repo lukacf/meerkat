@@ -26,8 +26,8 @@ impl Pack for ReviewPack {
         // Different models per reviewer for diverse perspectives
         let agents = [
             ("reviewer",    "reviewer-skill",          "General code reviewer",          "gemini-3.1-pro-preview"),
-            ("security",    "security-skill",          "Security-focused reviewer",      "gpt-5.3-codex"),
-            ("perf",        "perf-skill",              "Performance-focused reviewer",   "gemini-3-flash-preview"),
+            ("security",    "security-skill",          "Security-focused reviewer",      "gpt-5.4"),
+            ("perf",        "perf-skill",              "Performance-focused reviewer",   "gemini-3.1-flash-lite-preview"),
             ("synthesizer", "synthesizer-skill",       "Review synthesizer",             "claude-opus-4-6"),
         ];
 

@@ -28,6 +28,8 @@ struct DeliberateInput {
     context: Option<String>,
     model_overrides: Option<BTreeMap<String, String>>,
     provider_params: Option<Value>,
+    /// Continue an existing mob session instead of creating a new one.
+    session_id: Option<String>,
 }
 
 pub async fn handle(
@@ -59,27 +61,53 @@ pub async fn handle(
             pack.definition(&input.task, context, &overrides, input.provider_params.as_ref());
         (total_steps, has_flows, definition)
     };
-    let mob_id = definition.id.clone();
+
+    // If session_id is provided, attempt to reuse an existing mob.
+    let resuming = input.session_id.is_some();
+    let mob_id = if let Some(ref sid) = input.session_id {
+        MobId::from(sid.as_str())
+    } else {
+        definition.id.clone()
+    };
+
+    // Check if the mob already exists (resume path).
+    let mob_exists = if resuming {
+        state.mob_state.mob_status(&mob_id).await.is_ok()
+    } else {
+        false
+    };
 
     if let Some(context) = request_context.as_ref() {
-        let mob_state = state.mob_state.clone();
-        let mob_id_for_cancel = mob_id.clone();
-        context.replace_cancel_action(request_action(move || {
-            let mob_state = mob_state.clone();
-            let mob_id = mob_id_for_cancel.clone();
-            async move {
-                let _ = mob_state.mob_destroy(&mob_id).await;
-            }
-        }));
-        let mob_state = state.mob_state.clone();
-        let mob_id_for_cleanup = mob_id.clone();
-        context.set_unpublished_cleanup(request_action(move || {
-            let mob_state = mob_state.clone();
-            let mob_id = mob_id_for_cleanup.clone();
-            async move {
-                let _ = mob_state.mob_destroy(&mob_id).await;
-            }
-        }));
+        if !resuming {
+            let mob_state = state.mob_state.clone();
+            let mob_id_for_cancel = mob_id.clone();
+            context.replace_cancel_action(request_action(move || {
+                let mob_state = mob_state.clone();
+                let mob_id = mob_id_for_cancel.clone();
+                async move {
+                    let _ = mob_state.mob_destroy(&mob_id).await;
+                }
+            }));
+            let mob_state = state.mob_state.clone();
+            let mob_id_for_cleanup = mob_id.clone();
+            context.set_unpublished_cleanup(request_action(move || {
+                let mob_state = mob_state.clone();
+                let mob_id = mob_id_for_cleanup.clone();
+                async move {
+                    let _ = mob_state.mob_destroy(&mob_id).await;
+                }
+            }));
+        } else {
+            let mob_state = state.mob_state.clone();
+            let mob_id_for_cancel = mob_id.clone();
+            context.replace_cancel_action(request_action(move || {
+                let mob_state = mob_state.clone();
+                let mob_id = mob_id_for_cancel.clone();
+                async move {
+                    let _ = mob_state.mob_stop(&mob_id).await;
+                }
+            }));
+        }
         let _ = context.run_cancel_if_requested().await;
     }
 
@@ -96,86 +124,95 @@ pub async fn handle(
         None
     };
 
-    // Create mob
-    state
-        .mob_state
-        .mob_create_definition(definition)
-        .await
-        .map_err(|e| ToolCallError::internal(format!("Mob creation failed: {e}")))?;
+    if !mob_exists {
+        // Override the mob id when resuming with a new mob
+        let definition = if resuming {
+            MobDefinition { id: mob_id.clone(), ..definition }
+        } else {
+            definition
+        };
 
-    // Spawn one agent per profile (meerkat_id = profile name for simplicity)
-    let specs: Vec<SpawnMemberSpec> = profile_names
-        .iter()
-        .map(|name| SpawnMemberSpec::new(name.as_str(), name.as_str()))
-        .collect();
+        // Create mob
+        state
+            .mob_state
+            .mob_create_definition(definition)
+            .await
+            .map_err(|e| ToolCallError::internal(format!("Mob creation failed: {e}")))?;
 
-    let spawn_results = state
-        .mob_state
-        .mob_spawn_many(&mob_id, specs)
-        .await
-        .map_err(|e| ToolCallError::internal(format!("Spawn failed: {e}")))?;
+        // Spawn one agent per profile (meerkat_id = profile name for simplicity)
+        let specs: Vec<SpawnMemberSpec> = profile_names
+            .iter()
+            .map(|name| SpawnMemberSpec::new(name.as_str(), name.as_str()))
+            .collect();
 
-    // Fail fast if any agent failed to spawn — every flow step targets a
-    // specific role, so a missing agent means a guaranteed downstream failure.
-    let mut failed = Vec::new();
-    for (i, result) in spawn_results.iter().enumerate() {
-        match result {
-            Ok(_) => tracing::info!(profile = %profile_names[i], "spawned"),
-            Err(e) => failed.push(format!("{}: {e}", profile_names[i])),
-        }
-    }
-    if !failed.is_empty() {
-        // Clean up the partially-created mob before returning
-        let _ = state.mob_state.mob_destroy(&mob_id).await;
-        return Err(ToolCallError::internal(format!(
-            "Spawn failed for: {}",
-            failed.join("; ")
-        )));
-    }
+        let spawn_results = state
+            .mob_state
+            .mob_spawn_many(&mob_id, specs)
+            .await
+            .map_err(|e| ToolCallError::internal(format!("Spawn failed: {e}")))?;
 
-    // Wait for all spawned agents to appear in the roster before running
-    // the flow. The spawn command is processed by the mob actor, but the
-    // roster update may not be visible yet when we query list_members().
-    let expected = profile_names.len();
-    let mut visible = 0;
-    for _ in 0..20 {
-        // 20 attempts × 50ms = 1s max wait
-        match state.mob_state.mob_list_members(&mob_id).await {
-            Ok(members) => {
-                visible = members.len();
-                if visible >= expected {
-                    break;
-                }
+        // Fail fast if any agent failed to spawn — every flow step targets a
+        // specific role, so a missing agent means a guaranteed downstream failure.
+        let mut failed = Vec::new();
+        for (i, result) in spawn_results.iter().enumerate() {
+            match result {
+                Ok(_) => tracing::info!(profile = %profile_names[i], "spawned"),
+                Err(e) => failed.push(format!("{}: {e}", profile_names[i])),
             }
-            Err(_) => {}
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    if visible < expected {
-        let _ = state.mob_state.mob_destroy(&mob_id).await;
-        return Err(ToolCallError::internal(format!(
-            "Roster not ready: expected {expected} agents, only {visible} visible after 1s"
-        )));
-    }
+        if !failed.is_empty() {
+            // Clean up the partially-created mob before returning
+            let _ = state.mob_state.mob_destroy(&mob_id).await;
+            return Err(ToolCallError::internal(format!(
+                "Spawn failed for: {}",
+                failed.join("; ")
+            )));
+        }
 
-    // Wait for all autonomous kickoff turns to complete before subscribing
-    // to events. Without this barrier, the event subscription misses
-    // RunStarted events from kickoff turns (emitted during spawn) but sees
-    // their RunCompleted, causing the active_turns counter to go negative
-    // and triggering premature quiescence detection.
-    if let Some(token) = progress_token.as_ref() {
-        send_progress(
-            progress_notifier.as_ref(),
-            token, 0, 1,
-            &format!("waiting for {expected} agents to complete kickoff"),
-        );
-    }
-    if let Err(e) = state.mob_state.mob_wait_kickoff(
-        &mob_id,
-        None,
-        Some(120_000), // 2 min timeout — kickoff turns are simple LLM calls
-    ).await {
-        tracing::warn!(mob_id = %mob_id, error = %e, "kickoff barrier failed; proceeding anyway");
+        // Wait for all spawned agents to appear in the roster before running
+        // the flow. The spawn command is processed by the mob actor, but the
+        // roster update may not be visible yet when we query list_members().
+        let expected = profile_names.len();
+        let mut visible = 0;
+        for _ in 0..20 {
+            // 20 attempts × 50ms = 1s max wait
+            match state.mob_state.mob_list_members(&mob_id).await {
+                Ok(members) => {
+                    visible = members.len();
+                    if visible >= expected {
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if visible < expected {
+            let _ = state.mob_state.mob_destroy(&mob_id).await;
+            return Err(ToolCallError::internal(format!(
+                "Roster not ready: expected {expected} agents, only {visible} visible after 1s"
+            )));
+        }
+
+        // Wait for all autonomous kickoff turns to complete before subscribing
+        // to events. Without this barrier, the event subscription misses
+        // RunStarted events from kickoff turns (emitted during spawn) but sees
+        // their RunCompleted, causing the active_turns counter to go negative
+        // and triggering premature quiescence detection.
+        if let Some(token) = progress_token.as_ref() {
+            send_progress(
+                progress_notifier.as_ref(),
+                token, 0, 1,
+                &format!("waiting for {expected} agents to complete kickoff"),
+            );
+        }
+        if let Err(e) = state.mob_state.mob_wait_kickoff(
+            &mob_id,
+            None,
+            Some(120_000), // 2 min timeout — kickoff turns are simple LLM calls
+        ).await {
+            tracing::warn!(mob_id = %mob_id, error = %e, "kickoff barrier failed; proceeding anyway");
+        }
     }
 
     // Route to flow-based or comms-based execution
@@ -208,12 +245,23 @@ pub async fn handle(
         .await
     };
 
-    // Destroy mob (best-effort)
-    if let Err(e) = state.mob_state.mob_destroy(&mob_id).await {
-        tracing::warn!(mob_id = %mob_id, error = %e, "mob cleanup failed");
+    // Only destroy mob if not resuming (caller owns the lifecycle)
+    if !resuming {
+        if let Err(e) = state.mob_state.mob_destroy(&mob_id).await {
+            tracing::warn!(mob_id = %mob_id, error = %e, "mob cleanup failed");
+        }
     }
 
-    result
+    // Append session_id to content so the calling agent can continue the session
+    match result {
+        Ok(mut val) => {
+            if let Some(arr) = val.get_mut("content").and_then(|c| c.as_array_mut()) {
+                arr.push(json!({"type": "text", "text": format!("\n\n---\nsession_id: {mob_id}")}));
+            }
+            Ok(val)
+        }
+        err => err,
+    }
 }
 
 // ── Flow-based execution (structured packs) ─────────────────────────────────

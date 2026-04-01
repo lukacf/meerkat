@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use meerkat::{AgentFactory, FactoryAgentBuilder, build_ephemeral_service};
@@ -40,7 +41,7 @@ impl ForceState {
         let store_path = store_dir.path().join("sessions");
         std::fs::create_dir_all(&store_path)?;
 
-        let factory = AgentFactory::new(&store_path).comms(true);
+        let factory = AgentFactory::new(&store_path).comms(true).memory(true);
         let config = Config::default();
         let session_service: Arc<SessionSvc> =
             Arc::new(build_ephemeral_service(factory, config, 64));
@@ -98,4 +99,63 @@ impl ForceState {
             registry.register(pack);
         }
     }
+}
+
+// ── Skill resolution ───────────────────────────────────────────────────────
+
+/// Search directories for `.claude/skills/` collections.
+fn skill_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    // Project-level (CWD)
+    dirs.push(PathBuf::from(".claude/skills"));
+    // User-level
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".claude/skills"));
+    }
+    dirs
+}
+
+/// Read a SKILL.md and all `references/*.md` files, concatenated.
+fn read_skill_dir(skill_dir: &Path) -> Option<String> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let mut content = std::fs::read_to_string(&skill_md).ok()?;
+
+    let refs_dir = skill_dir.join("references");
+    if refs_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&refs_dir) {
+            let mut ref_files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+                .collect();
+            ref_files.sort_by_key(|e| e.file_name());
+            for entry in ref_files {
+                if let Ok(ref_content) = std::fs::read_to_string(entry.path()) {
+                    content.push_str("\n\n---\n\n");
+                    content.push_str(&ref_content);
+                }
+            }
+        }
+    }
+    Some(content)
+}
+
+/// Resolve skill names to their rendered content.
+///
+/// Searches project-level `.claude/skills/` then user-level `~/.claude/skills/`.
+/// Returns the content for each found skill; silently skips unknown names.
+pub fn resolve_skills(names: &[String]) -> Vec<String> {
+    let dirs = skill_search_dirs();
+    names
+        .iter()
+        .filter_map(|name| {
+            for dir in &dirs {
+                let skill_dir = dir.join(name);
+                if let Some(content) = read_skill_dir(&skill_dir) {
+                    return Some(content);
+                }
+            }
+            tracing::warn!(skill = %name, "skill not found in any search path");
+            None
+        })
+        .collect()
 }

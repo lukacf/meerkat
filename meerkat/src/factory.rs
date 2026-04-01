@@ -1538,38 +1538,36 @@ impl AgentFactory {
         // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
         // already-composed comms gateway).
         let effective_mob = build_config.override_mob.unwrap_or(self.enable_mob);
-        if effective_mob {
-            if let Some(mob_factory) = build_config.mob_tools.take() {
-                // Build comms runtime arg: clone from the comms phase if available.
-                #[cfg(feature = "comms")]
-                let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = comms_runtime
-                    .as_ref()
-                    .map(|r| Arc::clone(r) as Arc<dyn meerkat_core::agent::CommsRuntime>);
-                #[cfg(not(feature = "comms"))]
-                let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = None;
+        if effective_mob && let Some(mob_factory) = build_config.mob_tools.take() {
+            // Build comms runtime arg: clone from the comms phase if available.
+            #[cfg(feature = "comms")]
+            let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = comms_runtime
+                .as_ref()
+                .map(|r| Arc::clone(r) as Arc<dyn meerkat_core::agent::CommsRuntime>);
+            #[cfg(not(feature = "comms"))]
+            let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = None;
 
-                let mob_args = meerkat_core::service::MobToolsBuildArgs {
-                    session_id: session.id().clone(),
-                    ops_registry: Arc::clone(&ops_lifecycle),
-                    comms_runtime: mob_comms,
-                };
-                let mob_dispatcher = mob_factory
-                    .build_mob_tools(mob_args)
-                    .await
-                    .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
-                let mob_usage = render_tool_usage_instructions(mob_dispatcher.tools().as_ref());
-                let gateway = meerkat_core::ToolGatewayBuilder::new()
-                    .add_dispatcher(tools)
-                    .add_dispatcher(mob_dispatcher)
-                    .build()
-                    .map_err(|e| BuildAgentError::Config(format!("Mob tool composition: {e}")))?;
-                tools = Arc::new(gateway);
-                if !mob_usage.is_empty() {
-                    if !tool_usage_instructions.is_empty() {
-                        tool_usage_instructions.push_str("\n\n");
-                    }
-                    tool_usage_instructions.push_str(&mob_usage);
+            let mob_args = meerkat_core::service::MobToolsBuildArgs {
+                session_id: session.id().clone(),
+                ops_registry: Arc::clone(&ops_lifecycle),
+                comms_runtime: mob_comms,
+            };
+            let mob_dispatcher = mob_factory
+                .build_mob_tools(mob_args)
+                .await
+                .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
+            let mob_usage = render_tool_usage_instructions(mob_dispatcher.tools().as_ref());
+            let gateway = meerkat_core::ToolGatewayBuilder::new()
+                .add_dispatcher(tools)
+                .add_dispatcher(mob_dispatcher)
+                .build()
+                .map_err(|e| BuildAgentError::Config(format!("Mob tool composition: {e}")))?;
+            tools = Arc::new(gateway);
+            if !mob_usage.is_empty() {
+                if !tool_usage_instructions.is_empty() {
+                    tool_usage_instructions.push_str("\n\n");
                 }
+                tool_usage_instructions.push_str(&mob_usage);
             }
         }
 

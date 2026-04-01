@@ -21,6 +21,7 @@ use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
 use crate::event::ExternalToolDelta;
 use crate::hooks::HookEngine;
+use crate::ops_lifecycle::{OperationKind, OperationStatus, OperationTerminalOutcome};
 use crate::retry::RetryPolicy;
 use crate::schema::{CompiledSchema, SchemaError};
 use crate::session::Session;
@@ -33,6 +34,7 @@ use crate::types::{
     ToolDef, Usage,
 };
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -135,6 +137,32 @@ pub struct ExternalToolUpdate {
     pub notices: Vec<ExternalToolDelta>,
     /// Names of servers still connecting in the background.
     pub pending: Vec<String>,
+    /// Detached background operation completions since last poll.
+    pub background_completions: Vec<DetachedOpCompletion>,
+}
+
+/// Completion notice for a detached background operation, projected from
+/// canonical ops-lifecycle terminal state plus dispatcher-owned display metadata.
+///
+/// This is a rebuildable projection (INV-003), not authoritative state.
+/// Terminal class and timing come from `OperationLifecycleSnapshot` (INV-001).
+/// Shell-projected detail is supplementary display only (INV-002).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachedOpCompletion {
+    /// App-facing job identifier (the control noun for surfaces).
+    pub job_id: String,
+    /// Operation kind from canonical ops-lifecycle.
+    pub kind: OperationKind,
+    /// Terminal status from canonical ops-lifecycle.
+    pub status: OperationStatus,
+    /// Terminal outcome from canonical ops-lifecycle.
+    pub terminal_outcome: Option<OperationTerminalOutcome>,
+    /// Canonical display label from ops-lifecycle snapshot.
+    pub display_name: String,
+    /// Dispatcher-projected summary (exit code, output tail). Display only.
+    pub detail: String,
+    /// Monotonic elapsed millis from ops-lifecycle snapshot.
+    pub elapsed_ms: Option<u64>,
 }
 
 /// Trait for tool dispatchers
@@ -761,5 +789,49 @@ mod tests {
             Ok(_) => panic!("expected SharedOwnership error, got Ok"),
             Err(e) => panic!("expected SharedOwnership, got {e:?}"),
         }
+    }
+
+    /// UNIT-001: OperationStatus::is_terminal() returns true for all terminal
+    /// variants and false for non-terminal ones.
+    #[test]
+    fn unit_001_terminal_status_values() {
+        use crate::ops_lifecycle::OperationStatus;
+        assert!(OperationStatus::Completed.is_terminal());
+        assert!(OperationStatus::Failed.is_terminal());
+        assert!(OperationStatus::Cancelled.is_terminal());
+        assert!(OperationStatus::Aborted.is_terminal());
+        assert!(OperationStatus::Retired.is_terminal());
+        assert!(OperationStatus::Terminated.is_terminal());
+        assert!(!OperationStatus::Running.is_terminal());
+        assert!(!OperationStatus::Provisioning.is_terminal());
+        assert!(!OperationStatus::Retiring.is_terminal());
+        assert!(!OperationStatus::Absent.is_terminal());
+    }
+
+    /// UNIT-002: DetachedOpCompletion serializes without operation_id.
+    /// The app-facing control noun is job_id (CONTRACT-003).
+    #[test]
+    fn unit_002_detached_op_completion_has_no_operation_id() {
+        use crate::agent::DetachedOpCompletion;
+        use crate::ops_lifecycle::{OperationKind, OperationStatus};
+
+        let completion = DetachedOpCompletion {
+            job_id: "j_test".into(),
+            kind: OperationKind::BackgroundToolOp,
+            status: OperationStatus::Completed,
+            terminal_outcome: None,
+            display_name: "test cmd".into(),
+            detail: "ok".into(),
+            elapsed_ms: None,
+        };
+        let json = serde_json::to_value(&completion).unwrap();
+        assert!(
+            json.get("operation_id").is_none(),
+            "operation_id must not appear in serialized DetachedOpCompletion (CONTRACT-003)"
+        );
+        assert!(
+            json.get("job_id").is_some(),
+            "job_id must be the app-facing control noun"
+        );
     }
 }

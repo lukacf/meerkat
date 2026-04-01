@@ -229,6 +229,10 @@ struct RuntimeSessionEntry {
     completions: SharedCompletionRegistry,
     /// Runtime-loop capabilities. Presence means a loop is attached.
     attachment: Option<RuntimeLoopAttachment>,
+    /// Detached-wake state for background op completions.
+    detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
+    /// Handle for the detached-op waker task.
+    _waker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -420,6 +424,8 @@ impl RuntimeSessionAdapter {
             ops_lifecycle: Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
+            detached_wake: None,
+            _waker_handle: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -472,51 +478,59 @@ impl RuntimeSessionAdapter {
                     entry.has_attachment(),
                     entry.driver.clone(),
                     entry.completions.clone(),
+                    entry.ops_lifecycle.clone(),
                 )
             })
         };
 
-        let (driver, completions) = if let Some((has_attachment, driver, completions)) = existing {
-            if has_attachment {
-                return;
-            }
-            (driver, completions)
-        } else {
-            let mut recovered_entry = self.make_driver(&session_id);
-            if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-                tracing::error!(
-                    %session_id,
-                    error = %err,
-                    "failed to recover runtime driver during registration"
-                );
-                return;
-            }
-
-            let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(&session_id) {
-                entry.clear_dead_attachment();
-                if entry.has_attachment() {
+        let (driver, completions, ops_lifecycle) =
+            if let Some((has_attachment, driver, completions, ops_lifecycle)) = existing {
+                if has_attachment {
                     return;
                 }
-                (entry.driver.clone(), entry.completions.clone())
+                (driver, completions, ops_lifecycle)
             } else {
-                let driver = Arc::new(Mutex::new(recovered_entry));
-                let completions =
-                    Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                sessions.insert(
-                    session_id.clone(),
-                    RuntimeSessionEntry {
-                        driver: driver.clone(),
-                        ops_lifecycle: Arc::new(
-                            crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new(),
-                        ),
-                        completions: completions.clone(),
-                        attachment: None,
-                    },
-                );
-                (driver, completions)
-            }
-        };
+                let mut recovered_entry = self.make_driver(&session_id);
+                if let Err(err) = recovered_entry.as_driver_mut().recover().await {
+                    tracing::error!(
+                        %session_id,
+                        error = %err,
+                        "failed to recover runtime driver during registration"
+                    );
+                    return;
+                }
+
+                let mut sessions = self.sessions.write().await;
+                if let Some(entry) = sessions.get_mut(&session_id) {
+                    entry.clear_dead_attachment();
+                    if entry.has_attachment() {
+                        return;
+                    }
+                    (
+                        entry.driver.clone(),
+                        entry.completions.clone(),
+                        entry.ops_lifecycle.clone(),
+                    )
+                } else {
+                    let driver = Arc::new(Mutex::new(recovered_entry));
+                    let completions =
+                        Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
+                    let ops_lifecycle =
+                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+                    sessions.insert(
+                        session_id.clone(),
+                        RuntimeSessionEntry {
+                            driver: driver.clone(),
+                            ops_lifecycle: ops_lifecycle.clone(),
+                            completions: completions.clone(),
+                            attachment: None,
+                            detached_wake: None,
+                            _waker_handle: None,
+                        },
+                    );
+                    (driver, completions, ops_lifecycle)
+                }
+            };
 
         let should_wake = {
             let mut driver_guard = driver.lock().await;
@@ -565,6 +579,12 @@ impl RuntimeSessionAdapter {
             !driver_guard.as_driver().active_input_ids().is_empty()
         };
 
+        // Wire detached-op wake state: the ops lifecycle registry will set
+        // `pending = true` when a BackgroundToolOp reaches terminal, and the
+        // runtime loop will signal the Notify after queue processing completes.
+        let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
+        ops_lifecycle.set_detached_wake_pending(Arc::clone(&detached_wake_state.pending));
+
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let mut pending_loop_handle =
@@ -574,6 +594,7 @@ impl RuntimeSessionAdapter {
                 wake_rx,
                 control_rx,
                 Some(completions.clone()),
+                Some(Arc::clone(&detached_wake_state)),
             ));
 
         let (published, detach_after_abort) = {
@@ -596,6 +617,7 @@ impl RuntimeSessionAdapter {
                         match pending_loop_handle.take() {
                             Some(loop_handle) => {
                                 entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
+                                entry.detached_wake = Some(Arc::clone(&detached_wake_state));
                                 (true, false)
                             }
                             None => {
@@ -1037,6 +1059,34 @@ impl RuntimeSessionAdapter {
         sessions
             .get(session_id)
             .map(|e| Arc::clone(&e.ops_lifecycle))
+    }
+
+    /// Spawn the detached-op waker task for a session.
+    ///
+    /// The waker task waits on the detached-wake Notify and injects a
+    /// `ContinuationInput::detached_background_op_completed()` through the
+    /// canonical `accept_input_with_completion` ingress seam.
+    ///
+    /// Returns `true` if a new waker task was spawned.
+    pub async fn maybe_spawn_detached_op_waker(self: &Arc<Self>, session_id: &SessionId) -> bool {
+        let mut sessions = self.sessions.write().await;
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        // Already have a waker — don't double-spawn.
+        if entry._waker_handle.is_some() {
+            return false;
+        }
+        let Some(ref wake_state) = entry.detached_wake else {
+            return false;
+        };
+        let handle = crate::detached_wake::spawn_detached_op_waker(
+            Arc::clone(self),
+            session_id.clone(),
+            Arc::clone(wake_state),
+        );
+        entry._waker_handle = Some(handle);
+        true
     }
 
     /// Manage the comms drain lifecycle for a session based on keep_alive intent.

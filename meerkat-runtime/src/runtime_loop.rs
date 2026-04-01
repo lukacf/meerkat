@@ -266,6 +266,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
     completions: Option<crate::session_adapter::SharedCompletionRegistry>,
+    detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -301,6 +302,9 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             {
                                 break;
                             }
+                            // After queue drains (session quiescent), signal the
+                            // detached-op waker if a background op completed.
+                            maybe_signal_detached_wake(&driver, detached_wake.as_ref()).await;
                         }
                         None => break,
                     }
@@ -315,6 +319,40 @@ pub(crate) fn spawn_runtime_loop_with_completions(
             reg.resolve_all_terminated("runtime loop exited");
         }
     })
+}
+
+/// Signal the detached-op waker if the session is quiescent and a wake is pending.
+///
+/// Called after queue processing completes (session has returned to idle).
+/// INV-005: only signals when session is quiescent (Attached + no active inputs).
+/// INV-006: at most one wake cycle outstanding per session.
+async fn maybe_signal_detached_wake(
+    driver: &crate::session_adapter::SharedDriver,
+    wake_state: Option<&std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
+) {
+    let Some(state) = wake_state else { return };
+
+    if !state.pending.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    if state.signaled.load(std::sync::atomic::Ordering::Acquire) {
+        return; // INV-006: at most one outstanding
+    }
+
+    // Verify quiescence: Attached/Idle + no active inputs
+    let d = driver.lock().await;
+    if !d.is_idle_or_attached() {
+        return;
+    }
+    if !d.as_driver().active_input_ids().is_empty() {
+        return;
+    }
+    drop(d);
+
+    state
+        .signaled
+        .store(true, std::sync::atomic::Ordering::Release);
+    state.notify.notify_one();
 }
 
 /// Process all queued inputs until the queue is empty.

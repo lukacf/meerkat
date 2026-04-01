@@ -661,6 +661,16 @@ enum Commands {
         #[arg(long, short = 'v')]
         verbose: bool,
 
+        /// Keep the session alive after the initial turn completes.
+        ///
+        /// The agent stays running and wakes on background job completions,
+        /// comms messages, or stdin events. Without this flag, the session
+        /// exits after the agent's response.
+        ///
+        /// Implied by `--stdin lines` (line-mode stdin requires keep-alive).
+        #[arg(long)]
+        keep_alive: bool,
+
         /// How stdin should be handled
         #[arg(long, value_enum, default_value = "auto")]
         stdin: StdinMode,
@@ -1344,6 +1354,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             yolo,
             wait_for_mcp,
             verbose,
+            keep_alive,
             stdin,
             line_format,
         } => {
@@ -1374,6 +1385,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 yolo,
                 wait_for_mcp,
                 verbose,
+                keep_alive,
                 stdin,
                 line_format,
                 &cli_scope,
@@ -1538,6 +1550,7 @@ async fn handle_run_command(
     yolo: bool,
     wait_for_mcp: bool,
     verbose: bool,
+    keep_alive: bool,
     stdin: StdinMode,
     line_format: LineFormat,
     scope: &RuntimeScope,
@@ -1602,7 +1615,7 @@ async fn handle_run_command(
                 tooling.mob,
                 wait_for_mcp,
                 verbose,
-                matches!(stdin, StdinMode::Lines),
+                keep_alive || matches!(stdin, StdinMode::Lines),
                 matches!(stdin, StdinMode::Lines),
                 line_format,
                 &config,
@@ -3453,10 +3466,23 @@ async fn run_agent(
     }
     .await;
 
+    // In keep-alive mode, block until Ctrl+C after the initial turn completes.
+    // The runtime adapter, comms drain, and detached wake will inject new turns
+    // automatically. Without this, the process exits after the first turn.
+    if keep_alive {
+        if let Ok(ref _result) = turn_result {
+            eprintln!("Keep-alive: initial turn complete, waiting for events (Ctrl+C to exit)...");
+            // Block until SIGINT/SIGTERM. The runtime loop, comms drain, and
+            // detached wake tasks continue running in background tokio tasks.
+            tokio::signal::ctrl_c()
+                .await
+                .map_err(|e| anyhow::anyhow!("signal wait failed: {e}"))?;
+            eprintln!("\nShutting down...");
+        }
+    }
+
     let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {
-        // The initial turn is complete — abort the comms drain so the CLI can
-        // return. run_agent is a one-shot command; persistent keep-alive draining
-        // is only appropriate for interactive sessions (chat).
+        // Abort the comms drain so the CLI can exit cleanly.
         #[cfg(feature = "comms")]
         {
             runtime_adapter.abort_comms_drain(&session_id).await;
@@ -7390,6 +7416,59 @@ mod tests {
                 assert_eq!(block_tools, vec!["shell"]);
             }
             _ => unreachable!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn test_keep_alive_is_independent_of_stdin_lines() {
+        // Regression: --keep-alive must be a separate flag from --stdin lines.
+        // They are distinct concerns: keep-alive is runtime behavior (stay alive,
+        // wake on events), stdin lines is an input mode. You can have either
+        // without the other.
+
+        // --keep-alive without --stdin lines
+        let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive"])
+            .expect("--keep-alive should parse");
+        match cli.command {
+            Commands::Run {
+                keep_alive, stdin, ..
+            } => {
+                assert!(keep_alive, "--keep-alive flag must be true");
+                assert!(
+                    matches!(stdin, StdinMode::Auto),
+                    "stdin must default to auto when --stdin is not specified"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // --stdin lines without --keep-alive
+        let cli = Cli::try_parse_from(["rkat", "run", "hello", "--stdin", "lines"])
+            .expect("--stdin lines should parse");
+        match cli.command {
+            Commands::Run {
+                keep_alive, stdin, ..
+            } => {
+                assert!(
+                    !keep_alive,
+                    "--keep-alive must not be implicitly set by --stdin lines at the arg level"
+                );
+                assert!(matches!(stdin, StdinMode::Lines));
+            }
+            _ => unreachable!(),
+        }
+
+        // Both together
+        let cli = Cli::try_parse_from(["rkat", "run", "hello", "--keep-alive", "--stdin", "lines"])
+            .expect("both flags should parse");
+        match cli.command {
+            Commands::Run {
+                keep_alive, stdin, ..
+            } => {
+                assert!(keep_alive);
+                assert!(matches!(stdin, StdinMode::Lines));
+            }
+            _ => unreachable!(),
         }
     }
 

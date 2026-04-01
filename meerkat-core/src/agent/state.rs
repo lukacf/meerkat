@@ -482,6 +482,39 @@ where
                         ))));
                     }
 
+                    // 3b. Background shell job completion notices.
+                    const BG_JOB_PREFIX: &str = "[SYSTEM NOTICE][BG_JOB] ";
+                    self.session.messages_mut().retain(
+                        |m| !matches!(m, Message::User(u) if u.text_content().starts_with(BG_JOB_PREFIX)),
+                    );
+                    for completion in &ext.background_completions {
+                        if !completion.status.is_terminal() {
+                            tracing::warn!(
+                                job_id = %completion.job_id,
+                                status = ?completion.status,
+                                "non-terminal status in background completion, skipping"
+                            );
+                            continue;
+                        }
+
+                        emit_event!(AgentEvent::BackgroundJobCompleted {
+                            job_id: completion.job_id.clone(),
+                            display_name: completion.display_name.clone(),
+                            status: format!("{:?}", completion.status).to_lowercase(),
+                            detail: completion.detail.clone(),
+                        });
+
+                        let mut notice = format!(
+                            "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
+                            completion.display_name,
+                            completion.job_id,
+                            format!("{:?}", completion.status).to_lowercase(),
+                            completion.detail,
+                        );
+                        notice.push_str("\nUse shell_job_status to get the full output.");
+                        self.session.push(Message::User(UserMessage::text(notice)));
+                    }
+
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
                     let tool_defs = {
                         let dispatcher_tools = self.tools.tools();

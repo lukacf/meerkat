@@ -29,7 +29,7 @@
 //! ```
 
 use crate::AgentToolDispatcher;
-use crate::agent::ExternalToolUpdate;
+use crate::agent::{DetachedOpCompletion, ExternalToolUpdate};
 use crate::error::ToolError;
 use crate::event::ExternalToolDelta;
 #[cfg(target_arch = "wasm32")]
@@ -469,6 +469,9 @@ impl AgentToolDispatcher for ToolGateway {
             bool,
             Option<u32>,
         )> = std::collections::HashSet::new();
+        let mut seen_bg_job_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut all_bg_completions: Vec<DetachedOpCompletion> = Vec::new();
 
         for entry in &self.entries {
             let update = entry.dispatcher.poll_external_updates().await;
@@ -489,11 +492,17 @@ impl AgentToolDispatcher for ToolGateway {
                     all_pending.push(pending);
                 }
             }
+            for bg in update.background_completions {
+                if seen_bg_job_ids.insert(bg.job_id.clone()) {
+                    all_bg_completions.push(bg);
+                }
+            }
         }
 
         ExternalToolUpdate {
             notices: all_notices,
             pending: all_pending,
+            background_completions: all_bg_completions,
         }
     }
 }
@@ -1054,5 +1063,76 @@ mod tests {
             Ok(_) => panic!("expected SharedOwnership error, got Ok"),
             Err(e) => panic!("expected SharedOwnership, got {e:?}"),
         }
+    }
+
+    /// Mock dispatcher that returns a pre-built ExternalToolUpdate from poll_external_updates.
+    struct MockBgDispatcher {
+        update: ExternalToolUpdate,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for MockBgDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::new([])
+        }
+
+        async fn dispatch(
+            &self,
+            _call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(""))
+        }
+
+        async fn poll_external_updates(&self) -> ExternalToolUpdate {
+            self.update.clone()
+        }
+    }
+
+    /// CHOKE-003-IT-B: ToolGateway deduplicates background_completions by job_id.
+    ///
+    /// Two dispatchers return the same job_id. After poll_external_updates,
+    /// only one DetachedOpCompletion should appear (deduped by job_id).
+    /// This test is expected to FAIL until Phase 2 adds dedup logic.
+    #[tokio::test]
+    async fn choke_003_gateway_dedups_background_completions_by_job_id() {
+        use crate::agent::DetachedOpCompletion;
+        use crate::ops_lifecycle::{OperationKind, OperationStatus};
+
+        let completion = DetachedOpCompletion {
+            job_id: "j_123".into(),
+            kind: OperationKind::BackgroundToolOp,
+            status: OperationStatus::Completed,
+            terminal_outcome: None,
+            display_name: "sleep 2".into(),
+            detail: "exit_code: 0".into(),
+            elapsed_ms: Some(2000),
+        };
+
+        let update = ExternalToolUpdate {
+            notices: Vec::new(),
+            pending: Vec::new(),
+            background_completions: vec![completion.clone()],
+        };
+
+        let d1: Arc<dyn AgentToolDispatcher> = Arc::new(MockBgDispatcher {
+            update: update.clone(),
+        });
+        let d2: Arc<dyn AgentToolDispatcher> = Arc::new(MockBgDispatcher { update });
+
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(d1)
+            .add_dispatcher(d2)
+            .build()
+            .unwrap();
+
+        let result = gateway.poll_external_updates().await;
+        assert_eq!(
+            result.background_completions.len(),
+            1,
+            "gateway must dedup background_completions by job_id; got {} entries",
+            result.background_completions.len()
+        );
+        assert_eq!(result.background_completions[0].job_id, "j_123");
     }
 }

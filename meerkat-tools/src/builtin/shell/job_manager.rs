@@ -903,17 +903,14 @@ impl JobManager {
     }
 
     /// UTF-8-safe tail truncation: returns the last `max_bytes` bytes
-    /// rounded forward to a char boundary so we never split a multibyte
+    /// rounded down to a char boundary so we never split a multibyte
     /// code point.
     fn str_tail(s: &str, max_bytes: usize) -> &str {
         if s.len() <= max_bytes {
             return s;
         }
-        let mut start = s.len() - max_bytes;
-        // Advance past any continuation bytes to reach a char boundary
-        while start < s.len() && !s.is_char_boundary(start) {
-            start += 1;
-        }
+        // floor_char_boundary: stable since Rust 1.80
+        let start = s.floor_char_boundary(s.len() - max_bytes);
         &s[start..]
     }
 

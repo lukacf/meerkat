@@ -500,7 +500,7 @@ where
                         emit_event!(AgentEvent::BackgroundJobCompleted {
                             job_id: completion.job_id.clone(),
                             display_name: completion.display_name.clone(),
-                            status: format!("{:?}", completion.status).to_lowercase(),
+                            status: completion.status.as_str().to_string(),
                             detail: completion.detail.clone(),
                         });
 
@@ -508,7 +508,7 @@ where
                             "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
                             completion.display_name,
                             completion.job_id,
-                            format!("{:?}", completion.status).to_lowercase(),
+                            completion.status.as_str(),
                             completion.detail,
                         );
                         notice.push_str("\nUse shell_job_status to get the full output.");

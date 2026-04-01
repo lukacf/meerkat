@@ -315,8 +315,15 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             {
                                 break;
                             }
-                            // After queue drains (session quiescent), re-check
-                            // detached wake in case a completion arrived mid-turn.
+                            // Secondary wake path: re-check detached wake after
+                            // queue drain in case a completion arrived mid-turn.
+                            // The primary path is the `detached_notified` select
+                            // arm above (fires from idle). This secondary path
+                            // catches completions that arrive while the session
+                            // is already running — the select arm can't fire
+                            // during process_queue because biased select won't
+                            // poll lower arms while wake_rx is active. Both
+                            // paths coalesce: Notify permits are idempotent.
                             maybe_signal_detached_wake(&driver, detached_wake.as_ref()).await;
                         }
                         None => break,

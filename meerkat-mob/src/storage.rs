@@ -3,7 +3,7 @@
 //! Groups the event store with a session store for a mob's isolated storage.
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::store::RedbMobStores;
+use crate::store::SqliteMobStores;
 use crate::store::{
     InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
     MobSpecStore,
@@ -54,10 +54,26 @@ impl MobStorage {
         }
     }
 
-    /// Create a storage bundle backed by a single shared redb database handle.
+    /// Build a storage bundle from custom store implementations.
+    pub fn custom(
+        events: Arc<dyn MobEventStore>,
+        runs: Arc<dyn MobRunStore>,
+        specs: Arc<dyn MobSpecStore>,
+    ) -> Self {
+        Self {
+            events,
+            runs,
+            specs,
+        }
+    }
+
+    /// Create a storage bundle backed by a single SQLite database file.
+    ///
+    /// Uses WAL mode — no exclusive file lock is held, so the same path
+    /// can be reopened after drop within the same process.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn redb(path: impl AsRef<Path>) -> Result<Self, crate::MobError> {
-        let stores = RedbMobStores::open(path)?;
+    pub fn persistent(path: impl AsRef<Path>) -> Result<Self, crate::MobError> {
+        let stores = SqliteMobStores::open(path)?;
         Ok(Self {
             events: Arc::new(stores.event_store()),
             runs: Arc::new(stores.run_store()),
@@ -136,10 +152,10 @@ model = "test"
     }
 
     #[tokio::test]
-    async fn test_redb_storage_uses_shared_database_handle_for_all_stores() {
+    async fn test_persistent_storage_uses_shared_database_for_all_stores() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("mob.redb");
-        let storage = MobStorage::redb(&db_path).unwrap();
+        let db_path = dir.path().join("mob.db");
+        let storage = MobStorage::persistent(&db_path).unwrap();
 
         let event = NewMobEvent {
             mob_id: MobId::from("mob"),

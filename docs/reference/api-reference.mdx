@@ -112,7 +112,7 @@ async fn orchestrate(
     session_service: Arc<dyn MobSessionService>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let definition = MobDefinition::from_toml(definition_toml)?;
-    let storage = MobStorage::redb("./mob.redb")?;
+    let storage = MobStorage::persistent("./mob.db")?;
 
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(session_service)

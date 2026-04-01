@@ -2919,16 +2919,16 @@ async fn test_mob_create_returns_handle() {
 }
 
 #[tokio::test]
-async fn test_mob_builder_runs_with_shared_redb_storage_bundle() {
+async fn test_mob_builder_runs_with_persistent_storage_bundle() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("mob.redb");
-    let storage = MobStorage::redb(&db_path).expect("construct redb-backed storage");
+    let db_path = dir.path().join("mob.db");
+    let storage = MobStorage::persistent(&db_path).expect("construct persistent storage");
     let service = Arc::new(MockSessionService::new());
     let handle = MobBuilder::new(sample_definition_with_single_step_flow(500, 8), storage)
         .with_session_service(service.clone())
         .create()
         .await
-        .expect("create mob with redb-backed storage");
+        .expect("create mob with persistent storage");
 
     handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)

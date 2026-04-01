@@ -82,7 +82,7 @@ pub use store::{
     MobSpecStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use store::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores};
+pub use store::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores};
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,

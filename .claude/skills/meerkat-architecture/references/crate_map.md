@@ -72,7 +72,7 @@ Surface binaries:
 |-------|---------|-------------|
 | `MobSessionService` | Session service + comms access for mobs | `EphemeralSessionService<B>`, `PersistentSessionService<B>` |
 | `MobProvisioner` | Member spawn/retire/turn | `MultiBackendProvisioner`, session-backed provisioner |
-| `MobEventStore` | Mob structural events | `InMemoryMobEventStore`, `RedbMobEventStore` |
+| `MobEventStore` | Mob structural events | `InMemoryMobEventStore`, `SqliteMobEventStore` |
 
 ### Mob types (defined in meerkat-mob/src/launch.rs)
 

@@ -134,6 +134,30 @@ impl Drop for SessionIdentityClaim {
     }
 }
 
+/// Forcibly release a session identity claim that was not cleaned up by Drop.
+///
+/// This is needed when the task holding a [`SessionIdentityClaim`] is not
+/// joined on shutdown — the Drop never fires and the claim persists in the
+/// process-global set, preventing the same session_id from being reused
+/// after an in-process restart.
+///
+/// Returns `true` if the claim was present and removed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn release_session_claim(session_id: &meerkat_core::SessionId) -> bool {
+    SESSION_IDENTITY_CLAIMS
+        .lock()
+        .remove(&session_id.to_string())
+}
+
+/// Remove all session identity claims.
+///
+/// Intended for in-process restart / test teardown where the previous
+/// runtime's tasks may not have been joined and their claims linger.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear_all_session_claims() {
+    SESSION_IDENTITY_CLAIMS.lock().clear();
+}
+
 struct InteractionStream {
     id: Uuid,
     receiver: Option<Receiver<meerkat_core::AgentEvent>>,
@@ -3498,5 +3522,45 @@ mod tests {
             !removed,
             "remove should return false for peer that was never trusted"
         );
+    }
+
+    /// Regression: SESSION_IDENTITY_CLAIMS is process-global. If a task
+    /// holding a SessionIdentityClaim is not joined on shutdown, the claim
+    /// lingers and prevents re-acquiring the same session_id after an
+    /// in-process restart.
+    #[test]
+    fn test_release_session_claim_allows_reacquire() {
+        let sid = meerkat_core::SessionId::new();
+        // Acquire the claim
+        let claim = SessionIdentityClaim::acquire(&sid).unwrap();
+        // Simulate leaked claim (forget Drop)
+        std::mem::forget(claim);
+
+        // Without release, re-acquiring fails
+        assert!(
+            SessionIdentityClaim::acquire(&sid).is_err(),
+            "second acquire should fail while claim is leaked"
+        );
+
+        // Force-release the leaked claim
+        assert!(release_session_claim(&sid));
+
+        // Now re-acquiring succeeds
+        let claim2 = SessionIdentityClaim::acquire(&sid)
+            .expect("acquire should succeed after force-release");
+        drop(claim2);
+    }
+
+    #[test]
+    fn test_clear_all_session_claims_allows_reacquire() {
+        let sid = meerkat_core::SessionId::new();
+        let claim = SessionIdentityClaim::acquire(&sid).unwrap();
+        std::mem::forget(claim);
+
+        clear_all_session_claims();
+
+        let claim2 =
+            SessionIdentityClaim::acquire(&sid).expect("acquire should succeed after clear_all");
+        drop(claim2);
     }
 }

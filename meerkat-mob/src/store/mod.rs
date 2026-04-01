@@ -2,11 +2,11 @@
 
 mod in_memory;
 #[cfg(not(target_arch = "wasm32"))]
-mod redb;
+mod sqlite;
 
 pub use in_memory::{InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore};
 #[cfg(not(target_arch = "wasm32"))]
-pub use redb::{RedbMobEventStore, RedbMobRunStore, RedbMobSpecStore, RedbMobStores};
+pub use sqlite::{SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores};
 
 use crate::definition::MobDefinition;
 use crate::error::MobError;

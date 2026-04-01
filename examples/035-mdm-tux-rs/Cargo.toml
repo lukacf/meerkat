@@ -1,0 +1,47 @@
+[package]
+name = "mdm-tux"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "mcm-target"
+path = "src/bin/target.rs"
+
+[[bin]]
+name = "mcm-tux"
+path = "src/bin/tux.rs"
+
+[[bin]]
+name = "mcm-kennel"
+path = "src/bin/kennel.rs"
+
+[dependencies]
+meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store", "session-store"] }
+meerkat-core  = { path = "../../meerkat-core" }
+meerkat-comms = { path = "../../meerkat-comms" }
+meerkat-runtime = { path = "../../meerkat-runtime" }
+meerkat-store = { path = "../../meerkat-store", features = ["jsonl"] }
+futures       = "0.3"
+async-trait   = "0.1"
+chrono        = "0.4"
+tokio         = { version = "1", features = ["full"] }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+base64        = "0.22"
+ratatui       = "0.30"
+tui-markdown  = { version = "0.3", default-features = false }
+crossterm     = "0.29"
+anyhow        = "1"
+dirs          = "5"
+gethostname   = "1"
+parking_lot   = "0.12"
+tracing       = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"

@@ -5,31 +5,12 @@
 
 use anyhow::Context;
 use mdm_tux::{
-    ClaimGrant, KennelPayload, KennelTargetState, ListScope, SignedKennelEnvelope, TargetListEntry,
-    build_signed_envelope, read_envelope, verify_envelope, write_envelope,
+    KennelPayload, KennelTargetState, ListScope, build_signed_envelope, read_envelope,
+    verify_envelope, write_envelope,
 };
 use meerkat_comms::identity::Keypair;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
-
-/// Helper: connect to kennel at `addr`, send a payload, and read one response.
-async fn roundtrip(
-    addr: &str,
-    keypair: &Keypair,
-    signer_id: &str,
-    payload: KennelPayload,
-) -> anyhow::Result<KennelPayload> {
-    let stream = TcpStream::connect(addr).await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let env = build_signed_envelope(keypair, signer_id, payload)?;
-    write_envelope(&mut writer, &env).await?;
-    let resp = read_envelope(&mut reader)
-        .await?
-        .context("no response from kennel")?;
-    verify_envelope(&resp)?;
-    Ok(resp.payload)
-}
 
 /// Helper: open a persistent control session to the kennel.
 struct KennelSession {
@@ -71,38 +52,64 @@ impl KennelSession {
 }
 
 /// Spawn a real kennel process on a random port and return its address.
-/// Binds the port first and keeps it bound until the kennel is ready to avoid TOCTOU races.
+///
+/// There is still a tiny TOCTOU gap between releasing the probe listener and the
+/// child binding the same port, so this helper retries the whole spawn on a fresh
+/// port if the child exits early or never becomes reachable.
 async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfile::TempDir)> {
-    let temp = tempfile::tempdir()?;
+    let mut last_err = None;
 
-    // Bind to find a free port, keep the listener alive until the kennel is spawned.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    // Drop the listener right before spawning so the kennel can bind.
-    drop(listener);
+    for attempt in 0..10 {
+        let temp = tempfile::tempdir()?;
 
-    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcm-kennel"))
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{port}"))
-        .arg("--data-dir")
-        .arg(temp.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
 
-    // Wait for kennel to be ready (longer timeout, retry with backoff)
-    for i in 0..100 {
-        if TcpStream::connect(format!("127.0.0.1:{port}"))
-            .await
-            .is_ok()
-        {
-            // Return temp so it lives as long as the caller needs
-            return Ok((format!("127.0.0.1:{port}"), child, temp));
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcm-kennel"))
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--data-dir")
+            .arg(temp.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        let addr = format!("127.0.0.1:{port}");
+        let mut ready = false;
+
+        for i in 0..100 {
+            if TcpStream::connect(&addr).await.is_ok() {
+                ready = true;
+                break;
+            }
+            if let Some(status) = child.try_wait()? {
+                last_err = Some(format!(
+                    "kennel exited early on attempt {} with status {}",
+                    attempt + 1,
+                    status
+                ));
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50 + i * 10)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50 + i * 10)).await;
+
+        if ready {
+            return Ok((addr, child, temp));
+        }
+
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
-    anyhow::bail!("kennel did not start within 10s on port {port}");
+
+    anyhow::bail!(
+        "kennel did not start after retries{}",
+        last_err
+            .as_deref()
+            .map(|e| format!(" ({e})"))
+            .unwrap_or_default()
+    );
 }
 
 // ── Envelope tests ───────────────────────────────────────────────────────────
@@ -131,13 +138,12 @@ fn invalid_signature_rejected() {
 // ── Kennel integration tests ─────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "integration-real: spawns processes"]
+#[serial_test::serial]
 async fn kennel_target_register_and_list() {
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
     // Register a target
     let target_kp = Keypair::generate();
-    let target_id = target_kp.public_key().to_peer_id();
     let mut target = KennelSession::connect(&addr, target_kp).await.unwrap();
     target
         .send(KennelPayload::TargetRegister {
@@ -183,7 +189,7 @@ async fn kennel_target_register_and_list() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns processes"]
+#[serial_test::serial]
 async fn kennel_full_claim_attach_release_cycle() {
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
@@ -290,22 +296,23 @@ async fn kennel_full_claim_attach_release_cycle() {
 
     // Target should receive Released
     let resp = target.recv().await.unwrap();
-    let KennelPayload::Released {
-        lease_id: rel_lid,
-        reason,
-    } = resp
-    else {
+    let KennelPayload::Released { lease_ref, reason } = resp else {
         panic!("expected Released, got {resp:?}");
     };
-    assert_eq!(rel_lid, lease_id);
-    assert_eq!(reason, "released_by_tux");
+    assert_eq!(
+        lease_ref,
+        mdm_tux::LeaseRef::Known {
+            lease_id: lease_id.clone()
+        }
+    );
+    assert_eq!(reason, mdm_tux::LeaseTerminationReason::ReleasedByTux);
 
     // TUX should receive ClaimReleased
     let resp = tux.recv().await.unwrap();
     let KennelPayload::ClaimReleased { reason, .. } = resp else {
         panic!("expected ClaimReleased, got {resp:?}");
     };
-    assert_eq!(reason, "released_by_tux");
+    assert_eq!(reason, mdm_tux::LeaseTerminationReason::ReleasedByTux);
 
     // Target should be available again
     tux.send(KennelPayload::ListTargets {
@@ -321,7 +328,7 @@ async fn kennel_full_claim_attach_release_cycle() {
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns processes"]
+#[serial_test::serial]
 async fn kennel_target_disconnect_notifies_tux() {
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
@@ -384,17 +391,17 @@ async fn kennel_target_disconnect_notifies_tux() {
     // TUX should receive TargetLost
     let resp = tux.recv().await.unwrap();
     let KennelPayload::TargetLost {
-        target_id,
-        lease_id: lost_lid,
+        target_id: _,
+        lease_ref,
     } = resp
     else {
         panic!("expected TargetLost, got {resp:?}");
     };
-    assert_eq!(lost_lid, Some(lease_id));
+    assert_eq!(lease_ref, mdm_tux::LeaseRef::Known { lease_id });
 }
 
 #[tokio::test]
-#[ignore = "integration-real: spawns processes"]
+#[serial_test::serial]
 async fn kennel_claim_ack_subset() {
     let (addr, _kennel, _temp) = spawn_kennel().await.unwrap();
 
@@ -508,7 +515,7 @@ async fn kennel_claim_ack_subset() {
 // ── Regression: fleet churn does not leave stale claims ──────────────────────
 
 #[tokio::test]
-#[ignore = "integration-real: spawns processes"]
+#[serial_test::serial]
 async fn kennel_target_disappears_from_available_after_disconnect() {
     // Regression: if a target drops while listed as Available, the kennel
     // must remove it from listings. This exercises the codepath that
@@ -575,7 +582,7 @@ async fn kennel_target_disappears_from_available_after_disconnect() {
 // ── Regression: release sends ClaimReleased so peer can be cleaned up ────────
 
 #[tokio::test]
-#[ignore = "integration-real: spawns processes"]
+#[serial_test::serial]
 async fn kennel_release_sends_claim_released_to_tux() {
     // Regression: verifies the TUX receives ClaimReleased on release, which
     // is the signal it needs to remove the target from its trusted peer set.
@@ -644,12 +651,10 @@ async fn kennel_release_sends_claim_released_to_tux() {
     let resp = tux.recv().await.unwrap();
     match resp {
         KennelPayload::ClaimReleased {
-            lease_id: rel_lid,
-            reason,
-            ..
+            lease_ref, reason, ..
         } => {
-            assert_eq!(rel_lid, lease_id);
-            assert_eq!(reason, "released_by_tux");
+            assert_eq!(lease_ref, mdm_tux::LeaseRef::Known { lease_id });
+            assert_eq!(reason, mdm_tux::LeaseTerminationReason::ReleasedByTux);
         }
         other => panic!("expected ClaimReleased, got {other:?}"),
     }

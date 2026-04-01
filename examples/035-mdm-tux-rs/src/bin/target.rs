@@ -20,7 +20,7 @@
 //! Set one of: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,8 +49,9 @@ use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
 
 use mdm_tux::{
-    CommsNode, KennelPayload, STREAM_PREFIX, auto_detect, build_signed_envelope, detect_provider,
-    load_or_generate_keypair, read_envelope, register_with_backoff, verify_envelope,
+    CommsNode, DirectControlPayload, KennelPayload, ProviderKind, RegResponse, auto_detect,
+    build_signed_envelope, direct_control_request, load_or_generate_keypair,
+    parse_direct_control_message, read_envelope, register_with_backoff, verify_envelope,
     write_envelope,
 };
 use tokio::io::BufReader;
@@ -75,9 +76,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Parse CLI args ────────────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        eprintln!("Usage: mcm-target <HOST:PORT> [--name NAME] [--model MODEL]");
         eprintln!(
-            "   or: mcm-target --kennel HOST:PORT [--advertise IP] [--name NAME] [--model MODEL]"
+            "Usage: mcm-target <HOST:PORT> [--name NAME] [--model MODEL --provider PROVIDER]"
+        );
+        eprintln!(
+            "   or: mcm-target --kennel HOST:PORT [--advertise IP] [--name NAME] [--model MODEL --provider PROVIDER]"
         );
         eprintln!("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY");
         std::process::exit(1);
@@ -88,13 +91,16 @@ async fn main() -> anyhow::Result<()> {
     let host_addr = &args[0];
     let name = find_flag(&args, "--name")
         .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+    let provider_override = parse_provider_override(&args)?;
     let (model, provider) = match find_flag(&args, "--model") {
         Some(m) => {
-            let p = detect_provider(&m);
-            (m, p.to_string())
+            let p = provider_override
+                .context("--model requires --provider in override mode")?
+                .to_string();
+            (m, p)
         }
         None => match auto_detect() {
-            Some((m, p, _)) => (m, p),
+            Some((m, p, _)) => (m, p.to_string()),
             None => bail!("set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY"),
         },
     };
@@ -223,14 +229,20 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
+        let (resp_name, resp_pubkey) = match resp {
+            RegResponse::Accepted { name, pubkey } => (name, pubkey),
+            RegResponse::Rejected {
+                reason, message, ..
+            } => {
+                bail!("registration rejected ({reason:?}): {message}");
+            }
+        };
         eprintln!(
             "[target] paired with host '{}' ({})",
-            resp.name, resp.pubkey
+            resp_name, resp_pubkey
         );
 
-        let resp_name = resp.name.clone();
-
-        let host_pubkey = match meerkat_comms::identity::PubKey::from_peer_id(&resp.pubkey) {
+        let host_pubkey = match meerkat_comms::identity::PubKey::from_peer_id(&resp_pubkey) {
             Ok(pk) => pk,
             Err(e) => {
                 eprintln!("[target] bad host pubkey: {e} — retrying registration");
@@ -329,7 +341,6 @@ async fn run_inbox_loop(
                     session_binding_state,
                     current_session_id,
                     event_stream,
-                    false,
                 )
                 .await {
                     TargetLoopAction::Continue => {}
@@ -364,15 +375,44 @@ fn active_session_id(binding_state: &SessionBindingState) -> &SessionId {
         .expect("target session binding must be bound during runtime")
 }
 
-use mdm_tux::machines::target_attachment::{
-    self, Effect as TaEffect, Event as TaEvent, State as TaState,
+use mdm_tux::machines::target_attachment::{Effect as TaEffect, State as TaState};
+use mdm_tux::machines::target_kennel_control::{
+    self, Effect as TkcEffect, Event as TkcEvent, State as TkcState,
 };
+use mdm_tux::machines::target_kennel_session::{self, Event as TksEvent, State as TksState};
+use serde::{Deserialize, Serialize};
 
-/// Derive the caller's exit info from the machine's terminal state.
-fn adopted_exit_hint(terminal: &TaState) -> Option<String> {
-    match terminal {
-        TaState::DirectLost { tux_id } => tux_id.clone(),
-        _ => None,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedAttachmentHint {
+    tux_id: String,
+    lease_id: String,
+}
+
+async fn load_attachment_hint(path: &Path) -> anyhow::Result<Option<PersistedAttachmentHint>> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes).context("parse attachment hint")?,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).context("read attachment hint"),
+    }
+}
+
+async fn save_attachment_hint(path: &Path, hint: &PersistedAttachmentHint) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let bytes = serde_json::to_vec_pretty(hint).context("serialize attachment hint")?;
+    tokio::fs::write(path, bytes)
+        .await
+        .context("write attachment hint")
+}
+
+async fn clear_attachment_hint(path: &Path) -> anyhow::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("remove attachment hint"),
     }
 }
 
@@ -383,6 +423,8 @@ async fn apply_target_attachment_effects(
     effects: &[TaEffect],
     heartbeat: &mut Option<tokio::task::JoinHandle<()>>,
     disconnect_tx: &tokio::sync::watch::Sender<bool>,
+    attachment_hint: &mut Option<PersistedAttachmentHint>,
+    attachment_hint_path: &Path,
 ) -> anyhow::Result<bool> {
     for effect in effects {
         match effect {
@@ -410,17 +452,29 @@ async fn apply_target_attachment_effects(
                     meta: PeerMeta::default(),
                 });
             }
+            TaEffect::PersistAttachmentHint { tux_id, lease_id } => {
+                let next = PersistedAttachmentHint {
+                    tux_id: tux_id.clone(),
+                    lease_id: lease_id.clone(),
+                };
+                save_attachment_hint(attachment_hint_path, &next).await?;
+                *attachment_hint = Some(next);
+            }
+            TaEffect::ClearAttachmentHint => {
+                clear_attachment_hint(attachment_hint_path).await?;
+                *attachment_hint = None;
+            }
             TaEffect::SendAttachRequest {
                 target_id,
                 lease_id,
             } => {
-                let attach_fut = router.send(
-                    "tux",
-                    MessageKind::Request {
-                        intent: "mcm.attach".into(),
-                        params: serde_json::json!({ "lease_id": lease_id, "target_id": target_id }),
-                    },
-                );
+                let Ok(kind) = direct_control_request(&DirectControlPayload::AttachRequest {
+                    lease_id: lease_id.clone(),
+                    target_id: target_id.clone(),
+                }) else {
+                    return Ok(false);
+                };
+                let attach_fut = router.send("tux", kind);
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(10), attach_fut).await,
                     Ok(Ok(_))
@@ -449,6 +503,37 @@ async fn apply_target_attachment_effects(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn apply_target_control_effects(
+    node: &mut CommsNode,
+    router: &Arc<meerkat_comms::Router>,
+    effects: &[TkcEffect],
+    heartbeat: &mut Option<tokio::task::JoinHandle<()>>,
+    disconnect_tx: &tokio::sync::watch::Sender<bool>,
+    attachment_hint: &mut Option<PersistedAttachmentHint>,
+    attachment_hint_path: &Path,
+) -> anyhow::Result<(bool, bool)> {
+    let mut attachment_effects = Vec::new();
+    let mut should_return_to_register = false;
+    for effect in effects {
+        match effect {
+            TkcEffect::Attachment(effect) => attachment_effects.push(effect.clone()),
+            TkcEffect::ReturnToRegisterLoop => should_return_to_register = true,
+        }
+    }
+    let applied = apply_target_attachment_effects(
+        node,
+        router,
+        &attachment_effects,
+        heartbeat,
+        disconnect_tx,
+        attachment_hint,
+        attachment_hint_path,
+    )
+    .await?;
+    Ok((applied, should_return_to_register))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_target_message(
     msg: &meerkat_comms::agent::types::CommsMessage,
     router: &Arc<meerkat_comms::Router>,
@@ -462,7 +547,6 @@ async fn handle_target_message(
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
-    ignore_attach_ok: bool,
 ) -> TargetLoopAction {
     let sender = msg.from_peer.clone();
     match &msg.content {
@@ -505,8 +589,7 @@ async fn handle_target_message(
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), reply_fut).await;
         }
         meerkat_comms::agent::types::CommsContent::Request { intent, .. }
-            if intent.as_str() == "heartbeat"
-                || (ignore_attach_ok && intent.as_str() == "mcm.attach_ok") => {}
+            if intent.as_str() == "heartbeat" => {}
         meerkat_comms::agent::types::CommsContent::Message { body, .. } => {
             eprintln!("[target] received message from '{sender}'");
 
@@ -568,11 +651,12 @@ async fn forward_stream_event(
     peer: &str,
     event: &AgentEvent,
 ) -> bool {
-    let Ok(json) = serde_json::to_string(event) else {
+    let Ok(kind) = direct_control_request(&DirectControlPayload::StreamEvent {
+        event: event.clone(),
+    }) else {
         return true;
     };
-    let body = format!("{STREAM_PREFIX}{json}");
-    let send_fut = router.send(peer, MessageKind::Message { body, blocks: None });
+    let send_fut = router.send(peer, kind);
     matches!(
         tokio::time::timeout(std::time::Duration::from_secs(5), send_fut).await,
         Ok(Ok(_))
@@ -824,18 +908,31 @@ async fn switch_session(
     let mut new_id: Option<SessionId> = None;
     for effect in effects {
         if let SessionBindingEffect::SetupSession { resume_id } = effect {
-            new_id = Some(
-                setup_session(
-                    service,
-                    runtime_adapter,
-                    resume_id,
-                    model,
-                    system_prompt,
-                    comms_tools,
-                    provider,
-                )
-                .await?,
-            );
+            let setup_result = setup_session(
+                service,
+                runtime_adapter,
+                resume_id,
+                model,
+                system_prompt,
+                comms_tools,
+                provider,
+            )
+            .await;
+            match setup_result {
+                Ok(session_id) => new_id = Some(session_id),
+                Err(err) => {
+                    let (rolled_back, rollback_effects) = target_session_binding::transition(
+                        session_binding_state.clone(),
+                        SessionBindingEvent::SetupFailed,
+                    )
+                    .map_err(|binding_err| {
+                        anyhow::anyhow!("session binding setup failure rollback: {binding_err}")
+                    })?;
+                    debug_assert!(rollback_effects.is_empty());
+                    *session_binding_state = rolled_back;
+                    return Err(err);
+                }
+            }
         }
     }
     let Some(new_id) = new_id else {
@@ -845,23 +942,52 @@ async fn switch_session(
 
     let (next_state, effects) = target_session_binding::transition(
         session_binding_state.clone(),
-        SessionBindingEvent::SwitchPrepared {
+        SessionBindingEvent::SetupSucceeded {
             session_id: new_id.clone(),
         },
     )
-    .map_err(|e| anyhow::anyhow!("session binding prepared: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("session binding setup succeeded: {e}"))?;
     *session_binding_state = next_state;
 
     let mut new_event_stream = None;
     for effect in effects {
         match effect {
             SessionBindingEffect::SubscribeSessionEvents { session_id } => {
-                new_event_stream = Some(
-                    service
-                        .subscribe_session_events(&session_id)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("subscribe session events: {e}"))?,
-                );
+                match service.subscribe_session_events(&session_id).await {
+                    Ok(stream) => new_event_stream = Some(stream),
+                    Err(e) => {
+                        let (rolled_back, cleanup_effects) = target_session_binding::transition(
+                            session_binding_state.clone(),
+                            SessionBindingEvent::SubscriptionFailed,
+                        )
+                        .map_err(|binding_err| {
+                            anyhow::anyhow!(
+                                "session binding subscription failure rollback: {binding_err}"
+                            )
+                        })?;
+                        *session_binding_state = rolled_back;
+                        for cleanup in cleanup_effects {
+                            match cleanup {
+                                SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
+                                    runtime_adapter.unregister_session(&session_id).await;
+                                }
+                                SessionBindingEffect::DiscardLiveSession { session_id } => {
+                                    if let Err(discard_err) =
+                                        service.discard_live_session(&session_id).await
+                                        && !matches!(discard_err, SessionError::NotFound { .. })
+                                    {
+                                        eprintln!(
+                                            "[target] warning: discard failed rollback session {session_id}: {discard_err}"
+                                        );
+                                    }
+                                }
+                                SessionBindingEffect::SetupSession { .. }
+                                | SessionBindingEffect::SubscribeSessionEvents { .. } => {}
+                            }
+                        }
+                        return Err(anyhow::anyhow!("subscribe session events: {e}"));
+                    }
+                }
             }
             SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
                 runtime_adapter.unregister_session(&session_id).await;
@@ -879,11 +1005,32 @@ async fn switch_session(
 
     let (next_state, effects) = target_session_binding::transition(
         session_binding_state.clone(),
-        SessionBindingEvent::SwitchCommitted {
-            session_id: new_id.clone(),
-        },
+        SessionBindingEvent::SubscriptionEstablished,
     )
-    .map_err(|e| anyhow::anyhow!("session binding commit: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("session binding subscription established: {e}"))?;
+    *session_binding_state = next_state;
+    for effect in effects {
+        match effect {
+            SessionBindingEffect::UnregisterRuntimeSession { session_id } => {
+                runtime_adapter.unregister_session(&session_id).await;
+            }
+            SessionBindingEffect::DiscardLiveSession { session_id } => {
+                if let Err(e) = service.discard_live_session(&session_id).await
+                    && !matches!(e, SessionError::NotFound { .. })
+                {
+                    eprintln!("[target] warning: discard old session {session_id}: {e}");
+                }
+            }
+            SessionBindingEffect::SetupSession { .. }
+            | SessionBindingEffect::SubscribeSessionEvents { .. } => {}
+        }
+    }
+
+    let (next_state, effects) = target_session_binding::transition(
+        session_binding_state.clone(),
+        SessionBindingEvent::TeardownCompleted,
+    )
+    .map_err(|e| anyhow::anyhow!("session binding teardown completed: {e}"))?;
     debug_assert!(effects.is_empty());
     *session_binding_state = next_state;
 
@@ -1103,13 +1250,16 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let kennel_addr = find_flag(args, "--kennel").context("--kennel HOST:PORT is required")?;
     let name = find_flag(args, "--name")
         .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+    let provider_override = parse_provider_override(args)?;
     let (model, provider) = match find_flag(args, "--model") {
         Some(m) => {
-            let p = detect_provider(&m);
-            (m, p.to_string())
+            let p = provider_override
+                .context("--model requires --provider in override mode")?
+                .to_string();
+            (m, p)
         }
         None => match auto_detect() {
-            Some((m, p, _)) => (m, p),
+            Some((m, p, _)) => (m, p.to_string()),
             None => bail!("set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY"),
         },
     };
@@ -1173,13 +1323,15 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let explicit_ip = find_flag(args, "--advertise");
     let mut node = node;
     let router = node.router.clone();
+    let attachment_hint_path = data_dir.join("attachment_hint.json");
 
     println!("=== MCM Target: {name} ===");
     println!("comms     : tcp://0.0.0.0:{comms_port}");
     println!("kennel    : {kennel_addr}");
     println!("provider  : {provider} ({model})");
 
-    let mut attached_tux_hint: Option<String> = None;
+    let mut attached_tux_hint = load_attachment_hint(&attachment_hint_path).await?;
+    let mut kennel_session_state = TksState::Disconnected;
 
     loop {
         let (kennel_host, kennel_port) = kennel_addr
@@ -1234,7 +1386,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                     ("shell".to_string(), true),
                     ("runtime".to_string(), true),
                 ]),
-                attached_tux_id: attached_tux_hint.clone(),
+                attached_tux_id: attached_tux_hint.as_ref().map(|hint| hint.tux_id.clone()),
             },
         )?;
         if let Err(e) = write_envelope(&mut write_half, &register).await {
@@ -1242,12 +1394,38 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
+        kennel_session_state =
+            target_kennel_session::transition(kennel_session_state, TksEvent::RegisterSent)
+                .map_err(|e| anyhow::anyhow!("target kennel session register sent: {e}"))?;
         let Some(env) = read_envelope(&mut reader).await? else {
             eprintln!("[target] kennel closed during register");
+            kennel_session_state =
+                target_kennel_session::transition(kennel_session_state, TksEvent::ControlLost)
+                    .map_err(|e| anyhow::anyhow!("target kennel session register EOF: {e}"))?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         };
         let _ = verify_envelope(&env)?;
+        match &env.payload {
+            KennelPayload::TargetRegistered => {
+                kennel_session_state = target_kennel_session::transition(
+                    kennel_session_state,
+                    TksEvent::RegistrationAcked,
+                )
+                .map_err(|e| anyhow::anyhow!("target kennel session registration ack: {e}"))?;
+            }
+            KennelPayload::TargetRegistrationRejected { reason, message } => {
+                let _ = target_kennel_session::transition(
+                    kennel_session_state.clone(),
+                    TksEvent::RegistrationRejected,
+                )
+                .map_err(|e| anyhow::anyhow!("target kennel session registration rejected: {e}"))?;
+                bail!("kennel rejected target registration ({reason:?}): {message}");
+            }
+            other => {
+                bail!("unexpected kennel registration reply: {other:?}");
+            }
+        }
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
         loop {
@@ -1274,6 +1452,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             tux_direct_addr,
                             ..
                         } => {
+                            if !kennel_session_state.allows_control_payloads() {
+                                bail!("received adopted before kennel registration completed");
+                            }
                             if adopted_target_id != target_id {
                                 continue;
                             }
@@ -1284,7 +1465,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 tux_pubkey,
                                 tux_direct_addr,
                             };
-                            let adopted_exit = run_adopted_loop(
+                            let _adopted_exit = run_adopted_loop(
                                 &mut node,
                                 &router,
                                 &mut reader,
@@ -1301,9 +1482,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &mut session_binding_state,
                                 &mut current_session_id,
                                 &mut event_stream,
+                                &mut attached_tux_hint,
+                                &attachment_hint_path,
                             ).await?;
-
-                            attached_tux_hint = adopted_exit_hint(&adopted_exit);
 
                             let re_register = build_signed_envelope(
                                 node.router.keypair_arc().as_ref(),
@@ -1318,10 +1499,16 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                         ("shell".to_string(), true),
                                         ("runtime".to_string(), true),
                                     ]),
-                                    attached_tux_id: attached_tux_hint.clone(),
+                                    attached_tux_id: attached_tux_hint.as_ref().map(|hint| hint.tux_id.clone()),
                                 },
                             )?;
-                            let _ = write_envelope(&mut write_half, &re_register).await;
+                            if write_envelope(&mut write_half, &re_register).await.is_ok() {
+                                kennel_session_state = target_kennel_session::transition(
+                                    kennel_session_state,
+                                    TksEvent::RegisterSent,
+                                )
+                                .unwrap_or(TksState::Disconnected);
+                            }
                         }
                         KennelPayload::LeaseRebound {
                             lease_id,
@@ -1331,6 +1518,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             tux_direct_addr,
                             ..
                         } => {
+                            if !kennel_session_state.allows_control_payloads() {
+                                bail!("received lease rebound before kennel registration completed");
+                            }
                             if rebound_target_id != target_id {
                                 continue;
                             }
@@ -1344,7 +1534,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 tux_pubkey,
                                 tux_direct_addr,
                             };
-                            let adopted_exit = run_adopted_loop(
+                            let _adopted_exit = run_adopted_loop(
                                 &mut node,
                                 &router,
                                 &mut reader,
@@ -1361,9 +1551,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                 &mut session_binding_state,
                                 &mut current_session_id,
                                 &mut event_stream,
+                                &mut attached_tux_hint,
+                                &attachment_hint_path,
                             ).await?;
-
-                            attached_tux_hint = adopted_exit_hint(&adopted_exit);
 
                             let re_register = build_signed_envelope(
                                 node.router.keypair_arc().as_ref(),
@@ -1378,10 +1568,33 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                                         ("shell".to_string(), true),
                                         ("runtime".to_string(), true),
                                     ]),
-                                    attached_tux_id: attached_tux_hint.clone(),
+                                    attached_tux_id: attached_tux_hint.as_ref().map(|hint| hint.tux_id.clone()),
                                 },
                             )?;
-                            let _ = write_envelope(&mut write_half, &re_register).await;
+                            if write_envelope(&mut write_half, &re_register).await.is_ok() {
+                                kennel_session_state = target_kennel_session::transition(
+                                    kennel_session_state,
+                                    TksEvent::RegisterSent,
+                                )
+                                .unwrap_or(TksState::Disconnected);
+                            }
+                        }
+                        KennelPayload::TargetRegistered => {
+                            kennel_session_state = target_kennel_session::transition(
+                                kennel_session_state,
+                                TksEvent::RegistrationAcked,
+                            )
+                            .map_err(|e| anyhow::anyhow!("target kennel session re-register ack: {e}"))?;
+                        }
+                        KennelPayload::TargetRegistrationRejected { reason, message } => {
+                            let _ = target_kennel_session::transition(
+                                kennel_session_state.clone(),
+                                TksEvent::RegistrationRejected,
+                            )
+                            .map_err(|e| anyhow::anyhow!(
+                                "target kennel session re-register rejected: {e}"
+                            ))?;
+                            bail!("kennel rejected target re-registration ({reason:?}): {message}");
                         }
                         _ => {}
                     }
@@ -1390,6 +1603,9 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         }
 
         eprintln!("[target] kennel disconnected — reconnecting...");
+        kennel_session_state =
+            target_kennel_session::transition(kennel_session_state, TksEvent::ControlLost)
+                .unwrap_or(TksState::Disconnected);
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
@@ -1412,11 +1628,13 @@ async fn run_adopted_loop(
     session_binding_state: &mut SessionBindingState,
     current_session_id: &mut SessionId,
     event_stream: &mut meerkat_core::comms::EventStream,
-) -> anyhow::Result<TaState> {
+    attachment_hint: &mut Option<PersistedAttachmentHint>,
+    attachment_hint_path: &Path,
+) -> anyhow::Result<TkcState> {
     let (disconnect_tx, mut disconnect_rx) = tokio::sync::watch::channel(false);
     let mut heartbeat: Option<tokio::task::JoinHandle<()>> = None;
     let initial_event = if attach_required {
-        TaEvent::Adopted {
+        TkcEvent::Adopted {
             target_id: adoption.target_id.clone(),
             lease_id: adoption.lease_id.clone(),
             tux_id: adoption.tux_id.clone(),
@@ -1424,7 +1642,7 @@ async fn run_adopted_loop(
             tux_direct_addr: adoption.tux_direct_addr.clone(),
         }
     } else {
-        TaEvent::LeaseRebound {
+        TkcEvent::LeaseRebound {
             target_id: adoption.target_id.clone(),
             lease_id: adoption.lease_id.clone(),
             tux_id: adoption.tux_id.clone(),
@@ -1432,22 +1650,44 @@ async fn run_adopted_loop(
             tux_direct_addr: adoption.tux_direct_addr.clone(),
         }
     };
-    let (mut machine_state, effects) = target_attachment::transition(TaState::Idle, initial_event)
-        .map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
-    if !apply_target_attachment_effects(node, router, &effects, &mut heartbeat, &disconnect_tx)
-        .await?
-    {
-        let (state, _effects) =
-            target_attachment::transition(machine_state, TaEvent::AttachSendFailed)
-                .unwrap_or((TaState::AttachFailed, vec![]));
+    let (mut machine_state, effects) =
+        target_kennel_control::transition(TkcState::idle(), initial_event)
+            .map_err(|e| anyhow::anyhow!("machine transition: {e}"))?;
+    let (applied, should_return) = apply_target_control_effects(
+        node,
+        router,
+        &effects,
+        &mut heartbeat,
+        &disconnect_tx,
+        attachment_hint,
+        attachment_hint_path,
+    )
+    .await?;
+    if !applied {
+        let (state, effects) =
+            target_kennel_control::transition(machine_state, TkcEvent::AttachSendFailed)
+                .map_err(|e| anyhow::anyhow!("attach-send-failed transition: {e}"))?;
+        let _ = apply_target_control_effects(
+            node,
+            router,
+            &effects,
+            &mut heartbeat,
+            &disconnect_tx,
+            attachment_hint,
+            attachment_hint_path,
+        )
+        .await?;
         return Ok(state);
+    }
+    if should_return {
+        return Ok(machine_state);
     }
 
     let mut kennel_heartbeat = tokio::time::interval(Duration::from_secs(10));
 
     loop {
         let poll_kennel = matches!(
-            &machine_state,
+            &machine_state.attachment,
             TaState::Attaching { .. } | TaState::Attached { .. }
         );
 
@@ -1455,36 +1695,49 @@ async fn run_adopted_loop(
             msg = node.recv_message() => {
                 let Some(msg) = msg else {
                     if let Some(h) = heartbeat.take() { h.abort(); }
-                    let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
-                        .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
+                    let (s, effects) = target_kennel_control::transition(
+                        machine_state,
+                        TkcEvent::DirectLinkLost,
+                    )
+                    .map_err(|e| anyhow::anyhow!("direct-link-lost transition: {e}"))?;
+                    let _ = apply_target_control_effects(
+                        node,
+                        router,
+                        &effects,
+                        &mut heartbeat,
+                        &disconnect_tx,
+                        attachment_hint,
+                        attachment_hint_path,
+                    )
+                    .await?;
                     return Ok(s);
                 };
-                // mcm.attach_ok: lease correlation is machine-owned via DirectAttachAck.
-                // The machine rejects mismatched lease_ids and wrong states.
-                if let meerkat_comms::agent::types::CommsContent::Request { intent, params, .. } = &msg.content
-                    && intent.as_str() == "mcm.attach_ok"
-                    && matches!(machine_state, TaState::Attaching { .. })
-                {
-                    let ack_lid = params.get("lease_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if let Ok((s, effects)) = target_attachment::transition(
-                        machine_state.clone(),
-                        TaEvent::DirectAttachAck { lease_id: ack_lid.to_string() },
-                    ) {
+                if let Some(payload) = parse_direct_control_message(&msg)? {
+                    if let DirectControlPayload::AttachAck { lease_id } = payload
+                        && matches!(machine_state.attachment, TaState::Attaching { .. })
+                    {
+                        let (s, effects) = target_kennel_control::transition(
+                            machine_state.clone(),
+                            TkcEvent::DirectAttachAck { lease_id },
+                        )
+                        .map_err(|e| anyhow::anyhow!("direct-attach-ack transition: {e}"))?;
                         machine_state = s;
-                        let _ = apply_target_attachment_effects(
+                        let _ = apply_target_control_effects(
                             node,
                             router,
                             &effects,
                             &mut heartbeat,
                             &disconnect_tx,
+                            attachment_hint,
+                            attachment_hint_path,
                         )
                         .await?;
+                        continue;
                     }
-                    continue;
                 }
                 match handle_target_message(
                     &msg, router, service, runtime_adapter, jsonl_store, model,
-                    system_prompt, comms_tools, provider, session_binding_state, current_session_id, event_stream, true,
+                    system_prompt, comms_tools, provider, session_binding_state, current_session_id, event_stream,
                 ).await {
                     TargetLoopAction::Continue => {}
                     TargetLoopAction::ExitProcess => std::process::exit(0),
@@ -1495,8 +1748,21 @@ async fn run_adopted_loop(
                 let ev = &envelope.payload;
                 if should_forward(ev) && !forward_stream_event(router, "tux", ev).await {
                     if let Some(h) = heartbeat.take() { h.abort(); }
-                    let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
-                        .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
+                    let (s, effects) = target_kennel_control::transition(
+                        machine_state,
+                        TkcEvent::DirectLinkLost,
+                    )
+                    .map_err(|e| anyhow::anyhow!("stream-direct-link-lost transition: {e}"))?;
+                    let _ = apply_target_control_effects(
+                        node,
+                        router,
+                        &effects,
+                        &mut heartbeat,
+                        &disconnect_tx,
+                        attachment_hint,
+                        attachment_hint_path,
+                    )
+                    .await?;
                     return Ok(s);
                 }
             }
@@ -1507,18 +1773,27 @@ async fn run_adopted_loop(
                 )?;
                 if write_envelope(write_half, &kennel_hb).await.is_err() {
                     eprintln!("[target] kennel control lost");
-                    if let Ok((s, effects)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelHeartbeatFailed) {
-                        machine_state = s;
-                        let _ = apply_target_attachment_effects(
-                            node,
-                            router,
-                            &effects,
-                            &mut heartbeat,
-                            &disconnect_tx,
-                        )
-                        .await?;
+                    let (s, effects) = target_kennel_control::transition(
+                        machine_state.clone(),
+                        TkcEvent::KennelHeartbeatFailed,
+                    )
+                    .map_err(|e| anyhow::anyhow!("kennel-heartbeat-failed transition: {e}"))?;
+                    machine_state = s;
+                    let (_, should_return) = apply_target_control_effects(
+                        node,
+                        router,
+                        &effects,
+                        &mut heartbeat,
+                        &disconnect_tx,
+                        attachment_hint,
+                        attachment_hint_path,
+                    )
+                    .await?;
+                    if should_return {
+                        if let Some(h) = heartbeat.take() { h.abort(); }
+                        return Ok(machine_state);
                     }
-                    if machine_state.is_terminal() {
+                    if machine_state.attachment.is_terminal() {
                         if let Some(h) = heartbeat.take() { h.abort(); }
                         return Ok(machine_state);
                     }
@@ -1527,29 +1802,111 @@ async fn run_adopted_loop(
             maybe = read_envelope(reader), if poll_kennel => {
                 match maybe {
                     Ok(Some(env)) => {
-                        if verify_envelope(&env).is_ok()
-                            && let KennelPayload::Released { lease_id, .. } = env.payload
-                        {
-                            if let Some(h) = heartbeat.take() { h.abort(); }
-                            let (s, _) = target_attachment::transition(machine_state, TaEvent::KennelReleased { lease_id })
-                                .unwrap_or((TaState::Released, vec![]));
-                            return Ok(s);
-                        }
-                    }
-                    _ => {
-                        eprintln!("[target] kennel control lost");
-                        if let Ok((s, effects)) = target_attachment::transition(machine_state.clone(), TaEvent::KennelDisconnected) {
+                        if verify_envelope(&env).is_err() {
+                            eprintln!("[target] invalid signed kennel control frame");
+                            let (s, effects) = target_kennel_control::transition(
+                                machine_state.clone(),
+                                TkcEvent::KennelDisconnected,
+                            )
+                            .map_err(|e| anyhow::anyhow!("kennel-disconnected transition: {e}"))?;
                             machine_state = s;
-                            let _ = apply_target_attachment_effects(
+                            let (_, should_return) = apply_target_control_effects(
                                 node,
                                 router,
                                 &effects,
                                 &mut heartbeat,
                                 &disconnect_tx,
+                                attachment_hint,
+                                attachment_hint_path,
                             )
                             .await?;
+                            if should_return {
+                                if let Some(h) = heartbeat.take() { h.abort(); }
+                                return Ok(machine_state);
+                            }
+                            if machine_state.attachment.is_terminal() {
+                                if let Some(h) = heartbeat.take() { h.abort(); }
+                                return Ok(machine_state);
+                            }
+                            continue;
                         }
-                        if machine_state.is_terminal() {
+                        match env.payload {
+                            KennelPayload::Released { lease_ref, .. } => {
+                                if let Some(h) = heartbeat.take() { h.abort(); }
+                                let (s, effects) = target_kennel_control::transition(
+                                    machine_state,
+                                    TkcEvent::KennelReleased { lease_ref },
+                                )
+                                .map_err(|e| anyhow::anyhow!("kennel-released transition: {e}"))?;
+                                let _ = apply_target_control_effects(
+                                    node,
+                                    router,
+                                    &effects,
+                                    &mut heartbeat,
+                                    &disconnect_tx,
+                                    attachment_hint,
+                                    attachment_hint_path,
+                                )
+                                .await?;
+                                return Ok(s);
+                            }
+                            KennelPayload::LeaseRebound {
+                                target_id: rebound_target_id,
+                                lease_id,
+                                tux_id,
+                                tux_pubkey,
+                                tux_direct_addr,
+                                ..
+                            } => {
+                                let (s, effects) = target_kennel_control::transition(
+                                    machine_state,
+                                    TkcEvent::LeaseRebound {
+                                        target_id: rebound_target_id,
+                                        lease_id,
+                                        tux_id,
+                                        tux_pubkey,
+                                        tux_direct_addr,
+                                    },
+                                )
+                                .map_err(|e| anyhow::anyhow!("lease-rebound transition: {e}"))?;
+                                machine_state = s;
+                                let _ = apply_target_control_effects(
+                                    node,
+                                    router,
+                                    &effects,
+                                    &mut heartbeat,
+                                    &disconnect_tx,
+                                    attachment_hint,
+                                    attachment_hint_path,
+                                )
+                                .await?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {
+                        eprintln!("[target] kennel control lost");
+                        let (s, effects) = target_kennel_control::transition(
+                            machine_state.clone(),
+                            TkcEvent::KennelDisconnected,
+                        )
+                        .map_err(|e| anyhow::anyhow!("kennel-control-lost transition: {e}"))?;
+                        machine_state = s;
+                        let (_, should_return) = apply_target_control_effects(
+                            node,
+                            router,
+                            &effects,
+                            &mut heartbeat,
+                            &disconnect_tx,
+                            attachment_hint,
+                            attachment_hint_path,
+                        )
+                        .await?;
+                        if should_return {
+                            if let Some(h) = heartbeat.take() { h.abort(); }
+                            return Ok(machine_state);
+                        }
+                        if machine_state.attachment.is_terminal() {
                             if let Some(h) = heartbeat.take() { h.abort(); }
                             return Ok(machine_state);
                         }
@@ -1559,8 +1916,21 @@ async fn run_adopted_loop(
             _ = disconnect_rx.changed() => {
                 if *disconnect_rx.borrow() {
                     if let Some(h) = heartbeat.take() { h.abort(); }
-                    let (s, _) = target_attachment::transition(machine_state, TaEvent::DirectLinkLost)
-                        .unwrap_or((TaState::DirectLost { tux_id: None }, vec![]));
+                    let (s, effects) = target_kennel_control::transition(
+                        machine_state,
+                        TkcEvent::DirectLinkLost,
+                    )
+                    .map_err(|e| anyhow::anyhow!("disconnect-direct-link-lost transition: {e}"))?;
+                    let _ = apply_target_control_effects(
+                        node,
+                        router,
+                        &effects,
+                        &mut heartbeat,
+                        &disconnect_tx,
+                        attachment_hint,
+                        attachment_hint_path,
+                    )
+                    .await?;
                     return Ok(s);
                 }
             }
@@ -1596,4 +1966,42 @@ fn find_flag(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn parse_provider_override(args: &[String]) -> anyhow::Result<Option<ProviderKind>> {
+    let model = find_flag(args, "--model");
+    let provider = find_flag(args, "--provider");
+    match (model, provider) {
+        (Some(_), Some(provider)) => Ok(Some(provider.parse()?)),
+        (Some(_), None) => anyhow::bail!("--model requires --provider"),
+        (None, Some(_)) => anyhow::bail!("--provider requires --model"),
+        (None, None) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_override;
+    use mdm_tux::ProviderKind;
+
+    #[test]
+    fn provider_override_requires_model_and_provider_together() {
+        let err = parse_provider_override(&["--model".into(), "gpt-5.4".into()]).unwrap_err();
+        assert!(err.to_string().contains("--model requires --provider"));
+
+        let err = parse_provider_override(&["--provider".into(), "openai".into()]).unwrap_err();
+        assert!(err.to_string().contains("--provider requires --model"));
+    }
+
+    #[test]
+    fn provider_override_parses_explicit_provider() {
+        let provider = parse_provider_override(&[
+            "--model".into(),
+            "gpt-5.4".into(),
+            "--provider".into(),
+            "openai".into(),
+        ])
+        .unwrap();
+        assert_eq!(provider, Some(ProviderKind::Openai));
+    }
 }

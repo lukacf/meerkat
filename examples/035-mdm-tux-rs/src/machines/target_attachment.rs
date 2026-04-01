@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use crate::LeaseRef;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
     Idle,
@@ -27,7 +29,7 @@ pub enum State {
     Released,
     AttachFailed,
     DirectLost {
-        tux_id: Option<String>,
+        tux_id: String,
     },
 }
 
@@ -60,7 +62,7 @@ pub enum Event {
         lease_id: String,
     },
     KennelReleased {
-        lease_id: String,
+        lease_ref: LeaseRef,
     },
     KennelDisconnected,
     KennelHeartbeatFailed,
@@ -74,6 +76,11 @@ pub enum Effect {
         tux_pubkey: String,
         tux_direct_addr: String,
     },
+    PersistAttachmentHint {
+        tux_id: String,
+        lease_id: String,
+    },
+    ClearAttachmentHint,
     SendAttachRequest {
         target_id: String,
         lease_id: String,
@@ -154,8 +161,8 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         ) => Ok((
             State::Attached {
                 target_id,
-                lease_id,
-                tux_id,
+                lease_id: lease_id.clone(),
+                tux_id: tux_id.clone(),
                 tux_pubkey: tux_pubkey.clone(),
                 tux_direct_addr: tux_direct_addr.clone(),
                 kennel_alive: true,
@@ -164,6 +171,10 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 Effect::EnsureTuxPeer {
                     tux_pubkey,
                     tux_direct_addr,
+                },
+                Effect::PersistAttachmentHint {
+                    tux_id: tux_id.clone(),
+                    lease_id: lease_id.clone(),
                 },
                 Effect::StartDirectHeartbeat,
             ],
@@ -186,13 +197,19 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             Ok((
                 State::Attached {
                     target_id,
-                    lease_id,
-                    tux_id,
+                    lease_id: lease_id.clone(),
+                    tux_id: tux_id.clone(),
                     tux_pubkey,
                     tux_direct_addr,
                     kennel_alive: true,
                 },
-                vec![Effect::StartDirectHeartbeat],
+                vec![
+                    Effect::PersistAttachmentHint {
+                        tux_id,
+                        lease_id: ack_lid,
+                    },
+                    Effect::StartDirectHeartbeat,
+                ],
             ))
         }
         (
@@ -204,9 +221,13 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 tux_direct_addr,
                 ..
             },
-            Event::KennelReleased { lease_id: rel_lid },
+            Event::KennelReleased { lease_ref },
         ) => {
-            if rel_lid != lease_id && !rel_lid.is_empty() {
+            let release_matches = match lease_ref {
+                LeaseRef::Known { lease_id: rel_lid } => rel_lid == lease_id,
+                LeaseRef::PendingRebind => true,
+            };
+            if !release_matches {
                 return Ok((
                     State::Attaching {
                         target_id,
@@ -219,16 +240,20 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                     vec![],
                 ));
             }
-            Ok((State::Released, vec![]))
+            Ok((State::Released, vec![Effect::ClearAttachmentHint]))
         }
         (State::Attaching { .. }, Event::KennelDisconnected)
-        | (State::Attaching { .. }, Event::KennelHeartbeatFailed) => {
-            Ok((State::AttachFailed, vec![Effect::ReregisterClean]))
+        | (State::Attaching { .. }, Event::KennelHeartbeatFailed) => Ok((
+            State::AttachFailed,
+            vec![Effect::ClearAttachmentHint, Effect::ReregisterClean],
+        )),
+        (State::Attaching { .. }, Event::AttachSendFailed) => {
+            Ok((State::AttachFailed, vec![Effect::ClearAttachmentHint]))
         }
-        (State::Attaching { .. }, Event::AttachSendFailed) => Ok((State::AttachFailed, vec![])),
-        (State::Attaching { .. }, Event::DirectLinkLost) => {
-            Ok((State::AttachFailed, vec![Effect::ReregisterClean]))
-        }
+        (State::Attaching { .. }, Event::DirectLinkLost) => Ok((
+            State::AttachFailed,
+            vec![Effect::ClearAttachmentHint, Effect::ReregisterClean],
+        )),
 
         (
             State::Attached {
@@ -240,10 +265,17 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 kennel_alive,
                 ..
             },
-            Event::KennelReleased { lease_id: rel_lid },
+            Event::KennelReleased { lease_ref },
         ) => {
-            if rel_lid.is_empty() || rel_lid == lease_id {
-                Ok((State::Released, vec![Effect::StopDirectHeartbeat]))
+            let release_matches = match lease_ref {
+                LeaseRef::Known { lease_id: rel_lid } => rel_lid == lease_id,
+                LeaseRef::PendingRebind => true,
+            };
+            if release_matches {
+                Ok((
+                    State::Released,
+                    vec![Effect::StopDirectHeartbeat, Effect::ClearAttachmentHint],
+                ))
             } else {
                 Ok((
                     State::Attached {
@@ -316,7 +348,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         (State::Attached { tux_id, .. }, Event::KennelDisconnected)
         | (State::Attached { tux_id, .. }, Event::KennelHeartbeatFailed) => Ok((
             State::DirectLost {
-                tux_id: Some(tux_id.clone()),
+                tux_id: tux_id.clone(),
             },
             vec![
                 Effect::StopDirectHeartbeat,
@@ -328,8 +360,13 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             // hint. Without this, a transient direct-socket failure silently
             // revokes the active lease on the kennel side.
             Ok((
-                State::DirectLost { tux_id: Some(tux_id.clone()) },
-                vec![Effect::StopDirectHeartbeat, Effect::ReregisterWithHint { tux_id }],
+                State::DirectLost {
+                    tux_id: tux_id.clone(),
+                },
+                vec![
+                    Effect::StopDirectHeartbeat,
+                    Effect::ReregisterWithHint { tux_id },
+                ],
             ))
         }
 
@@ -403,5 +440,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.reason.contains("lease_id mismatch"));
+    }
+
+    #[test]
+    fn direct_link_loss_preserves_tux_id() {
+        let (state, _) = transition(State::Idle, adopted()).unwrap();
+        let (state, _) = transition(
+            state,
+            Event::DirectAttachAck {
+                lease_id: "lease-1".into(),
+            },
+        )
+        .unwrap();
+        let (state, loss_effects) = transition(state, Event::DirectLinkLost).unwrap();
+
+        assert_eq!(
+            state,
+            State::DirectLost {
+                tux_id: "tux-1".into()
+            }
+        );
+        assert_eq!(
+            loss_effects,
+            vec![
+                Effect::StopDirectHeartbeat,
+                Effect::ReregisterWithHint {
+                    tux_id: "tux-1".into()
+                }
+            ]
+        );
     }
 }

@@ -48,6 +48,29 @@ pub struct LeaseView {
     pub expires_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LeaseRef {
+    Known { lease_id: String },
+    PendingRebind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetRegistrationRejectReason {
+    DuplicateName,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseTerminationReason {
+    ReleasedByTux,
+    ClaimAckTimeout,
+    AttachTimeout,
+    RecoveryExpired,
+    TuxDisconnected,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KennelPayload {
@@ -64,6 +87,10 @@ pub enum KennelPayload {
         attached_tux_id: Option<String>,
     },
     TargetRegistered,
+    TargetRegistrationRejected {
+        reason: TargetRegistrationRejectReason,
+        message: String,
+    },
     TargetHeartbeat,
     TuxRegister {
         tux_id: String,
@@ -114,18 +141,17 @@ pub enum KennelPayload {
         lease_ids: Vec<String>,
     },
     Released {
-        lease_id: String,
-        reason: String,
+        lease_ref: LeaseRef,
+        reason: LeaseTerminationReason,
     },
     ClaimReleased {
-        lease_id: String,
+        lease_ref: LeaseRef,
         target_id: String,
-        reason: String,
+        reason: LeaseTerminationReason,
     },
     TargetLost {
         target_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lease_id: Option<String>,
+        lease_ref: LeaseRef,
     },
     TuxHeartbeat,
     RebindTargets {
@@ -144,6 +170,19 @@ pub enum KennelPayload {
     Error {
         message: String,
     },
+}
+
+impl std::fmt::Display for LeaseTerminationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            LeaseTerminationReason::ReleasedByTux => "released_by_tux",
+            LeaseTerminationReason::ClaimAckTimeout => "claim_ack_timeout",
+            LeaseTerminationReason::AttachTimeout => "attach_timeout",
+            LeaseTerminationReason::RecoveryExpired => "recovery_expired",
+            LeaseTerminationReason::TuxDisconnected => "tux_disconnected",
+        };
+        f.write_str(text)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

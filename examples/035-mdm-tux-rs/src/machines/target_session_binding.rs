@@ -11,7 +11,15 @@ pub enum State {
     Bound {
         session_id: SessionId,
     },
-    Switching {
+    SettingUp {
+        from_session_id: SessionId,
+        resume_id: Option<SessionId>,
+    },
+    Subscribing {
+        from_session_id: SessionId,
+        to_session_id: SessionId,
+    },
+    TearingDown {
         from_session_id: SessionId,
         to_session_id: SessionId,
     },
@@ -21,7 +29,15 @@ impl State {
     pub fn current_session_id(&self) -> Option<&SessionId> {
         match self {
             State::Bound { session_id } => Some(session_id),
-            State::Switching { to_session_id, .. } => Some(to_session_id),
+            State::SettingUp {
+                from_session_id, ..
+            }
+            | State::Subscribing {
+                from_session_id, ..
+            }
+            | State::TearingDown {
+                from_session_id, ..
+            } => Some(from_session_id),
             State::Unbound => None,
         }
     }
@@ -32,9 +48,11 @@ pub enum Event {
     BootResolved { session_id: SessionId },
     CreateNewRequested,
     ResumeRequested { session_id: SessionId },
-    SwitchPrepared { session_id: SessionId },
-    SwitchCommitted { session_id: SessionId },
-    SwitchFailed,
+    SetupSucceeded { session_id: SessionId },
+    SetupFailed,
+    SubscriptionEstablished,
+    SubscriptionFailed,
+    TeardownCompleted,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,9 +95,9 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         }
 
         (State::Bound { session_id }, Event::CreateNewRequested) => Ok((
-            State::Switching {
-                from_session_id: session_id.clone(),
-                to_session_id: session_id,
+            State::SettingUp {
+                from_session_id: session_id,
+                resume_id: None,
             },
             vec![Effect::SetupSession { resume_id: None }],
         )),
@@ -93,9 +111,9 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 Ok((State::Bound { session_id }, vec![]))
             } else {
                 Ok((
-                    State::Switching {
-                        from_session_id: session_id.clone(),
-                        to_session_id: session_id,
+                    State::SettingUp {
+                        from_session_id: session_id,
+                        resume_id: Some(resume_id.clone()),
                     },
                     vec![Effect::SetupSession {
                         resume_id: Some(resume_id),
@@ -105,50 +123,82 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
         }
 
         (
-            State::Switching {
-                from_session_id, ..
+            State::SettingUp {
+                from_session_id,
+                resume_id,
             },
-            Event::SwitchPrepared { session_id },
+            Event::SetupSucceeded { session_id },
         ) => {
-            if session_id == from_session_id {
-                Ok((State::Bound { session_id }, vec![]))
-            } else {
+            if Some(session_id.clone()) == resume_id || resume_id.is_none() {
                 Ok((
-                    State::Switching {
-                        from_session_id: from_session_id.clone(),
+                    State::Subscribing {
+                        from_session_id,
                         to_session_id: session_id.clone(),
                     },
-                    vec![
-                        Effect::SubscribeSessionEvents {
-                            session_id: session_id.clone(),
-                        },
-                        // Ordering is semantically significant: unregister first,
-                        // then discard. Callers must execute effects sequentially
-                        // in emitted order.
-                        Effect::UnregisterRuntimeSession {
-                            session_id: from_session_id.clone(),
-                        },
-                        Effect::DiscardLiveSession {
-                            session_id: from_session_id,
-                        },
-                    ],
+                    vec![Effect::SubscribeSessionEvents { session_id }],
                 ))
+            } else {
+                Err(err("SettingUp", "SetupSucceeded", "session_id mismatch"))
             }
-        }
-        (State::Switching { to_session_id, .. }, Event::SwitchCommitted { session_id }) => {
-            if session_id != to_session_id {
-                return Err(err("Switching", "SwitchCommitted", "session_id mismatch"));
-            }
-            Ok((State::Bound { session_id }, vec![]))
         }
         (
-            State::Switching {
+            State::SettingUp {
                 from_session_id, ..
             },
-            Event::SwitchFailed,
+            Event::SetupFailed,
         ) => Ok((
             State::Bound {
                 session_id: from_session_id,
+            },
+            vec![],
+        )),
+
+        (
+            State::Subscribing {
+                from_session_id,
+                to_session_id,
+            },
+            Event::SubscriptionEstablished,
+        ) => Ok((
+            State::TearingDown {
+                from_session_id: from_session_id.clone(),
+                to_session_id,
+            },
+            vec![
+                // Ordering is semantically significant: unregister first, then
+                // discard. Callers must execute effects sequentially in emitted
+                // order.
+                Effect::UnregisterRuntimeSession {
+                    session_id: from_session_id.clone(),
+                },
+                Effect::DiscardLiveSession {
+                    session_id: from_session_id,
+                },
+            ],
+        )),
+        (
+            State::Subscribing {
+                from_session_id,
+                to_session_id,
+            },
+            Event::SubscriptionFailed,
+        ) => Ok((
+            State::Bound {
+                session_id: from_session_id,
+            },
+            vec![
+                Effect::UnregisterRuntimeSession {
+                    session_id: to_session_id.clone(),
+                },
+                Effect::DiscardLiveSession {
+                    session_id: to_session_id,
+                },
+            ],
+        )),
+
+        (State::TearingDown { to_session_id, .. }, Event::TeardownCompleted) => Ok((
+            State::Bound {
+                session_id: to_session_id,
             },
             vec![],
         )),
@@ -157,7 +207,9 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             let state_name = match &state {
                 State::Unbound => "Unbound",
                 State::Bound { .. } => "Bound",
-                State::Switching { .. } => "Switching",
+                State::SettingUp { .. } => "SettingUp",
+                State::Subscribing { .. } => "Subscribing",
+                State::TearingDown { .. } => "TearingDown",
             };
             Err(err(
                 state_name,
@@ -207,26 +259,50 @@ mod tests {
     }
 
     #[test]
-    fn switching_emits_ordered_teardown_effects() {
+    fn switching_follows_explicit_phases() {
         let old = sid();
         let new = sid();
-        let (state, _effects) = transition(
+        let (state, effects) = transition(
             State::Bound {
                 session_id: old.clone(),
             },
             Event::CreateNewRequested,
         )
         .unwrap();
+        assert_eq!(
+            state,
+            State::SettingUp {
+                from_session_id: old.clone(),
+                resume_id: None
+            }
+        );
+        assert_eq!(effects, vec![Effect::SetupSession { resume_id: None }]);
+
         let (state, effects) = transition(
             state,
-            Event::SwitchPrepared {
+            Event::SetupSucceeded {
                 session_id: new.clone(),
             },
         )
         .unwrap();
         assert_eq!(
             state,
-            State::Switching {
+            State::Subscribing {
+                from_session_id: old.clone(),
+                to_session_id: new.clone()
+            }
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::SubscribeSessionEvents {
+                session_id: new.clone()
+            }]
+        );
+
+        let (state, effects) = transition(state, Event::SubscriptionEstablished).unwrap();
+        assert_eq!(
+            state,
+            State::TearingDown {
                 from_session_id: old.clone(),
                 to_session_id: new.clone()
             }
@@ -234,22 +310,48 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                Effect::SubscribeSessionEvents {
-                    session_id: new.clone()
-                },
                 Effect::UnregisterRuntimeSession {
                     session_id: old.clone()
                 },
-                Effect::DiscardLiveSession { session_id: old },
+                Effect::DiscardLiveSession {
+                    session_id: old.clone()
+                }
             ]
         );
-        assert!(matches!(
-            effects.as_slice(),
-            [
-                Effect::SubscribeSessionEvents { .. },
-                Effect::UnregisterRuntimeSession { .. },
-                Effect::DiscardLiveSession { .. }
+
+        let (state, effects) = transition(state, Event::TeardownCompleted).unwrap();
+        assert_eq!(state, State::Bound { session_id: new });
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn subscription_failure_rolls_back_and_cleans_new_session() {
+        let old = sid();
+        let new = sid();
+        let (state, _) = transition(
+            State::Bound {
+                session_id: old.clone(),
+            },
+            Event::CreateNewRequested,
+        )
+        .unwrap();
+        let (state, _) = transition(
+            state,
+            Event::SetupSucceeded {
+                session_id: new.clone(),
+            },
+        )
+        .unwrap();
+        let (state, effects) = transition(state, Event::SubscriptionFailed).unwrap();
+        assert_eq!(state, State::Bound { session_id: old });
+        assert_eq!(
+            effects,
+            vec![
+                Effect::UnregisterRuntimeSession {
+                    session_id: new.clone()
+                },
+                Effect::DiscardLiveSession { session_id: new }
             ]
-        ));
+        );
     }
 }

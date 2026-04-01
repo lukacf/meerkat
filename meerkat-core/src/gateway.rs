@@ -568,6 +568,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
         ExternalToolUpdate {
             notices: all_notices,
             pending: all_pending,
+            background_completions: Vec::new(),
         }
     }
 

@@ -245,6 +245,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         ExternalToolUpdate {
             notices,
             pending: Vec::new(),
+            background_completions: Vec::new(),
         }
     }
 }

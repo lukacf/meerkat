@@ -191,13 +191,74 @@ impl App {
         }
     }
 
+    fn ensure_section_gap(&mut self) {
+        if self.output.back().is_some_and(|line| !line.is_empty()) {
+            self.output.push_back(String::new());
+        }
+    }
+
+    fn push_markdown_section<I>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.ensure_section_gap();
+        for line in lines {
+            self.push(line);
+        }
+    }
+
+    fn push_user_turn(&mut self, target: &str, body: &str) {
+        self.push_markdown_section([
+            format!("**You -> {target}**"),
+            String::new(),
+            body.trim().to_string(),
+        ]);
+    }
+
+    fn push_remote_turn(&mut self, target: &str, body: &str) {
+        self.push_markdown_section([
+            format!("**{target}**"),
+            String::new(),
+            body.trim().to_string(),
+        ]);
+    }
+
+    fn push_notice(&mut self, title: &str, body: &str) {
+        self.push_markdown_section([format!("_{}_", title), body.trim().to_string()]);
+    }
+
     /// Flush streaming text for a target into the output buffer.
     fn flush_streaming(&mut self, target: &str) {
         if let Some(text) = self.streaming_text.remove(target)
             && !text.is_empty()
         {
-            self.push(format!("[{target}] {text}"));
+            self.push_remote_turn(target, &text);
         }
+    }
+
+    fn selected_target_name(&self) -> Option<&str> {
+        self.targets.get(self.selected).map(String::as_str)
+    }
+
+    fn selected_target_name_owned(&self) -> Option<String> {
+        self.selected_target_name().map(ToString::to_string)
+    }
+
+    fn restore_selection(&mut self, previous_target: Option<String>) {
+        if self.targets.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(previous_target) = previous_target
+            && let Some(index) = self
+                .targets
+                .iter()
+                .position(|target| target == &previous_target)
+        {
+            self.selected = index;
+            return;
+        }
+        self.selected = self.selected.min(self.targets.len().saturating_sub(1));
     }
 
     /// The label prefix shown before the input text (e.g. `[target] > `).
@@ -244,6 +305,152 @@ impl App {
     fn display_name_for_target(&self, target_id: &str) -> String {
         self.target_name_for_id(target_id)
             .unwrap_or_else(|| target_id.to_string())
+    }
+}
+
+fn is_known_slash_command(input: &str) -> bool {
+    input.starts_with('/')
+        && matches!(
+            input.split_once(' ').map(|(cmd, _)| cmd).unwrap_or(input),
+            "/new" | "/resume" | "/help" | "/claim" | "/release"
+        )
+}
+
+fn short_id(id: &str) -> String {
+    if id.len() <= 18 {
+        id.to_string()
+    } else {
+        format!("{}...{}", &id[..8], &id[id.len() - 6..])
+    }
+}
+
+fn format_age_ms(age_ms: i64) -> String {
+    if age_ms < 0 {
+        "just now".into()
+    } else if age_ms < 1_000 {
+        "just now".into()
+    } else if age_ms < 60_000 {
+        format!("{}s ago", age_ms / 1_000)
+    } else if age_ms < 3_600_000 {
+        format!("{}m ago", age_ms / 60_000)
+    } else {
+        format!("{}h ago", age_ms / 3_600_000)
+    }
+}
+
+fn target_runtime_snapshot(
+    app: &App,
+    runtime: &RuntimeRegistry,
+    target_name: &str,
+) -> (RuntimePhase, Option<i64>, bool, bool) {
+    let runtime = runtime.read();
+    let runtime_id = app.target_runtime_id(target_name);
+    let phase = runtime.phase(runtime_id);
+    let age_ms = runtime
+        .last_activity_ms(runtime_id)
+        .map(|last| chrono::Utc::now().timestamp_millis() - last);
+    let offline = age_ms.is_some_and(|age| age > Duration::from_secs(60).as_millis() as i64);
+    let stale = phase == RuntimePhase::Stalled
+        || age_ms.is_some_and(|age| age >= Duration::from_secs(35).as_millis() as i64);
+    (phase, age_ms, stale, offline)
+}
+
+fn runtime_status_label(phase: RuntimePhase, stale: bool, offline: bool) -> &'static str {
+    if offline {
+        "offline"
+    } else if stale {
+        "stalled"
+    } else {
+        match phase {
+            RuntimePhase::Idle => "idle",
+            RuntimePhase::Dispatching => "dispatching",
+            RuntimePhase::Running => "running",
+            RuntimePhase::Stalled => "stalled",
+        }
+    }
+}
+
+fn control_status_label(app: &App, target_name: &str) -> String {
+    match app.transport {
+        TransportMode::Direct => "direct".into(),
+        TransportMode::Kennel => match app.target_states.get(target_name).copied() {
+            Some(KennelUiState::Available) => "available".into(),
+            Some(KennelUiState::Attaching) => app
+                .attaching_since
+                .get(target_name)
+                .map(|started| format!("attaching {}s", started.elapsed().as_secs()))
+                .unwrap_or_else(|| "attaching".into()),
+            Some(KennelUiState::ClaimedByMe) => "claimed by me".into(),
+            Some(KennelUiState::ClaimUncertain) => "claim uncertain".into(),
+            None => "unknown".into(),
+        },
+    }
+}
+
+fn composer_status(app: &App, runtime: &RuntimeRegistry) -> (String, String, Color) {
+    match app.mode {
+        Mode::Hive if app.hive_planning => (
+            "Planner busy".into(),
+            "Wait for the current hive plan to finish before sending another prompt.".into(),
+            Color::Yellow,
+        ),
+        Mode::Hive => (
+            "Hive ready".into(),
+            "Prompt the planner and it will decide which targets to involve.".into(),
+            Color::Green,
+        ),
+        Mode::Direct if app.targets.is_empty() => (
+            "No targets".into(),
+            if app.transport == TransportMode::Kennel {
+                "Waiting for kennel inventory or claimed targets to appear.".into()
+            } else {
+                "Start mcm-target or check direct registration.".into()
+            },
+            Color::Yellow,
+        ),
+        Mode::Direct => {
+            let target_name = app.selected_target_name().unwrap_or("target");
+            let runtime_id = app.target_runtime_id(target_name);
+            let runtime = runtime.read();
+            let busy = runtime.is_busy(runtime_id);
+            let is_slash = is_known_slash_command(&app.input);
+            if app.transport == TransportMode::Kennel
+                && !matches!(
+                    app.target_states.get(target_name),
+                    Some(KennelUiState::ClaimedByMe | KennelUiState::ClaimUncertain)
+                )
+            {
+                (
+                    "Claim required".into(),
+                    format!("Use /claim before sending commands to {target_name}."),
+                    Color::Yellow,
+                )
+            } else if busy && is_slash {
+                (
+                    "Run in progress".into(),
+                    format!("{target_name} is busy; slash commands wait for the current run."),
+                    Color::Yellow,
+                )
+            } else if runtime.phase(runtime_id) == RuntimePhase::Stalled {
+                (
+                    "Target stalled".into(),
+                    format!("{target_name} stopped responding; messages still queue."),
+                    Color::Yellow,
+                )
+            } else if busy {
+                (
+                    "Queued send".into(),
+                    format!("{target_name} is already working; new messages queue behind it."),
+                    Color::Cyan,
+                )
+            } else {
+                (
+                    "Ready".into(),
+                    format!("Enter sends to {target_name}. /help shows session commands."),
+                    Color::Green,
+                )
+            }
+        }
     }
 }
 
@@ -628,6 +835,7 @@ fn attach_claim_facts(claims: &ClaimRegistry, target_id: &str) -> Option<AttachC
 }
 
 fn rebuild_kennel_projection(app: &mut App, claims: &ClaimRegistry) {
+    let selected_target = app.selected_target_name_owned();
     app.targets.clear();
     app.target_ids.clear();
     app.target_states.clear();
@@ -684,11 +892,7 @@ fn rebuild_kennel_projection(app: &mut App, claims: &ClaimRegistry) {
     }
     app.targets.sort();
     app.targets.dedup();
-    if !app.targets.is_empty() {
-        app.selected = app.selected.min(app.targets.len() - 1);
-    } else {
-        app.selected = 0;
-    }
+    app.restore_selection(selected_target);
 }
 
 fn reconcile_available_targets(
@@ -1673,7 +1877,7 @@ fn tui_loop(
                     let line_count = text.lines().count();
                     app.input.push_str(&text);
                     if line_count > 1 {
-                        app.push(format!("[pasted {line_count} lines]"));
+                        app.push_notice("pasted input", &format!("{line_count} lines"));
                     }
                 }
                 _ => {}
@@ -1698,10 +1902,13 @@ fn tui_loop(
                     let clean = body
                         .strip_prefix("[COMMS MESSAGE from ")
                         .and_then(|rest| rest.split_once("]\n"))
-                        .map(|(from, body)| format!("[{from}] {body}"))
-                        .or_else(|| from_name.map(|from| format!("[{from}] {body}")))
-                        .unwrap_or(body);
-                    app.push(clean);
+                        .map(|(from, body)| (from.to_string(), body.to_string()))
+                        .or_else(|| from_name.map(|from| (from, body.clone())));
+                    if let Some((from, body)) = clean {
+                        app.push_remote_turn(&from, &body);
+                    } else {
+                        app.push_notice("message", &body);
+                    }
                 }
                 TuiEvent::Heartbeat { from_target_id } => {
                     runtime.write().apply(
@@ -1712,11 +1919,11 @@ fn tui_loop(
                     );
                 }
                 TuiEvent::HivePlanDone(s) => {
-                    app.push(format!("[hive dispatched] {s}"));
+                    app.push_notice("hive dispatched", &s);
                     app.hive_planning = false;
                 }
                 TuiEvent::HiveError(e) => {
-                    app.push(format!("[hive error] {e}"));
+                    app.push_notice("hive error", &e);
                     app.hive_planning = false;
                 }
                 TuiEvent::SendFailed { target_id, message } => {
@@ -1728,16 +1935,18 @@ fn tui_loop(
                                 now_ms: chrono::Utc::now().timestamp_millis(),
                             },
                         );
-                        app.push(format!("[send error] [{display_name}] {message}"));
+                        app.push_notice("send error", &format!("[{display_name}] {message}"));
                     } else {
-                        app.push(format!("[send error] {message}"));
+                        app.push_notice("send error", &message);
                     }
                 }
                 TuiEvent::TargetRegistered { target_id, name } => {
+                    let selected_target = app.selected_target_name_owned();
                     if !app.targets.contains(&name) {
                         app.targets.push(name.clone());
                         app.targets.sort();
                     }
+                    app.restore_selection(selected_target);
                     app.target_ids.insert(name.clone(), target_id.clone());
                     app.streaming_text.remove(&name);
                     runtime.write().apply(
@@ -1746,7 +1955,7 @@ fn tui_loop(
                             now_ms: chrono::Utc::now().timestamp_millis(),
                         },
                     );
-                    app.push(format!("[registered] target '{name}' connected"));
+                    app.push_notice("registered", &format!("target `{name}` connected"));
                 }
                 TuiEvent::StreamEvent {
                     from_target_id,
@@ -1766,6 +1975,7 @@ fn tui_loop(
                     }
                 }
                 TuiEvent::KennelClaimGranted(claims) => {
+                    let selected_target = app.selected_target_name_owned();
                     for claim in claims {
                         app.target_ids
                             .insert(claim.target_name.clone(), claim.target_id.clone());
@@ -1786,6 +1996,7 @@ fn tui_loop(
                         }
                     }
                     app.targets.sort();
+                    app.restore_selection(selected_target);
                 }
                 TuiEvent::KennelClaimReleased {
                     target_id,
@@ -1815,13 +2026,15 @@ fn tui_loop(
                             },
                         );
                         app.flush_streaming(&name);
-                        app.push(format!(
-                            "[{name}] kennel released claim ({lease_text}): {reason}"
-                        ));
+                        app.push_notice(
+                            "kennel released claim",
+                            &format!("`{name}` ({lease_text}): {reason}"),
+                        );
                     } else {
-                        app.push(format!(
-                            "[kennel] claim released {target_id} ({lease_text}): {reason}"
-                        ));
+                        app.push_notice(
+                            "kennel released claim",
+                            &format!("`{target_id}` ({lease_text}): {reason}"),
+                        );
                     }
                 }
                 TuiEvent::KennelAttached {
@@ -1832,7 +2045,7 @@ fn tui_loop(
                         .insert(target_name.clone(), KennelUiState::ClaimedByMe);
                     app.target_leases.insert(target_name.clone(), lease_id);
                     app.attaching_since.remove(&target_name);
-                    app.push(format!("[{target_name}] attached"));
+                    app.push_notice("attached", &target_name);
                 }
             }
         }
@@ -1862,7 +2075,7 @@ fn tui_loop(
                     .target_name_for_id(&target)
                     .unwrap_or_else(|| target.clone());
                 app.flush_streaming(&display_name);
-                app.push(format!("[{display_name}] target unresponsive"));
+                app.push_notice("target unresponsive", &display_name);
             }
         }
 
@@ -1908,7 +2121,7 @@ fn handle_stream_event(
             // Preserve source attribution so multi-target output is distinguishable.
             app.streaming_text.remove(from_name);
             if !content.is_empty() {
-                app.push(format!("[{from_name}] {content}"));
+                app.push_remote_turn(from_name, content);
             }
         }
         AgentEvent::ToolCallRequested { name, args, .. } => {
@@ -1937,7 +2150,12 @@ fn handle_stream_event(
                     short
                 }
             };
-            app.push(format!("  [{name}] {display}"));
+            app.push_markdown_section([
+                format!("**tool** `{name}`"),
+                "```text".into(),
+                display,
+                "```".into(),
+            ]);
         }
         AgentEvent::ToolExecutionCompleted {
             name,
@@ -1949,34 +2167,12 @@ fn handle_stream_event(
             runtime
                 .write()
                 .apply(from_target_id, RuntimeEvent::ActivityObserved { now_ms });
-            if *is_error {
-                app.push(format!("  [{name}] error ({duration_ms}ms):"));
-                for line in result.lines().take(10) {
-                    app.push(format!("  {line}"));
-                }
-            } else if result.trim().is_empty() {
-                // Silent success (e.g. background job started with no output)
-            } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
-                // Structured result — prefer "message" field, fall back to compact JSON
-                if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
-                    app.push(format!("  {msg}"));
-                } else {
-                    let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
-                    for line in pretty.lines().take(15) {
-                        app.push(format!("  {line}"));
-                    }
-                }
-            } else {
-                // Plain text output — show first 15 lines
-                let line_count = result.lines().count();
-                for (i, line) in result.lines().enumerate() {
-                    if i >= 15 {
-                        app.push(format!("  ... ({} more lines)", line_count - 15));
-                        break;
-                    }
-                    app.push(format!("  {line}"));
-                }
-            }
+            app.push_markdown_section(format_tool_completion(
+                name,
+                result,
+                *is_error,
+                *duration_ms,
+            ));
         }
         AgentEvent::RunCompleted { .. } => {
             app.flush_streaming(from_name);
@@ -1987,13 +2183,204 @@ fn handle_stream_event(
         }
         AgentEvent::RunFailed { error, .. } => {
             app.flush_streaming(from_name);
-            app.push(format!("[{from_name} error] {error}"));
+            app.push_notice(&format!("{from_name} error"), error);
             runtime
                 .write()
                 .apply(from_target_id, RuntimeEvent::RunFailed { now_ms });
         }
         _ => {}
     }
+}
+
+fn decode_common_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn normalize_tool_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut normalized = if trimmed.matches("\\n").count() >= 2 && trimmed.lines().count() <= 2 {
+        decode_common_escapes(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+    normalized = normalized.replace("\r\n", "\n");
+
+    let mut lines = Vec::new();
+    let mut blank_run = 0;
+    for raw in normalized.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                lines.push(String::new());
+            }
+            continue;
+        }
+        blank_run = 0;
+        lines.push(line.to_string());
+    }
+    lines.join("\n").trim().to_string()
+}
+
+fn truncate_tool_block(text: &str, max_lines: usize, max_cols: usize) -> Vec<String> {
+    let normalized = normalize_tool_text(text);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let all_lines: Vec<&str> = normalized.lines().collect();
+    let hidden = all_lines.len().saturating_sub(max_lines);
+    for line in all_lines.into_iter().take(max_lines) {
+        let trimmed = if line.chars().count() > max_cols {
+            let clipped: String = line.chars().take(max_cols.saturating_sub(1)).collect();
+            format!("{clipped}…")
+        } else {
+            line.to_string()
+        };
+        lines.push(trimmed);
+    }
+    if hidden > 0 {
+        lines.push(format!("... ({hidden} more lines)"));
+    }
+    lines
+}
+
+fn emit_tool_block(lines: &mut Vec<String>, title: Option<String>, body: Vec<String>) {
+    if body.is_empty() {
+        return;
+    }
+    if let Some(title) = title {
+        lines.push(title);
+    }
+    lines.push("```text".into());
+    lines.extend(body);
+    lines.push("```".into());
+}
+
+fn format_tool_completion(
+    name: &str,
+    result: &str,
+    is_error: bool,
+    duration_ms: u64,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let status = if is_error { "failed" } else { "completed" };
+    lines.push(format!("**tool** `{name}` {status} in {duration_ms}ms"));
+
+    if result.trim().is_empty() {
+        if !is_error {
+            lines.push("_no output_".into());
+        }
+        return lines;
+    }
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(result) {
+        if let Some(obj) = json.as_object() {
+            let stdout = obj
+                .get("stdout")
+                .and_then(|v| v.as_str())
+                .map(|s| truncate_tool_block(s, 20, 140))
+                .unwrap_or_default();
+            let stderr = obj
+                .get("stderr")
+                .and_then(|v| v.as_str())
+                .map(|s| truncate_tool_block(s, 12, 140))
+                .unwrap_or_default();
+            let message = obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| truncate_tool_block(s, 12, 140))
+                .unwrap_or_default();
+            let exit_code = obj.get("exit_code").and_then(|v| v.as_i64());
+            let timed_out = obj
+                .get("timed_out")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let has_message = !message.is_empty();
+            let has_stdout = !stdout.is_empty();
+            let has_stderr = !stderr.is_empty();
+
+            if exit_code.is_some() || timed_out {
+                let mut summary = Vec::new();
+                if let Some(exit_code) = exit_code {
+                    summary.push(format!("exit code: {exit_code}"));
+                }
+                if timed_out {
+                    summary.push("timed out".into());
+                }
+                if !summary.is_empty() {
+                    lines.push(summary.join("  •  "));
+                }
+            }
+
+            if !message.is_empty() {
+                emit_tool_block(&mut lines, Some("message".into()), message);
+            }
+            if !stdout.is_empty() {
+                emit_tool_block(&mut lines, Some("stdout".into()), stdout);
+            }
+            if !stderr.is_empty() {
+                emit_tool_block(&mut lines, Some("stderr".into()), stderr);
+            }
+
+            if !has_message && !has_stdout && !has_stderr {
+                let pretty =
+                    serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string());
+                emit_tool_block(&mut lines, None, truncate_tool_block(&pretty, 18, 140));
+            }
+            return lines;
+        }
+
+        let pretty = serde_json::to_string_pretty(&json).unwrap_or_else(|_| json.to_string());
+        emit_tool_block(&mut lines, None, truncate_tool_block(&pretty, 18, 140));
+        return lines;
+    }
+
+    emit_tool_block(&mut lines, None, truncate_tool_block(result, 18, 140));
+    lines
+}
+
+fn timeline_max_scroll(content_height: u16, inner_height: u16) -> u16 {
+    if content_height <= inner_height {
+        0
+    } else {
+        content_height
+            .saturating_sub(inner_height)
+            .saturating_add(2)
+    }
+}
+
+fn scroll_timeline_up(app: &mut App, lines: u16) {
+    app.auto_scroll = false;
+    app.scroll_offset = app.scroll_offset.saturating_sub(lines);
+}
+
+fn scroll_timeline_down(app: &mut App, lines: u16) {
+    app.auto_scroll = false;
+    app.scroll_offset = app.scroll_offset.saturating_add(lines);
 }
 
 fn handle_key(
@@ -2012,24 +2399,54 @@ fn handle_key(
                 Mode::Direct
             };
         }
-        KeyCode::Up if app.mode == Mode::Direct => {
+        KeyCode::Char('p')
+            if modifiers.contains(KeyModifiers::CONTROL) && app.mode == Mode::Direct =>
+        {
             app.selected = app.selected.saturating_sub(1);
         }
-        KeyCode::Down if app.mode == Mode::Direct => {
+        KeyCode::Char('n')
+            if modifiers.contains(KeyModifiers::CONTROL) && app.mode == Mode::Direct =>
+        {
+            app.selected = (app.selected + 1).min(app.targets.len().saturating_sub(1));
+        }
+        KeyCode::Up if app.mode == Mode::Direct && modifiers.is_empty() => {
+            app.selected = app.selected.saturating_sub(1);
+        }
+        KeyCode::Down if app.mode == Mode::Direct && modifiers.is_empty() => {
             app.selected = (app.selected + 1).min(app.targets.len().saturating_sub(1));
         }
         KeyCode::PageUp => {
-            app.auto_scroll = false;
-            app.scroll_offset = app.scroll_offset.saturating_sub(10);
+            scroll_timeline_up(app, 10);
         }
         KeyCode::PageDown => {
-            app.scroll_offset = app.scroll_offset.saturating_add(10);
+            scroll_timeline_down(app, 10);
+        }
+        KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
+            scroll_timeline_up(app, 10);
+        }
+        KeyCode::Char('f') if modifiers.contains(KeyModifiers::CONTROL) => {
+            scroll_timeline_down(app, 10);
+        }
+        KeyCode::Up if modifiers.contains(KeyModifiers::ALT) => {
+            scroll_timeline_up(app, 3);
+        }
+        KeyCode::Down if modifiers.contains(KeyModifiers::ALT) => {
+            scroll_timeline_down(app, 3);
         }
         KeyCode::Home => {
             app.auto_scroll = false;
             app.scroll_offset = 0;
         }
         KeyCode::End => {
+            app.auto_scroll = true;
+        }
+        KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input.clear();
+        }
+        KeyCode::Char('l') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.output.clear();
+            app.streaming_text.clear();
+            app.scroll_offset = 0;
             app.auto_scroll = true;
         }
         // Shift+Enter, Alt+Enter, or Ctrl+J → insert newline
@@ -2044,14 +2461,7 @@ fn handle_key(
             // Check if submission is possible BEFORE consuming the input.
             // Slash commands are always submittable. Regular messages need
             // a valid target (Direct) or no in-flight hive plan (Hive).
-            let is_slash = app.input.starts_with('/')
-                && matches!(
-                    app.input
-                        .split_once(' ')
-                        .map(|(c, _)| c)
-                        .unwrap_or(&app.input),
-                    "/new" | "/resume" | "/help" | "/claim" | "/release"
-                );
+            let is_slash = is_known_slash_command(&app.input);
             // Check if submission is possible before consuming input.
             let selected_busy = !app.targets.is_empty()
                 && runtime
@@ -2102,7 +2512,7 @@ fn handle_key(
                             app.output.clear();
                             app.streaming_text.clear();
                             app.hive_planning = false;
-                            app.push("Session reset (hive).".into());
+                            app.push_notice("session reset", "hive");
                             let _ = command_tx.send(AppCommand::ResetHive);
                             return;
                         }
@@ -2114,7 +2524,7 @@ fn handle_key(
                         // Don't clear output yet — wait for the target to confirm.
                         // Clearing before the command succeeds would lose unrelated
                         // history if the send fails or other targets are connected.
-                        app.push(format!("> /new ({target})"));
+                        app.push_user_turn(&target, "/new");
                         let _ = command_tx.send(AppCommand::SlashCmd {
                             target_peer: target,
                             target_id,
@@ -2127,7 +2537,7 @@ fn handle_key(
                         }
                         let target = app.targets[app.selected].clone();
                         let target_id = app.target_runtime_id(&target).to_string();
-                        app.push(format!("> /resume ({target})"));
+                        app.push_user_turn(&target, "/resume");
                         let _ = command_tx.send(AppCommand::SlashCmd {
                             target_peer: target,
                             target_id,
@@ -2140,7 +2550,7 @@ fn handle_key(
                         }
                         let target = app.targets[app.selected].clone();
                         let target_id = app.target_runtime_id(&target).to_string();
-                        app.push(format!("> /resume {arg} ({target})"));
+                        app.push_user_turn(&target, &format!("/resume {arg}"));
                         let _ = command_tx.send(AppCommand::SlashCmd {
                             target_peer: target,
                             target_id,
@@ -2148,7 +2558,7 @@ fn handle_key(
                         });
                     }
                     "/help" => {
-                        app.push("**Commands:**".into());
+                        app.push_markdown_section(["**Commands**".into()]);
                         if app.transport == TransportMode::Kennel {
                             app.push(
                                 "  `/claim`        — claim selected target from kennel".into(),
@@ -2170,7 +2580,7 @@ fn handle_key(
                         let Some(target_id) = app.target_ids.get(&target).cloned() else {
                             return;
                         };
-                        app.push(format!("> /claim ({target})"));
+                        app.push_user_turn(&target, "/claim");
                         let _ = command_tx.send(AppCommand::ClaimTarget { target_id });
                     }
                     "/release" => {
@@ -2184,7 +2594,7 @@ fn handle_key(
                         else {
                             return;
                         };
-                        app.push(format!("> /release ({target})"));
+                        app.push_user_turn(&target, "/release");
                         let _ = command_tx.send(AppCommand::ReleaseTarget { lease_id });
                     }
                     _ => unreachable!("guard above only admits known commands"),
@@ -2197,13 +2607,15 @@ fn handle_key(
                 Mode::Direct if !app.targets.is_empty() => {
                     let target = app.targets[app.selected].clone();
                     let target_id = app.target_runtime_id(&target).to_string();
-                    let display = body.replace('\n', " ");
                     if runtime.read().is_busy(&target_id) {
                         // Target is busy — message sent immediately via comms,
                         // queued in the target's inbox for after the current run.
-                        app.push(format!("  ↳ [{target}] {display}"));
+                        app.push_user_turn(
+                            &target,
+                            &format!("{body}\n\n_queued behind current run_"),
+                        );
                     } else {
-                        app.push(format!("> [{target}] {display}"));
+                        app.push_user_turn(&target, &body);
                         runtime.write().apply(
                             &target_id,
                             RuntimeEvent::DispatchRequested {
@@ -2219,8 +2631,7 @@ fn handle_key(
                 }
                 Mode::Hive => {
                     app.hive_planning = true;
-                    let display = body.replace('\n', " ");
-                    app.push(format!("> [hive] {display}"));
+                    app.push_user_turn("hive", &body);
                     AppCommand::RunHive { prompt: body }
                 }
                 _ => unreachable!("checked before taking input"),
@@ -2239,7 +2650,7 @@ fn handle_key(
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 fn render(f: &mut ratatui::Frame, app: &mut App, runtime: &RuntimeRegistry) {
-    // Input box height: 2 (borders) + estimated visual lines (min 1, max 8).
+    // Input box height: 2 (borders) + command lines + 1 contextual hint line.
     // Derive the label length from the actual label string so the
     // first-line available width is always correct.
     let label = app.input_label(runtime);
@@ -2262,7 +2673,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App, runtime: &RuntimeRegistry) {
             }
         })
         .sum();
-    let input_height = (input_lines.clamp(1, 8) as u16) + 2;
+    let input_height = (input_lines.clamp(1, 7) as u16) + 3;
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -2270,11 +2681,37 @@ fn render(f: &mut ratatui::Frame, app: &mut App, runtime: &RuntimeRegistry) {
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(input_height),
+            Constraint::Length(2),
         ])
         .split(f.area());
 
-    // Title bar
-    let d = if app.mode == Mode::Direct {
+    render_header(f, outer[0], app, runtime);
+
+    // Main: targets + output
+    let main = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(outer[1]);
+
+    let sidebar = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(9)])
+        .split(main[0]);
+
+    render_targets(f, sidebar[0], app, runtime);
+    render_target_inspector(f, sidebar[1], app, runtime);
+    render_output(f, main[1], app);
+    render_input(f, outer[2], app, runtime);
+    render_footer(f, outer[3], app, runtime);
+}
+
+fn render_header(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    app: &App,
+    runtime: &RuntimeRegistry,
+) {
+    let direct_style = if app.mode == Mode::Direct {
         Style::default()
             .fg(Color::Black)
             .bg(Color::Cyan)
@@ -2282,7 +2719,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App, runtime: &RuntimeRegistry) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let h = if app.mode == Mode::Hive {
+    let hive_style = if app.mode == Mode::Hive {
         Style::default()
             .fg(Color::Black)
             .bg(Color::Yellow)
@@ -2290,32 +2727,53 @@ fn render(f: &mut ratatui::Frame, app: &mut App, runtime: &RuntimeRegistry) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let transport_style = match app.transport {
+        TransportMode::Direct => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        TransportMode::Kennel => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    };
+    let selected_text = app
+        .selected_target_name()
+        .map(|name| {
+            let (phase, _, stale, offline) = target_runtime_snapshot(app, runtime, name);
+            format!(
+                "  selected: {} ({})",
+                name,
+                runtime_status_label(phase, stale, offline)
+            )
+        })
+        .unwrap_or_else(|| "  selected: none".into());
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " TUX — Meerkat Device Manager   ",
-                Style::default().fg(Color::White),
+                " TUX — Meerkat Device Manager ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" Direct ", d),
-            Span::raw(" "),
-            Span::styled(" Hive ", h),
             Span::styled(
-                "  [Tab] toggle  [PgUp/Dn] scroll  [Esc] quit",
+                match app.transport {
+                    TransportMode::Direct => " Direct Transport ",
+                    TransportMode::Kennel => " Kennel Transport ",
+                },
+                transport_style,
+            ),
+            Span::raw(" "),
+            Span::styled(" Direct ", direct_style),
+            Span::raw(" "),
+            Span::styled(" Hive ", hive_style),
+            Span::styled(
+                format!("  {} targets{}", app.targets.len(), selected_text),
                 Style::default().fg(Color::DarkGray),
             ),
         ])),
-        outer[0],
+        area,
     );
-
-    // Main: targets + output
-    let main = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(22), Constraint::Percentage(78)])
-        .split(outer[1]);
-
-    render_targets(f, main[0], app, runtime);
-    render_output(f, main[1], app);
-    render_input(f, outer[2], app, runtime);
 }
 
 fn render_targets(
@@ -2324,6 +2782,12 @@ fn render_targets(
     app: &App,
     runtime: &RuntimeRegistry,
 ) {
+    let runtime = runtime.read();
+    let claimed_count = app
+        .target_states
+        .values()
+        .filter(|state| matches!(state, KennelUiState::ClaimedByMe))
+        .count();
     let items: Vec<ListItem> = app
         .targets
         .iter()
@@ -2331,30 +2795,30 @@ fn render_targets(
         .map(|(i, t)| {
             let sel = app.mode == Mode::Direct && i == app.selected;
             let target_id = app.target_runtime_id(t);
-            let busy = runtime.read().is_busy(target_id);
-            let stalled = runtime.read().phase(target_id) == RuntimePhase::Stalled;
+            let busy = runtime.is_busy(target_id);
+            let phase = runtime.phase(target_id);
+            let stalled = phase == RuntimePhase::Stalled;
             let prefix = if sel { "> " } else { "  " };
             let suffix = if app.transport == TransportMode::Kennel {
                 match app.target_states.get(t).copied() {
-                    Some(KennelUiState::Attaching) => " [attaching...]",
-                    Some(KennelUiState::ClaimedByMe) if busy => " [mine ...]",
-                    Some(KennelUiState::ClaimedByMe) if stalled => " [mine stalled]",
-                    Some(KennelUiState::ClaimedByMe) => " [mine]",
-                    Some(KennelUiState::ClaimUncertain) => " [claim?]",
-                    _ if stalled => " [stalled]",
-                    _ if busy => " [...]",
+                    Some(KennelUiState::Attaching) => " attaching",
+                    Some(KennelUiState::ClaimedByMe) if busy => " mine + running",
+                    Some(KennelUiState::ClaimedByMe) if stalled => " mine + stalled",
+                    Some(KennelUiState::ClaimedByMe) => " mine",
+                    Some(KennelUiState::ClaimUncertain) => " claim?",
+                    _ if stalled => " stalled",
+                    _ if busy => " running",
                     _ => "",
                 }
             } else if stalled {
-                " [stalled]"
+                " stalled"
             } else if busy {
-                " [...]"
+                " running"
             } else {
                 ""
             };
 
             let age_ms = runtime
-                .read()
                 .last_activity_ms(target_id)
                 .map(|last| chrono::Utc::now().timestamp_millis() - last)
                 .unwrap_or(i64::MAX);
@@ -2364,24 +2828,120 @@ fn render_targets(
             } else if age_ms >= Duration::from_secs(35).as_millis() as i64 || stalled {
                 // Stale
                 Style::default().fg(Color::Yellow)
+            } else if sel {
+                Style::default()
+                    .fg(Color::Green)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
             } else if app.transport == TransportMode::Kennel
                 && matches!(app.target_states.get(t), Some(KennelUiState::ClaimedByMe))
             {
-                Style::default().fg(Color::Green)
-            } else if sel {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Green)
                     .add_modifier(Modifier::BOLD)
             } else if busy {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default()
             };
-            ListItem::new(format!("{prefix}{t}{suffix}")).style(style)
+            let icon = if age_ms > Duration::from_secs(60).as_millis() as i64 {
+                "○"
+            } else if stalled {
+                "▲"
+            } else if phase == RuntimePhase::Running || phase == RuntimePhase::Dispatching {
+                "●"
+            } else {
+                "•"
+            };
+            ListItem::new(format!("{prefix}{icon} {t}{suffix}")).style(style)
         })
         .collect();
+    let title = if app.transport == TransportMode::Kennel {
+        format!(
+            "TARGETS  {} total / {} mine",
+            app.targets.len(),
+            claimed_count
+        )
+    } else {
+        format!("TARGETS  {}", app.targets.len())
+    };
     f.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title("TARGETS")),
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+fn render_target_inspector(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    app: &App,
+    runtime: &RuntimeRegistry,
+) {
+    let lines = if let Some(target_name) = app.selected_target_name() {
+        let target_id = app.target_runtime_id(target_name);
+        let (phase, age_ms, stale, offline) = target_runtime_snapshot(app, runtime, target_name);
+        let runtime_label = runtime_status_label(phase, stale, offline);
+        let control_label = control_status_label(app, target_name);
+        let lease = app
+            .target_leases
+            .get(target_name)
+            .map(|lease| short_id(lease))
+            .unwrap_or_else(|| "none".into());
+        let activity = age_ms.map(format_age_ms).unwrap_or_else(|| "never".into());
+        let action_hint: String = match app.mode {
+            Mode::Hive => {
+                "Enter sends to the hive planner; selected target is context only.".into()
+            }
+            Mode::Direct
+                if app.transport == TransportMode::Kennel
+                    && !matches!(
+                        app.target_states.get(target_name),
+                        Some(KennelUiState::ClaimedByMe | KennelUiState::ClaimUncertain)
+                    ) =>
+            {
+                "Use /claim before sending commands.".into()
+            }
+            Mode::Direct if runtime.read().is_busy(target_id) => {
+                "Messages queue while running; /new and /resume wait.".into()
+            }
+            Mode::Direct => "Ready for a command, /new, /resume, or /help.".into(),
+        };
+        vec![
+            Line::from(Span::styled(
+                target_name.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("runtime:   {runtime_label}")),
+            Line::from(format!("control:   {control_label}")),
+            Line::from(format!("activity:  {activity}")),
+            Line::from(format!("target id: {}", short_id(target_id))),
+            Line::from(format!("lease:     {lease}")),
+            Line::from(""),
+            Line::from(action_hint),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "No target selected",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Connect a target to start using Direct mode."),
+            Line::from(""),
+            Line::from("Helpful commands:"),
+            Line::from("/help  /new  /resume"),
+            Line::from(""),
+            Line::from("Tab switches between Direct and Hive."),
+        ]
+    };
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("INSPECTOR"))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -2402,6 +2962,29 @@ fn render_output(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut 
         }
     }
 
+    if md.trim().is_empty() {
+        let placeholder = match app.mode {
+            Mode::Direct => {
+                "No activity yet.\n\nPick a target, type a command, or use /help for session commands."
+            }
+            Mode::Hive => {
+                "No hive activity yet.\n\nDescribe the outcome you want and the planner will fan work out to targets."
+            }
+        };
+        f.render_widget(
+            Paragraph::new(placeholder)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("TIMELINE  idle"),
+                )
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
     // Render markdown → styled ratatui Text
     let text = tui_markdown::from_str(&md);
 
@@ -2420,14 +3003,25 @@ fn render_output(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut 
         })
         .sum();
 
-    // Auto-scroll: set offset so the bottom of content is visible
+    let max_scroll = timeline_max_scroll(content_height, inner_height);
     if app.auto_scroll {
-        app.scroll_offset = content_height.saturating_sub(inner_height);
+        app.scroll_offset = max_scroll;
+    } else {
+        app.scroll_offset = app.scroll_offset.min(max_scroll);
     }
+    let title = if app.auto_scroll {
+        format!("TIMELINE  live  {} lines", app.output.len())
+    } else {
+        format!(
+            "TIMELINE  scrolled  line {} / {}",
+            app.scroll_offset.saturating_add(1),
+            max_scroll.saturating_add(1)
+        )
+    };
 
     f.render_widget(
         Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("OUTPUT"))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false })
             .scroll((app.scroll_offset, 0)),
         area,
@@ -2441,13 +3035,27 @@ fn render_input(
     runtime: &RuntimeRegistry,
 ) {
     let label = app.input_label(runtime);
+    let (status, hint, tone) = composer_status(app, runtime);
     // Build multiline display: first line gets the label, rest are continuation
     let mut lines: Vec<Line> = Vec::new();
-    for (i, part) in app.input.split('\n').enumerate() {
-        if i == 0 {
-            lines.push(Line::from(format!("{label}{part}")));
-        } else {
-            lines.push(Line::from(format!("  {part}")));
+    if app.input.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw(label.clone()),
+            Span::styled(
+                match app.mode {
+                    Mode::Direct => "Type a command or /help",
+                    Mode::Hive => "Describe the task for the planner",
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    } else {
+        for (i, part) in app.input.split('\n').enumerate() {
+            if i == 0 {
+                lines.push(Line::from(format!("{label}{part}")));
+            } else {
+                lines.push(Line::from(format!("  {part}")));
+            }
         }
     }
     // Cursor on the last line
@@ -2455,13 +3063,68 @@ fn render_input(
         last.spans
             .push(Span::styled("_", Style::default().fg(Color::DarkGray)));
     }
-    let title = "COMMAND  [Ctrl+J: newline]".to_string();
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
     f.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Line::from(vec![
+                        Span::raw("COMMAND  "),
+                        Span::styled(
+                            status,
+                            Style::default().fg(tone).add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn render_footer(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    app: &App,
+    runtime: &RuntimeRegistry,
+) {
+    let (_, hint, tone) = composer_status(app, runtime);
+    let selected_hint = app
+        .selected_target_name()
+        .map(|target| format!("selected {target}"))
+        .unwrap_or_else(|| "no target selected".into());
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(hint, Style::default().fg(tone)),
+            Span::styled(
+                format!(
+                    "  •  {}  •  {}",
+                    selected_hint,
+                    if app.auto_scroll {
+                        "timeline live"
+                    } else {
+                        "timeline paused"
+                    }
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "[Tab] mode  [Up/Down or Ctrl+N/P] select  [Enter] send  [Shift+Enter/Ctrl+J] newline  ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "[Ctrl+U] clear input  [Ctrl+L] clear timeline  [PgUp/PgDn] scroll  [Esc] quit",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn find_flag(args: &[String], flag: &str) -> Option<String> {
@@ -2490,8 +3153,13 @@ fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_provider_override;
+    use super::{
+        App, Mode, TransportMode, format_tool_completion, is_known_slash_command,
+        normalize_tool_text, parse_provider_override, scroll_timeline_down, scroll_timeline_up,
+        timeline_max_scroll,
+    };
     use mdm_tux::ProviderKind;
+    use std::collections::{BTreeMap, HashMap, VecDeque};
 
     #[test]
     fn provider_override_requires_model_and_provider_together() {
@@ -2512,5 +3180,95 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(provider, Some(ProviderKind::Openai));
+    }
+
+    #[test]
+    fn slash_command_guard_recognizes_supported_commands() {
+        assert!(is_known_slash_command("/help"));
+        assert!(is_known_slash_command("/resume 3"));
+        assert!(is_known_slash_command("/claim"));
+        assert!(!is_known_slash_command("/wat"));
+        assert!(!is_known_slash_command("ls /tmp"));
+    }
+
+    #[test]
+    fn restore_selection_prefers_same_target_after_resort() {
+        let mut app = App {
+            transport: TransportMode::Direct,
+            mode: Mode::Direct,
+            targets: vec!["beta".into(), "alpha".into(), "gamma".into()],
+            target_ids: HashMap::new(),
+            target_states: HashMap::new(),
+            target_leases: HashMap::new(),
+            attaching_since: HashMap::new(),
+            selected: 0,
+            input: String::new(),
+            output: VecDeque::new(),
+            hive_planning: false,
+            quit: false,
+            streaming_text: BTreeMap::new(),
+            scroll_offset: 0,
+            auto_scroll: true,
+        };
+        let previous = Some("beta".to_string());
+        app.targets.sort();
+        app.restore_selection(previous);
+        assert_eq!(app.selected_target_name(), Some("beta"));
+    }
+
+    #[test]
+    fn normalize_tool_text_decodes_escaped_newlines() {
+        let text = "line one\\nline two\\nline three";
+        assert_eq!(normalize_tool_text(text), "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn format_tool_completion_summarizes_shell_like_json() {
+        let result = serde_json::json!({
+            "stdout": "hello\\nworld\\nthird",
+            "stderr": "",
+            "exit_code": 0,
+            "timed_out": false
+        })
+        .to_string();
+        let lines = format_tool_completion("shell", &result, false, 42);
+        let joined = lines.join("\n");
+        assert!(joined.contains("**tool** `shell` completed in 42ms"));
+        assert!(joined.contains("exit code: 0"));
+        assert!(joined.contains("stdout"));
+        assert!(joined.contains("hello"));
+        assert!(joined.contains("world"));
+    }
+
+    #[test]
+    fn timeline_scroll_helpers_disable_auto_follow() {
+        let mut app = App {
+            transport: TransportMode::Direct,
+            mode: Mode::Direct,
+            targets: Vec::new(),
+            target_ids: HashMap::new(),
+            target_states: HashMap::new(),
+            target_leases: HashMap::new(),
+            attaching_since: HashMap::new(),
+            selected: 0,
+            input: String::new(),
+            output: VecDeque::new(),
+            hive_planning: false,
+            quit: false,
+            streaming_text: BTreeMap::new(),
+            scroll_offset: 20,
+            auto_scroll: true,
+        };
+        scroll_timeline_up(&mut app, 5);
+        assert!(!app.auto_scroll);
+        assert_eq!(app.scroll_offset, 15);
+        scroll_timeline_down(&mut app, 3);
+        assert_eq!(app.scroll_offset, 18);
+    }
+
+    #[test]
+    fn timeline_max_scroll_keeps_bottom_slack() {
+        assert_eq!(timeline_max_scroll(40, 10), 32);
+        assert_eq!(timeline_max_scroll(8, 10), 0);
     }
 }

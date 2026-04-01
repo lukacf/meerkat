@@ -54,8 +54,7 @@ impl BlockingWriter {
         }
     }
 
-    /// Create a blocking writer wrapping any `Write` (for tests).
-    #[cfg(test)]
+    /// Create a blocking writer wrapping any `Write`.
     pub fn new(writer: Box<dyn Write + Send>) -> Self {
         Self {
             inner: Arc::new(std::sync::Mutex::new(writer)),

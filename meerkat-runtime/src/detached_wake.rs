@@ -1,31 +1,32 @@
-//! Detached-op wake task for idle keep-alive sessions.
+//! Detached-op wake state for idle keep-alive sessions.
 //!
 //! When a `BackgroundToolOp` reaches terminal in the ops lifecycle registry,
-//! the registry sets `pending = true`. This task waits for the session to
-//! become quiescent, then injects a derived `ContinuationInput` through the
-//! canonical ingress seam to wake the agent.
+//! the registry sets `pending = true` and fires `notify`. The runtime loop
+//! selects on the Notify directly and injects a `ContinuationInput` to wake
+//! the agent. No separate waker task is needed — the runtime loop owns the
+//! wake lifecycle, making it surface-agnostic (dogma: surfaces are skins,
+//! not authorities).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use crate::tokio::sync::Notify;
-use crate::tokio::task::JoinHandle;
-use meerkat_core::types::SessionId;
-
-use crate::input::{ContinuationInput, Input};
-use crate::session_adapter::RuntimeSessionAdapter;
 
 /// Per-session wake state for detached background operations.
 ///
-/// Shared between the ops lifecycle registry (sets `pending`) and the
-/// session adapter (checks quiescence and signals).
+/// Shared between:
+/// - The ops lifecycle registry (`execute_effects` sets `pending` + fires `notify`)
+/// - The runtime loop (selects on `notify`, checks `pending`, injects continuation)
+///
+/// `signaled` is used by `maybe_signal_detached_wake` as a secondary fallback
+/// after queue processing, ensuring at most one outstanding wake cycle (INV-006).
 #[derive(Debug)]
 pub struct DetachedWakeState {
     /// A background op reached terminal since last drain.
     pub pending: Arc<AtomicBool>,
-    /// A wake signal has been sent and not yet consumed.
+    /// A wake signal has been sent and not yet consumed (INV-006).
     pub signaled: Arc<AtomicBool>,
-    /// Notification handle for the waker task.
+    /// Notification handle: fired by ops lifecycle, selected by runtime loop.
     pub notify: Arc<Notify>,
 }
 
@@ -43,43 +44,4 @@ impl Default for DetachedWakeState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Spawn the detached-op waker task for a session.
-///
-/// The task loops: await notify -> re-check pending -> admit continuation.
-/// Exits when the adapter rejects the input (session gone).
-pub fn spawn_detached_op_waker(
-    adapter: Arc<RuntimeSessionAdapter>,
-    session_id: SessionId,
-    state: Arc<DetachedWakeState>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            state.notify.notified().await;
-
-            // Re-check: is there actually pending work?
-            if !state.pending.load(Ordering::Acquire) {
-                state.signaled.store(false, Ordering::Release);
-                continue;
-            }
-
-            let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
-
-            match adapter
-                .accept_input_with_completion(&session_id, input)
-                .await
-            {
-                Ok(_) => {
-                    // Continuation admitted — clear both flags
-                    state.pending.store(false, Ordering::Release);
-                    state.signaled.store(false, Ordering::Release);
-                }
-                Err(_) => {
-                    // Session gone or rejected — exit the waker task
-                    break;
-                }
-            }
-        }
-    })
 }

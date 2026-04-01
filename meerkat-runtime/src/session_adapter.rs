@@ -230,9 +230,8 @@ struct RuntimeSessionEntry {
     /// Runtime-loop capabilities. Presence means a loop is attached.
     attachment: Option<RuntimeLoopAttachment>,
     /// Detached-wake state for background op completions.
+    /// Shared with the runtime loop which selects on the Notify directly.
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
-    /// Handle for the detached-op waker task.
-    _waker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -273,6 +272,9 @@ impl RuntimeSessionEntry {
     fn clear_dead_attachment(&mut self) -> bool {
         if self.attachment.is_some() && !self.attachment_is_live() {
             self.attachment = None;
+            // Clear detached wake state — it will be re-created on
+            // re-registration along with the new runtime loop.
+            self.detached_wake = None;
             return true;
         }
         false
@@ -425,7 +427,6 @@ impl RuntimeSessionAdapter {
             completions: Arc::new(Mutex::new(crate::completion::CompletionRegistry::new())),
             attachment: None,
             detached_wake: None,
-            _waker_handle: None,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -525,7 +526,6 @@ impl RuntimeSessionAdapter {
                             completions: completions.clone(),
                             attachment: None,
                             detached_wake: None,
-                            _waker_handle: None,
                         },
                     );
                     (driver, completions, ops_lifecycle)
@@ -581,8 +581,8 @@ impl RuntimeSessionAdapter {
 
         // Wire detached-op wake state: the ops lifecycle registry will set
         // `pending = true` and fire `notify` when a BackgroundToolOp reaches
-        // terminal. The waker task (spawned via `maybe_spawn_detached_op_waker`)
-        // then injects a continuation through the canonical ingress seam.
+        // terminal. The waker task (spawned after attachment below) then injects
+        // a continuation through the canonical ingress seam.
         let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
         ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
 
@@ -1060,34 +1060,6 @@ impl RuntimeSessionAdapter {
         sessions
             .get(session_id)
             .map(|e| Arc::clone(&e.ops_lifecycle))
-    }
-
-    /// Spawn the detached-op waker task for a session.
-    ///
-    /// The waker task waits on the detached-wake Notify and injects a
-    /// `ContinuationInput::detached_background_op_completed()` through the
-    /// canonical `accept_input_with_completion` ingress seam.
-    ///
-    /// Returns `true` if a new waker task was spawned.
-    pub async fn maybe_spawn_detached_op_waker(self: &Arc<Self>, session_id: &SessionId) -> bool {
-        let mut sessions = self.sessions.write().await;
-        let Some(entry) = sessions.get_mut(session_id) else {
-            return false;
-        };
-        // Already have a waker — don't double-spawn.
-        if entry._waker_handle.is_some() {
-            return false;
-        }
-        let Some(ref wake_state) = entry.detached_wake else {
-            return false;
-        };
-        let handle = crate::detached_wake::spawn_detached_op_waker(
-            Arc::clone(self),
-            session_id.clone(),
-            Arc::clone(wake_state),
-        );
-        entry._waker_handle = Some(handle);
-        true
     }
 
     /// Manage the comms drain lifecycle for a session based on keep_alive intent.

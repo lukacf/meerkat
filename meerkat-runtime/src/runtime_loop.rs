@@ -270,6 +270,19 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            // Build a future for the detached-wake Notify if present.
+            // When a BackgroundToolOp completes, the ops lifecycle fires
+            // notify_one(). We select on it here to inject a ContinuationInput
+            // directly, eliminating the need for a separate waker task.
+            let detached_notified = async {
+                if let Some(ref state) = detached_wake {
+                    state.notify.notified().await;
+                } else {
+                    // No detached wake configured — never resolves.
+                    std::future::pending::<()>().await;
+                }
+            };
+
             tokio::select! {
                 biased;
                 maybe_command = control_rx.recv() => {
@@ -302,11 +315,38 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             {
                                 break;
                             }
-                            // After queue drains (session quiescent), signal the
-                            // detached-op waker if a background op completed.
+                            // After queue drains (session quiescent), re-check
+                            // detached wake in case a completion arrived mid-turn.
                             maybe_signal_detached_wake(&driver, detached_wake.as_ref()).await;
                         }
                         None => break,
+                    }
+                }
+                () = detached_notified => {
+                    // A BackgroundToolOp completed while idle. Inject a
+                    // ContinuationInput into the driver and process it.
+                    if let Some(ref state) = detached_wake {
+                        if state.pending.load(std::sync::atomic::Ordering::Acquire) {
+                            let input = crate::input::Input::Continuation(
+                                crate::input::ContinuationInput::detached_background_op_completed(),
+                            );
+                            let mut d = driver.lock().await;
+                            if let Ok(_) = d.as_driver_mut().accept_input(input).await {
+                                state.pending.store(false, std::sync::atomic::Ordering::Release);
+                            }
+                            drop(d);
+                            // Process the queued continuation
+                            if process_queue(
+                                &driver,
+                                &mut *executor,
+                                &mut control_rx,
+                                completions.as_ref(),
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
             }

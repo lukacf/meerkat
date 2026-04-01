@@ -106,8 +106,7 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
         .register_session_with_executor(session_id.clone(), Box::new(ResultExecutor))
         .await;
 
-    // Spawn the detached-op waker task
-    adapter.maybe_spawn_detached_op_waker(&session_id).await;
+    // Waker task is spawned automatically during register_session_with_executor.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -200,7 +199,7 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
         .register_session_with_executor(session_id.clone(), Box::new(ResultExecutor))
         .await;
 
-    adapter.maybe_spawn_detached_op_waker(&session_id).await;
+    // Waker task is spawned automatically during register_session_with_executor.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
@@ -321,7 +320,7 @@ async fn choke_004_completion_during_running_defers_wake() {
         )
         .await;
 
-    adapter.maybe_spawn_detached_op_waker(&session_id).await;
+    // Waker task is spawned automatically during register_session_with_executor.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)

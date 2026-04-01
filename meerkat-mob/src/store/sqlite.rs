@@ -51,6 +51,17 @@ fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, MobError> {
     serde_json::from_slice(bytes).map_err(storage_error)
 }
 
+fn cursor_to_i64(value: u64) -> Result<i64, MobError> {
+    i64::try_from(value)
+        .map_err(|_| MobError::Internal(format!("cursor value {value} exceeds i64::MAX")))
+}
+
+fn i64_to_cursor(value: i64) -> u64 {
+    // SQLite INTEGER is signed; cursors start at 1 and are monotonic.
+    // Negative values should never appear, but clamp to 0 defensively.
+    u64::try_from(value).unwrap_or(0)
+}
+
 fn open_connection(path: &Path) -> Result<Connection, MobError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(storage_error)?;
@@ -156,7 +167,7 @@ impl MobEventStore for SqliteMobEventStore {
             let encoded = encode_json(&stored)?;
             tx.execute(
                 "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                params![cursor as i64, encoded],
+                params![cursor_to_i64(cursor)?, encoded],
             )
             .map_err(storage_error)?;
             set_next_cursor(&tx, cursor.saturating_add(1))?;
@@ -183,7 +194,7 @@ impl MobEventStore for SqliteMobEventStore {
                 let encoded = encode_json(&stored)?;
                 tx.execute(
                     "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
-                    params![cursor as i64, encoded],
+                    params![cursor_to_i64(cursor)?, encoded],
                 )
                 .map_err(storage_error)?;
                 results.push(stored);
@@ -206,9 +217,14 @@ impl MobEventStore for SqliteMobEventStore {
                 )
                 .map_err(storage_error)?;
             let rows = stmt
-                .query_map(params![after_cursor as i64, limit as i64], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
+                .query_map(
+                    params![
+                        cursor_to_i64(after_cursor)?,
+                        i64::try_from(limit)
+                            .map_err(|_| storage_error("limit exceeds i64::MAX"))?
+                    ],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
                 .map_err(storage_error)?;
             let mut result = Vec::new();
             for row in rows {
@@ -304,7 +320,7 @@ fn get_next_cursor(conn: &Connection) -> Result<u64, MobError> {
         )
         .optional()
         .map_err(storage_error)?;
-    Ok(result.map_or(1, |v| v as u64))
+    Ok(result.map_or(1, i64_to_cursor))
 }
 
 fn next_event_cursor(tx: &Transaction<'_>) -> Result<u64, MobError> {
@@ -314,7 +330,7 @@ fn next_event_cursor(tx: &Transaction<'_>) -> Result<u64, MobError> {
 fn set_next_cursor(conn: &Connection, value: u64) -> Result<(), MobError> {
     conn.execute(
         "INSERT OR REPLACE INTO mob_event_meta (key, value) VALUES (?1, ?2)",
-        params![EVENT_CURSOR_KEY, value as i64],
+        params![EVENT_CURSOR_KEY, cursor_to_i64(value)?],
     )
     .map_err(storage_error)?;
     Ok(())
@@ -435,9 +451,34 @@ impl MobRunStore for SqliteMobRunStore {
         run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
-            let result = cas_run_status_in_txn(&tx, &key, expected, next)?;
+            let bytes: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT run_json FROM mob_runs WHERE run_id = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            let Some(bytes) = bytes else {
+                return Ok(false);
+            };
+            let mut run: MobRun = decode_json(&bytes)?;
+            if run.status != expected || run.status.is_terminal() {
+                return Ok(false);
+            }
+            let terminal = next.is_terminal();
+            run.status = next;
+            if terminal && run.completed_at.is_none() {
+                run.completed_at = Some(Utc::now());
+            }
+            let encoded = encode_json(&run)?;
+            tx.execute(
+                "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
+                params![encoded, key],
+            )
+            .map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
-            Ok(result)
+            Ok(true)
         })
         .await
     }
@@ -698,41 +739,6 @@ impl MobRunStore for SqliteMobRunStore {
         })
         .await
     }
-}
-
-fn cas_run_status_in_txn(
-    tx: &Transaction<'_>,
-    key: &str,
-    expected: MobRunStatus,
-    next: MobRunStatus,
-) -> Result<bool, MobError> {
-    let bytes: Option<Vec<u8>> = tx
-        .query_row(
-            "SELECT run_json FROM mob_runs WHERE run_id = ?1",
-            params![key],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage_error)?;
-    let Some(bytes) = bytes else {
-        return Ok(false);
-    };
-    let mut run: MobRun = decode_json(&bytes)?;
-    if run.status != expected || run.status.is_terminal() {
-        return Ok(false);
-    }
-    let terminal = next.is_terminal();
-    run.status = next;
-    if terminal && run.completed_at.is_none() {
-        run.completed_at = Some(Utc::now());
-    }
-    let encoded = encode_json(&run)?;
-    tx.execute(
-        "UPDATE mob_runs SET run_json = ?1 WHERE run_id = ?2",
-        params![encoded, key],
-    )
-    .map_err(storage_error)?;
-    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1119,38 @@ mod tests {
             .unwrap();
         assert_eq!(revision, 1);
         assert_eq!(events.replay_all().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore] // integration_real: large keyset stress test
+    async fn integration_real_sqlite_event_store_clear_and_prune_large_keyset() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().event_store();
+        let now = Utc::now();
+
+        for i in 0..2_000 {
+            store
+                .append(NewMobEvent {
+                    mob_id: MobId::from("mob"),
+                    timestamp: Some(now - chrono::Duration::minutes((i % 10) as i64)),
+                    kind: MobEventKind::MobCompleted,
+                })
+                .await
+                .unwrap();
+        }
+
+        let removed = store
+            .prune(now - chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        assert!(removed > 0, "expected stale events to be pruned");
+
+        store.clear().await.unwrap();
+        let replayed = store.replay_all().await.unwrap();
+        assert!(
+            replayed.is_empty(),
+            "clear should remove all persisted events"
+        );
     }
 
     /// Regression test: redb held an exclusive file lock that prevented

@@ -3469,16 +3469,14 @@ async fn run_agent(
     // In keep-alive mode, block until Ctrl+C after the initial turn completes.
     // The runtime adapter, comms drain, and detached wake will inject new turns
     // automatically. Without this, the process exits after the first turn.
-    if keep_alive {
-        if let Ok(ref _result) = turn_result {
-            eprintln!("Keep-alive: initial turn complete, waiting for events (Ctrl+C to exit)...");
-            // Block until SIGINT/SIGTERM. The runtime loop, comms drain, and
-            // detached wake tasks continue running in background tokio tasks.
-            tokio::signal::ctrl_c()
-                .await
-                .map_err(|e| anyhow::anyhow!("signal wait failed: {e}"))?;
-            eprintln!("\nShutting down...");
-        }
+    if keep_alive && let Ok(ref _result) = turn_result {
+        eprintln!("Keep-alive: initial turn complete, waiting for events (Ctrl+C to exit)...");
+        // Block until SIGINT/SIGTERM. The runtime loop, comms drain, and
+        // detached wake tasks continue running in background tokio tasks.
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|e| anyhow::anyhow!("signal wait failed: {e}"))?;
+        eprintln!("\nShutting down...");
     }
 
     let result = finalize_cli_runtime_backed_turn(output_pipeline, turn_result, async {

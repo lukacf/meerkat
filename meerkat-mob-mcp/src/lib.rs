@@ -1,5 +1,5 @@
 mod agent_tools;
-pub use agent_tools::{AgentMobToolSurface, AgentMobToolSurfaceFactory, MobAwareSessionService};
+pub use agent_tools::{AgentMobToolSurface, AgentMobToolSurfaceFactory, MobCleanupSessionService};
 
 #[cfg(target_arch = "wasm32")]
 mod tokio {

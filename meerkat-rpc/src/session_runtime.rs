@@ -197,9 +197,6 @@ pub struct SessionRuntime {
     callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
     /// Globally registered callback tool definitions (via `tools/register`).
     registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
-    /// Mob state for implicit mob cleanup on session archive.
-    #[cfg(feature = "mob")]
-    mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {
@@ -269,18 +266,7 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
-            #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(None),
         }
-    }
-
-    /// Set the mob state for implicit mob cleanup on session archive.
-    #[cfg(feature = "mob")]
-    pub fn set_mob_state(&self, state: Arc<meerkat_mob_mcp::MobMcpState>) {
-        *self
-            .mob_state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
     }
 
     /// Create a runtime that resolves config from a shared config store.
@@ -329,8 +315,6 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
-            #[cfg(feature = "mob")]
-            mob_state: StdRwLock::new(None),
         }
     }
 
@@ -2267,21 +2251,6 @@ impl SessionRuntime {
             .archive(session_id)
             .await
             .map_err(session_error_to_rpc);
-
-        // Clean up implicit mob owned by this session (best-effort, after successful archive).
-        #[cfg(feature = "mob")]
-        if result.is_ok() {
-            let mob_state = self
-                .mob_state
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(mob_state) = mob_state {
-                let _ = mob_state
-                    .destroy_implicit_mob(&session_id.to_string())
-                    .await;
-            }
-        }
 
         #[cfg(feature = "mcp")]
         if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {

@@ -9,20 +9,17 @@
 //! clean up implicit mobs when their owning session is archived.
 
 use async_trait::async_trait;
-use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionQuery,
-    SessionService, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
-    SessionSummary, SessionView, StartTurnRequest,
+    CreateSessionRequest, SessionError, SessionQuery, SessionService, SessionSummary, SessionView,
+    StartTurnRequest,
 };
 use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{AgentToolDispatcher, EventStream, StreamError};
 use meerkat_mob::{
-    MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, MobSessionService,
-    ProfileName, SpawnMemberSpec,
+    MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
+    SpawnMemberSpec,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -737,29 +734,29 @@ struct MemberArgs {
     member_id: String,
 }
 
-// ─── MobAwareSessionService ─────────────────────────────────────────────
+// ─── MobCleanupSessionService ───────────────────────────────────────────
 
-/// Session service decorator that intercepts `archive()` to clean up
-/// implicit mobs when their owning session is archived.
+/// Session service decorator that intercepts `archive()` to destroy
+/// all mobs owned by the archived session (both implicit and explicit).
 ///
-/// All other methods delegate to the inner service unchanged.
-pub struct MobAwareSessionService {
-    inner: Arc<dyn MobSessionService>,
+/// Wraps a plain `dyn SessionService` — no extension traits needed.
+/// Wire this around the main session service at surface construction
+/// time so every archive path triggers cleanup automatically.
+pub struct MobCleanupSessionService {
+    inner: Arc<dyn SessionService>,
     mob_state: Arc<MobMcpState>,
 }
 
-impl MobAwareSessionService {
-    /// Create a new mob-aware session service wrapper.
-    pub fn new(inner: Arc<dyn MobSessionService>, mob_state: Arc<MobMcpState>) -> Self {
+impl MobCleanupSessionService {
+    /// Wrap a session service with mob cleanup on archive.
+    pub fn new(inner: Arc<dyn SessionService>, mob_state: Arc<MobMcpState>) -> Self {
         Self { inner, mob_state }
     }
 }
 
-// ── SessionService impl (archive() overridden) ──────────────────────────
-
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl SessionService for MobAwareSessionService {
+impl SessionService for MobCleanupSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
         self.inner.create_session(req).await
     }
@@ -824,124 +821,15 @@ impl SessionService for MobAwareSessionService {
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        // Archive the session FIRST — only clean up mob on success
+        // Archive the session FIRST — only clean up mob on success.
         self.inner.archive(id).await?;
-        // Best-effort cleanup — session is already archived, mob is now orphaned
+        // Best-effort cleanup — session is already archived, mobs are now orphaned.
         let _ = self.mob_state.destroy_implicit_mob(&id.to_string()).await;
         Ok(())
     }
 
     async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
-        SessionService::subscribe_session_events(self.inner.as_ref(), id).await
-    }
-}
-
-// ── SessionServiceCommsExt impl ─────────────────────────────────────────
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl SessionServiceCommsExt for MobAwareSessionService {
-    async fn comms_runtime(&self, session_id: &SessionId) -> Option<Arc<dyn CoreCommsRuntime>> {
-        self.inner.comms_runtime(session_id).await
-    }
-
-    async fn event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::EventInjector>> {
-        self.inner.event_injector(session_id).await
-    }
-
-    async fn interaction_event_injector(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
-        self.inner.interaction_event_injector(session_id).await
-    }
-}
-
-// ── SessionServiceControlExt impl ───────────────────────────────────────
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl SessionServiceControlExt for MobAwareSessionService {
-    async fn append_system_context(
-        &self,
-        id: &SessionId,
-        req: AppendSystemContextRequest,
-    ) -> Result<AppendSystemContextResult, SessionControlError> {
-        self.inner.append_system_context(id, req).await
-    }
-}
-
-// ── SessionServiceHistoryExt impl ───────────────────────────────────────
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl SessionServiceHistoryExt for MobAwareSessionService {
-    async fn read_history(
-        &self,
-        id: &SessionId,
-        query: SessionHistoryQuery,
-    ) -> Result<SessionHistoryPage, SessionError> {
-        self.inner.read_history(id, query).await
-    }
-}
-
-// ── MobSessionService impl ─────────────────────────────────────────────
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl MobSessionService for MobAwareSessionService {
-    async fn subscribe_session_events(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<EventStream, StreamError> {
-        MobSessionService::subscribe_session_events(self.inner.as_ref(), session_id).await
-    }
-
-    fn supports_persistent_sessions(&self) -> bool {
-        self.inner.supports_persistent_sessions()
-    }
-
-    fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
-        self.inner.runtime_adapter()
-    }
-
-    async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
-        self.inner.session_belongs_to_mob(session_id, mob_id).await
-    }
-
-    async fn load_persisted_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<meerkat_core::Session>, SessionError> {
-        self.inner.load_persisted_session(session_id).await
-    }
-
-    async fn apply_runtime_turn(
-        &self,
-        session_id: &SessionId,
-        run_id: meerkat_core::RunId,
-        req: StartTurnRequest,
-        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
-        contributing_input_ids: Vec<meerkat_core::InputId>,
-    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        self.inner
-            .apply_runtime_turn(session_id, run_id, req, boundary, contributing_input_ids)
-            .await
-    }
-
-    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        self.inner.discard_live_session(session_id).await
-    }
-
-    async fn cancel_all_checkpointers(&self) {
-        self.inner.cancel_all_checkpointers().await;
-    }
-
-    async fn rearm_all_checkpointers(&self) {
-        self.inner.rearm_all_checkpointers().await;
+        self.inner.subscribe_session_events(id).await
     }
 }
 

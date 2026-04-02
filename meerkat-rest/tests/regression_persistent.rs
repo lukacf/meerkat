@@ -320,8 +320,17 @@ async fn resume_preserves_tooling_flags() {
         .expect("load")
         .expect("session exists");
     let metadata = session.session_metadata().expect("metadata present");
-    assert!(metadata.tooling.builtins, "builtins should be preserved");
-    assert!(metadata.tooling.shell, "shell should be preserved");
+    // No explicit override was set → Inherit (follows factory default)
+    assert_eq!(
+        metadata.tooling.builtins,
+        meerkat_core::ToolCategoryOverride::Inherit,
+        "builtins should be Inherit (no explicit override)"
+    );
+    assert_eq!(
+        metadata.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Inherit,
+        "shell should be Inherit (no explicit override)"
+    );
 }
 
 #[tokio::test]

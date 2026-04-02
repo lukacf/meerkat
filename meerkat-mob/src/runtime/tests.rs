@@ -42,7 +42,9 @@ use meerkat_core::{
     PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
-use meerkat_core::{Session, SessionMetadata, SessionSystemContextState, SessionTooling};
+use meerkat_core::{
+    Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
+};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde_json::value::RawValue;
@@ -807,11 +809,21 @@ impl SessionService for MockSessionService {
                     .unwrap_or(Provider::Anthropic),
                 provider_params: build.and_then(|b| b.provider_params.clone()),
                 tooling: SessionTooling {
-                    builtins: build.and_then(|b| b.override_builtins).unwrap_or(true),
-                    shell: build.and_then(|b| b.override_shell).unwrap_or(false),
-                    comms: build.and_then(|b| b.comms_name.as_ref()).is_some(),
-                    mob: build.and_then(|b| b.override_mob).unwrap_or(false),
-                    memory: build.and_then(|b| b.override_memory).unwrap_or(false),
+                    builtins: ToolCategoryOverride::from_effective(
+                        build.and_then(|b| b.override_builtins).unwrap_or(true),
+                    ),
+                    shell: ToolCategoryOverride::from_effective(
+                        build.and_then(|b| b.override_shell).unwrap_or(false),
+                    ),
+                    comms: ToolCategoryOverride::from_effective(
+                        build.and_then(|b| b.comms_name.as_ref()).is_some(),
+                    ),
+                    mob: ToolCategoryOverride::from_effective(
+                        build.and_then(|b| b.override_mob).unwrap_or(false),
+                    ),
+                    memory: ToolCategoryOverride::from_effective(
+                        build.and_then(|b| b.override_memory).unwrap_or(false),
+                    ),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
@@ -5468,10 +5480,10 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         "reasoning": { "effort": "high" }
     }));
     metadata.max_tokens = 8192;
-    metadata.tooling.builtins = false;
-    metadata.tooling.shell = true;
-    metadata.tooling.mob = true;
-    metadata.tooling.memory = true;
+    metadata.tooling.builtins = ToolCategoryOverride::Disable;
+    metadata.tooling.shell = ToolCategoryOverride::Enable;
+    metadata.tooling.mob = ToolCategoryOverride::Enable;
+    metadata.tooling.memory = ToolCategoryOverride::Enable;
     metadata.tooling.active_skills = Some(vec![meerkat_core::skills::SkillId(
         "mob-communication".into(),
     )]);
@@ -5660,11 +5672,11 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: true,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Enable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: Some(vec![meerkat_core::skills::SkillId(
                     "mob-communication".into(),
                 )]),

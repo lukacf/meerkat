@@ -38,7 +38,7 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     BlobStore, BudgetLimits, Config, HookRunOverrides, OutputSchema, Provider, Session,
-    SessionMetadata, SessionTooling,
+    SessionMetadata, SessionTooling, ToolCategoryOverride,
 };
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::{SessionId, SessionMeta};
@@ -842,16 +842,16 @@ impl AgentFactory {
             build_config.provider_params = metadata.provider_params.clone();
         }
         if !mask.override_builtins {
-            build_config.override_builtins = Some(metadata.tooling.builtins);
+            build_config.override_builtins = metadata.tooling.builtins.to_override();
         }
         if !mask.override_shell {
-            build_config.override_shell = Some(metadata.tooling.shell);
+            build_config.override_shell = metadata.tooling.shell.to_override();
         }
         if !mask.override_memory {
-            build_config.override_memory = Some(metadata.tooling.memory);
+            build_config.override_memory = metadata.tooling.memory.to_override();
         }
         if !mask.override_mob {
-            build_config.override_mob = Some(metadata.tooling.mob);
+            build_config.override_mob = metadata.tooling.mob.to_override();
         }
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
@@ -1269,6 +1269,7 @@ impl AgentFactory {
         let effective_builtins = build_config
             .override_builtins
             .unwrap_or(self.enable_builtins);
+        #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
         let session = build_config.resume_session.clone().unwrap_or_default();
         let _session_id = session.id().to_string();
@@ -1836,9 +1837,9 @@ impl AgentFactory {
         let _is_resumed = build_config.resume_session.is_some();
         builder = builder.resume_session(session);
         #[cfg(feature = "comms")]
-        let comms_enabled = comms_runtime.is_some();
+        let _comms_enabled = comms_runtime.is_some();
         #[cfg(not(feature = "comms"))]
-        let comms_enabled = false;
+        let _comms_enabled = false;
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
             builder =
@@ -1938,17 +1939,26 @@ impl AgentFactory {
         }
 
         // 14. Set SessionMetadata
+        //
+        // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
+        // effective bool. This ensures Inherit survives across save/resume cycles so
+        // the session continues to follow future runtime defaults.
         let metadata = if let Some(mut metadata) = resumed_session_metadata {
             metadata.model = model;
             metadata.max_tokens = max_tokens;
             metadata.structured_output_retries = build_config.structured_output_retries;
             metadata.provider = provider;
             metadata.provider_params = build_config.provider_params;
-            metadata.tooling.builtins = effective_builtins;
-            metadata.tooling.shell = effective_shell;
-            metadata.tooling.comms = comms_enabled;
-            metadata.tooling.mob = build_config.override_mob.unwrap_or(self.enable_mob);
-            metadata.tooling.memory = effective_memory;
+            metadata.tooling.builtins =
+                ToolCategoryOverride::from_override(build_config.override_builtins);
+            metadata.tooling.shell =
+                ToolCategoryOverride::from_override(build_config.override_shell);
+            // No override_comms field in AgentBuildConfig — preserve the existing
+            // metadata value so explicit Enable/Disable survives across resumes.
+            // (metadata.tooling.comms is left unchanged)
+            metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
+            metadata.tooling.memory =
+                ToolCategoryOverride::from_override(build_config.override_memory);
             metadata.keep_alive = build_config.keep_alive;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;
@@ -1965,11 +1975,11 @@ impl AgentFactory {
                 provider,
                 provider_params: build_config.provider_params,
                 tooling: SessionTooling {
-                    builtins: effective_builtins,
-                    shell: effective_shell,
-                    comms: comms_enabled,
-                    mob: build_config.override_mob.unwrap_or(self.enable_mob),
-                    memory: effective_memory,
+                    builtins: ToolCategoryOverride::from_override(build_config.override_builtins),
+                    shell: ToolCategoryOverride::from_override(build_config.override_shell),
+                    comms: ToolCategoryOverride::Inherit,
+                    mob: ToolCategoryOverride::from_override(build_config.override_mob),
+                    memory: ToolCategoryOverride::from_override(build_config.override_memory),
                     active_skills: active_skill_ids,
                 },
                 keep_alive: build_config.keep_alive,

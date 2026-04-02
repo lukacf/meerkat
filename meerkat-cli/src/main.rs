@@ -23,7 +23,7 @@ use meerkat_core::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    Session, SessionTooling,
+    Session,
 };
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
@@ -3312,9 +3312,9 @@ async fn run_agent(
         provider_params,
         external_tools,
         llm_client_override: None,
-        override_builtins: None,
-        override_shell: None,
-        override_memory: if enable_memory { Some(true) } else { None },
+        override_builtins: Some(enable_builtins),
+        override_shell: Some(enable_shell),
+        override_memory: Some(enable_memory),
         override_mob: Some(effective_mob),
         preload_skills,
         realm_id: Some(scope.locator.realm_id.clone()),
@@ -3682,14 +3682,7 @@ async fn resume_session_with_llm_override(
     let tooling = stored_metadata
         .as_ref()
         .map(|meta| meta.tooling.clone())
-        .unwrap_or(SessionTooling {
-            builtins: config.tools.builtins_enabled,
-            shell: config.tools.shell_enabled,
-            comms: config.tools.comms_enabled,
-            mob: config.tools.mob_enabled,
-            memory: false,
-            active_skills: None,
-        });
+        .unwrap_or_default();
     let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
     let keep_alive = resolve_keep_alive(keep_alive_requested)?;
     let comms_name = stored_metadata
@@ -3737,8 +3730,8 @@ async fn resume_session_with_llm_override(
             meerkat_store::realm_paths_in(&scope.locator.state_root, &scope.locator.realm_id).root,
         )
         .project_root(project_root)
-        .builtins(tooling.builtins)
-        .shell(tooling.shell);
+        .builtins(tooling.builtins.resolve(config.tools.builtins_enabled))
+        .shell(tooling.shell.resolve(config.tools.shell_enabled));
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
     }
@@ -3747,7 +3740,7 @@ async fn resume_session_with_llm_override(
     }
 
     #[cfg(feature = "comms")]
-    let factory = factory.comms(tooling.comms || keep_alive);
+    let factory = factory.comms(tooling.comms.resolve(config.tools.comms_enabled) || keep_alive);
 
     log_stage("build_cli_persistent_service");
     // Build persistent session service for resume — durable runtime semantics.
@@ -3764,7 +3757,7 @@ async fn resume_session_with_llm_override(
     ));
 
     log_stage("compose_external_tool_dispatchers");
-    let mut run_mob_tools = if tooling.mob {
+    let mut run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
         log_stage("get_or_create_mob_persistent_service");
         let mob_persistent = get_or_create_mob_persistent_service(scope, config.clone()).await?;
         let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
@@ -3820,10 +3813,10 @@ async fn resume_session_with_llm_override(
         provider_params: merged_provider_params,
         external_tools,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        override_builtins: None,
-        override_shell: None,
-        override_memory: None,
-        override_mob: Some(tooling.mob),
+        override_builtins: tooling.builtins.to_override(),
+        override_shell: tooling.shell.to_override(),
+        override_memory: tooling.memory.to_override(),
+        override_mob: tooling.mob.to_override(),
         preload_skills: None,
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
         realm_id: stored_metadata

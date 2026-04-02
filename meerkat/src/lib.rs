@@ -116,6 +116,8 @@ pub use meerkat_core::{
     SystemMessage,
     ToolAccessPolicy,
     ToolCall,
+    // Tool category override (tri-state for resume upgrade semantics)
+    ToolCategoryOverride,
     ToolDef,
     ToolGateway,
     ToolGatewayBuilder,

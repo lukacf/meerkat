@@ -1365,10 +1365,10 @@ impl SessionRuntime {
                 .clone()
                 .map(encode_llm_client_override_for_service),
             ops_lifecycle_override: Some(ops_lifecycle),
-            override_builtins: Some(tooling.builtins),
-            override_shell: Some(tooling.shell),
-            override_memory: Some(tooling.memory),
-            override_mob: Some(tooling.mob),
+            override_builtins: tooling.builtins.to_override(),
+            override_shell: tooling.shell.to_override(),
+            override_memory: tooling.memory.to_override(),
+            override_mob: tooling.mob.to_override(),
             preload_skills: tooling.active_skills.clone(),
             realm_id: stored_metadata
                 .as_ref()
@@ -1997,10 +1997,10 @@ impl SessionRuntime {
             build_config.keep_alive = meta.keep_alive;
             build_config.comms_name = meta.comms_name.clone();
             build_config.peer_meta = meta.peer_meta.clone();
-            build_config.override_builtins = Some(meta.tooling.builtins);
-            build_config.override_shell = Some(meta.tooling.shell);
-            build_config.override_mob = Some(meta.tooling.mob);
-            build_config.override_memory = Some(meta.tooling.memory);
+            build_config.override_builtins = meta.tooling.builtins.to_override();
+            build_config.override_shell = meta.tooling.shell.to_override();
+            build_config.override_mob = meta.tooling.mob.to_override();
+            build_config.override_memory = meta.tooling.memory.to_override();
             build_config.preload_skills = meta.tooling.active_skills.clone();
         }
 

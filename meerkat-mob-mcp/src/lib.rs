@@ -2055,7 +2055,9 @@ mod tests {
         SessionUsage, SessionView, StartTurnRequest,
     };
     use meerkat_core::types::{RunResult, SessionId, Usage};
-    use meerkat_core::{PeerMeta, Provider, Session, SessionMetadata, SessionTooling};
+    use meerkat_core::{
+        PeerMeta, Provider, Session, SessionMetadata, SessionTooling, ToolCategoryOverride,
+    };
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
@@ -2765,7 +2767,7 @@ mod tests {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                comms: true,
+                comms: ToolCategoryOverride::Enable,
                 ..SessionTooling::default()
             },
             keep_alive: false,
@@ -2799,7 +2801,7 @@ mod tests {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                comms: true,
+                comms: ToolCategoryOverride::Enable,
                 ..SessionTooling::default()
             },
             keep_alive: false,
@@ -2838,7 +2840,7 @@ mod tests {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                comms: true,
+                comms: ToolCategoryOverride::Enable,
                 ..SessionTooling::default()
             },
             keep_alive: false,

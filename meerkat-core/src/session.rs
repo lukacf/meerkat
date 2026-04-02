@@ -568,19 +568,137 @@ impl SessionMetadata {
 /// Key used to store SessionMetadata in Session metadata map.
 pub const SESSION_METADATA_KEY: &str = "session_metadata";
 
-/// Tooling flags captured at session creation time.
+/// Caller intent for a tool category.
+///
+/// Distinguishes "no opinion / didn't exist" (`Inherit`) from explicit
+/// `Enable` / `Disable` so that resumed sessions don't freeze tool
+/// availability at the capabilities of the Meerkat version that created them.
+///
+/// **Dogma §10:** Inherit, disable, and set are different facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCategoryOverride {
+    /// No explicit intent — inherit runtime/factory default.
+    Inherit,
+    /// Explicitly enabled by caller.
+    Enable,
+    /// Explicitly disabled by caller.
+    Disable,
+}
+
+impl Default for ToolCategoryOverride {
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+impl ToolCategoryOverride {
+    /// Resolve this override against a runtime default.
+    ///
+    /// - `Enable` → `true`
+    /// - `Disable` → `false`
+    /// - `Inherit` → `runtime_default`
+    #[must_use]
+    pub fn resolve(self, runtime_default: bool) -> bool {
+        match self {
+            Self::Enable => true,
+            Self::Disable => false,
+            Self::Inherit => runtime_default,
+        }
+    }
+
+    /// Convert to `Option<bool>` for feeding `AgentBuildConfig` override fields.
+    ///
+    /// - `Enable` → `Some(true)`
+    /// - `Disable` → `Some(false)`
+    /// - `Inherit` → `None` (factory default wins)
+    #[must_use]
+    pub fn to_override(self) -> Option<bool> {
+        match self {
+            Self::Enable => Some(true),
+            Self::Disable => Some(false),
+            Self::Inherit => None,
+        }
+    }
+
+    /// Construct from a resolved effective bool (for metadata write-back).
+    ///
+    /// Use when persisting the *effective* value after resolution.
+    #[must_use]
+    pub fn from_effective(enabled: bool) -> Self {
+        if enabled { Self::Enable } else { Self::Disable }
+    }
+}
+
+/// Backward-compatible deserializer: accepts both old `bool` JSON and new
+/// tri-state `"inherit"` / `"enable"` / `"disable"` strings.
+///
+/// Old persisted sessions have `"mob": false` or `"builtins": true`.
+/// - `true`  → `Enable`  (user explicitly had it on)
+/// - `false` → `Inherit` (can't distinguish "disabled" from "didn't exist")
+/// - string  → normal enum deserialization
+fn deserialize_tool_category_compat<'de, D>(
+    deserializer: D,
+) -> Result<ToolCategoryOverride, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct ToolCategoryVisitor;
+
+    impl<'de> de::Visitor<'de> for ToolCategoryVisitor {
+        type Value = ToolCategoryOverride;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a boolean or one of \"inherit\", \"enable\", \"disable\"")
+        }
+
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(if v {
+                ToolCategoryOverride::Enable
+            } else {
+                ToolCategoryOverride::Inherit
+            })
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match v {
+                "inherit" => Ok(ToolCategoryOverride::Inherit),
+                "enable" => Ok(ToolCategoryOverride::Enable),
+                "disable" => Ok(ToolCategoryOverride::Disable),
+                _ => Err(de::Error::unknown_variant(
+                    v,
+                    &["inherit", "enable", "disable"],
+                )),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(ToolCategoryVisitor)
+}
+
+/// Tooling intent captured at session creation time.
+///
+/// Fields use [`ToolCategoryOverride`] to distinguish "no opinion" from
+/// explicit enable/disable (Dogma §10). On resume, `Inherit` falls through
+/// to the factory's current runtime default, allowing new tool categories
+/// to become available without re-creating the session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionTooling {
-    pub builtins: bool,
-    pub shell: bool,
-    pub comms: bool,
-    /// Mob (multi-agent orchestration) tools enabled.
-    #[serde(default)]
-    pub mob: bool,
-    /// Semantic memory enabled.
-    #[serde(default)]
-    pub memory: bool,
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub builtins: ToolCategoryOverride,
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub shell: ToolCategoryOverride,
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub comms: ToolCategoryOverride,
+    /// Mob (multi-agent orchestration) tools.
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub mob: ToolCategoryOverride,
+    /// Semantic memory.
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub memory: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillId>>,

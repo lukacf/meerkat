@@ -172,7 +172,7 @@ pub use session::{
     PendingSystemContextAppend, SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION,
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
     SessionLlmIdentity, SessionMeta, SessionMetadata, SessionSystemContextState, SessionTooling,
-    SystemContextStageError,
+    SystemContextStageError, ToolCategoryOverride,
 };
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;

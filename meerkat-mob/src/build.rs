@@ -205,10 +205,10 @@ fn apply_resumed_session_metadata(
     config.max_tokens = Some(metadata.max_tokens);
     config.provider = Some(metadata.provider);
     config.provider_params = metadata.provider_params.clone();
-    config.override_builtins = Some(metadata.tooling.builtins);
-    config.override_shell = Some(metadata.tooling.shell);
-    config.override_memory = Some(metadata.tooling.memory);
-    config.override_mob = Some(metadata.tooling.mob);
+    config.override_builtins = metadata.tooling.builtins.to_override();
+    config.override_shell = metadata.tooling.shell.to_override();
+    config.override_memory = metadata.tooling.memory.to_override();
+    config.override_mob = metadata.tooling.mob.to_override();
     config.preload_skills = metadata.tooling.active_skills.clone();
     // keep_alive is NOT restored from metadata — mob runtime owns it
     // (determined by runtime_mode == AutonomousHost). §1: one owner.

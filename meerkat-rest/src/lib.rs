@@ -51,7 +51,7 @@ use meerkat_core::service::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
-    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap, SessionTooling,
+    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap,
     agent_event_type, format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
@@ -144,8 +144,6 @@ pub struct SessionEvent {
 struct RestRuntimeExecutorContext {
     default_model: Cow<'static, str>,
     max_tokens: u32,
-    enable_builtins: bool,
-    enable_shell: bool,
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -355,8 +353,6 @@ impl AppState {
         RestRuntimeExecutorContext {
             default_model: self.default_model.clone(),
             max_tokens: self.max_tokens,
-            enable_builtins: self.enable_builtins,
-            enable_shell: self.enable_shell,
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
             session_service: self.session_service.clone(),
@@ -516,14 +512,7 @@ async fn apply_runtime_turn(
             let tooling = stored_metadata
                 .as_ref()
                 .map(|meta| meta.tooling.clone())
-                .unwrap_or(SessionTooling {
-                    builtins: context.enable_builtins,
-                    shell: context.enable_shell,
-                    comms: false,
-                    mob: false,
-                    memory: false,
-                    active_skills: None,
-                });
+                .unwrap_or_default();
             let current_generation = context
                 .config_runtime
                 .get()
@@ -566,10 +555,10 @@ async fn apply_runtime_turn(
                     .clone()
                     .map(encode_llm_client_override_for_service),
                 ops_lifecycle_override: Some(ops_lifecycle),
-                override_builtins: Some(tooling.builtins),
-                override_shell: Some(tooling.shell),
-                override_memory: Some(tooling.memory),
-                override_mob: Some(tooling.mob),
+                override_builtins: tooling.builtins.to_override(),
+                override_shell: tooling.shell.to_override(),
+                override_memory: tooling.memory.to_override(),
+                override_mob: tooling.mob.to_override(),
                 preload_skills: tooling.active_skills.clone(),
                 realm_id: stored_metadata
                     .as_ref()

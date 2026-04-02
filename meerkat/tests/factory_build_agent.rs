@@ -16,7 +16,7 @@ use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmReque
 use meerkat_client::LlmClient;
 use meerkat_core::{
     Config, Provider, ProviderConfig, Session, SessionId, SessionMetadata, SessionTooling,
-    UserMessage,
+    ToolCategoryOverride, UserMessage,
 };
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use serde_json::json;
@@ -190,9 +190,9 @@ async fn build_agent_sets_session_metadata() {
     assert_eq!(metadata.model, "claude-sonnet-4-5");
     assert_eq!(metadata.max_tokens, 2048);
     assert_eq!(metadata.provider, Provider::Anthropic);
-    assert!(metadata.tooling.builtins);
-    assert!(metadata.tooling.shell);
-    assert!(!metadata.tooling.comms);
+    assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Enable);
+    assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Enable);
+    assert_eq!(metadata.tooling.comms, ToolCategoryOverride::Disable);
     // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
     assert!(metadata.tooling.active_skills.is_none());
@@ -222,7 +222,11 @@ async fn build_agent_with_builtins_has_tools() {
         .session()
         .session_metadata()
         .expect("session should have metadata");
-    assert!(metadata.tooling.builtins, "builtins should be enabled");
+    assert_eq!(
+        metadata.tooling.builtins,
+        ToolCategoryOverride::Enable,
+        "builtins should be enabled"
+    );
 }
 
 /// 6. `build_agent` with `resume_session` preserves existing session messages.
@@ -279,11 +283,11 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             "reasoning": { "budget_tokens": 2048 }
         })),
         tooling: SessionTooling {
-            builtins: true,
-            shell: false,
-            comms: false,
-            mob: false,
-            memory: false,
+            builtins: ToolCategoryOverride::Enable,
+            shell: ToolCategoryOverride::Disable,
+            comms: ToolCategoryOverride::Disable,
+            mob: ToolCategoryOverride::Disable,
+            memory: ToolCategoryOverride::Disable,
             active_skills: None,
         },
         keep_alive: false,
@@ -358,11 +362,11 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 "reasoning": { "budget_tokens": 2048 }
             })),
             tooling: SessionTooling {
-                builtins: false,
-                shell: false,
-                comms: false,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Disable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: true,
@@ -434,11 +438,11 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: false,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: false,
@@ -487,11 +491,11 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: true,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Enable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: false,
@@ -563,11 +567,11 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: true,
-                shell: false,
-                comms: true,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Enable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: None,
             },
             keep_alive: false,
@@ -884,11 +888,11 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             provider: Provider::Anthropic,
             provider_params: None,
             tooling: SessionTooling {
-                builtins: false,
-                shell: false,
-                comms: false,
-                mob: false,
-                memory: false,
+                builtins: ToolCategoryOverride::Disable,
+                shell: ToolCategoryOverride::Disable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable,
+                memory: ToolCategoryOverride::Disable,
                 active_skills: Some(vec![meerkat_core::skills::SkillId(
                     "nonexistent-legacy-skill".into(),
                 )]),
@@ -997,5 +1001,154 @@ async fn build_agent_with_custom_session_store() {
         store.save_count() > 0,
         "Custom store should have been used for saving, got {} saves",
         store.save_count()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: ToolCategoryOverride upgrade semantics on resume
+// ---------------------------------------------------------------------------
+
+/// Regression: a session created before mob tools existed (mob=Inherit via
+/// serde default) should NOT suppress mob tools on resume. The factory's
+/// current runtime default should win.
+#[tokio::test]
+async fn resume_with_inherit_mob_allows_factory_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).mob(true); // factory enables mob
+    let config = Config::default();
+
+    // Simulate a session from a pre-mob Meerkat version:
+    // mob field is Inherit (the serde default for missing/false fields).
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Inherit, // <-- key: no opinion
+                memory: ToolCategoryOverride::Inherit,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
+    build_config.resume_session = Some(session);
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+
+    // Mob should be Enable (resolved from factory default=true), not suppressed.
+    assert_eq!(
+        metadata.tooling.mob,
+        ToolCategoryOverride::Enable,
+        "Inherit mob on resume should resolve to factory default (enabled)"
+    );
+}
+
+/// Regression: a session with mob=Disable should remain disabled on resume,
+/// even if the factory now enables mob by default.
+#[tokio::test]
+async fn resume_with_disable_mob_stays_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).mob(true); // factory enables mob
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Disable, // <-- explicitly off
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
+    build_config.resume_session = Some(session);
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+
+    assert_eq!(
+        metadata.tooling.mob,
+        ToolCategoryOverride::Disable,
+        "Disable mob should be preserved on resume despite factory enabling it"
+    );
+}
+
+/// Regression: a session with mob=Enable should remain enabled even if
+/// the factory default changes to disabled.
+#[tokio::test]
+async fn resume_with_enable_mob_stays_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).mob(false); // factory disables mob
+    let config = Config::default();
+
+    let mut session = Session::new();
+    session
+        .set_session_metadata(SessionMetadata {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 2048,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            provider_params: None,
+            tooling: SessionTooling {
+                builtins: ToolCategoryOverride::Enable,
+                shell: ToolCategoryOverride::Enable,
+                comms: ToolCategoryOverride::Disable,
+                mob: ToolCategoryOverride::Enable, // <-- explicitly on
+                memory: ToolCategoryOverride::Disable,
+                active_skills: None,
+            },
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+        })
+        .unwrap();
+
+    let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
+    build_config.resume_session = Some(session);
+
+    let agent = factory.build_agent(build_config, &config).await.unwrap();
+    let metadata = agent.session().session_metadata().unwrap();
+
+    assert_eq!(
+        metadata.tooling.mob,
+        ToolCategoryOverride::Enable,
+        "Enable mob should be preserved on resume despite factory disabling it"
     );
 }

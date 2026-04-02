@@ -1836,9 +1836,9 @@ impl AgentFactory {
         let _is_resumed = build_config.resume_session.is_some();
         builder = builder.resume_session(session);
         #[cfg(feature = "comms")]
-        let comms_enabled = comms_runtime.is_some();
+        let _comms_enabled = comms_runtime.is_some();
         #[cfg(not(feature = "comms"))]
-        let comms_enabled = false;
+        let _comms_enabled = false;
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
             builder =

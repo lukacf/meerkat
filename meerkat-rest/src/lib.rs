@@ -2754,7 +2754,7 @@ async fn archive_session(
             #[cfg(feature = "mob")]
             let _ = state
                 .mob_state
-                .destroy_implicit_mob(&session_id.to_string())
+                .destroy_session_mobs(&session_id.to_string())
                 .await;
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;

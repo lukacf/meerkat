@@ -223,7 +223,7 @@ impl MobMcpState {
     }
 
     /// Destroy a mob. Rejects implicit delegation mobs — use
-    /// [`destroy_implicit_mob`](Self::destroy_implicit_mob) for session cleanup.
+    /// [`destroy_session_mobs`](Self::destroy_session_mobs) for session cleanup.
     pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
         if self.is_implicit_mob(mob_id).await {
             return Err(MobError::Internal(
@@ -693,7 +693,7 @@ impl MobMcpState {
     /// Destroy all mobs owned by the given session (both implicit and explicit).
     ///
     /// Called during session archive to clean up session-scoped mobs.
-    pub async fn destroy_implicit_mob(&self, session_id: &str) -> Result<(), MobError> {
+    pub async fn destroy_session_mobs(&self, session_id: &str) -> Result<(), MobError> {
         let mob_ids = self.find_mobs_for_session(session_id).await;
         if mob_ids.is_empty() {
             return Ok(());
@@ -3598,7 +3598,7 @@ timeout_ms = 1000
     }
 
     #[tokio::test]
-    async fn test_destroy_implicit_mob_cleans_up() {
+    async fn test_destroy_session_mobs_cleans_up() {
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
@@ -3608,15 +3608,15 @@ timeout_ms = 1000
             .unwrap();
         assert!(state.find_implicit_mob(&sid).await.is_some());
 
-        state.destroy_implicit_mob(&sid).await.unwrap();
+        state.destroy_session_mobs(&sid).await.unwrap();
         assert!(state.find_implicit_mob(&sid).await.is_none());
     }
 
     #[tokio::test]
-    async fn test_destroy_implicit_mob_noop_when_none() {
+    async fn test_destroy_session_mobs_noop_when_none() {
         let state = MobMcpState::new_in_memory();
         // Should succeed even when no implicit mob exists
-        state.destroy_implicit_mob("nonexistent").await.unwrap();
+        state.destroy_session_mobs("nonexistent").await.unwrap();
     }
 
     #[tokio::test]

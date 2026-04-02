@@ -200,7 +200,8 @@ pub struct SessionRuntime {
     /// Handle to the builder's mob tools slot inside the session service.
     /// Captured before the builder is consumed so `set_mob_tools` can write
     /// through to the actual builder that creates agents.
-    builder_mob_tools_slot: Arc<StdRwLock<Option<Arc<dyn meerkat_core::service::MobToolsFactory>>>>,
+    pub builder_mob_tools_slot:
+        Arc<StdRwLock<Option<Arc<dyn meerkat_core::service::MobToolsFactory>>>>,
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {

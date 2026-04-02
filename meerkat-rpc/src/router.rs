@@ -1075,7 +1075,7 @@ impl MethodRouter {
                     #[cfg(feature = "mob")]
                     let _ = self
                         .mob_state
-                        .destroy_implicit_mob(&session_id.to_string())
+                        .destroy_session_mobs(&session_id.to_string())
                         .await;
                     self.runtime_adapter.unregister_session(&session_id).await;
                     RpcResponse::success(id, json!({"archived": true}))

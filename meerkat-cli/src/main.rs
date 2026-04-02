@@ -6425,17 +6425,9 @@ where
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_config_runtime(config_runtime);
 
-    // Set mob tools factory on the runtime's stored AgentFactory so agents
-    // built through this runtime get delegation tools. Archive cleanup is
-    // handled by the MethodRouter which holds the real hydrated mob_state.
-    {
-        let mob_session_svc: Arc<dyn meerkat_mob::MobSessionService> =
-            session_service.clone() as Arc<dyn meerkat_mob::MobSessionService>;
-        let factory_mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_svc));
-        runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
-            factory_mob_state,
-        )));
-    }
+    // Capture the builder's mob tools slot so we can set the factory AFTER
+    // hydration (using the same MobMcpState that the router will use for cleanup).
+    let mob_tools_slot = Arc::clone(&runtime.builder_mob_tools_slot);
 
     // Set realm context before Arc-wrapping (requires &mut self).
     // The mob_id is known from the definition before the handle is created.
@@ -6519,6 +6511,16 @@ where
         seeded_handles,
     )
     .await?;
+
+    // Set mob tools factory using the SAME hydrated state the router will use.
+    // This ensures agent-created mobs (via delegate/mob_create) live in the
+    // same registry that archive cleanup scans.
+    *mob_tools_slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+        meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&mob_state)),
+    )
+        as Arc<dyn meerkat_core::service::MobToolsFactory>);
 
     let mut server = meerkat_rpc::server::RpcServer::new_with_skill_runtime_and_mob_state(
         reader,

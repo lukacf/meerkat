@@ -5,13 +5,12 @@
 //! mob_check_member, mob_list_members, mob_list) composed into the tool
 //! gateway by `build_agent()`.
 //!
-//! `MobCleanupSessionService` is a decorator that intercepts `archive()` to
-//! clean up session-owned mobs when their owning session is archived.
+//! `archive_session_with_mob_cleanup()` is a helper that archives a session
+//! and destroys its owned mobs in a single call.
 
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolDef, ToolResult};
 use meerkat_mob::{
@@ -136,20 +135,11 @@ impl AgentMobToolSurface {
         call: ToolCallView<'_>,
         value: serde_json::Value,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        Self::encode_result_with_async_ops(call, value, Vec::new())
-    }
-
-    fn encode_result_with_async_ops(
-        call: ToolCallView<'_>,
-        value: serde_json::Value,
-        async_ops: Vec<AsyncOpRef>,
-    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let content = serde_json::to_string(&value)
             .map_err(|e| ToolError::execution_failed(format!("encode tool result: {e}")))?;
-        Ok(meerkat_core::ToolDispatchOutcome {
-            result: ToolResult::new(call.id.to_string(), content, false),
-            async_ops,
-        })
+        Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+            ToolResult::new(call.id.to_string(), content, false),
+        ))
     }
 
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
@@ -235,40 +225,46 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        // Wire the helper to the parent agent's comms identity.
-        // The parent is external to the mob (not a roster member), so we use
-        // PeerTarget::External with a TrustedPeerSpec built from the parent's comms info.
-        if let (Some(name), Some(peer_id)) = (&self.comms_name, &self.comms_peer_id)
+        // Wire the helper to trust the parent agent's comms identity.
+        // This lets the helper send messages TO the parent. For the parent to
+        // receive them, it must also have the helper as a trusted peer — the
+        // mob's auto_wire_orchestrator handles this IF the parent is in the roster.
+        // For external parents (the common delegate case), the helper can send
+        // to the parent but the parent must poll via mob_check_member until
+        // bidirectional wiring is available.
+        let wired = if let (Some(name), Some(peer_id)) = (&self.comms_name, &self.comms_peer_id)
             && let Ok(parent_spec) = meerkat_core::comms::TrustedPeerSpec::new(
                 name.as_str(),
                 peer_id.as_str(),
                 format!("inproc://{name}"),
-            )
-        {
-            let _ = self
-                .state
+            ) {
+            self.state
                 .mob_wire(
                     &mob_id,
                     meerkat_id.clone(),
                     meerkat_mob::PeerTarget::External(parent_spec),
                 )
-                .await;
-        }
+                .await
+                .is_ok()
+        } else {
+            false
+        };
 
         let mut result = json!({
             "mob_id": mob_id,
             "meerkat_id": meerkat_id,
             "member_ref": member_ref,
             "session_id": member_ref.session_id(),
+            "wired": wired,
         });
 
         if first_delegate {
-            let notice = if self.comms_name.is_some() {
-                "Implicit delegation mob created. Helpers are wired to you via comms. \
-                 Use `send` to communicate. The mob persists across turns."
+            let notice = if wired {
+                "Implicit delegation mob created. Helper can send messages to you. \
+                 Use `mob_check_member` to poll helper status and output. \
+                 The mob persists across turns."
             } else {
                 "Implicit delegation mob created. The mob persists across turns. \
-                 Note: comms is not enabled on this session, so peer messaging is unavailable. \
                  Use `mob_check_member` to poll helper status."
             };
             result["system_notice"] = json!(notice);
@@ -738,7 +734,7 @@ struct MemberArgs {
 /// Archive a session and clean up any mobs it owns (best-effort).
 ///
 /// Single-function cleanup path used by CLI delete_session. Other surfaces
-/// (REST, MCP, RPC) call `destroy_implicit_mob` inline after their own
+/// (REST, MCP, RPC) call `destroy_session_mobs` inline after their own
 /// archive calls because their session service types are concrete and
 /// can't be wrapped with a decorator.
 pub async fn archive_session_with_mob_cleanup(
@@ -748,7 +744,7 @@ pub async fn archive_session_with_mob_cleanup(
 ) -> Result<(), SessionError> {
     service.archive(session_id).await?;
     let _ = mob_state
-        .destroy_implicit_mob(&session_id.to_string())
+        .destroy_session_mobs(&session_id.to_string())
         .await;
     Ok(())
 }

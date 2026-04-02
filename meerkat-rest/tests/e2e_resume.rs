@@ -75,6 +75,9 @@ async fn inner_test_rest_resume_metadata() {
         config_store: config_store_arc,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::new(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,
@@ -178,6 +181,9 @@ async fn inner_test_rest_resume_metadata() {
         config_store: config_store_resume,
         event_tx: tokio::sync::broadcast::channel(16).0,
         session_service: session_service2,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::new(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,

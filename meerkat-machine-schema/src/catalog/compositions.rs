@@ -10278,6 +10278,1338 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
     }
 }
 
+pub fn schedule_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "schedule_bundle".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "schedule".into(),
+                machine_name: "ScheduleLifecycleMachine".into(),
+                actor: "schedule_authority".into(),
+            },
+            MachineInstance {
+                instance_id: "occurrence".into(),
+                machine_name: "OccurrenceLifecycleMachine".into(),
+                actor: "occurrence_authority".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("schedule_authority"),
+            machine_actor("occurrence_authority"),
+            owner_actor("schedule_store"),
+            owner_actor("runtime_owner"),
+            owner_actor("mob_owner"),
+        ],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "occurrence_runtime_delivery".into(),
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToRuntime".into(),
+                realizing_actor: "runtime_owner".into(),
+                correlation_fields: vec!["occurrence_id".into(), "attempt_count".into()],
+                obligation_fields: vec![
+                    "occurrence_id".into(),
+                    "schedule_id".into(),
+                    "schedule_revision".into(),
+                    "occurrence_ordinal".into(),
+                    "attempt_count".into(),
+                    "target_binding_key".into(),
+                    "delivery_correlation_id".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeAccepted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeCompleted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeSkipped".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_skipped_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeMisfired".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_misfired_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeDeliveryFailed".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_delivery_failed_failure_class"),
+                            ),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback or lease expiry under runtime owner fairness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-schedule/src/generated/protocol_occurrence_runtime_delivery.rs",
+                    ProtocolGenerationMode::ShellBridge,
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleInput"),
+                    None,
+                    Some("crate::authority::OccurrenceLifecycleMutator"),
+                    Some("crate::authority::OccurrenceLifecycleError"),
+                    None,
+                    Some("crate::types::Occurrence"),
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator};",
+                        "use crate::types::{Occurrence, OccurrenceFailureClass};",
+                    ],
+                ),
+            },
+            EffectHandoffProtocol {
+                name: "occurrence_mob_delivery".into(),
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToMob".into(),
+                realizing_actor: "mob_owner".into(),
+                correlation_fields: vec!["occurrence_id".into(), "attempt_count".into()],
+                obligation_fields: vec![
+                    "occurrence_id".into(),
+                    "schedule_id".into(),
+                    "schedule_revision".into(),
+                    "occurrence_ordinal".into(),
+                    "attempt_count".into(),
+                    "target_binding_key".into(),
+                    "delivery_correlation_id".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobAccepted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobCompleted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobSkipped".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding("failure_class", owner_context("mob_skipped_failure_class")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobMisfired".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("mob_misfired_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobDeliveryFailed".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("mob_delivery_failed_failure_class"),
+                            ),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback or lease expiry under mob owner fairness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-schedule/src/generated/protocol_occurrence_mob_delivery.rs",
+                    ProtocolGenerationMode::ShellBridge,
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleInput"),
+                    None,
+                    Some("crate::authority::OccurrenceLifecycleMutator"),
+                    Some("crate::authority::OccurrenceLifecycleError"),
+                    None,
+                    Some("crate::types::Occurrence"),
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator};",
+                        "use crate::types::{Occurrence, OccurrenceFailureClass};",
+                    ],
+                ),
+            },
+        ],
+        entry_inputs: vec![
+            EntryInput {
+                name: "schedule_revise".into(),
+                machine: "schedule".into(),
+                input_variant: "Revise".into(),
+            },
+            EntryInput {
+                name: "schedule_record_planning_window".into(),
+                machine: "schedule".into(),
+                input_variant: "RecordPlanningWindow".into(),
+            },
+            EntryInput {
+                name: "schedule_pause".into(),
+                machine: "schedule".into(),
+                input_variant: "Pause".into(),
+            },
+            EntryInput {
+                name: "schedule_resume".into(),
+                machine: "schedule".into(),
+                input_variant: "Resume".into(),
+            },
+            EntryInput {
+                name: "schedule_delete".into(),
+                machine: "schedule".into(),
+                input_variant: "Delete".into(),
+            },
+            EntryInput {
+                name: "occurrence_claim".into(),
+                machine: "occurrence".into(),
+                input_variant: "Claim".into(),
+            },
+            EntryInput {
+                name: "occurrence_lease_expired".into(),
+                machine: "occurrence".into(),
+                input_variant: "LeaseExpired".into(),
+            },
+        ],
+        routes: vec![Route {
+            name: "revision_supersede_enters_occurrence_authority".into(),
+            from_machine: "schedule".into(),
+            effect_variant: "SupersedePendingOccurrences".into(),
+            to: RouteTarget {
+                machine: "occurrence".into(),
+                input_variant: "SupersedeByRevision".into(),
+            },
+            bindings: vec![RouteFieldBinding {
+                to_field: "superseding_revision".into(),
+                source: RouteBindingSource::Field {
+                    from_field: "superseding_revision".into(),
+                    allow_named_alias: false,
+                },
+            }],
+            delivery: RouteDelivery::Immediate,
+        }],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![
+            CompositionTransactionPlan {
+                name: "transactional_claim".into(),
+                trigger: "claim_due_occurrences".into(),
+                description:
+                    "store-backed claim uses authoritative store time plus durable lease state"
+                        .into(),
+                store_primitive: "ScheduleStore::claim_due_occurrences".into(),
+                route_names: vec![],
+                protocol_names: vec![],
+            },
+            CompositionTransactionPlan {
+                name: "revision_supersede_and_replan".into(),
+                trigger: "update_schedule_revision".into(),
+                description:
+                    "revision-affecting schedule updates supersede pending future occurrences before replanning"
+                        .into(),
+                store_primitive: "ScheduleStore::put_schedule + put_occurrences".into(),
+                route_names: vec!["revision_supersede_enters_occurrence_authority".into()],
+                protocol_names: vec![],
+            },
+        ],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![
+            CompositionInvariant {
+                name: "schedule_revision_supersede_route_present".into(),
+                kind: CompositionInvariantKind::RoutePresent {
+                    from_machine: "schedule".into(),
+                    effect_variant: "SupersedePendingOccurrences".into(),
+                    to_machine: "occurrence".into(),
+                    input_variant: "SupersedeByRevision".into(),
+                },
+                statement:
+                    "revision-affecting schedule edits enter occurrence authority through the explicit supersede route"
+                        .into(),
+                references_machines: vec!["schedule".into(), "occurrence".into()],
+                references_actors: vec!["schedule_authority".into(), "occurrence_authority".into()],
+            },
+            CompositionInvariant {
+                name: "superseded_occurrence_originates_from_schedule_revision".into(),
+                kind: CompositionInvariantKind::ObservedRouteInputOriginatesFromEffect {
+                    route_name: "revision_supersede_enters_occurrence_authority".into(),
+                    to_machine: "occurrence".into(),
+                    input_variant: "SupersedeByRevision".into(),
+                    from_machine: "schedule".into(),
+                    effect_variant: "SupersedePendingOccurrences".into(),
+                },
+                statement:
+                    "pending future occurrences are superseded only by the schedule revision route rather than by ad hoc shell mutation"
+                        .into(),
+                references_machines: vec!["schedule".into(), "occurrence".into()],
+                references_actors: vec!["schedule_authority".into(), "occurrence_authority".into()],
+            },
+        ],
+        witnesses: vec![
+            CompositionWitness {
+                name: "revision_supersede_path".into(),
+                preload_inputs: vec![CompositionWitnessInput {
+                    machine: "schedule".into(),
+                    input_variant: "Revise".into(),
+                    fields: vec![
+                        CompositionWitnessField {
+                            field: "trigger_key".into(),
+                            expr: Expr::String("trigger-1".into()),
+                        },
+                        CompositionWitnessField {
+                            field: "target_binding_key".into(),
+                            expr: Expr::String("target-1".into()),
+                        },
+                        CompositionWitnessField {
+                            field: "misfire_policy".into(),
+                            expr: enum_variant("MisfirePolicy", "Skip"),
+                        },
+                        CompositionWitnessField {
+                            field: "overlap_policy".into(),
+                            expr: enum_variant("OverlapPolicy", "SkipIfRunning"),
+                        },
+                        CompositionWitnessField {
+                            field: "missing_target_policy".into(),
+                            expr: enum_variant("MissingTargetPolicy", "MarkMisfired"),
+                        },
+                    ],
+                }],
+                expected_routes: vec!["revision_supersede_enters_occurrence_authority".into()],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![
+                    witness_state(
+                        "schedule",
+                        Some("Active"),
+                        vec![CompositionWitnessField {
+                            field: "revision".into(),
+                            expr: Expr::U64(2),
+                        }],
+                    ),
+                    witness_state(
+                        "occurrence",
+                        Some("Superseded"),
+                        vec![CompositionWitnessField {
+                            field: "superseded_by_revision".into(),
+                            expr: Expr::Some(Box::new(Expr::U64(2))),
+                        }],
+                    ),
+                ],
+                expected_transitions: vec![
+                    witness_transition("schedule", "ReviseActive"),
+                    witness_transition("occurrence", "SupersedePending"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "schedule",
+                    "ReviseActive",
+                    "occurrence",
+                    "SupersedePending",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 2,
+                    pending_input_limit: 1,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 2,
+                    seq_limit: 1,
+                    set_limit: 1,
+                    map_limit: 1,
+                },
+            },
+            CompositionWitness {
+                name: "pause_resume_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "schedule".into(),
+                        input_variant: "Pause".into(),
+                        fields: vec![],
+                    },
+                    CompositionWitnessInput {
+                        machine: "schedule".into(),
+                        input_variant: "Resume".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![witness_state("schedule", Some("Active"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("schedule", "PauseActive"),
+                    witness_transition("schedule", "ResumePaused"),
+                ],
+                expected_transition_order: vec![witness_transition_order(
+                    "schedule",
+                    "PauseActive",
+                    "schedule",
+                    "ResumePaused",
+                )],
+                state_limits: CompositionStateLimits {
+                    step_limit: 2,
+                    pending_input_limit: 1,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 1,
+                    seq_limit: 1,
+                    set_limit: 1,
+                    map_limit: 1,
+                },
+            },
+        ],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: Some(CompositionStateLimits::ci_defaults()),
+        closed_world: true,
+    }
+}
+
+pub fn schedule_runtime_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "schedule_runtime_bundle".into(),
+        machines: vec![MachineInstance {
+            instance_id: "occurrence".into(),
+            machine_name: "OccurrenceLifecycleMachine".into(),
+            actor: "occurrence_authority".into(),
+        }],
+        actors: vec![
+            machine_actor("occurrence_authority"),
+            owner_actor("runtime_owner"),
+            owner_actor("mob_owner"),
+        ],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "occurrence_runtime_delivery".into(),
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToRuntime".into(),
+                realizing_actor: "runtime_owner".into(),
+                correlation_fields: vec!["occurrence_id".into(), "attempt_count".into()],
+                obligation_fields: vec![
+                    "occurrence_id".into(),
+                    "schedule_id".into(),
+                    "schedule_revision".into(),
+                    "occurrence_ordinal".into(),
+                    "attempt_count".into(),
+                    "target_binding_key".into(),
+                    "delivery_correlation_id".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeAccepted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeCompleted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeSkipped".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_skipped_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeMisfired".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_misfired_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeDeliveryFailed".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_delivery_failed_failure_class"),
+                            ),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback or lease expiry under runtime owner fairness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-schedule/src/generated/protocol_occurrence_runtime_delivery.rs",
+                    ProtocolGenerationMode::ShellBridge,
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleInput"),
+                    None,
+                    Some("crate::authority::OccurrenceLifecycleMutator"),
+                    Some("crate::authority::OccurrenceLifecycleError"),
+                    None,
+                    Some("crate::types::Occurrence"),
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator};",
+                        "use crate::types::{Occurrence, OccurrenceFailureClass};",
+                    ],
+                ),
+            },
+            EffectHandoffProtocol {
+                name: "occurrence_mob_delivery".into(),
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToMob".into(),
+                realizing_actor: "mob_owner".into(),
+                correlation_fields: vec!["occurrence_id".into(), "attempt_count".into()],
+                obligation_fields: vec![
+                    "occurrence_id".into(),
+                    "schedule_id".into(),
+                    "schedule_revision".into(),
+                    "occurrence_ordinal".into(),
+                    "attempt_count".into(),
+                    "target_binding_key".into(),
+                    "delivery_correlation_id".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobAccepted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobCompleted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobSkipped".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding("failure_class", owner_context("mob_skipped_failure_class")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobMisfired".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("mob_misfired_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "MobDeliveryFailed".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("mob_delivery_failed_failure_class"),
+                            ),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback or lease expiry under mob owner fairness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-schedule/src/generated/protocol_occurrence_mob_delivery.rs",
+                    ProtocolGenerationMode::ShellBridge,
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleInput"),
+                    None,
+                    Some("crate::authority::OccurrenceLifecycleMutator"),
+                    Some("crate::authority::OccurrenceLifecycleError"),
+                    None,
+                    Some("crate::types::Occurrence"),
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator};",
+                        "use crate::types::{Occurrence, OccurrenceFailureClass};",
+                    ],
+                ),
+            },
+        ],
+        entry_inputs: vec![
+            EntryInput {
+                name: "occurrence_claim".into(),
+                machine: "occurrence".into(),
+                input_variant: "Claim".into(),
+            },
+            EntryInput {
+                name: "occurrence_start_runtime_dispatch".into(),
+                machine: "occurrence".into(),
+                input_variant: "StartRuntimeDispatch".into(),
+            },
+            EntryInput {
+                name: "occurrence_runtime_accepted".into(),
+                machine: "occurrence".into(),
+                input_variant: "RuntimeAccepted".into(),
+            },
+            EntryInput {
+                name: "occurrence_runtime_completed".into(),
+                machine: "occurrence".into(),
+                input_variant: "RuntimeCompleted".into(),
+            },
+            EntryInput {
+                name: "occurrence_runtime_skipped".into(),
+                machine: "occurrence".into(),
+                input_variant: "RuntimeSkipped".into(),
+            },
+            EntryInput {
+                name: "occurrence_runtime_misfired".into(),
+                machine: "occurrence".into(),
+                input_variant: "RuntimeMisfired".into(),
+            },
+            EntryInput {
+                name: "occurrence_runtime_failed".into(),
+                machine: "occurrence".into(),
+                input_variant: "RuntimeDeliveryFailed".into(),
+            },
+            EntryInput {
+                name: "occurrence_lease_expired".into(),
+                machine: "occurrence".into(),
+                input_variant: "LeaseExpired".into(),
+            },
+        ],
+        routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![CompositionTransactionPlan {
+            name: "transactional_runtime_claim".into(),
+            trigger: "claim_and_runtime_handoff".into(),
+            description:
+                "transactional claim establishes the durable lease before runtime delivery begins"
+                    .into(),
+            store_primitive: "ScheduleStore::claim_due_occurrences".into(),
+            route_names: vec![],
+            protocol_names: vec!["occurrence_runtime_delivery".into()],
+        }],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![CompositionInvariant {
+            name: "runtime_delivery_protocol_covered".into(),
+            kind: CompositionInvariantKind::HandoffProtocolCovered {
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToRuntime".into(),
+                protocol_name: "occurrence_runtime_delivery".into(),
+            },
+            statement:
+                "runtime delivery feedback closes occurrence obligations only through the explicit runtime delivery protocol"
+                    .into(),
+            references_machines: vec!["occurrence".into()],
+            references_actors: vec!["occurrence_authority".into(), "runtime_owner".into()],
+        }],
+        witnesses: vec![
+            CompositionWitness {
+                name: "runtime_delivery_completion_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "Claim".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "claim_time_utc_ms".into(),
+                                expr: Expr::U64(10),
+                            },
+                            CompositionWitnessField {
+                                field: "owner_id".into(),
+                                expr: Expr::String("scheduler-owner".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "lease_expiry_utc_ms".into(),
+                                expr: Expr::U64(20),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "StartRuntimeDispatch".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "delivery_correlation_id".into(),
+                            expr: Expr::String("corr-1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "RuntimeAccepted".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "occurrence_id".into(),
+                                expr: Expr::String("occurrence-0".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "attempt_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "RuntimeCompleted".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "occurrence_id".into(),
+                                expr: Expr::String("occurrence-0".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "attempt_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![witness_state("occurrence", Some("Completed"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("occurrence", "ClaimPending"),
+                    witness_transition("occurrence", "StartRuntimeDispatchFromClaimed"),
+                    witness_transition("occurrence", "RuntimeAcceptedFromDispatching"),
+                    witness_transition(
+                        "occurrence",
+                        "RuntimeCompletedFromDispatchingOrAwaiting",
+                    ),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "occurrence",
+                        "ClaimPending",
+                        "occurrence",
+                        "StartRuntimeDispatchFromClaimed",
+                    ),
+                    witness_transition_order(
+                        "occurrence",
+                        "StartRuntimeDispatchFromClaimed",
+                        "occurrence",
+                        "RuntimeAcceptedFromDispatching",
+                    ),
+                    witness_transition_order(
+                        "occurrence",
+                        "RuntimeAcceptedFromDispatching",
+                        "occurrence",
+                        "RuntimeCompletedFromDispatchingOrAwaiting",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 4,
+                    pending_input_limit: 1,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 3,
+                    seq_limit: 1,
+                    set_limit: 1,
+                    map_limit: 1,
+                },
+            },
+            CompositionWitness {
+                name: "runtime_lease_expiry_reclaims_occurrence".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "Claim".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "claim_time_utc_ms".into(),
+                                expr: Expr::U64(10),
+                            },
+                            CompositionWitnessField {
+                                field: "owner_id".into(),
+                                expr: Expr::String("scheduler-owner".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "lease_expiry_utc_ms".into(),
+                                expr: Expr::U64(20),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "StartRuntimeDispatch".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "delivery_correlation_id".into(),
+                            expr: Expr::String("corr-2".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "LeaseExpired".into(),
+                        fields: vec![],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![witness_state("occurrence", Some("Pending"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("occurrence", "ClaimPending"),
+                    witness_transition("occurrence", "StartRuntimeDispatchFromClaimed"),
+                    witness_transition("occurrence", "LeaseExpiredFromDispatching"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "occurrence",
+                        "ClaimPending",
+                        "occurrence",
+                        "StartRuntimeDispatchFromClaimed",
+                    ),
+                    witness_transition_order(
+                        "occurrence",
+                        "StartRuntimeDispatchFromClaimed",
+                        "occurrence",
+                        "LeaseExpiredFromDispatching",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 3,
+                    pending_input_limit: 1,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 2,
+                    seq_limit: 1,
+                    set_limit: 1,
+                    map_limit: 1,
+                },
+            },
+        ],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: Some(CompositionStateLimits::ci_defaults()),
+        closed_world: true,
+    }
+}
+
+pub fn schedule_mob_bundle_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "schedule_mob_bundle".into(),
+        machines: vec![MachineInstance {
+            instance_id: "occurrence".into(),
+            machine_name: "OccurrenceLifecycleMachine".into(),
+            actor: "occurrence_authority".into(),
+        }],
+        actors: vec![
+            machine_actor("occurrence_authority"),
+            owner_actor("mob_owner"),
+            owner_actor("runtime_owner"),
+        ],
+        handoff_protocols: vec![
+            EffectHandoffProtocol {
+                name: "occurrence_runtime_delivery".into(),
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToRuntime".into(),
+                realizing_actor: "runtime_owner".into(),
+                correlation_fields: vec!["occurrence_id".into(), "attempt_count".into()],
+                obligation_fields: vec![
+                    "occurrence_id".into(),
+                    "schedule_id".into(),
+                    "schedule_revision".into(),
+                    "occurrence_ordinal".into(),
+                    "attempt_count".into(),
+                    "target_binding_key".into(),
+                    "delivery_correlation_id".into(),
+                ],
+                allowed_feedback_inputs: vec![
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeAccepted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeCompleted".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeSkipped".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_skipped_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeMisfired".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_misfired_failure_class"),
+                            ),
+                        ],
+                    },
+                    FeedbackInputRef {
+                        machine_instance: "occurrence".into(),
+                        input_variant: "RuntimeDeliveryFailed".into(),
+                        field_bindings: vec![
+                            binding("occurrence_id", obligation_field("occurrence_id")),
+                            binding("attempt_count", obligation_field("attempt_count")),
+                            binding(
+                                "failure_class",
+                                owner_context("runtime_delivery_failed_failure_class"),
+                            ),
+                        ],
+                    },
+                ],
+                closure_policy: ClosurePolicy::AckRequired,
+                liveness_annotation: Some(
+                    "eventual feedback or lease expiry under runtime owner fairness".into(),
+                ),
+                rust: protocol_rust(
+                    "meerkat-schedule/src/generated/protocol_occurrence_runtime_delivery.rs",
+                    ProtocolGenerationMode::ShellBridge,
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleAuthority"),
+                    Some("crate::authority::OccurrenceLifecycleInput"),
+                    None,
+                    Some("crate::authority::OccurrenceLifecycleMutator"),
+                    Some("crate::authority::OccurrenceLifecycleError"),
+                    None,
+                    Some("crate::types::Occurrence"),
+                    ProtocolHelperReturnShape::Obligations,
+                    &[
+                        "use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator};",
+                        "use crate::types::{Occurrence, OccurrenceFailureClass};",
+                    ],
+                ),
+            },
+            EffectHandoffProtocol {
+            name: "occurrence_mob_delivery".into(),
+            producer_instance: "occurrence".into(),
+            effect_variant: "DispatchToMob".into(),
+            realizing_actor: "mob_owner".into(),
+            correlation_fields: vec!["occurrence_id".into(), "attempt_count".into()],
+            obligation_fields: vec![
+                "occurrence_id".into(),
+                "schedule_id".into(),
+                "schedule_revision".into(),
+                "occurrence_ordinal".into(),
+                "attempt_count".into(),
+                "target_binding_key".into(),
+                "delivery_correlation_id".into(),
+            ],
+            allowed_feedback_inputs: vec![
+                FeedbackInputRef {
+                    machine_instance: "occurrence".into(),
+                    input_variant: "MobAccepted".into(),
+                    field_bindings: vec![
+                        binding("occurrence_id", obligation_field("occurrence_id")),
+                        binding("attempt_count", obligation_field("attempt_count")),
+                    ],
+                },
+                FeedbackInputRef {
+                    machine_instance: "occurrence".into(),
+                    input_variant: "MobCompleted".into(),
+                    field_bindings: vec![
+                        binding("occurrence_id", obligation_field("occurrence_id")),
+                        binding("attempt_count", obligation_field("attempt_count")),
+                    ],
+                },
+                FeedbackInputRef {
+                    machine_instance: "occurrence".into(),
+                    input_variant: "MobSkipped".into(),
+                    field_bindings: vec![
+                        binding("occurrence_id", obligation_field("occurrence_id")),
+                        binding("attempt_count", obligation_field("attempt_count")),
+                        binding("failure_class", owner_context("mob_skipped_failure_class")),
+                    ],
+                },
+                FeedbackInputRef {
+                    machine_instance: "occurrence".into(),
+                    input_variant: "MobMisfired".into(),
+                    field_bindings: vec![
+                        binding("occurrence_id", obligation_field("occurrence_id")),
+                        binding("attempt_count", obligation_field("attempt_count")),
+                        binding(
+                            "failure_class",
+                            owner_context("mob_misfired_failure_class"),
+                        ),
+                    ],
+                },
+                FeedbackInputRef {
+                    machine_instance: "occurrence".into(),
+                    input_variant: "MobDeliveryFailed".into(),
+                    field_bindings: vec![
+                        binding("occurrence_id", obligation_field("occurrence_id")),
+                        binding("attempt_count", obligation_field("attempt_count")),
+                        binding(
+                            "failure_class",
+                            owner_context("mob_delivery_failed_failure_class"),
+                        ),
+                    ],
+                },
+            ],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback or lease expiry under mob owner fairness".into(),
+            ),
+            rust: protocol_rust(
+                "meerkat-schedule/src/generated/protocol_occurrence_mob_delivery.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::authority::OccurrenceLifecycleAuthority"),
+                Some("crate::authority::OccurrenceLifecycleAuthority"),
+                Some("crate::authority::OccurrenceLifecycleInput"),
+                None,
+                Some("crate::authority::OccurrenceLifecycleMutator"),
+                Some("crate::authority::OccurrenceLifecycleError"),
+                None,
+                Some("crate::types::Occurrence"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput, OccurrenceLifecycleMutator};",
+                    "use crate::types::{Occurrence, OccurrenceFailureClass};",
+                ],
+            ),
+        }],
+        entry_inputs: vec![
+            EntryInput {
+                name: "occurrence_claim".into(),
+                machine: "occurrence".into(),
+                input_variant: "Claim".into(),
+            },
+            EntryInput {
+                name: "occurrence_start_mob_dispatch".into(),
+                machine: "occurrence".into(),
+                input_variant: "StartMobDispatch".into(),
+            },
+            EntryInput {
+                name: "occurrence_mob_accepted".into(),
+                machine: "occurrence".into(),
+                input_variant: "MobAccepted".into(),
+            },
+            EntryInput {
+                name: "occurrence_mob_completed".into(),
+                machine: "occurrence".into(),
+                input_variant: "MobCompleted".into(),
+            },
+            EntryInput {
+                name: "occurrence_mob_skipped".into(),
+                machine: "occurrence".into(),
+                input_variant: "MobSkipped".into(),
+            },
+            EntryInput {
+                name: "occurrence_mob_misfired".into(),
+                machine: "occurrence".into(),
+                input_variant: "MobMisfired".into(),
+            },
+            EntryInput {
+                name: "occurrence_mob_failed".into(),
+                machine: "occurrence".into(),
+                input_variant: "MobDeliveryFailed".into(),
+            },
+            EntryInput {
+                name: "occurrence_lease_expired".into(),
+                machine: "occurrence".into(),
+                input_variant: "LeaseExpired".into(),
+            },
+        ],
+        routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![CompositionTransactionPlan {
+            name: "transactional_mob_claim".into(),
+            trigger: "claim_and_mob_handoff".into(),
+            description:
+                "transactional claim establishes the durable lease before mob delivery begins"
+                    .into(),
+            store_primitive: "ScheduleStore::claim_due_occurrences".into(),
+            route_names: vec![],
+            protocol_names: vec!["occurrence_mob_delivery".into()],
+        }],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![CompositionInvariant {
+            name: "mob_delivery_protocol_covered".into(),
+            kind: CompositionInvariantKind::HandoffProtocolCovered {
+                producer_instance: "occurrence".into(),
+                effect_variant: "DispatchToMob".into(),
+                protocol_name: "occurrence_mob_delivery".into(),
+            },
+            statement:
+                "mob delivery feedback closes occurrence obligations only through the explicit mob delivery protocol"
+                    .into(),
+            references_machines: vec!["occurrence".into()],
+            references_actors: vec!["occurrence_authority".into(), "mob_owner".into()],
+        }],
+        witnesses: vec![
+            CompositionWitness {
+                name: "mob_delivery_completion_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "Claim".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "claim_time_utc_ms".into(),
+                                expr: Expr::U64(10),
+                            },
+                            CompositionWitnessField {
+                                field: "owner_id".into(),
+                                expr: Expr::String("scheduler-owner".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "lease_expiry_utc_ms".into(),
+                                expr: Expr::U64(20),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "StartMobDispatch".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "delivery_correlation_id".into(),
+                            expr: Expr::String("mob-corr-1".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "MobAccepted".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "occurrence_id".into(),
+                                expr: Expr::String("occurrence-0".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "attempt_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "MobCompleted".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "occurrence_id".into(),
+                                expr: Expr::String("occurrence-0".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "attempt_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![witness_state("occurrence", Some("Completed"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("occurrence", "ClaimPending"),
+                    witness_transition("occurrence", "StartMobDispatchFromClaimed"),
+                    witness_transition("occurrence", "MobAcceptedFromDispatching"),
+                    witness_transition("occurrence", "MobCompletedFromDispatchingOrAwaiting"),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "occurrence",
+                        "ClaimPending",
+                        "occurrence",
+                        "StartMobDispatchFromClaimed",
+                    ),
+                    witness_transition_order(
+                        "occurrence",
+                        "StartMobDispatchFromClaimed",
+                        "occurrence",
+                        "MobAcceptedFromDispatching",
+                    ),
+                    witness_transition_order(
+                        "occurrence",
+                        "MobAcceptedFromDispatching",
+                        "occurrence",
+                        "MobCompletedFromDispatchingOrAwaiting",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 4,
+                    pending_input_limit: 1,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 3,
+                    seq_limit: 1,
+                    set_limit: 1,
+                    map_limit: 1,
+                },
+            },
+            CompositionWitness {
+                name: "mob_delivery_failure_path".into(),
+                preload_inputs: vec![
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "Claim".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "claim_time_utc_ms".into(),
+                                expr: Expr::U64(10),
+                            },
+                            CompositionWitnessField {
+                                field: "owner_id".into(),
+                                expr: Expr::String("scheduler-owner".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "lease_expiry_utc_ms".into(),
+                                expr: Expr::U64(20),
+                            },
+                        ],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "StartMobDispatch".into(),
+                        fields: vec![CompositionWitnessField {
+                            field: "delivery_correlation_id".into(),
+                            expr: Expr::String("mob-corr-2".into()),
+                        }],
+                    },
+                    CompositionWitnessInput {
+                        machine: "occurrence".into(),
+                        input_variant: "MobDeliveryFailed".into(),
+                        fields: vec![
+                            CompositionWitnessField {
+                                field: "occurrence_id".into(),
+                                expr: Expr::String("occurrence-0".into()),
+                            },
+                            CompositionWitnessField {
+                                field: "attempt_count".into(),
+                                expr: Expr::U64(1),
+                            },
+                            CompositionWitnessField {
+                                field: "failure_class".into(),
+                                expr: enum_variant(
+                                    "OccurrenceFailureClass",
+                                    "TargetMaterializationFailed",
+                                ),
+                            },
+                        ],
+                    },
+                ],
+                expected_routes: vec![],
+                expected_scheduler_rules: vec![],
+                expected_states: vec![witness_state("occurrence", Some("DeliveryFailed"), vec![])],
+                expected_transitions: vec![
+                    witness_transition("occurrence", "ClaimPending"),
+                    witness_transition("occurrence", "StartMobDispatchFromClaimed"),
+                    witness_transition(
+                        "occurrence",
+                        "MobDeliveryFailedFromDispatchingOrAwaiting",
+                    ),
+                ],
+                expected_transition_order: vec![
+                    witness_transition_order(
+                        "occurrence",
+                        "ClaimPending",
+                        "occurrence",
+                        "StartMobDispatchFromClaimed",
+                    ),
+                    witness_transition_order(
+                        "occurrence",
+                        "StartMobDispatchFromClaimed",
+                        "occurrence",
+                        "MobDeliveryFailedFromDispatchingOrAwaiting",
+                    ),
+                ],
+                state_limits: CompositionStateLimits {
+                    step_limit: 3,
+                    pending_input_limit: 1,
+                    pending_route_limit: 1,
+                    delivered_route_limit: 1,
+                    emitted_effect_limit: 2,
+                    seq_limit: 1,
+                    set_limit: 1,
+                    map_limit: 1,
+                },
+            },
+        ],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: Some(CompositionStateLimits::ci_defaults()),
+        closed_world: true,
+    }
+}
+
 fn machine_actor(name: &str) -> ActorSchema {
     ActorSchema {
         name: name.into(),
@@ -10296,6 +11628,13 @@ fn binding(input_field: &str, source: FeedbackFieldSource) -> FeedbackFieldBindi
     FeedbackFieldBinding {
         input_field: input_field.into(),
         source,
+    }
+}
+
+fn enum_variant(enum_name: &str, variant: &str) -> Expr {
+    Expr::NamedVariant {
+        enum_name: enum_name.into(),
+        variant: variant.into(),
     }
 }
 

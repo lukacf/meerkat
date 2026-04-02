@@ -19,7 +19,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, encode_llm_client_override_for_service,
+    PersistentSessionService, ScheduleService, encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -162,6 +162,7 @@ enum PendingSessionPhase {
 /// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    schedule_service: ScheduleService,
     /// Sessions that have been "created" (ID returned to caller) but not yet
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, PendingSession>>,
@@ -235,6 +236,7 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
@@ -251,6 +253,7 @@ impl SessionRuntime {
 
         Self {
             service,
+            schedule_service,
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
             factory: factory_clone,
@@ -285,6 +288,7 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
@@ -302,6 +306,7 @@ impl SessionRuntime {
 
         Self {
             service,
+            schedule_service,
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
             factory: factory_clone,
@@ -396,6 +401,10 @@ impl SessionRuntime {
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
         self.runtime_adapter.clone()
+    }
+
+    pub fn schedule_service(&self) -> ScheduleService {
+        self.schedule_service.clone()
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {

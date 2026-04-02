@@ -60,6 +60,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireStopReason": schema_for!(crate::wire::WireStopReason),
         "WireToolCall": schema_for!(crate::wire::WireToolCall),
         "WireToolResult": schema_for!(crate::wire::WireToolResult),
+        "Schedule": schema_for!(crate::Schedule),
+        "Occurrence": schema_for!(crate::Occurrence),
+        "ScheduleListResult": schema_for!(crate::wire::ScheduleListResult),
+        "ScheduleOccurrencesResult": schema_for!(crate::wire::ScheduleOccurrencesResult),
     });
     fs::write(
         output_dir.join("wire-types.json"),
@@ -83,6 +87,11 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RuntimeResetParams": schema_for!(crate::wire::RuntimeResetParams),
         "InputStateParams": schema_for!(crate::wire::InputStateParams),
         "InputListParams": schema_for!(crate::wire::InputListParams),
+        "CreateScheduleRequest": schema_for!(crate::CreateScheduleRequest),
+        "UpdateScheduleRequest": schema_for!(crate::UpdateScheduleRequest),
+        "ListSchedulesParams": schema_for!(crate::wire::ListSchedulesParams),
+        "ScheduleIdParams": schema_for!(crate::wire::ScheduleIdParams),
+        "UpdateScheduleParams": schema_for!(crate::wire::UpdateScheduleParams),
     });
     fs::write(
         output_dir.join("params.json"),

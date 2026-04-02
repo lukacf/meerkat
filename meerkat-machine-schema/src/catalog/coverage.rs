@@ -6,7 +6,8 @@ use super::{
         comms_drain_lifecycle_composition, continuation_runtime_bundle_composition,
         external_tool_bundle_composition, flow_frame_loop_composition, mob_bundle_composition,
         ops_peer_bundle_composition, ops_runtime_bundle_composition,
-        peer_runtime_bundle_composition, runtime_pipeline_composition,
+        peer_runtime_bundle_composition, runtime_pipeline_composition, schedule_bundle_composition,
+        schedule_mob_bundle_composition, schedule_runtime_bundle_composition,
         surface_event_runtime_bundle_composition,
     },
     external_tool_surface::external_tool_surface_machine,
@@ -20,11 +21,13 @@ use super::{
     mob_orchestrator::mob_orchestrator_machine,
     mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine,
     mob_wiring_anchor::mob_wiring_anchor_machine,
+    occurrence_lifecycle::occurrence_lifecycle_machine,
     ops_lifecycle::ops_lifecycle_machine,
     peer_comms::peer_comms_machine,
     peer_directory_reachability::peer_directory_reachability_machine,
     runtime_control::runtime_control_machine,
     runtime_ingress::runtime_ingress_machine,
+    schedule_lifecycle::schedule_lifecycle_machine,
     turn_execution::turn_execution_machine,
 };
 
@@ -769,6 +772,74 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "loop starts, body frames execute, until condition terminates it (Phase 1 complete)",
             )],
         ),
+        machine_manifest_from_schema(
+            &schedule_lifecycle_machine(),
+            &[
+                anchor(
+                    "schedule_authority",
+                    "meerkat-schedule/src/authority.rs",
+                    "schedule lifecycle authority that owns revision, pause/resume, and delete semantics",
+                ),
+                anchor(
+                    "schedule_service",
+                    "meerkat-schedule/src/service.rs",
+                    "schedule service precursor for revision supersession and rolling planning",
+                ),
+                anchor(
+                    "schedule_schema",
+                    "meerkat-machine-schema/src/catalog/schedule_lifecycle.rs",
+                    "formal ScheduleLifecycleMachine schema",
+                ),
+            ],
+            &[
+                scenario(
+                    "schedule-revision-supersede",
+                    "revision-affecting updates bump revision and explicitly supersede pending future occurrences",
+                ),
+                scenario(
+                    "schedule-pause-resume",
+                    "pause freezes claiming and resume re-enables planning without bumping revision",
+                ),
+                scenario(
+                    "schedule-delete",
+                    "delete terminalizes the schedule while preserving occurrence history",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &occurrence_lifecycle_machine(),
+            &[
+                anchor(
+                    "occurrence_authority",
+                    "meerkat-schedule/src/authority.rs",
+                    "occurrence lifecycle authority that owns claim, dispatch, lease expiry, and terminal outcomes",
+                ),
+                anchor(
+                    "schedule_driver",
+                    "meerkat-schedule/src/driver.rs",
+                    "mechanical scheduler driver precursor for due claims, probes, dispatch, and feedback",
+                ),
+                anchor(
+                    "schedule_sqlite_store",
+                    "meerkat-store/src/schedule_sqlite_store.rs",
+                    "sqlite schedule store precursor for authoritative claim-time and durable lease state",
+                ),
+            ],
+            &[
+                scenario(
+                    "claim-dispatch-complete",
+                    "pending occurrence claims, dispatches, awaits owner feedback, and completes",
+                ),
+                scenario(
+                    "lease-expiry-reclaim",
+                    "claimed or dispatching occurrence returns to claimable after lease expiry",
+                ),
+                scenario(
+                    "supersede-and-fail",
+                    "occurrence terminalizes as superseded or delivery_failed with explicit failure class",
+                ),
+            ],
+        ),
     ]
 }
 
@@ -1156,6 +1227,96 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 scenario(
                     "abort-terminal-closure",
                     "AbortDrainTask obligation closes on terminal phase without explicit feedback",
+                ),
+            ],
+        ),
+        composition_manifest_from_schema(
+            &schedule_bundle_composition(),
+            &[
+                anchor(
+                    "schedule_service",
+                    "meerkat-schedule/src/service.rs",
+                    "schedule service precursor for revision supersession and rolling planning",
+                ),
+                anchor(
+                    "schedule_store",
+                    "meerkat-schedule/src/store.rs",
+                    "schedule store contract precursor for transactional claim and supersede persistence",
+                ),
+                anchor(
+                    "schedule_bundle_schema",
+                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "formal schedule bundle composition",
+                ),
+            ],
+            &[
+                scenario(
+                    "revision-supersede-route",
+                    "revision-affecting schedule updates supersede pending future occurrences through the explicit route",
+                ),
+                scenario(
+                    "pause-resume-without-revision",
+                    "pause and resume leave schedule revision unchanged while preserving typed ownership",
+                ),
+            ],
+        ),
+        composition_manifest_from_schema(
+            &schedule_runtime_bundle_composition(),
+            &[
+                anchor(
+                    "schedule_driver",
+                    "meerkat-schedule/src/driver.rs",
+                    "mechanical scheduler driver precursor for runtime-target claim, handoff, and feedback",
+                ),
+                anchor(
+                    "runtime_delivery_precursor",
+                    "meerkat-rpc/src/session_runtime.rs",
+                    "runtime-owned prompt/event delivery precursor that scheduling must hand off into",
+                ),
+                anchor(
+                    "schedule_runtime_bundle_schema",
+                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "formal schedule runtime bundle composition",
+                ),
+            ],
+            &[
+                scenario(
+                    "runtime-delivery-feedback",
+                    "DispatchToRuntime is realized by runtime-owned delivery and closed by typed completion feedback",
+                ),
+                scenario(
+                    "runtime-lease-expiry",
+                    "runtime owner fairness still allows lease expiry to return a stuck occurrence to claimable",
+                ),
+            ],
+        ),
+        composition_manifest_from_schema(
+            &schedule_mob_bundle_composition(),
+            &[
+                anchor(
+                    "schedule_driver",
+                    "meerkat-schedule/src/driver.rs",
+                    "mechanical scheduler driver precursor for mob-target claim, handoff, and feedback",
+                ),
+                anchor(
+                    "mob_delivery_precursor",
+                    "meerkat-mob-mcp/src/lib.rs",
+                    "mob-owned action delivery precursor that scheduling must hand off into",
+                ),
+                anchor(
+                    "schedule_mob_bundle_schema",
+                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "formal schedule mob bundle composition",
+                ),
+            ],
+            &[
+                scenario(
+                    "mob-delivery-feedback",
+                    "DispatchToMob is realized by mob-owned delivery and closed by typed completion feedback",
+                ),
+                scenario(
+                    "materialization-failure-classification",
+                    "mob-side delivery failure preserves explicit TargetMaterializationFailed classification",
                 ),
             ],
         ),

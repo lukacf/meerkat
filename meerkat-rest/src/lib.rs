@@ -35,8 +35,9 @@ use meerkat::surface::{
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
-    PersistentSessionService, Session, SessionId, SessionService, SessionServiceControlExt,
-    SessionServiceHistoryExt, encode_llm_client_override_for_service, open_realm_persistence_in,
+    PersistentSessionService, ScheduleService, Session, SessionId, SessionService,
+    SessionServiceControlExt, SessionServiceHistoryExt, encode_llm_client_override_for_service,
+    open_realm_persistence_in,
 };
 use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;
@@ -112,6 +113,8 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<SessionEvent>,
     /// Session service for managing agent lifecycle.
     pub session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    /// Realm-scoped schedule service for native scheduling.
+    pub schedule_service: ScheduleService,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
     pub realm_id: String,
@@ -287,6 +290,7 @@ impl AppState {
         // We set the actual factory after mob_state is constructed (circular dep break).
         #[cfg(feature = "mob")]
         let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
         let mut session_service =
@@ -321,6 +325,7 @@ impl AppState {
             config_store,
             event_tx,
             session_service,
+            schedule_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm_id,
             instance_id,
@@ -948,6 +953,16 @@ pub struct SessionDetailsResponse {
     pub labels: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ScheduleListResponse {
+    pub schedules: Vec<meerkat::Schedule>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleOccurrencesResponse {
+    pub occurrences: Vec<meerkat::Occurrence>,
+}
+
 /// API error response
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -1020,6 +1035,19 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/external-events", post(post_external_event))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/schedules/{id}",
+            get(get_schedule)
+                .put(update_schedule)
+                .delete(delete_schedule),
+        )
+        .route("/schedules/{id}/pause", post(pause_schedule))
+        .route("/schedules/{id}/resume", post(resume_schedule))
+        .route(
+            "/schedules/{id}/occurrences",
+            get(list_schedule_occurrences),
+        )
         .route("/requests/{request_id}/cancel", post(cancel_request))
         .route("/comms/send", post(comms_send))
         .route("/comms/peers", get(comms_peers))
@@ -2252,6 +2280,26 @@ fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<Session
     Ok(locator.session_id)
 }
 
+fn resolve_schedule_id(input: &str) -> Result<meerkat::ScheduleId, ApiError> {
+    meerkat::ScheduleId::parse(input)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid schedule id '{input}': {e}")))
+}
+
+fn schedule_error_to_api(error: meerkat::ScheduleDomainError) -> ApiError {
+    match error {
+        meerkat::ScheduleDomainError::Store(meerkat::ScheduleStoreError::ScheduleNotFound {
+            schedule_id,
+        }) => ApiError::NotFound(format!("Schedule not found: {schedule_id}")),
+        meerkat::ScheduleDomainError::Store(meerkat::ScheduleStoreError::UnsupportedBackend {
+            ..
+        }) => ApiError::ServiceUnavailable(error.to_string()),
+        meerkat::ScheduleDomainError::InvalidSchedule(_)
+        | meerkat::ScheduleDomainError::InvalidTrigger(_)
+        | meerkat::ScheduleDomainError::InvalidCron(_) => ApiError::BadRequest(error.to_string()),
+        other => ApiError::Internal(other.to_string()),
+    }
+}
+
 /// Create and run a new session (outer wrapper with request lifecycle).
 async fn create_session(
     State(state): State<AppState>,
@@ -2620,6 +2668,108 @@ fn parse_label_filters(
         map.insert(k.to_string(), v.to_string());
     }
     Ok(if map.is_empty() { None } else { Some(map) })
+}
+
+async fn create_schedule(
+    State(state): State<AppState>,
+    Json(request): Json<meerkat::CreateScheduleRequest>,
+) -> Result<Json<meerkat::Schedule>, ApiError> {
+    state
+        .schedule_service
+        .create(request)
+        .await
+        .map(Json)
+        .map_err(schedule_error_to_api)
+}
+
+async fn list_schedules(
+    State(state): State<AppState>,
+) -> Result<Json<ScheduleListResponse>, ApiError> {
+    state
+        .schedule_service
+        .list()
+        .await
+        .map(|schedules| Json(ScheduleListResponse { schedules }))
+        .map_err(schedule_error_to_api)
+}
+
+async fn get_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat::Schedule>, ApiError> {
+    let schedule_id = resolve_schedule_id(&id)?;
+    state
+        .schedule_service
+        .get(&schedule_id)
+        .await
+        .map(Json)
+        .map_err(schedule_error_to_api)
+}
+
+async fn update_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<meerkat::UpdateScheduleRequest>,
+) -> Result<Json<meerkat::Schedule>, ApiError> {
+    let schedule_id = resolve_schedule_id(&id)?;
+    state
+        .schedule_service
+        .update(&schedule_id, request)
+        .await
+        .map(Json)
+        .map_err(schedule_error_to_api)
+}
+
+async fn pause_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat::Schedule>, ApiError> {
+    let schedule_id = resolve_schedule_id(&id)?;
+    state
+        .schedule_service
+        .pause(&schedule_id)
+        .await
+        .map(Json)
+        .map_err(schedule_error_to_api)
+}
+
+async fn resume_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat::Schedule>, ApiError> {
+    let schedule_id = resolve_schedule_id(&id)?;
+    state
+        .schedule_service
+        .resume(&schedule_id)
+        .await
+        .map(Json)
+        .map_err(schedule_error_to_api)
+}
+
+async fn delete_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<meerkat::Schedule>, ApiError> {
+    let schedule_id = resolve_schedule_id(&id)?;
+    state
+        .schedule_service
+        .delete(&schedule_id)
+        .await
+        .map(Json)
+        .map_err(schedule_error_to_api)
+}
+
+async fn list_schedule_occurrences(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ScheduleOccurrencesResponse>, ApiError> {
+    let schedule_id = resolve_schedule_id(&id)?;
+    state
+        .schedule_service
+        .list_occurrences(&schedule_id)
+        .await
+        .map(|occurrences| Json(ScheduleOccurrencesResponse { occurrences }))
+        .map_err(schedule_error_to_api)
 }
 
 /// List sessions in the active realm.

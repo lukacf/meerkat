@@ -78,6 +78,8 @@ import type {
   MobSummary,
   RunResult,
   SchemaWarning,
+  ScheduleOccurrenceRecord,
+  ScheduleRecord,
   SessionAssistantBlock,
   SessionHistory,
   SessionInfo,
@@ -441,6 +443,46 @@ export class MeerkatClient {
     }
     const raw = await this.request("session/history", params);
     return MeerkatClient.parseSessionHistory(raw);
+  }
+
+  async createSchedule(request: Record<string, unknown>): Promise<ScheduleRecord> {
+    return this.request("schedule/create", request) as Promise<ScheduleRecord>;
+  }
+
+  async getSchedule(scheduleId: string): Promise<ScheduleRecord> {
+    return this.request("schedule/get", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+  }
+
+  async listSchedules(): Promise<ScheduleRecord[]> {
+    const result = await this.request("schedule/list", {});
+    return ((result.schedules as Array<Record<string, unknown>>) ?? []) as ScheduleRecord[];
+  }
+
+  async updateSchedule(
+    scheduleId: string,
+    update: Record<string, unknown>,
+  ): Promise<ScheduleRecord> {
+    return this.request("schedule/update", {
+      schedule_id: scheduleId,
+      ...update,
+    }) as Promise<ScheduleRecord>;
+  }
+
+  async pauseSchedule(scheduleId: string): Promise<ScheduleRecord> {
+    return this.request("schedule/pause", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+  }
+
+  async resumeSchedule(scheduleId: string): Promise<ScheduleRecord> {
+    return this.request("schedule/resume", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+  }
+
+  async deleteSchedule(scheduleId: string): Promise<ScheduleRecord> {
+    return this.request("schedule/delete", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+  }
+
+  async listScheduleOccurrences(scheduleId: string): Promise<ScheduleOccurrenceRecord[]> {
+    const result = await this.request("schedule/occurrences", { schedule_id: scheduleId });
+    return ((result.occurrences as Array<Record<string, unknown>>) ?? []) as ScheduleOccurrenceRecord[];
   }
 
   // -- Capabilities -------------------------------------------------------

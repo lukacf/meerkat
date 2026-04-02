@@ -227,6 +227,55 @@ class SessionHistory:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduleRecord:
+    """Persisted realm-scoped schedule returned by scheduling APIs."""
+
+    schedule_id: str = ""
+    name: str | None = None
+    description: str | None = None
+    revision: int = 0
+    phase: str = ""
+    trigger: dict[str, Any] = field(default_factory=dict)
+    target: dict[str, Any] = field(default_factory=dict)
+    misfire_policy: Any = None
+    overlap_policy: str = ""
+    missing_target_policy: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
+    planning_horizon_days: int = 0
+    planning_horizon_occurrences: int = 0
+    planning_cursor_utc: str | None = None
+    next_occurrence_ordinal: int = 0
+    created_at_utc: str = ""
+    updated_at_utc: str = ""
+    deleted_at_utc: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleOccurrenceRecord:
+    """Persisted occurrence row returned by schedule occurrence inspection APIs."""
+
+    occurrence_id: str = ""
+    schedule_id: str = ""
+    schedule_revision: int = 0
+    occurrence_ordinal: int = 0
+    due_at_utc: str = ""
+    phase: str = ""
+    target_snapshot: dict[str, Any] = field(default_factory=dict)
+    attempt_count: int = 0
+    overlap_policy: str = ""
+    missing_target_policy: str = ""
+    misfire_policy: Any = None
+    failure_class: str | None = None
+    failure_detail: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at_utc: str | None = None
+    claimed_at_utc: str | None = None
+    dispatched_at_utc: str | None = None
+    completed_at_utc: str | None = None
+    last_receipt: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EventEnvelope:
     """Session or agent event with delivery metadata."""
 

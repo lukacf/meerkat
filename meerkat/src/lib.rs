@@ -202,6 +202,17 @@ pub use meerkat_client::OpenAiClient;
 pub use meerkat_client::GeminiClient;
 
 // Re-export store types (trait + filter + error from core, backend error from meerkat-store)
+pub use meerkat_schedule::{
+    CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
+    DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
+    DisabledScheduleStore, IntervalTriggerSpec, MemoryScheduleStore, MisfirePolicy,
+    MissingTargetPolicy, Occurrence, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId,
+    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, Schedule, ScheduleDomainError,
+    ScheduleDriver, ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase,
+    ScheduleRevision, ScheduleService, ScheduleStore as RealmScheduleStore, ScheduleStoreError,
+    ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
+    SessionTargetBinding, TargetBinding, TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest,
+};
 pub use meerkat_store::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 
 #[cfg(feature = "jsonl-store")]
@@ -211,7 +222,11 @@ pub use meerkat_store::JsonlStore;
 pub use meerkat_store::MemoryStore;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::RedbScheduleStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::RedbSessionStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::SqliteScheduleStore;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteSessionStore;
 

@@ -77,6 +77,9 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         config_store: config_store_arc,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::new(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,

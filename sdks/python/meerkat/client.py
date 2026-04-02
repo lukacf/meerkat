@@ -56,6 +56,8 @@ from .types import (
     EventEnvelope,
     McpLiveOpResponse,
     RunResult,
+    ScheduleOccurrenceRecord,
+    ScheduleRecord,
     SchemaWarning,
     SessionAssistantBlock,
     SessionHistory,
@@ -515,6 +517,46 @@ class MeerkatClient:
             params["limit"] = limit
         raw = await self._request("session/history", params)
         return self._parse_session_history(raw)
+
+    async def create_schedule(self, request: dict[str, Any]) -> ScheduleRecord:
+        raw = await self._request("schedule/create", request)
+        return ScheduleRecord(**raw)
+
+    async def get_schedule(self, schedule_id: str) -> ScheduleRecord:
+        raw = await self._request("schedule/get", {"schedule_id": schedule_id})
+        return ScheduleRecord(**raw)
+
+    async def list_schedules(self) -> list[ScheduleRecord]:
+        raw = await self._request("schedule/list", {})
+        return [ScheduleRecord(**item) for item in raw.get("schedules", [])]
+
+    async def update_schedule(
+        self,
+        schedule_id: str,
+        update: dict[str, Any],
+    ) -> ScheduleRecord:
+        payload = {"schedule_id": schedule_id, **update}
+        raw = await self._request("schedule/update", payload)
+        return ScheduleRecord(**raw)
+
+    async def pause_schedule(self, schedule_id: str) -> ScheduleRecord:
+        raw = await self._request("schedule/pause", {"schedule_id": schedule_id})
+        return ScheduleRecord(**raw)
+
+    async def resume_schedule(self, schedule_id: str) -> ScheduleRecord:
+        raw = await self._request("schedule/resume", {"schedule_id": schedule_id})
+        return ScheduleRecord(**raw)
+
+    async def delete_schedule(self, schedule_id: str) -> ScheduleRecord:
+        raw = await self._request("schedule/delete", {"schedule_id": schedule_id})
+        return ScheduleRecord(**raw)
+
+    async def list_schedule_occurrences(
+        self,
+        schedule_id: str,
+    ) -> list[ScheduleOccurrenceRecord]:
+        raw = await self._request("schedule/occurrences", {"schedule_id": schedule_id})
+        return [ScheduleOccurrenceRecord(**item) for item in raw.get("occurrences", [])]
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
         raw = await self._request("blob/get", {"blob_id": blob_id})

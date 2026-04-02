@@ -98,6 +98,36 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             vec![RestOperationDescriptor::new("get", "SSE event stream")],
         ),
         RestPathDescriptor::new(
+            "/schedules",
+            vec![
+                RestOperationDescriptor::new("get", "List schedules"),
+                RestOperationDescriptor::new("post", "Create a schedule"),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}",
+            vec![
+                RestOperationDescriptor::new("get", "Get schedule details"),
+                RestOperationDescriptor::new("put", "Update a schedule"),
+                RestOperationDescriptor::new("delete", "Delete a schedule"),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}/pause",
+            vec![RestOperationDescriptor::new("post", "Pause a schedule")],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}/resume",
+            vec![RestOperationDescriptor::new("post", "Resume a schedule")],
+        ),
+        RestPathDescriptor::new(
+            "/schedules/{id}/occurrences",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "List persisted schedule occurrences",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/comms/send",
             vec![RestOperationDescriptor::new("post", "Send a comms message")],
         ),

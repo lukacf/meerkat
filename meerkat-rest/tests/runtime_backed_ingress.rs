@@ -111,6 +111,9 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         config_store: config_store_arc,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::new(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "phase1-rest".to_string(),
         instance_id: None,

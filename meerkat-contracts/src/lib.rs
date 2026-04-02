@@ -35,16 +35,20 @@ pub use session_locator::{SessionLocator, SessionLocatorError, format_session_re
 pub use version::ContractVersion;
 pub use wire::{
     CatalogModelEntry, CommsParams, CoreCreateParams, HookParams, InputListParams, InputListResult,
-    InputStateParams, InputStateResult, McpAddParams, McpLiveOpResponse, McpLiveOpStatus,
-    McpLiveOperation, McpReloadParams, McpRemoveParams, MobPeerTarget, MobSendParams,
-    MobSendResult, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
+    InputStateParams, InputStateResult, ListSchedulesParams, McpAddParams, McpLiveOpResponse,
+    McpLiveOpStatus, McpLiveOperation, McpReloadParams, McpRemoveParams, MobPeerTarget,
+    MobSendParams, MobSendResult, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
     ModelsCatalogResponse, ProviderCatalog, RuntimeAcceptOutcomeType, RuntimeAcceptParams,
     RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult, RuntimeRetireParams,
-    RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult, SkillEntry, SkillInspectResponse,
-    SkillListResponse, SkillsParams, StructuredOutputParams, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireEvent, WireHandlingMode, WireInputLifecycleState, WireInputState,
-    WireInputStateHistoryEntry, WireModelProfile, WireModelTier, WireProviderMeta, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireRunResult, WireRuntimeState, WireSessionHistory,
-    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
-    WireToolResult, WireToolResultContent, WireTrustedPeerSpec, WireUsage,
+    RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult, ScheduleIdParams,
+    ScheduleListResult, ScheduleOccurrencesResult, SkillEntry, SkillInspectResponse,
+    SkillListResponse, SkillsParams, StructuredOutputParams, UpdateScheduleParams,
+    WireAssistantBlock, WireContentBlock, WireContentInput, WireEvent, WireHandlingMode,
+    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireModelProfile,
+    WireModelTier, WireProviderMeta, WireRenderClass, WireRenderMetadata, WireRenderSalience,
+    WireRunResult, WireRuntimeState, WireSessionHistory, WireSessionInfo, WireSessionMessage,
+    WireSessionSummary, WireStopReason, WireToolCall, WireToolResult, WireToolResultContent,
+    WireTrustedPeerSpec, WireUsage,
 };
+
+pub use meerkat_schedule::{CreateScheduleRequest, Occurrence, Schedule, UpdateScheduleRequest};

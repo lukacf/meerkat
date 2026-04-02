@@ -155,6 +155,51 @@ export interface SessionHistory {
   readonly messages: readonly SessionMessage[];
 }
 
+/** Persisted realm-scoped schedule record returned by scheduling surfaces. */
+export interface ScheduleRecord {
+  readonly schedule_id: string;
+  readonly name?: string;
+  readonly description?: string;
+  readonly revision: number;
+  readonly phase: string;
+  readonly trigger: Record<string, unknown>;
+  readonly target: Record<string, unknown>;
+  readonly misfire_policy: string | Record<string, unknown>;
+  readonly overlap_policy: string;
+  readonly missing_target_policy: string;
+  readonly labels: Record<string, string>;
+  readonly planning_horizon_days: number;
+  readonly planning_horizon_occurrences: number;
+  readonly planning_cursor_utc?: string | null;
+  readonly next_occurrence_ordinal: number;
+  readonly created_at_utc: string;
+  readonly updated_at_utc: string;
+  readonly deleted_at_utc?: string | null;
+}
+
+/** Persisted schedule occurrence record returned by occurrence inspection surfaces. */
+export interface ScheduleOccurrenceRecord {
+  readonly occurrence_id: string;
+  readonly schedule_id: string;
+  readonly schedule_revision: number;
+  readonly occurrence_ordinal: number;
+  readonly due_at_utc: string;
+  readonly phase: string;
+  readonly target_snapshot: Record<string, unknown>;
+  readonly attempt_count: number;
+  readonly overlap_policy: string;
+  readonly missing_target_policy: string;
+  readonly misfire_policy: string | Record<string, unknown>;
+  readonly failure_class?: string | null;
+  readonly failure_detail?: string | null;
+  readonly lease_owner?: string | null;
+  readonly lease_expires_at_utc?: string | null;
+  readonly claimed_at_utc?: string | null;
+  readonly dispatched_at_utc?: string | null;
+  readonly completed_at_utc?: string | null;
+  readonly last_receipt?: Record<string, unknown> | null;
+}
+
 /** A runtime capability and its availability status. */
 
 

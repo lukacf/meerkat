@@ -638,6 +638,30 @@ impl MethodRouter {
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
+            "schedule/create" => {
+                handlers::schedule::handle_create(id, params, self.runtime.clone()).await
+            }
+            "schedule/get" => {
+                handlers::schedule::handle_get(id, params, self.runtime.clone()).await
+            }
+            "schedule/list" => {
+                handlers::schedule::handle_list(id, params, self.runtime.clone()).await
+            }
+            "schedule/update" => {
+                handlers::schedule::handle_update(id, params, self.runtime.clone()).await
+            }
+            "schedule/pause" => {
+                handlers::schedule::handle_pause(id, params, self.runtime.clone()).await
+            }
+            "schedule/resume" => {
+                handlers::schedule::handle_resume(id, params, self.runtime.clone()).await
+            }
+            "schedule/delete" => {
+                handlers::schedule::handle_delete(id, params, self.runtime.clone()).await
+            }
+            "schedule/occurrences" => {
+                handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
+            }
             "turn/start" => {
                 handlers::turn::handle_start(
                     id,
@@ -2079,6 +2103,38 @@ mod tests {
         (router, notif_rx)
     }
 
+    async fn test_router_with_schedule_store() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let schedule_store = Arc::new(meerkat::MemoryScheduleStore::new());
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new_with_schedule_store(
+                store,
+                None,
+                memory_blob_store(),
+                schedule_store,
+            ),
+            NotificationSink::noop(),
+        );
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(Config::default()));
+        runtime.default_llm_client = Some(Arc::new(MockLlmClient));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let sink = NotificationSink::new(notif_tx);
+        let router = MethodRouter::new(runtime, config_store, sink);
+        (router, notif_rx)
+    }
+
     async fn test_router_with_v9_runtime() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let (router, notif_rx) = test_router().await;
         let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::persistent(
@@ -2413,6 +2469,14 @@ mod tests {
         assert!(method_names.contains(&"session/history"));
         assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/inject_context"));
+        assert!(method_names.contains(&"schedule/create"));
+        assert!(method_names.contains(&"schedule/get"));
+        assert!(method_names.contains(&"schedule/list"));
+        assert!(method_names.contains(&"schedule/update"));
+        assert!(method_names.contains(&"schedule/pause"));
+        assert!(method_names.contains(&"schedule/resume"));
+        assert!(method_names.contains(&"schedule/delete"));
+        assert!(method_names.contains(&"schedule/occurrences"));
         assert!(method_names.contains(&"turn/start"));
         assert!(
             !method_names.contains(&"session/destroy"),
@@ -2439,6 +2503,86 @@ mod tests {
             assert!(!method_names.contains(&"mob/stream_close"));
         }
         assert!(method_names.contains(&"config/get"));
+    }
+
+    #[tokio::test]
+    async fn schedule_crud_methods_round_trip_basic_schedule_state() {
+        let (router, _notif_rx) = test_router_with_schedule_store().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "schedule/create",
+                meerkat::CreateScheduleRequest {
+                    name: Some("heartbeat".into()),
+                    description: Some("scheduled check-in".into()),
+                    trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                        start_at_utc: chrono::Utc::now() + chrono::Duration::minutes(1),
+                        every_seconds: 300,
+                        end_at_utc: None,
+                    }),
+                    target: meerkat::TargetBinding::Session(
+                        meerkat::SessionTargetBinding::ExactSession {
+                            session_id: meerkat::SessionId::new(),
+                            action: meerkat::ScheduledSessionAction::Prompt {
+                                prompt: meerkat_core::ContentInput::from("hello from schedule"),
+                                system_prompt: None,
+                                render_metadata: None,
+                                skill_references: Vec::new(),
+                                additional_instructions: Vec::new(),
+                            },
+                        },
+                    ),
+                    misfire_policy: meerkat::MisfirePolicy::Skip,
+                    overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+                    missing_target_policy: meerkat::MissingTargetPolicy::MarkMisfired,
+                    labels: std::collections::BTreeMap::new(),
+                    planning_horizon_days: Some(1),
+                    planning_horizon_occurrences: Some(4),
+                },
+            ))
+            .await
+            .expect("schedule/create response");
+        let created = result_value(&create_resp);
+        let schedule_id = created["schedule_id"]
+            .as_str()
+            .expect("schedule id should serialize");
+
+        let list_resp = router
+            .dispatch(make_request_no_params("schedule/list"))
+            .await
+            .expect("schedule/list response");
+        let listed = result_value(&list_resp);
+        let schedules = listed["schedules"]
+            .as_array()
+            .expect("schedule/list returns schedules array");
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0]["schedule_id"], schedule_id);
+
+        let occurrences_resp = router
+            .dispatch(make_request(
+                "schedule/occurrences",
+                serde_json::json!({ "schedule_id": schedule_id }),
+            ))
+            .await
+            .expect("schedule/occurrences response");
+        let occurrences = result_value(&occurrences_resp);
+        let rows = occurrences["occurrences"]
+            .as_array()
+            .expect("occurrences array");
+        assert!(
+            !rows.is_empty(),
+            "schedule planning should persist at least one occurrence"
+        );
+
+        let pause_resp = router
+            .dispatch(make_request(
+                "schedule/pause",
+                serde_json::json!({ "schedule_id": schedule_id }),
+            ))
+            .await
+            .expect("schedule/pause response");
+        let paused = result_value(&pause_resp);
+        assert_eq!(paused["phase"], "paused");
     }
 
     #[cfg(feature = "mob")]

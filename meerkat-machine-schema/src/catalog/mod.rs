@@ -12,11 +12,13 @@ mod mob_member_lifecycle_anchor;
 mod mob_orchestrator;
 mod mob_runtime_bridge_anchor;
 mod mob_wiring_anchor;
+mod occurrence_lifecycle;
 mod ops_lifecycle;
 mod peer_comms;
 mod peer_directory_reachability;
 mod runtime_control;
 mod runtime_ingress;
+mod schedule_lifecycle;
 mod turn_execution;
 
 use crate::{CompositionSchema, MachineSchema};
@@ -26,7 +28,8 @@ pub use compositions::{
     comms_drain_lifecycle_composition, continuation_runtime_bundle_composition,
     external_tool_bundle_composition, flow_frame_loop_composition, mob_bundle_composition,
     ops_peer_bundle_composition, ops_runtime_bundle_composition, peer_runtime_bundle_composition,
-    runtime_pipeline_composition, surface_event_runtime_bundle_composition,
+    runtime_pipeline_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
+    schedule_runtime_bundle_composition, surface_event_runtime_bundle_composition,
 };
 pub use coverage::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
@@ -47,11 +50,13 @@ pub use mob_member_lifecycle_anchor::mob_member_lifecycle_anchor_machine;
 pub use mob_orchestrator::mob_orchestrator_machine;
 pub use mob_runtime_bridge_anchor::mob_runtime_bridge_anchor_machine;
 pub use mob_wiring_anchor::mob_wiring_anchor_machine;
+pub use occurrence_lifecycle::occurrence_lifecycle_machine;
 pub use ops_lifecycle::ops_lifecycle_machine;
 pub use peer_comms::peer_comms_machine;
 pub use peer_directory_reachability::peer_directory_reachability_machine;
 pub use runtime_control::runtime_control_machine;
 pub use runtime_ingress::runtime_ingress_machine;
+pub use schedule_lifecycle::schedule_lifecycle_machine;
 pub use turn_execution::turn_execution_machine;
 
 pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
@@ -78,6 +83,8 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         comms_drain_lifecycle_machine(),
         flow_frame_machine(),
         loop_iteration_machine(),
+        schedule_lifecycle_machine(),
+        occurrence_lifecycle_machine(),
     ]
 }
 
@@ -93,5 +100,8 @@ pub fn canonical_composition_schemas() -> Vec<CompositionSchema> {
         mob_bundle_composition(),
         flow_frame_loop_composition(),
         comms_drain_lifecycle_composition(),
+        schedule_bundle_composition(),
+        schedule_runtime_bundle_composition(),
+        schedule_mob_bundle_composition(),
     ]
 }

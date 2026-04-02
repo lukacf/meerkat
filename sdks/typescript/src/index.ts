@@ -49,6 +49,8 @@ export type {
   MobStatus,
   MobSummary,
   RunResult,
+  ScheduleOccurrenceRecord,
+  ScheduleRecord,
   SchemaWarning,
   SessionAssistantBlock,
   SessionHistory,

@@ -61,6 +61,9 @@ async fn integration_real_live_continue_hangs() {
         config_store,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::new(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,

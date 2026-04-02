@@ -67,6 +67,9 @@ fn build_state(
         config_store,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::new(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,
@@ -220,6 +223,137 @@ async fn archive_session(state: AppState, session_id: &str) -> StatusCode {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn schedule_routes_round_trip_basic_schedule_state() {
+    let scaffold = Scaffold::new();
+    let app = router(scaffold.state());
+
+    let create_payload = serde_json::to_value(meerkat::CreateScheduleRequest {
+        name: Some("heartbeat".into()),
+        description: Some("scheduled check-in".into()),
+        trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+            start_at_utc: chrono::Utc::now() + chrono::Duration::minutes(1),
+            every_seconds: 300,
+            end_at_utc: None,
+        }),
+        target: meerkat::TargetBinding::Session(meerkat::SessionTargetBinding::ExactSession {
+            session_id: SessionId::new(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: meerkat_core::ContentInput::from("hello from rest schedule"),
+                system_prompt: None,
+                render_metadata: None,
+                skill_references: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        }),
+        misfire_policy: meerkat::MisfirePolicy::Skip,
+        overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+        missing_target_policy: meerkat::MissingTargetPolicy::MarkMisfired,
+        labels: std::collections::BTreeMap::new(),
+        planning_horizon_days: Some(1),
+        planning_horizon_occurrences: Some(4),
+    })
+    .expect("serialize schedule create payload");
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/schedules")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&create_payload).expect("serialize request body"),
+        ))
+        .expect("build request");
+    let create_response = timeout(Duration::from_secs(30), app.clone().oneshot(create_request))
+        .await
+        .expect("schedule create timed out")
+        .expect("schedule create request");
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let create_body = create_response
+        .into_body()
+        .collect()
+        .await
+        .expect("read create body")
+        .to_bytes();
+    let created: Value = serde_json::from_slice(&create_body).expect("parse create response");
+    let schedule_id = created["schedule_id"]
+        .as_str()
+        .expect("schedule id in response")
+        .to_string();
+
+    let list_request = Request::builder()
+        .method("GET")
+        .uri("/schedules")
+        .body(Body::empty())
+        .expect("build list request");
+    let list_response = timeout(Duration::from_secs(30), app.clone().oneshot(list_request))
+        .await
+        .expect("schedule list timed out")
+        .expect("schedule list request");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = list_response
+        .into_body()
+        .collect()
+        .await
+        .expect("read list body")
+        .to_bytes();
+    let listed: Value = serde_json::from_slice(&list_body).expect("parse list response");
+    assert_eq!(
+        listed["schedules"]
+            .as_array()
+            .expect("schedules array")
+            .len(),
+        1
+    );
+
+    let occurrences_request = Request::builder()
+        .method("GET")
+        .uri(format!("/schedules/{schedule_id}/occurrences"))
+        .body(Body::empty())
+        .expect("build occurrences request");
+    let occurrences_response = timeout(
+        Duration::from_secs(30),
+        app.clone().oneshot(occurrences_request),
+    )
+    .await
+    .expect("schedule occurrences timed out")
+    .expect("schedule occurrences request");
+    assert_eq!(occurrences_response.status(), StatusCode::OK);
+    let occurrences_body = occurrences_response
+        .into_body()
+        .collect()
+        .await
+        .expect("read occurrences body")
+        .to_bytes();
+    let occurrences: Value =
+        serde_json::from_slice(&occurrences_body).expect("parse occurrences response");
+    assert!(
+        !occurrences["occurrences"]
+            .as_array()
+            .expect("occurrences array")
+            .is_empty(),
+        "rolling planner should persist occurrences through REST"
+    );
+
+    let pause_request = Request::builder()
+        .method("POST")
+        .uri(format!("/schedules/{schedule_id}/pause"))
+        .body(Body::empty())
+        .expect("build pause request");
+    let pause_response = timeout(Duration::from_secs(30), app.oneshot(pause_request))
+        .await
+        .expect("schedule pause timed out")
+        .expect("schedule pause request");
+    assert_eq!(pause_response.status(), StatusCode::OK);
+    let pause_body = pause_response
+        .into_body()
+        .collect()
+        .await
+        .expect("read pause body")
+        .to_bytes();
+    let paused: Value = serde_json::from_slice(&pause_body).expect("parse pause response");
+    assert_eq!(paused["phase"], "paused");
+}
 
 #[tokio::test]
 async fn resume_preserves_model_metadata() {

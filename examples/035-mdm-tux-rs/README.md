@@ -1,14 +1,14 @@
 # 035 — MDM TUX: Meerkat Device Manager
 
 A smart MDM (Mobile Device Management) demo using Meerkat peer-to-peer comms over TCP.
-Three binaries: **`mcm-target`** runs on each managed machine, **`mcm-tux`** is the ratatui TUI controller, and **`mcm-kennel`** is the kennel-mode rendezvous service.
+Three binaries: **`mdm-target`** runs on each managed machine, **`mdm-tux`** is the ratatui TUI controller, and **`mdm-kennel`** is the kennel-mode rendezvous service.
 
 Targets register with TUX automatically — no config files, no manual key exchange.
 
 ```
   Managed machine                    Controller machine
   ┌────────────────────────┐         ┌───────────────────────────────────────────┐
-  │ mcm-target <HOST:PORT> │         │ mcm-tux <PORT>                            │
+  │ mdm-target <HOST:PORT> │         │ mdm-tux <PORT>                            │
   │                        │  TCP    │                                           │
   │ auto-registers ────────┼────────►│ registration server (PORT+1)              │
   │ shell + comms tools    │◄───────►│ comms listener (PORT)                     │
@@ -26,10 +26,10 @@ Targets register with TUX automatically — no config files, no manual key excha
 cd examples/035-mdm-tux-rs
 
 # Terminal 1 — host
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mcm-tux -- 4747
+ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-tux -- 4747
 
 # Terminal 2 — target (auto-registers with host)
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mcm-target -- 127.0.0.1:4747
+ANTHROPIC_API_KEY=sk-ant-... cargo run --bin mdm-target -- 127.0.0.1:4747
 ```
 
 That's it. The target registers automatically. In TUX, type `ls /tmp` and press Enter.
@@ -38,14 +38,14 @@ That's it. The target registers automatically. In TUX, type `ls /tmp` and press 
 
 ## CLI Reference
 
-### `mcm-tux <PORT> [--model MODEL]`
+### `mdm-tux <PORT> [--model MODEL]`
 
 Starts the TUI controller. Comms listens on `PORT`, target registration on `PORT+1`.
 
 - **Direct mode** (default): no API key required — dispatches commands via `router.send()`
 - **Hive mode** (Tab): requires an API key — an LLM agent decides which targets to contact
 
-### `mcm-target <HOST:PORT> [--name NAME] [--model MODEL]`
+### `mdm-target <HOST:PORT> [--name NAME] [--model MODEL]`
 
 Starts a managed agent that registers with TUX and waits for commands.
 
@@ -64,6 +64,23 @@ Both binaries detect the provider from the model name or available API keys:
 | `GEMINI_API_KEY` | Gemini | `gemini-3.1-flash-lite` |
 
 If `--model` is given, the provider is inferred from the prefix (`claude-*` → Anthropic, `gpt-*`/`o1-*` → OpenAI, `gemini-*` → Gemini).
+
+---
+
+## Delegation
+
+Both the target agent and the hive agent now expose Meerkat's built-in delegation and mob management tools:
+
+- `delegate`
+- `mob_create`
+- `mob_destroy`
+- `mob_spawn_member`
+- `mob_retire_member`
+- `mob_check_member`
+- `mob_list_members`
+- `mob_list`
+
+This example uses the built-in option-1 surface only. Delegated helpers are inspected through the mob tools themselves, not projected into the TUX timeline as first-class targets.
 
 ---
 
@@ -89,10 +106,10 @@ Keypairs are persisted in `~/.rkat/mdm/tux/identity/` (TUX), `~/.rkat/mdm/target
 ```bash
 cd examples/035-mdm-tux-rs
 cargo build --release
-# Produces: target/release/mcm-target, target/release/mcm-tux, and target/release/mcm-kennel
+# Produces: target/release/mdm-target, target/release/mdm-tux, and target/release/mdm-kennel
 ```
 
-Copy `target/release/mcm-target` to each managed machine. Run `target/release/mcm-tux` on the controller.
+Copy `target/release/mdm-target` to each managed machine. Run `target/release/mdm-tux` on the controller.
 
 ### macOS launchd (target as a persistent service)
 
@@ -108,7 +125,7 @@ Copy `target/release/mcm-target` to each managed machine. Run `target/release/mc
   <string>com.example.mdm-target</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/mcm-target</string>
+    <string>/usr/local/bin/mdm-target</string>
     <string>192.168.1.50:4747</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -129,7 +146,7 @@ Copy `target/release/mcm-target` to each managed machine. Run `target/release/mc
 ```
 
 ```bash
-sudo cp target/release/mcm-target /usr/local/bin/mcm-target
+sudo cp target/release/mdm-target /usr/local/bin/mdm-target
 sudo launchctl load /Library/LaunchDaemons/com.example.mdm-target.plist
 ```
 
@@ -145,7 +162,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mcm-target 192.168.1.50:4747
+ExecStart=/usr/local/bin/mdm-target 192.168.1.50:4747
 Environment=ANTHROPIC_API_KEY=sk-ant-YOUR_KEY_HERE
 Restart=always
 RestartSec=5
@@ -155,7 +172,7 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-sudo cp target/release/mcm-target /usr/local/bin/mcm-target
+sudo cp target/release/mdm-target /usr/local/bin/mdm-target
 sudo systemctl daemon-reload
 sudo systemctl enable --now mdm-target
 ```
@@ -169,7 +186,7 @@ The target agent runs shell commands as its own user. For privileged operations:
 ### Option A — Run as root (simplest)
 
 ```bash
-sudo ANTHROPIC_API_KEY=sk-ant-... ./mcm-target 192.168.1.50:4747
+sudo ANTHROPIC_API_KEY=sk-ant-... ./mdm-target 192.168.1.50:4747
 ```
 
 Or in the launchd plist: `<key>UserName</key><string>root</string>`.
@@ -198,7 +215,7 @@ mdm-agent ALL=(ALL) NOPASSWD: /usr/sbin/softwareupdate, /bin/launchctl, \
                                /usr/sbin/diskutil, /usr/bin/installer, /usr/local/bin/brew
 ```
 
-Run as that user: `sudo -u mdm-agent ANTHROPIC_API_KEY=... ./mcm-target 192.168.1.50:4747`
+Run as that user: `sudo -u mdm-agent ANTHROPIC_API_KEY=... ./mdm-target 192.168.1.50:4747`
 
 ### Option C — Full passwordless sudo
 

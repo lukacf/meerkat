@@ -7,21 +7,22 @@ publish = false
 [workspace]
 
 [[bin]]
-name = "mcm-target"
+name = "mdm-target"
 path = "src/bin/target.rs"
 
 [[bin]]
-name = "mcm-tux"
+name = "mdm-tux"
 path = "src/bin/tux.rs"
 
 [[bin]]
-name = "mcm-kennel"
+name = "mdm-kennel"
 path = "src/bin/kennel.rs"
 
 [dependencies]
 meerkat       = { path = "../../meerkat", features = ["comms", "jsonl-store", "session-store"] }
 meerkat-core  = { path = "../../meerkat-core" }
 meerkat-comms = { path = "../../meerkat-comms" }
+meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
 meerkat-runtime = { path = "../../meerkat-runtime" }
 meerkat-store = { path = "../../meerkat-store", features = ["jsonl"] }
 futures       = "0.3"
@@ -43,5 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+meerkat-client = { path = "../../meerkat-client" }
 tempfile = "3"
 serial_test = "3"

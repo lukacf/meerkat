@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        eprintln!("Usage: mcm-kennel --listen HOST:PORT [--data-dir PATH]");
+        eprintln!("Usage: mdm-kennel --listen HOST:PORT [--data-dir PATH]");
         std::process::exit(1);
     }
     let listen = find_flag(&args, "--listen")

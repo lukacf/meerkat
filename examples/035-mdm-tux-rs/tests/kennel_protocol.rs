@@ -66,7 +66,7 @@ async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfi
         let port = listener.local_addr()?.port();
         drop(listener);
 
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcm-kennel"))
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mdm-kennel"))
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--data-dir")

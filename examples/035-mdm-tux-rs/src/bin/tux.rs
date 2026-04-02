@@ -3,7 +3,7 @@
 //! Ratatui-based terminal UI for managing remote Meerkat agents.
 //!
 //! ```text
-//! mcm-tux <PORT> [--model MODEL]
+//! mdm-tux <PORT> [--model MODEL]
 //! ```
 //!
 //! ## Modes
@@ -26,11 +26,12 @@ use anyhow::Context as _;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
-use meerkat::{AgentBuilder, AgentEvent, AgentFactory, DynAgent};
+use meerkat::{AgentBuildConfig, AgentEvent, AgentFactory, DynAgent, LlmClient};
 use meerkat_comms::MessageKind;
 use meerkat_comms::agent::CommsToolDispatcher;
 use meerkat_comms::agent::types::CommsContent;
 use meerkat_core::{AgentSessionStore, AgentToolDispatcher};
+use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 use meerkat_store::{JsonlStore, StoreAdapter};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -47,7 +48,7 @@ use mdm_tux::machines::tux_runtime::{Event as RuntimeEvent, Phase as RuntimePhas
 use mdm_tux::machines::tux_runtime_registry as runtime_registry;
 use mdm_tux::{
     ClaimGrant, CommsNode, DirectControlPayload, KennelPayload, LeaseRef, LeaseTerminationReason,
-    ListScope, ProviderKind, TargetListEntry, auto_detect, build_llm_client, build_signed_envelope,
+    ListScope, ProviderKind, TargetListEntry, auto_detect, build_signed_envelope,
     direct_control_request, load_or_generate_keypair, parse_direct_control_message, read_envelope,
     run_registration_server, verify_envelope, write_envelope,
 };
@@ -57,6 +58,11 @@ use tokio::net::TcpStream;
 /// Timeout for router.send() calls. Prevents a black-holed target from wedging
 /// the command loop (TCP connect can hang for minutes without this).
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+struct HiveAgentState {
+    agent: DynAgent,
+    _mob_state: Arc<MobMcpState>,
+}
 
 // ── Event / command types ─────────────────────────────────────────────────────
 
@@ -404,7 +410,7 @@ fn composer_status(app: &App, runtime: &RuntimeRegistry) -> (String, String, Col
             if app.transport == TransportMode::Kennel {
                 "Waiting for kennel inventory or claimed targets to appear.".into()
             } else {
-                "Start mcm-target or check direct registration.".into()
+                "Start mdm-target or check direct registration.".into()
             },
             Color::Yellow,
         ),
@@ -466,9 +472,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        eprintln!("Usage: mcm-tux <PORT> [--model MODEL --provider PROVIDER]");
+        eprintln!("Usage: mdm-tux <PORT> [--model MODEL --provider PROVIDER]");
         eprintln!(
-            "   or: mcm-tux --kennel HOST:PORT --listen PORT [--advertise IP] [--model MODEL --provider PROVIDER]"
+            "   or: mdm-tux --kennel HOST:PORT --listen PORT [--advertise IP] [--model MODEL --provider PROVIDER]"
         );
         eprintln!("Direct mode: no API key needed");
         eprintln!("Hive mode: set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY");
@@ -514,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("hive model: (none — Direct mode only)");
     }
-    println!("\nStart targets with: mcm-target <THIS_IP>:{port}\n");
+    println!("\nStart targets with: mdm-target <THIS_IP>:{port}\n");
 
     // ── 3. Channels ───────────────────────────────────────────────────────────
     let (command_tx, mut command_rx) = mpsc::unbounded_channel::<AppCommand>();
@@ -608,7 +614,7 @@ async fn main() -> anyhow::Result<()> {
         let router = router.clone();
         let trusted_shared = trusted_shared.clone();
         async move {
-            let mut hive_agent: Option<DynAgent> = None;
+            let mut hive_agent: Option<HiveAgentState> = None;
             // Per-target send queues: preserves FIFO within each target while
             // preventing one slow/unreachable target from blocking others.
             let mut target_senders: HashMap<String, mpsc::Sender<MessageKind>> = HashMap::new();
@@ -694,7 +700,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                         let agent = hive_agent.as_mut().expect("just built");
-                        let ev = match agent.run(prompt.into()).await {
+                        let ev = match agent.agent.run(prompt.into()).await {
                             Ok(r) => TuiEvent::HivePlanDone(r.text),
                             Err(e) => TuiEvent::HiveError(e.to_string()),
                         };
@@ -790,25 +796,51 @@ async fn build_hive(
     provider: ProviderKind,
     router: Arc<meerkat_comms::Router>,
     trusted: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
-) -> anyhow::Result<DynAgent> {
-    let factory = AgentFactory::new(session_dir);
-    let llm = build_llm_client(&factory, model, provider).await?;
+) -> anyhow::Result<HiveAgentState> {
+    build_hive_with_llm_override(session_dir, model, provider, router, trusted, None).await
+}
+
+async fn build_hive_with_llm_override(
+    session_dir: &std::path::Path,
+    model: &str,
+    provider: ProviderKind,
+    router: Arc<meerkat_comms::Router>,
+    trusted: Arc<parking_lot::RwLock<meerkat_comms::TrustedPeers>>,
+    llm_client_override: Option<Arc<dyn LlmClient>>,
+) -> anyhow::Result<HiveAgentState> {
+    let factory = AgentFactory::new(session_dir).mob(true);
     let tools: Arc<dyn AgentToolDispatcher> = Arc::new(CommsToolDispatcher::new(router, trusted));
     let store = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
     store.init().await?;
     let hive_store: Arc<dyn AgentSessionStore> = Arc::new(StoreAdapter::new(store));
+    let mob_state = MobMcpState::new_in_memory();
 
-    let agent: DynAgent = AgentBuilder::new()
-        .model(model)
-        .system_prompt(
-            "You are a hive orchestrator for a fleet of remote machines. \
-             Use the 'peers' tool to discover targets, then 'send' to dispatch \
-             commands. Target replies appear in the TUX output panel; the user \
-             will relay results if needed. Keep dispatches concise.",
-        )
-        .build(llm, tools, hive_store)
-        .await;
-    Ok(agent)
+    let mut build = AgentBuildConfig::new(model.to_string());
+    build.provider = Some(meerkat_core::Provider::from_name(&provider.to_string()));
+    build.system_prompt = Some(
+        "You are a hive orchestrator for a fleet of remote machines. \
+         Use the 'peers' tool to discover targets, then 'send' to dispatch \
+         commands. Target replies appear in the TUX output panel; the user \
+         will relay results if needed. Keep dispatches concise."
+            .to_string(),
+    );
+    build.external_tools = Some(tools);
+    build.session_store_override = Some(hive_store);
+    build.override_builtins = Some(false);
+    build.override_shell = Some(false);
+    build.override_mob = Some(true);
+    build.mob_tools = Some(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(
+        &mob_state,
+    ))));
+    build.llm_client_override = llm_client_override;
+
+    let agent = factory
+        .build_agent(build, &meerkat_core::Config::default())
+        .await?;
+    Ok(HiveAgentState {
+        agent,
+        _mob_state: mob_state,
+    })
 }
 
 fn current_attached_target_ids(claims: &ClaimRegistry) -> Vec<String> {
@@ -1069,7 +1101,7 @@ async fn spawn_command_processor(
     hive_provider: Option<ProviderKind>,
     hive_session_dir: PathBuf,
 ) {
-    let mut hive_agent: Option<DynAgent> = None;
+    let mut hive_agent: Option<HiveAgentState> = None;
     let mut target_senders: HashMap<String, mpsc::Sender<MessageKind>> = HashMap::new();
 
     while let Some(cmd) = command_rx.recv().await {
@@ -1166,7 +1198,7 @@ async fn spawn_command_processor(
                     }
                 }
                 let agent = hive_agent.as_mut().expect("just built");
-                let ev = match agent.run(prompt.into()).await {
+                let ev = match agent.agent.run(prompt.into()).await {
                     Ok(r) => TuiEvent::HivePlanDone(r.text),
                     Err(e) => TuiEvent::HiveError(e.to_string()),
                 };
@@ -3154,12 +3186,48 @@ fn discover_local_ip(host: &str, port: u16) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, Mode, TransportMode, format_tool_completion, is_known_slash_command,
-        normalize_tool_text, parse_provider_override, scroll_timeline_down, scroll_timeline_up,
-        timeline_max_scroll,
+        App, Mode, TransportMode, build_hive_with_llm_override, format_tool_completion,
+        is_known_slash_command, normalize_tool_text, parse_provider_override, scroll_timeline_down,
+        scroll_timeline_up, timeline_max_scroll,
     };
+    use async_trait::async_trait;
     use mdm_tux::ProviderKind;
+    use meerkat::LlmClient;
+    use meerkat_client::types::LlmStream;
+    use meerkat_client::{LlmError, LlmRequest, TestClient};
+    use meerkat_comms::identity::Keypair;
     use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CaptureClient {
+        inner: TestClient,
+        seen_tools: Mutex<Vec<String>>,
+    }
+
+    impl CaptureClient {
+        fn tool_names(&self) -> Vec<String> {
+            self.seen_tools.lock().expect("capture lock").clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl LlmClient for CaptureClient {
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            *self.seen_tools.lock().expect("capture lock") =
+                request.tools.iter().map(|tool| tool.name.clone()).collect();
+            self.inner.stream(request)
+        }
+
+        fn provider(&self) -> &'static str {
+            self.inner.provider()
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            self.inner.health_check().await
+        }
+    }
 
     #[test]
     fn provider_override_requires_model_and_provider_together() {
@@ -3270,5 +3338,36 @@ mod tests {
     fn timeline_max_scroll_keeps_bottom_slack() {
         assert_eq!(timeline_max_scroll(40, 10), 32);
         assert_eq!(timeline_max_scroll(8, 10), 0);
+    }
+
+    #[tokio::test]
+    async fn hive_build_exposes_comms_and_mob_tools_without_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = mdm_tux::CommsNode::new(Keypair::generate());
+        let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+
+        let mut hive = build_hive_with_llm_override(
+            temp.path(),
+            "gpt-5.2",
+            ProviderKind::Openai,
+            node.router.clone(),
+            node.trusted.clone(),
+            Some(capture.clone() as Arc<dyn LlmClient>),
+        )
+        .await
+        .unwrap();
+
+        hive.agent
+            .run("inspect hive tools".to_string().into())
+            .await
+            .unwrap();
+
+        let tool_names = capture.tool_names();
+        assert!(tool_names.iter().any(|name| name == "send"));
+        assert!(tool_names.iter().any(|name| name == "peers"));
+        assert!(tool_names.iter().any(|name| name == "delegate"));
+        assert!(tool_names.iter().any(|name| name == "mob_list"));
+        assert!(tool_names.iter().any(|name| name == "mob_check_member"));
+        assert!(!tool_names.iter().any(|name| name == "shell"));
     }
 }

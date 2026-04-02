@@ -193,8 +193,8 @@ async fn build_agent_sets_session_metadata() {
     // No explicit override was set → Inherit (follows factory default)
     assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Inherit);
     assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Inherit);
-    // comms is from_effective(false) since there's no override_comms field
-    assert_eq!(metadata.tooling.comms, ToolCategoryOverride::Disable);
+    // comms has no override field — always persisted as Inherit
+    assert_eq!(metadata.tooling.comms, ToolCategoryOverride::Inherit);
     // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
     assert!(metadata.tooling.active_skills.is_none());

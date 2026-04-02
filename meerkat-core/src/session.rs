@@ -618,9 +618,11 @@ impl ToolCategoryOverride {
 
     /// Construct from a resolved effective bool.
     ///
-    /// **Warning:** this collapses `Inherit` into `Enable`/`Disable`. Only use
-    /// when the caller genuinely has no access to the original override intent
-    /// (e.g. comms, which has no `override_comms` field).
+    /// **Warning:** this collapses `Inherit` into `Enable`/`Disable`. Prefer
+    /// [`from_override`] when persisting session metadata so that `Inherit`
+    /// survives across save/resume cycles. Only use `from_effective` in test
+    /// helpers or when constructing metadata from external sources that only
+    /// provide a resolved bool.
     #[must_use]
     pub fn from_effective(enabled: bool) -> Self {
         if enabled { Self::Enable } else { Self::Disable }

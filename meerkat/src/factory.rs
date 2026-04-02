@@ -1942,7 +1942,6 @@ impl AgentFactory {
         // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
         // effective bool. This ensures Inherit survives across save/resume cycles so
         // the session continues to follow future runtime defaults.
-        // `comms` has no override field — use from_effective() as the only option.
         let metadata = if let Some(mut metadata) = resumed_session_metadata {
             metadata.model = model;
             metadata.max_tokens = max_tokens;
@@ -1953,7 +1952,9 @@ impl AgentFactory {
                 ToolCategoryOverride::from_override(build_config.override_builtins);
             metadata.tooling.shell =
                 ToolCategoryOverride::from_override(build_config.override_shell);
-            metadata.tooling.comms = ToolCategoryOverride::from_effective(comms_enabled);
+            // No override_comms field exists — comms is always derived from
+            // comms_name / keep_alive / factory config, so persist Inherit.
+            metadata.tooling.comms = ToolCategoryOverride::Inherit;
             metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
             metadata.tooling.memory =
                 ToolCategoryOverride::from_override(build_config.override_memory);
@@ -1975,7 +1976,7 @@ impl AgentFactory {
                 tooling: SessionTooling {
                     builtins: ToolCategoryOverride::from_override(build_config.override_builtins),
                     shell: ToolCategoryOverride::from_override(build_config.override_shell),
-                    comms: ToolCategoryOverride::from_effective(comms_enabled),
+                    comms: ToolCategoryOverride::Inherit,
                     mob: ToolCategoryOverride::from_override(build_config.override_mob),
                     memory: ToolCategoryOverride::from_override(build_config.override_memory),
                     active_skills: active_skill_ids,

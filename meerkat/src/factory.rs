@@ -592,6 +592,11 @@ pub struct AgentFactory {
     /// Optional custom session store. When set, `build_agent()` uses this
     /// instead of the feature-flag-based default (jsonl, memory, or ephemeral).
     custom_store: Option<Arc<dyn SessionStore>>,
+    /// Default mob tools factory injected into all builds when mob is enabled.
+    /// Surfaces set this when constructing the factory, so every agent built
+    /// through this factory gets mob delegation tools without each session
+    /// needing to set `SessionBuildOptions.mob_tools`.
+    mob_tools: Option<Arc<dyn meerkat_core::service::MobToolsFactory>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -611,6 +616,7 @@ impl std::fmt::Debug for AgentFactory {
         #[cfg(feature = "skills")]
         d.field("skill_source", &self.skill_source.as_ref().map(|_| ".."));
         d.field("custom_store", &self.custom_store.as_ref().map(|_| ".."));
+        d.field("mob_tools", &self.mob_tools.is_some());
         d.finish()
     }
 }
@@ -637,6 +643,7 @@ impl AgentFactory {
             #[cfg(feature = "skills")]
             skill_source: None,
             custom_store: None,
+            mob_tools: None,
         }
     }
 
@@ -657,6 +664,7 @@ impl AgentFactory {
             #[cfg(feature = "skills")]
             skill_source: None,
             custom_store: None,
+            mob_tools: None,
         }
     }
 
@@ -713,6 +721,15 @@ impl AgentFactory {
     /// Enable or disable mob (multi-agent orchestration) tools.
     pub fn mob(mut self, enabled: bool) -> Self {
         self.enable_mob = enabled;
+        self
+    }
+
+    /// Set the default mob tools factory for all agents built by this factory.
+    pub fn mob_tools_factory(
+        mut self,
+        factory: Arc<dyn meerkat_core::service::MobToolsFactory>,
+    ) -> Self {
+        self.mob_tools = Some(factory);
         self
     }
 
@@ -1538,7 +1555,11 @@ impl AgentFactory {
         // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
         // already-composed comms gateway).
         let effective_mob = build_config.override_mob.unwrap_or(self.enable_mob);
-        if effective_mob && let Some(mob_factory) = build_config.mob_tools.take() {
+        let mob_factory = build_config
+            .mob_tools
+            .take()
+            .or_else(|| self.mob_tools.clone());
+        if effective_mob && let Some(mob_factory) = mob_factory {
             // Build comms runtime arg: clone from the comms phase if available.
             #[cfg(feature = "comms")]
             let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = comms_runtime

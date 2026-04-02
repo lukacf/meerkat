@@ -521,6 +521,8 @@ impl MeerkatMcpState {
 
         let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
         builder.default_llm_client = default_llm_client;
+        #[cfg(feature = "mob")]
+        let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let service = Arc::new(PersistentSessionService::new(
             builder,
             100,
@@ -538,7 +540,15 @@ impl MeerkatMcpState {
             config_runtime,
             skill_runtime,
             #[cfg(feature = "mob")]
-            mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
+            mob_state: {
+                let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+                *mob_tools_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+                    meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
+                ));
+                state
+            },
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]

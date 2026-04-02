@@ -237,6 +237,12 @@ pub struct FactoryAgentBuilder {
     /// Optional default session store injected when no override is provided.
     /// Used on wasm32 where filesystem-based stores are unavailable.
     pub default_session_store: Option<Arc<dyn meerkat_core::AgentSessionStore>>,
+    /// Default mob tools factory injected into all builds.
+    /// Wrapped in `Arc<StdRwLock<...>>` so surfaces can set it after the builder
+    /// is consumed into a session service (breaking the circular dependency between
+    /// session service construction and mob state creation).
+    pub default_mob_tools:
+        Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::service::MobToolsFactory>>>>,
 }
 
 impl FactoryAgentBuilder {
@@ -250,6 +256,7 @@ impl FactoryAgentBuilder {
             default_llm_client: None,
             default_tool_dispatcher: None,
             default_session_store: None,
+            default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -269,6 +276,7 @@ impl FactoryAgentBuilder {
             default_llm_client: None,
             default_tool_dispatcher: None,
             default_session_store: None,
+            default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -327,6 +335,17 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             && let Some(ref store) = self.default_session_store
         {
             build_config.session_store_override = Some(store.clone());
+        }
+
+        // Inject default mob tools factory if none provided.
+        if build_config.mob_tools.is_none()
+            && let Some(mob_factory) = self
+                .default_mob_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        {
+            build_config.mob_tools = Some(mob_factory);
         }
 
         let config = self.resolve_config().await;

@@ -6429,6 +6429,19 @@ where
     runtime.set_skill_identity_registry(identity_registry);
     runtime.set_config_runtime(config_runtime);
 
+    // Set mob tools factory on the runtime's stored AgentFactory so agents
+    // built through this runtime get delegation tools. We create a temporary
+    // MobMcpState for the factory — the full hydrated state is created later
+    // and passed to the RPC server for operator-facing mob operations.
+    {
+        let mob_session_svc: Arc<dyn meerkat_mob::MobSessionService> =
+            session_service.clone() as Arc<dyn meerkat_mob::MobSessionService>;
+        let factory_mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_svc));
+        runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+            factory_mob_state,
+        )));
+    }
+
     // Set realm context before Arc-wrapping (requires &mut self).
     // The mob_id is known from the definition before the handle is created.
     let deployed_mob_id = archive.definition.id.to_string();

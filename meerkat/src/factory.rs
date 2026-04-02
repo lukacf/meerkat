@@ -596,7 +596,7 @@ pub struct AgentFactory {
     /// Surfaces set this when constructing the factory, so every agent built
     /// through this factory gets mob delegation tools without each session
     /// needing to set `SessionBuildOptions.mob_tools`.
-    mob_tools: Option<Arc<dyn meerkat_core::service::MobToolsFactory>>,
+    pub mob_tools: Option<Arc<dyn meerkat_core::service::MobToolsFactory>>,
 }
 
 impl std::fmt::Debug for AgentFactory {

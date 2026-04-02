@@ -357,6 +357,16 @@ impl SessionRuntime {
         self.backend = backend;
     }
 
+    /// Set the default mob tools factory on the stored AgentFactory.
+    ///
+    /// Called after mob_state is created (which happens after the runtime is
+    /// constructed, due to circular dependency). The factory's `mob_tools` is
+    /// checked as a fallback in `build_agent()` when `build_config.mob_tools`
+    /// is not set.
+    pub fn set_mob_tools(&mut self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
+        self.factory.mob_tools = Some(factory);
+    }
+
     /// Active realm id for this runtime, if configured.
     pub fn realm_id(&self) -> Option<&str> {
         self.realm_id.as_deref()

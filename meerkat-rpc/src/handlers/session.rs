@@ -289,6 +289,9 @@ pub async fn handle_create(
     build_config.peer_meta = params.peer_meta;
     build_config.override_memory = params.enable_memory;
     build_config.override_mob = params.enable_mob;
+    // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
+    // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
+    // it at build time.
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
     build_config.additional_instructions = params.additional_instructions;

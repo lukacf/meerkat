@@ -266,10 +266,15 @@ impl AgentMobToolSurface {
         });
 
         if first_delegate {
-            result["system_notice"] = json!(
+            let notice = if self.comms_name.is_some() {
                 "Implicit delegation mob created. Helpers are wired to you via comms. \
                  Use `send` to communicate. The mob persists across turns."
-            );
+            } else {
+                "Implicit delegation mob created. The mob persists across turns. \
+                 Note: comms is not enabled on this session, so peer messaging is unavailable. \
+                 Use `mob_check_member` to poll helper status."
+            };
+            result["system_notice"] = json!(notice);
         }
 
         Self::encode_result(call, result)
@@ -284,8 +289,11 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         // Tag with owner session so this mob is session-scoped and discoverable on resume.
+        // Only set if the definition doesn't already declare an owner.
         let mut definition = args.definition;
-        definition.owner_session_id = Some(self.owner_session_id.to_string());
+        if definition.owner_session_id.is_none() {
+            definition.owner_session_id = Some(self.owner_session_id.to_string());
+        }
 
         let mob_id = self
             .state
@@ -307,14 +315,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id);
 
-        // Canonical ownership check: query MobMcpState for the mob's definition
-        if self.state.is_implicit_mob(&mob_id).await {
-            return Err(ToolError::Other(
-                "Cannot destroy implicit delegation mob. It is managed automatically.".to_string(),
-            ));
-        }
-
-        // Session-scoped: only allow destroying mobs created by this session
+        // Session-scoped: only allow destroying mobs created by this session.
         if !self.owns_mob(&mob_id).await {
             return Err(ToolError::Other(format!(
                 "Mob '{mob_id}' is not owned by this session"

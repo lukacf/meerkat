@@ -378,7 +378,10 @@ impl MobDefinition {
             Profile {
                 model: model.to_string(),
                 skills: Vec::new(),
-                tools: crate::profile::ToolConfig::default(),
+                tools: crate::profile::ToolConfig {
+                    comms: true,
+                    ..crate::profile::ToolConfig::default()
+                },
                 peer_description: "Delegated sub-agent".to_string(),
                 external_addressable: false,
                 backend: None,

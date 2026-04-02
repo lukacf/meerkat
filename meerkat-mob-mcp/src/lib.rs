@@ -220,7 +220,22 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.reset().await
     }
 
+    /// Destroy a mob. Rejects implicit delegation mobs — use
+    /// [`destroy_implicit_mob`](Self::destroy_implicit_mob) for session cleanup.
     pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
+        if self.is_implicit_mob(mob_id).await {
+            return Err(MobError::Internal(
+                "Cannot destroy implicit delegation mob directly. \
+                 It is cleaned up automatically when the owning session is archived."
+                    .to_string(),
+            ));
+        }
+        self.mob_destroy_unchecked(mob_id).await
+    }
+
+    /// Destroy a mob without the implicit-mob guard.
+    /// Used by session cleanup paths that intentionally destroy implicit mobs.
+    async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
         let managed = {
             let mut mobs = self.mobs.write().await;
             mobs.remove(mob_id)
@@ -680,7 +695,7 @@ impl MobMcpState {
             return Ok(());
         }
         for mob_id in &mob_ids {
-            if let Err(error) = self.mob_destroy(mob_id).await {
+            if let Err(error) = self.mob_destroy_unchecked(mob_id).await {
                 tracing::warn!(
                     mob_id = %mob_id,
                     session_id = %session_id,
@@ -727,7 +742,7 @@ impl MobMcpState {
                 Err(_) => false, // Unknown error — don't scavenge
             };
             if is_orphan {
-                if let Err(error) = self.mob_destroy(&mob_id).await {
+                if let Err(error) = self.mob_destroy_unchecked(&mob_id).await {
                     tracing::warn!(
                         mob_id = %mob_id,
                         session_id = %session_id,

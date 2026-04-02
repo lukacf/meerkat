@@ -60,6 +60,8 @@ pub struct AgentMobToolSurface {
     comms_name: Option<String>,
     /// Parent agent's comms peer ID (ed25519 public key).
     comms_peer_id: Option<String>,
+    /// Parent agent's comms runtime for bidirectional wiring.
+    comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
 }
 
 impl AgentMobToolSurface {
@@ -77,6 +79,7 @@ impl AgentMobToolSurface {
         owner_session_id: SessionId,
         comms_name: Option<String>,
         comms_peer_id: Option<String>,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> Self {
         let mut owned = std::collections::HashSet::new();
         if let Some(ref id) = implicit_mob_id {
@@ -90,10 +93,12 @@ impl AgentMobToolSurface {
             owner_session_id,
             comms_name,
             comms_peer_id,
+            comms_runtime,
         )
     }
 
     /// Create with a pre-populated set of owned mob IDs (for resume).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_owned(
         state: Arc<MobMcpState>,
         implicit_mob_id: Option<MobId>,
@@ -102,6 +107,7 @@ impl AgentMobToolSurface {
         owner_session_id: SessionId,
         comms_name: Option<String>,
         comms_peer_id: Option<String>,
+        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> Self {
         let tools = build_tool_defs();
         Self {
@@ -113,6 +119,7 @@ impl AgentMobToolSurface {
             model,
             comms_name,
             comms_peer_id,
+            comms_runtime,
         }
     }
 
@@ -225,27 +232,59 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        // Wire the helper to trust the parent agent's comms identity.
-        // This lets the helper send messages TO the parent. For the parent to
-        // receive them, it must also have the helper as a trusted peer — the
-        // mob's auto_wire_orchestrator handles this IF the parent is in the roster.
-        // For external parents (the common delegate case), the helper can send
-        // to the parent but the parent must poll via mob_check_member until
-        // bidirectional wiring is available.
+        // Bidirectional comms wiring:
+        // 1. Wire helper → parent: helper trusts parent as external peer
+        // 2. Wire parent → helper: parent trusts helper so it can receive messages
         let wired = if let (Some(name), Some(peer_id)) = (&self.comms_name, &self.comms_peer_id)
             && let Ok(parent_spec) = meerkat_core::comms::TrustedPeerSpec::new(
                 name.as_str(),
                 peer_id.as_str(),
                 format!("inproc://{name}"),
             ) {
-            self.state
+            // Direction 1: helper trusts parent
+            let helper_trusts_parent = self
+                .state
                 .mob_wire(
                     &mob_id,
                     meerkat_id.clone(),
                     meerkat_mob::PeerTarget::External(parent_spec),
                 )
                 .await
-                .is_ok()
+                .is_ok();
+
+            // Direction 2: parent trusts helper
+            // Get helper's comms identity from the mob roster.
+            let parent_trusts_helper = if let Some(ref comms_rt) = self.comms_runtime {
+                let handle = self.state.handle_for(&mob_id).await;
+                if let Ok(handle) = handle {
+                    let roster = handle.roster().await;
+                    if let Some(entry) = roster.get(&meerkat_id) {
+                        if let Some(ref helper_peer_id) = entry.peer_id {
+                            let helper_comms_name =
+                                format!("{}/{}/{}", mob_id, entry.profile, meerkat_id);
+                            if let Ok(helper_spec) = meerkat_core::comms::TrustedPeerSpec::new(
+                                &helper_comms_name,
+                                helper_peer_id.as_str(),
+                                format!("inproc://{helper_comms_name}"),
+                            ) {
+                                comms_rt.add_trusted_peer(helper_spec).await.is_ok()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            helper_trusts_parent && parent_trusts_helper
         } else {
             false
         };
@@ -260,9 +299,8 @@ impl AgentMobToolSurface {
 
         if first_delegate {
             let notice = if wired {
-                "Implicit delegation mob created. Helper can send messages to you. \
-                 Use `mob_check_member` to poll helper status and output. \
-                 The mob persists across turns."
+                "Implicit delegation mob created. Helpers are wired to you via comms. \
+                 Use `send` to communicate. The mob persists across turns."
             } else {
                 "Implicit delegation mob created. The mob persists across turns. \
                  Use `mob_check_member` to poll helper status."
@@ -517,6 +555,7 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
             args.session_id,
             args.comms_name,
             comms_peer_id,
+            args.comms_runtime,
         );
         Ok(Arc::new(surface))
     }
@@ -808,6 +847,7 @@ mod tests {
             SessionId::new(),
             None,
             None,
+            None,
         );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
@@ -828,6 +868,7 @@ mod tests {
             None,
             "claude-sonnet-4-5".to_string(),
             SessionId::new(),
+            None,
             None,
             None,
         );

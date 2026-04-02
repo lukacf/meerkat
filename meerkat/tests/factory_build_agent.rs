@@ -190,8 +190,10 @@ async fn build_agent_sets_session_metadata() {
     assert_eq!(metadata.model, "claude-sonnet-4-5");
     assert_eq!(metadata.max_tokens, 2048);
     assert_eq!(metadata.provider, Provider::Anthropic);
-    assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Enable);
-    assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Enable);
+    // No explicit override was set → Inherit (follows factory default)
+    assert_eq!(metadata.tooling.builtins, ToolCategoryOverride::Inherit);
+    assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Inherit);
+    // comms is from_effective(false) since there's no override_comms field
     assert_eq!(metadata.tooling.comms, ToolCategoryOverride::Disable);
     // Skills become active only when they were explicitly preloaded.
     #[cfg(feature = "skills")]
@@ -222,10 +224,11 @@ async fn build_agent_with_builtins_has_tools() {
         .session()
         .session_metadata()
         .expect("session should have metadata");
+    // No explicit override → Inherit (builtins are active via factory default)
     assert_eq!(
         metadata.tooling.builtins,
-        ToolCategoryOverride::Enable,
-        "builtins should be enabled"
+        ToolCategoryOverride::Inherit,
+        "builtins should be Inherit when no explicit override was set"
     );
 }
 
@@ -1051,11 +1054,12 @@ async fn resume_with_inherit_mob_allows_factory_default() {
     let agent = factory.build_agent(build_config, &config).await.unwrap();
     let metadata = agent.session().session_metadata().unwrap();
 
-    // Mob should be Enable (resolved from factory default=true), not suppressed.
+    // Mob should stay Inherit — the session has no opinion, so it continues to
+    // follow whatever the factory default is at each future resume.
     assert_eq!(
         metadata.tooling.mob,
-        ToolCategoryOverride::Enable,
-        "Inherit mob on resume should resolve to factory default (enabled)"
+        ToolCategoryOverride::Inherit,
+        "Inherit mob must be preserved through save/resume, not collapsed to Enable"
     );
 }
 

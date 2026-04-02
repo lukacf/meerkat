@@ -344,7 +344,7 @@ fn test_tool_category_override_resolution() {
     assert_eq!(ToolCategoryOverride::Disable.to_override(), Some(false));
     assert_eq!(ToolCategoryOverride::Inherit.to_override(), None);
 
-    // from_effective() for metadata write-back
+    // from_effective() — collapses Inherit, only for fields without override
     assert_eq!(
         ToolCategoryOverride::from_effective(true),
         ToolCategoryOverride::Enable
@@ -353,6 +353,29 @@ fn test_tool_category_override_resolution() {
         ToolCategoryOverride::from_effective(false),
         ToolCategoryOverride::Disable
     );
+
+    // from_override() — preserves Inherit for metadata persistence
+    assert_eq!(
+        ToolCategoryOverride::from_override(Some(true)),
+        ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        ToolCategoryOverride::from_override(Some(false)),
+        ToolCategoryOverride::Disable
+    );
+    assert_eq!(
+        ToolCategoryOverride::from_override(None),
+        ToolCategoryOverride::Inherit
+    );
+
+    // Round-trip: to_override -> from_override is identity
+    for v in [
+        ToolCategoryOverride::Inherit,
+        ToolCategoryOverride::Enable,
+        ToolCategoryOverride::Disable,
+    ] {
+        assert_eq!(ToolCategoryOverride::from_override(v.to_override()), v);
+    }
 }
 
 #[tokio::test]

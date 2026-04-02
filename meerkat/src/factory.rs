@@ -1938,19 +1938,25 @@ impl AgentFactory {
         }
 
         // 14. Set SessionMetadata
+        //
+        // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
+        // effective bool. This ensures Inherit survives across save/resume cycles so
+        // the session continues to follow future runtime defaults.
+        // `comms` has no override field — use from_effective() as the only option.
         let metadata = if let Some(mut metadata) = resumed_session_metadata {
             metadata.model = model;
             metadata.max_tokens = max_tokens;
             metadata.structured_output_retries = build_config.structured_output_retries;
             metadata.provider = provider;
             metadata.provider_params = build_config.provider_params;
-            metadata.tooling.builtins = ToolCategoryOverride::from_effective(effective_builtins);
-            metadata.tooling.shell = ToolCategoryOverride::from_effective(effective_shell);
+            metadata.tooling.builtins =
+                ToolCategoryOverride::from_override(build_config.override_builtins);
+            metadata.tooling.shell =
+                ToolCategoryOverride::from_override(build_config.override_shell);
             metadata.tooling.comms = ToolCategoryOverride::from_effective(comms_enabled);
-            metadata.tooling.mob = ToolCategoryOverride::from_effective(
-                build_config.override_mob.unwrap_or(self.enable_mob),
-            );
-            metadata.tooling.memory = ToolCategoryOverride::from_effective(effective_memory);
+            metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
+            metadata.tooling.memory =
+                ToolCategoryOverride::from_override(build_config.override_memory);
             metadata.keep_alive = build_config.keep_alive;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;
@@ -1967,13 +1973,11 @@ impl AgentFactory {
                 provider,
                 provider_params: build_config.provider_params,
                 tooling: SessionTooling {
-                    builtins: ToolCategoryOverride::from_effective(effective_builtins),
-                    shell: ToolCategoryOverride::from_effective(effective_shell),
+                    builtins: ToolCategoryOverride::from_override(build_config.override_builtins),
+                    shell: ToolCategoryOverride::from_override(build_config.override_shell),
                     comms: ToolCategoryOverride::from_effective(comms_enabled),
-                    mob: ToolCategoryOverride::from_effective(
-                        build_config.override_mob.unwrap_or(self.enable_mob),
-                    ),
-                    memory: ToolCategoryOverride::from_effective(effective_memory),
+                    mob: ToolCategoryOverride::from_override(build_config.override_mob),
+                    memory: ToolCategoryOverride::from_override(build_config.override_memory),
                     active_skills: active_skill_ids,
                 },
                 keep_alive: build_config.keep_alive,

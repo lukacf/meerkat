@@ -616,12 +616,32 @@ impl ToolCategoryOverride {
         }
     }
 
-    /// Construct from a resolved effective bool (for metadata write-back).
+    /// Construct from a resolved effective bool.
     ///
-    /// Use when persisting the *effective* value after resolution.
+    /// **Warning:** this collapses `Inherit` into `Enable`/`Disable`. Only use
+    /// when the caller genuinely has no access to the original override intent
+    /// (e.g. comms, which has no `override_comms` field).
     #[must_use]
     pub fn from_effective(enabled: bool) -> Self {
         if enabled { Self::Enable } else { Self::Disable }
+    }
+
+    /// Construct from an `Option<bool>` override field, preserving `Inherit`.
+    ///
+    /// - `Some(true)` → `Enable`
+    /// - `Some(false)` → `Disable`
+    /// - `None` → `Inherit` (factory default was used, no explicit intent)
+    ///
+    /// This is the inverse of [`to_override`] and should be used when persisting
+    /// session tooling metadata so that `Inherit` survives across save/resume
+    /// cycles.
+    #[must_use]
+    pub fn from_override(value: Option<bool>) -> Self {
+        match value {
+            Some(true) => Self::Enable,
+            Some(false) => Self::Disable,
+            None => Self::Inherit,
+        }
     }
 }
 

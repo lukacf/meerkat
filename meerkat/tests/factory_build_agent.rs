@@ -1050,6 +1050,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
 
     let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
     build_config.resume_session = Some(session);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
     let metadata = agent.session().session_metadata().unwrap();
@@ -1099,6 +1100,7 @@ async fn resume_with_disable_mob_stays_disabled() {
 
     let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
     build_config.resume_session = Some(session);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
     let metadata = agent.session().session_metadata().unwrap();
@@ -1146,6 +1148,7 @@ async fn resume_with_enable_mob_stays_enabled() {
 
     let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5".to_string());
     build_config.resume_session = Some(session);
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
 
     let agent = factory.build_agent(build_config, &config).await.unwrap();
     let metadata = agent.session().session_metadata().unwrap();

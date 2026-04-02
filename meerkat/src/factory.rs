@@ -1269,6 +1269,7 @@ impl AgentFactory {
         let effective_builtins = build_config
             .override_builtins
             .unwrap_or(self.enable_builtins);
+        #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.unwrap_or(self.enable_shell);
         let session = build_config.resume_session.clone().unwrap_or_default();
         let _session_id = session.id().to_string();

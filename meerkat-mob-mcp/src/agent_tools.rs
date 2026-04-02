@@ -538,7 +538,7 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
                 .get(&ProfileName::from("delegate"))
                 .map(|p| p.model.as_str());
             if profile_model != Some(&args.model) {
-                let _ = self.state.mob_destroy(mob_id).await;
+                let _ = self.state.mob_destroy_unchecked(mob_id).await;
                 implicit_mob_id = None;
             }
         }

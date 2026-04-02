@@ -236,8 +236,8 @@ impl MobMcpState {
     }
 
     /// Destroy a mob without the implicit-mob guard.
-    /// Used by session cleanup paths that intentionally destroy implicit mobs.
-    async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
+    /// Used by session cleanup paths and model-refresh that intentionally destroy implicit mobs.
+    pub(crate) async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
         let managed = {
             let mut mobs = self.mobs.write().await;
             mobs.remove(mob_id)

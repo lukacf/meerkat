@@ -816,6 +816,41 @@ pub enum CommsRuntimeError {
     UnsafeBinding(String),
 }
 
+/// Material needed by the facade's comms tool composition helper.
+///
+/// Bundles the concrete router/trust/key access so the facade doesn't
+/// reach into CommsRuntime internals directly. Construct via
+/// [`CommsRuntime::tool_material()`].
+pub struct CommsToolMaterial {
+    router: Arc<Router>,
+    trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
+    self_pubkey: crate::identity::PubKey,
+    runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+}
+
+impl CommsToolMaterial {
+    /// Router for tool dispatch.
+    pub fn router(&self) -> &Arc<Router> {
+        &self.router
+    }
+    /// Live trust state for peer availability gating.
+    pub fn trusted_peers(&self) -> &Arc<parking_lot::RwLock<TrustedPeers>> {
+        &self.trusted_peers
+    }
+    /// Owned clone of the trust state Arc (for availability closures).
+    pub fn trusted_peers_shared(&self) -> Arc<parking_lot::RwLock<TrustedPeers>> {
+        self.trusted_peers.clone()
+    }
+    /// This runtime's public key.
+    pub fn self_pubkey(&self) -> crate::identity::PubKey {
+        self.self_pubkey
+    }
+    /// Trait-erased runtime for the comms tool surface.
+    pub fn into_runtime(self) -> Arc<dyn meerkat_core::agent::CommsRuntime> {
+        self.runtime
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct CommsRuntime {
     public_key: PubKey,
@@ -1527,6 +1562,19 @@ impl CommsRuntime {
     }
     pub fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
+    }
+
+    /// Extract the material needed for comms tool composition.
+    ///
+    /// The facade uses this to compose comms tools without reaching into
+    /// router/trust/key internals directly.
+    pub fn tool_material(self: &Arc<Self>) -> CommsToolMaterial {
+        CommsToolMaterial {
+            router: self.router_arc(),
+            trusted_peers: self.trusted_peers_shared(),
+            self_pubkey: self.public_key,
+            runtime: Arc::clone(self) as Arc<dyn meerkat_core::agent::CommsRuntime>,
+        }
     }
 
     /// Get an event injector for this runtime's inbox.

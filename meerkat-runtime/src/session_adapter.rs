@@ -1264,11 +1264,21 @@ impl SessionServiceRuntimeExt for RuntimeSessionAdapter {
         };
 
         // Signal the RuntimeLoop if wake or immediate processing was requested.
-        if (should_wake || should_process)
-            && let Some(ref wake_tx) = wake_tx
-        {
-            // Non-blocking: if the channel is full, the loop is already processing
-            let _ = wake_tx.try_send(());
+        if should_wake || should_process {
+            match wake_tx {
+                Some(ref wake_tx) => {
+                    // Non-blocking: if the channel is full, the loop is already processing
+                    let _ = wake_tx.try_send(());
+                }
+                None => {
+                    tracing::warn!(
+                        %session_id,
+                        "input accepted but runtime loop is not attached — \
+                         wake signal dropped, input will remain queued until \
+                         a loop is re-attached"
+                    );
+                }
+            }
         }
 
         Ok(outcome)

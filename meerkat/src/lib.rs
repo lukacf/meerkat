@@ -139,7 +139,7 @@ pub use meerkat_core::{
 #[cfg(feature = "comms")]
 pub use meerkat_comms::agent::{CommsContent, CommsMessage, CommsStatus};
 #[cfg(feature = "comms")]
-pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CoreCommsConfig};
+pub use meerkat_comms::{CommsRuntime, CommsRuntimeError, CommsToolMaterial, CoreCommsConfig};
 #[cfg(feature = "comms")]
 pub use meerkat_core::SessionServiceCommsExt;
 pub use meerkat_core::SessionServiceControlExt;
@@ -298,7 +298,7 @@ pub use sdk_config::SdkConfigStore;
 pub fn compose_tools_with_comms(
     base_tools: std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
     tool_usage_instructions: String,
-    runtime: std::sync::Arc<meerkat_comms::CommsRuntime>,
+    material: meerkat_comms::CommsToolMaterial,
 ) -> Result<
     (
         std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>,
@@ -308,14 +308,11 @@ pub fn compose_tools_with_comms(
 > {
     use meerkat_tools::CommsToolSurface;
     use std::sync::Arc;
-    let router = runtime.router_arc();
-    let trusted_peers = runtime.trusted_peers_shared();
-    let self_pubkey = router.keypair_arc().public_key();
-    let comms_surface = CommsToolSurface::new_with_runtime(
-        router,
-        trusted_peers.clone(),
-        runtime as Arc<dyn meerkat_core::agent::CommsRuntime>,
-    );
+    let router = material.router().clone();
+    let trusted_peers = material.trusted_peers_shared();
+    let self_pubkey = material.self_pubkey();
+    let runtime = material.into_runtime();
+    let comms_surface = CommsToolSurface::new_with_runtime(router, trusted_peers.clone(), runtime);
     let availability = CommsToolSurface::peer_availability(trusted_peers, self_pubkey);
     // Use DynamicToolComposite instead of a single ToolGateway so that
     // base_tools with dynamic tool lists (e.g. CallbackToolDispatcher backed

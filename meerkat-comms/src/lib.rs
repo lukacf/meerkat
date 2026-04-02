@@ -53,7 +53,7 @@ pub use runtime::comms_bootstrap::{
 pub use runtime::comms_config::CoreCommsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::comms_config::ResolvedCommsConfig;
-pub use runtime::comms_runtime::{CommsRuntime, CommsRuntimeError};
+pub use runtime::comms_runtime::{CommsRuntime, CommsRuntimeError, CommsToolMaterial};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::comms_runtime::{clear_all_session_claims, release_session_claim};
 

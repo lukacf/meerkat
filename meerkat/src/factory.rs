@@ -597,6 +597,14 @@ pub struct AgentFactory {
     /// through this factory gets mob delegation tools without each session
     /// needing to set `SessionBuildOptions.mob_tools`.
     pub mob_tools: Option<Arc<dyn meerkat_core::service::MobToolsFactory>>,
+    /// Pre-built comms runtime shared across all sessions built by this factory.
+    ///
+    /// When set, `build_agent()` uses this runtime for tool composition and
+    /// agent wiring instead of creating a per-session runtime from config.
+    /// Used by surfaces with stable identity (e.g., a target agent that keeps
+    /// the same keypair and TCP listener across session restarts).
+    #[cfg(feature = "comms")]
+    pub comms_runtime: Option<Arc<meerkat_comms::CommsRuntime>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -617,6 +625,8 @@ impl std::fmt::Debug for AgentFactory {
         d.field("skill_source", &self.skill_source.as_ref().map(|_| ".."));
         d.field("custom_store", &self.custom_store.as_ref().map(|_| ".."));
         d.field("mob_tools", &self.mob_tools.is_some());
+        #[cfg(feature = "comms")]
+        d.field("comms_runtime", &self.comms_runtime.is_some());
         d.finish()
     }
 }
@@ -644,6 +654,8 @@ impl AgentFactory {
             skill_source: None,
             custom_store: None,
             mob_tools: None,
+            #[cfg(feature = "comms")]
+            comms_runtime: None,
         }
     }
 
@@ -665,6 +677,8 @@ impl AgentFactory {
             skill_source: None,
             custom_store: None,
             mob_tools: None,
+            #[cfg(feature = "comms")]
+            comms_runtime: None,
         }
     }
 
@@ -737,6 +751,16 @@ impl AgentFactory {
     #[cfg(feature = "comms")]
     pub fn comms(mut self, enabled: bool) -> Self {
         self.enable_comms = enabled;
+        self
+    }
+
+    /// Set a pre-built comms runtime shared across all sessions.
+    ///
+    /// When set, `build_agent()` uses this runtime for tool composition and
+    /// agent wiring instead of creating a per-session runtime from config.
+    #[cfg(feature = "comms")]
+    pub fn with_comms_runtime(mut self, runtime: Arc<meerkat_comms::CommsRuntime>) -> Self {
+        self.comms_runtime = Some(runtime);
         self
     }
 
@@ -1274,8 +1298,12 @@ impl AgentFactory {
         let session = build_config.resume_session.clone().unwrap_or_default();
         let _session_id = session.id().to_string();
         // 6b. Create comms runtime before tool wiring.
+        // If the factory has a pre-built runtime (surface with stable identity),
+        // use it directly. Otherwise create a per-session runtime from config.
         #[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
-        let comms_runtime = if build_config.keep_alive || build_config.comms_name.is_some() {
+        let comms_runtime = if let Some(ref runtime) = self.comms_runtime {
+            Some(Arc::clone(runtime))
+        } else if build_config.keep_alive || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
                 .as_ref()
@@ -1309,7 +1337,9 @@ impl AgentFactory {
             None
         };
         #[cfg(all(feature = "comms", target_arch = "wasm32"))]
-        let comms_runtime = if build_config.keep_alive || build_config.comms_name.is_some() {
+        let comms_runtime = if let Some(ref runtime) = self.comms_runtime {
+            Some(Arc::clone(runtime))
+        } else if build_config.keep_alive || build_config.comms_name.is_some() {
             let comms_name = build_config
                 .comms_name
                 .as_ref()
@@ -1545,10 +1575,10 @@ impl AgentFactory {
         #[cfg(feature = "comms")]
         if let Some(ref runtime) = comms_runtime {
             let composed =
-                compose_tools_with_comms(tools, tool_usage_instructions, Arc::clone(runtime))
+                compose_tools_with_comms(tools, tool_usage_instructions, runtime.tool_material())
                     .map_err(|e| {
-                        BuildAgentError::Config(format!("Failed to compose comms tools: {e}"))
-                    })?;
+                    BuildAgentError::Config(format!("Failed to compose comms tools: {e}"))
+                })?;
             tools = composed.0;
             tool_usage_instructions = composed.1;
         }

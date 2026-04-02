@@ -884,25 +884,26 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
 
 
 @pytest.mark.asyncio
-async def test_send_mob_member_content_uses_host_turn_start_lane() -> None:
+async def test_send_mob_member_content_uses_canonical_host_member_send_lane() -> None:
     client = MeerkatClient()
-    start_turn_calls: list[tuple[str, object]] = []
+    calls: list[tuple[str, dict[str, object]]] = []
 
-    async def fake_list_mob_members(_mob_id: str) -> list[dict[str, object]]:
-        return [{"meerkat_id": "agent-a", "member_ref": {"session_id": "session-123"}}]
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "member_id": "agent-a",
+            "session_id": "session-123",
+            "handling_mode": "steer",
+        }
 
-    async def fake_start_turn(session_id: str, prompt, **_kwargs) -> RunResult:
-        start_turn_calls.append((session_id, prompt))
-        return RunResult(session_id=session_id)
-
-    client.list_mob_members = fake_list_mob_members  # type: ignore[method-assign]
-    client._start_turn = fake_start_turn  # type: ignore[method-assign]
+    client._request = fake_request  # type: ignore[method-assign]
 
     receipt = await client.send_mob_member_content(
         "mob-1",
         "agent-a",
         "hello reviewer",
         handling_mode="steer",
+        render_metadata={"class": "peer_request", "salience": "urgent"},
     )
 
     assert receipt == {
@@ -910,17 +911,28 @@ async def test_send_mob_member_content_uses_host_turn_start_lane() -> None:
         "session_id": "session-123",
         "handling_mode": "steer",
     }
-    assert start_turn_calls == [("session-123", "hello reviewer")]
+    assert calls == [
+        (
+            "mob/member_send",
+            {
+                "mob_id": "mob-1",
+                "meerkat_id": "agent-a",
+                "content": "hello reviewer",
+                "handling_mode": "steer",
+                "render_metadata": {"class": "peer_request", "salience": "urgent"},
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_send_mob_member_content_rejects_members_without_active_session() -> None:
+async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
     client = MeerkatClient()
 
-    async def fake_list_mob_members(_mob_id: str) -> list[dict[str, object]]:
-        return [{"meerkat_id": "agent-a"}]
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {"handling_mode": "queue"}
 
-    client.list_mob_members = fake_list_mob_members  # type: ignore[method-assign]
+    client._request = fake_request  # type: ignore[method-assign]
 
-    with pytest.raises(MeerkatError, match="does not have an active session"):
+    with pytest.raises(MeerkatError, match="missing session_id"):
         await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")

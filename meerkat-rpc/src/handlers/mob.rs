@@ -10,7 +10,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat_core::service::AppendSystemContextRequest;
-use meerkat_core::types::{ContentInput, SessionId};
+use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
 use meerkat_mob::{
     FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobDefinition, MobId, MobRespawnError,
     MobRuntimeMode, RunId, SpawnMemberSpec,
@@ -526,6 +526,54 @@ pub struct MobAppendSystemContextParams {
     pub source: Option<String>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobMemberSendParams {
+    pub mob_id: String,
+    pub meerkat_id: String,
+    pub content: ContentInput,
+    #[serde(default)]
+    pub handling_mode: HandlingMode,
+    #[serde(default)]
+    pub render_metadata: Option<RenderMetadata>,
+}
+
+pub async fn handle_member_send(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberSendParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let meerkat_id = MeerkatId::from(params.meerkat_id.as_str());
+    match state
+        .mob_member_send(
+            &mob_id,
+            meerkat_id.clone(),
+            params.content,
+            params.handling_mode,
+            params.render_metadata,
+        )
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "mob_id": mob_id,
+                "member_id": receipt.member_id,
+                "session_id": receipt.session_id,
+                "handling_mode": receipt.handling_mode,
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
 }
 
 pub async fn handle_append_system_context(

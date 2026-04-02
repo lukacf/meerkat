@@ -756,31 +756,27 @@ describe("Mob kickoff wait wrappers", () => {
 });
 
 describe("Mob member host ingress", () => {
-  it("resolves member sessions and starts a turn through the host control plane", async () => {
+  it("routes member sends through the canonical host member-send lane", async () => {
     const client = new MeerkatClient();
-    const startTurnCalls = [];
-    client.listMobMembers = async () => [
-      {
-        meerkatId: "reviewer-1",
-        profile: "reviewer",
-        memberRef: { session_id: "session-123" },
-        sessionId: "session-123",
-      },
-    ];
-    client._startTurn = async (sessionId, prompt) => {
-      startTurnCalls.push({ sessionId, prompt });
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
       return {
-        sessionId,
-        text: "",
-        turns: 0,
-        toolCalls: 0,
-        usage: { inputTokens: 0, outputTokens: 0 },
+        member_id: "reviewer-1",
+        session_id: "session-123",
+        handling_mode: "steer",
       };
     };
 
     const receipt = await new Mob(client, "mob-1").member("reviewer-1").send(
       "hello reviewer",
-      { handlingMode: "steer" },
+      {
+        handlingMode: "steer",
+        renderMetadata: {
+          class: "peer_request",
+          salience: "urgent",
+        },
+      },
     );
 
     assert.deepEqual(receipt, {
@@ -788,23 +784,30 @@ describe("Mob member host ingress", () => {
       sessionId: "session-123",
       handlingMode: "steer",
     });
-    assert.deepEqual(startTurnCalls, [
-      { sessionId: "session-123", prompt: "hello reviewer" },
+    assert.deepEqual(calls, [
+      {
+        method: "mob/member_send",
+        params: {
+          mob_id: "mob-1",
+          meerkat_id: "reviewer-1",
+          content: "hello reviewer",
+          handling_mode: "steer",
+          render_metadata: {
+            class: "peer_request",
+            salience: "urgent",
+          },
+        },
+      },
     ]);
   });
 
-  it("rejects sends when the member has no active session", async () => {
+  it("rejects malformed member-send receipts", async () => {
     const client = new MeerkatClient();
-    client.listMobMembers = async () => [
-      {
-        meerkatId: "reviewer-1",
-        profile: "reviewer",
-      },
-    ];
+    client.request = async () => ({ handling_mode: "queue" });
 
     await assert.rejects(
       () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
-      /does not have an active session/,
+      /missing session_id/,
     );
   });
 });

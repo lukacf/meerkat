@@ -655,28 +655,30 @@ export class MeerkatClient {
     content: string | ContentBlock[],
     options?: MemberSendOptions,
   ): Promise<MemberDeliveryReceipt> {
-    const members = await this.listMobMembers(mobId);
-    const member = members.find((candidate) => candidate.meerkatId === meerkatId);
-    if (!member) {
+    const result = await this.request("mob/member_send", {
+      mob_id: mobId,
+      meerkat_id: meerkatId,
+      content,
+      handling_mode: options?.handlingMode,
+      render_metadata: options?.renderMetadata,
+    });
+    const sessionId = result.session_id;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw new MeerkatError(
-        "NOT_FOUND",
-        `Mob member '${meerkatId}' not found in mob '${mobId}'`,
+        "INVALID_RESPONSE",
+        "Invalid mob/member_send response: missing session_id",
       );
     }
-
-    const sessionId = member.currentSessionId ?? member.sessionId;
-    if (!sessionId) {
-      throw new MeerkatError(
-        "NOT_FOUND",
-        `Mob member '${meerkatId}' in mob '${mobId}' does not have an active session`,
-      );
-    }
-
-    await this._startTurn(sessionId, content);
     return {
-      memberId: meerkatId,
+      memberId:
+        typeof result.member_id === "string" && result.member_id.length > 0
+          ? result.member_id
+          : meerkatId,
       sessionId,
-      handlingMode: options?.handlingMode ?? "queue",
+      handlingMode:
+        result.handling_mode === "steer" || result.handling_mode === "queue"
+          ? result.handling_mode
+          : (options?.handlingMode ?? "queue"),
     };
   }
 

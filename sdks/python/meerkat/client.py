@@ -723,42 +723,35 @@ class MeerkatClient:
         handling_mode: Literal["queue", "steer"] = "queue",
         render_metadata: RenderMetadata | None = None,
     ) -> dict[str, Any]:
-        _ = render_metadata
-        members = await self.list_mob_members(mob_id)
-        member = next(
-            (
-                candidate
-                for candidate in members
-                if str(candidate.get("meerkat_id", candidate.get("meerkatId", ""))) == meerkat_id
-            ),
-            None,
+        result = await self._request(
+            "mob/member_send",
+            {
+                "mob_id": mob_id,
+                "meerkat_id": meerkat_id,
+                "content": content,
+                "handling_mode": handling_mode,
+                "render_metadata": render_metadata,
+            },
         )
-        if member is None:
-            raise MeerkatError(
-                "NOT_FOUND",
-                f"Mob member '{meerkat_id}' not found in mob '{mob_id}'",
-            )
-
-        session_id = member.get("current_session_id", member.get("currentSessionId"))
-        if not isinstance(session_id, str) or not session_id:
-            member_ref = member.get("member_ref", member.get("memberRef"))
-            if isinstance(member_ref, dict):
-                raw_session_id = member_ref.get("session_id", member_ref.get("sessionId"))
-                if isinstance(raw_session_id, str) and raw_session_id:
-                    session_id = raw_session_id
-        if not isinstance(session_id, str) or not session_id:
-            session_id = member.get("session_id", member.get("sessionId"))
+        session_id = result.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             raise MeerkatError(
-                "NOT_FOUND",
-                f"Mob member '{meerkat_id}' in mob '{mob_id}' does not have an active session",
+                "INVALID_RESPONSE",
+                "Invalid mob/member_send response: missing session_id",
             )
-
-        await self._start_turn(session_id, content)
+        receipt_handling_mode = result.get("handling_mode")
         return {
-            "member_id": meerkat_id,
+            "member_id": (
+                result["member_id"]
+                if isinstance(result.get("member_id"), str) and result["member_id"]
+                else meerkat_id
+            ),
             "session_id": session_id,
-            "handling_mode": handling_mode,
+            "handling_mode": (
+                receipt_handling_mode
+                if receipt_handling_mode in {"queue", "steer"}
+                else handling_mode
+            ),
         }
 
     async def spawn_mob_member(

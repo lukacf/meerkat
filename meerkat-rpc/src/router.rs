@@ -689,6 +689,10 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/events" => handlers::mob::handle_events(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
+            "mob/member_send" => {
+                handlers::mob::handle_member_send(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/append_system_context" => {
                 handlers::mob::handle_append_system_context(
                     id,
@@ -2610,6 +2614,7 @@ mod tests {
                         "profiles": {
                             "worker": {
                                 "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
                                 "tools": { "comms": true }
                             }
                         }
@@ -2651,6 +2656,132 @@ mod tests {
             .unwrap();
         let appended = result_value(&append_resp);
         assert_eq!(appended["status"], "staged");
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_member_send_host_route_targets_canonical_member_path() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-member-send",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let spawned = result_value(&spawn_resp);
+        assert_eq!(spawned["meerkat_id"], "worker-1");
+
+        let send_resp = router
+            .dispatch(make_request(
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "meerkat_id": "worker-1",
+                    "content": "Please acknowledge with HOST_ROUTE_OK."
+                }),
+            ))
+            .await
+            .unwrap();
+        let sent = result_value(&send_resp);
+        assert_eq!(sent["member_id"], "worker-1");
+        assert_eq!(sent["handling_mode"], "queue");
+        assert!(sent["session_id"].as_str().is_some());
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_member_send_host_route_preserves_steer_mode_rejection() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-member-send-steer",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "meerkat_id": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let spawned = result_value(&spawn_resp);
+        assert_eq!(spawned["meerkat_id"], "worker-1");
+
+        let send_resp = router
+            .dispatch(make_request(
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "meerkat_id": "worker-1",
+                    "content": "Please acknowledge with HOST_ROUTE_STEER.",
+                    "handling_mode": "steer"
+                }),
+            ))
+            .await
+            .unwrap();
+        let err = send_resp
+            .error
+            .expect("steer send should fail on direct path");
+        assert!(
+            err.message
+                .contains("handling_mode Steer requires a runtime-backed surface"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[cfg(feature = "mob")]

@@ -278,7 +278,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
 /// `true` must deserialize as `Enable`, `false` as `Inherit` (not Disable),
 /// and missing fields default to `Inherit`.
 #[test]
-fn test_tool_category_override_backward_compat_serde() {
+fn test_tool_category_override_backward_compat_serde() -> Result<(), Box<dyn std::error::Error>> {
     use meerkat_core::ToolCategoryOverride;
 
     // Old-format JSON with bool fields
@@ -289,8 +289,7 @@ fn test_tool_category_override_backward_compat_serde() {
         "mob": false,
         "memory": false
     });
-    let tooling: meerkat_core::SessionTooling =
-        serde_json::from_value(old_json).expect("old bool format should deserialize");
+    let tooling: meerkat_core::SessionTooling = serde_json::from_value(old_json)?;
     assert_eq!(tooling.builtins, ToolCategoryOverride::Enable);
     assert_eq!(tooling.shell, ToolCategoryOverride::Inherit); // false → Inherit, not Disable
     assert_eq!(tooling.comms, ToolCategoryOverride::Enable);
@@ -303,8 +302,7 @@ fn test_tool_category_override_backward_compat_serde() {
         "shell": true,
         "comms": false
     });
-    let tooling: meerkat_core::SessionTooling =
-        serde_json::from_value(missing_fields_json).expect("missing fields should default");
+    let tooling: meerkat_core::SessionTooling = serde_json::from_value(missing_fields_json)?;
     assert_eq!(tooling.mob, ToolCategoryOverride::Inherit);
     assert_eq!(tooling.memory, ToolCategoryOverride::Inherit);
 
@@ -316,8 +314,7 @@ fn test_tool_category_override_backward_compat_serde() {
         "mob": "enable",
         "memory": "disable"
     });
-    let tooling: meerkat_core::SessionTooling =
-        serde_json::from_value(new_json).expect("new enum format should deserialize");
+    let tooling: meerkat_core::SessionTooling = serde_json::from_value(new_json)?;
     assert_eq!(tooling.builtins, ToolCategoryOverride::Enable);
     assert_eq!(tooling.shell, ToolCategoryOverride::Disable);
     assert_eq!(tooling.comms, ToolCategoryOverride::Inherit);
@@ -325,10 +322,10 @@ fn test_tool_category_override_backward_compat_serde() {
     assert_eq!(tooling.memory, ToolCategoryOverride::Disable);
 
     // New format round-trips correctly
-    let serialized = serde_json::to_value(&tooling).expect("serialize");
-    let round_tripped: meerkat_core::SessionTooling =
-        serde_json::from_value(serialized).expect("round-trip");
+    let serialized = serde_json::to_value(&tooling)?;
+    let round_tripped: meerkat_core::SessionTooling = serde_json::from_value(serialized)?;
     assert_eq!(round_tripped, tooling);
+    Ok(())
 }
 
 /// Regression: ToolCategoryOverride.resolve() and .to_override() semantics.

@@ -622,24 +622,26 @@ impl MobMcpState {
     /// Find the implicit delegation mob for the given session, if one exists.
     ///
     /// Scans the in-memory mob registry for a mob whose definition has
-    /// `owner_session_id` matching the given session ID.
+    /// `is_implicit == true` and `owner_session_id` matching the given session ID.
+    /// Does NOT match explicit mobs that merely share the same owner.
     pub async fn find_implicit_mob(&self, session_id: &str) -> Option<MobId> {
         let mobs = self.mobs.read().await;
         mobs.iter()
-            .find(|(_, m)| m.handle.definition().owner_session_id.as_deref() == Some(session_id))
+            .find(|(_, m)| {
+                let def = m.handle.definition();
+                def.is_implicit && def.owner_session_id.as_deref() == Some(session_id)
+            })
             .map(|(id, _)| id.clone())
     }
 
     /// Check whether the given mob is an implicit delegation mob.
     ///
-    /// Checks the canonical `owner_session_id` field on the mob definition,
-    /// not a cache. Works regardless of whether `delegate` has been called.
-    /// Check if a mob is an implicit delegation mob (vs an explicitly created one).
-    ///
-    /// Both implicit and explicit agent-created mobs carry `owner_session_id`,
-    /// but only implicit mobs use the `implicit-{session_id}` naming convention.
+    /// Checks the canonical `is_implicit` field on the mob definition.
     pub async fn is_implicit_mob(&self, mob_id: &MobId) -> bool {
-        mob_id.to_string().starts_with("implicit-")
+        let mobs = self.mobs.read().await;
+        mobs.get(mob_id)
+            .map(|m| m.handle.definition().is_implicit)
+            .unwrap_or(false)
     }
 
     /// Find all mobs owned by the given session (both implicit and explicit).
@@ -3584,6 +3586,7 @@ timeout_ms = 1000
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            is_implicit: false,
         };
         let explicit_id = state.mob_create_definition(explicit_def).await.unwrap();
 

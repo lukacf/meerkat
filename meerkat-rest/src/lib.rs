@@ -2751,6 +2751,11 @@ async fn archive_session(
     let session_id = resolve_session_id_for_state(&id, &state)?;
     match state.session_service.archive(&session_id).await {
         Ok(()) => {
+            #[cfg(feature = "mob")]
+            let _ = state
+                .mob_state
+                .destroy_implicit_mob(&session_id.to_string())
+                .await;
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;
             #[cfg(feature = "comms")]

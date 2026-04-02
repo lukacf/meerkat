@@ -1771,6 +1771,11 @@ async fn handle_meerkat_archive(
         .archive(&session_id)
         .await
         .map_err(|e| format!("Failed to archive session: {e}"))?;
+    #[cfg(feature = "mob")]
+    let _ = state
+        .mob_state
+        .destroy_implicit_mob(&session_id.to_string())
+        .await;
     Ok(wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "archived": true

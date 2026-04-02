@@ -249,8 +249,6 @@ pub struct MobToolsBuildArgs {
     pub model: String,
     /// Comms name of the owning agent (for building TrustedPeerSpec).
     pub comms_name: Option<String>,
-    /// Ops lifecycle registry for barrier/async-op tracking.
-    pub ops_registry: Arc<dyn OpsLifecycleRegistry>,
     /// Optional comms runtime for auto-wiring spawned members.
     pub comms_runtime: Option<Arc<dyn crate::agent::CommsRuntime>>,
 }

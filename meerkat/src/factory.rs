@@ -1572,7 +1572,6 @@ impl AgentFactory {
                 session_id: session.id().clone(),
                 model: model.clone(),
                 comms_name: build_config.comms_name.clone(),
-                ops_registry: Arc::clone(&ops_lifecycle),
                 comms_runtime: mob_comms,
             };
             let mob_dispatcher = mob_factory

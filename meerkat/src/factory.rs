@@ -1952,9 +1952,9 @@ impl AgentFactory {
                 ToolCategoryOverride::from_override(build_config.override_builtins);
             metadata.tooling.shell =
                 ToolCategoryOverride::from_override(build_config.override_shell);
-            // No override_comms field exists — comms is always derived from
-            // comms_name / keep_alive / factory config, so persist Inherit.
-            metadata.tooling.comms = ToolCategoryOverride::Inherit;
+            // No override_comms field in AgentBuildConfig — preserve the existing
+            // metadata value so explicit Enable/Disable survives across resumes.
+            // (metadata.tooling.comms is left unchanged)
             metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
             metadata.tooling.memory =
                 ToolCategoryOverride::from_override(build_config.override_memory);

@@ -5,18 +5,15 @@
 //! mob_check_member, mob_list_members, mob_list) composed into the tool
 //! gateway by `build_agent()`.
 //!
-//! `MobAwareSessionService` is a decorator that intercepts `archive()` to
-//! clean up implicit mobs when their owning session is archived.
+//! `MobCleanupSessionService` is a decorator that intercepts `archive()` to
+//! clean up session-owned mobs when their owning session is archived.
 
 use async_trait::async_trait;
+use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::AsyncOpRef;
-use meerkat_core::service::{
-    CreateSessionRequest, SessionError, SessionQuery, SessionService, SessionSummary, SessionView,
-    StartTurnRequest,
-};
-use meerkat_core::types::{ContentInput, RunResult, SessionId, ToolCallView, ToolDef, ToolResult};
-use meerkat_core::{AgentToolDispatcher, EventStream, StreamError};
+use meerkat_core::service::{SessionError, SessionService};
+use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolDef, ToolResult};
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
     SpawnMemberSpec,
@@ -288,10 +285,11 @@ impl AgentMobToolSurface {
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
-        // Tag with owner session so this mob is session-scoped and discoverable on resume.
-        // Only set if the definition doesn't already declare an owner.
+        // Always tag with the owning session — the agent surface is the authority
+        // for session ownership. Caller-supplied owner_session_id is ignored to
+        // prevent cross-session ownership spoofing.
         let mut definition = args.definition;
-        if definition.owner_session_id.is_none() {
+        {
             definition.owner_session_id = Some(self.owner_session_id.to_string());
         }
 
@@ -735,103 +733,24 @@ struct MemberArgs {
     member_id: String,
 }
 
-// ─── MobCleanupSessionService ───────────────────────────────────────────
+// ─── Mob cleanup helper ─────────────────────────────────────────────────
 
-/// Session service decorator that intercepts `archive()` to destroy
-/// all mobs owned by the archived session (both implicit and explicit).
+/// Archive a session and clean up any mobs it owns (best-effort).
 ///
-/// Wraps a plain `dyn SessionService` — no extension traits needed.
-/// Wire this around the main session service at surface construction
-/// time so every archive path triggers cleanup automatically.
-pub struct MobCleanupSessionService {
-    inner: Arc<dyn SessionService>,
-    mob_state: Arc<MobMcpState>,
-}
-
-impl MobCleanupSessionService {
-    /// Wrap a session service with mob cleanup on archive.
-    pub fn new(inner: Arc<dyn SessionService>, mob_state: Arc<MobMcpState>) -> Self {
-        Self { inner, mob_state }
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl SessionService for MobCleanupSessionService {
-    async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        self.inner.create_session(req).await
-    }
-
-    async fn start_turn(
-        &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-    ) -> Result<RunResult, SessionError> {
-        self.inner.start_turn(id, req).await
-    }
-
-    async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
-        self.inner.interrupt(id).await
-    }
-
-    async fn set_session_client(
-        &self,
-        id: &SessionId,
-        client: Arc<dyn meerkat_core::AgentLlmClient>,
-    ) -> Result<(), SessionError> {
-        self.inner.set_session_client(id, client).await
-    }
-
-    async fn hot_swap_session_llm_identity(
-        &self,
-        id: &SessionId,
-        client: Arc<dyn meerkat_core::AgentLlmClient>,
-        identity: meerkat_core::SessionLlmIdentity,
-    ) -> Result<(), SessionError> {
-        self.inner
-            .hot_swap_session_llm_identity(id, client, identity)
-            .await
-    }
-
-    async fn update_session_keep_alive(
-        &self,
-        id: &SessionId,
-        keep_alive: bool,
-    ) -> Result<(), SessionError> {
-        self.inner.update_session_keep_alive(id, keep_alive).await
-    }
-
-    async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
-        self.inner.has_live_session(id).await
-    }
-
-    async fn set_session_tool_filter(
-        &self,
-        id: &SessionId,
-        filter: meerkat_core::ToolFilter,
-    ) -> Result<(), SessionError> {
-        self.inner.set_session_tool_filter(id, filter).await
-    }
-
-    async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
-        self.inner.read(id).await
-    }
-
-    async fn list(&self, query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
-        self.inner.list(query).await
-    }
-
-    async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        // Archive the session FIRST — only clean up mob on success.
-        self.inner.archive(id).await?;
-        // Best-effort cleanup — session is already archived, mobs are now orphaned.
-        let _ = self.mob_state.destroy_implicit_mob(&id.to_string()).await;
-        Ok(())
-    }
-
-    async fn subscribe_session_events(&self, id: &SessionId) -> Result<EventStream, StreamError> {
-        self.inner.subscribe_session_events(id).await
-    }
+/// Single-function cleanup path used by CLI delete_session. Other surfaces
+/// (REST, MCP, RPC) call `destroy_implicit_mob` inline after their own
+/// archive calls because their session service types are concrete and
+/// can't be wrapped with a decorator.
+pub async fn archive_session_with_mob_cleanup(
+    service: &dyn SessionService,
+    mob_state: &MobMcpState,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    service.archive(session_id).await?;
+    let _ = mob_state
+        .destroy_implicit_mob(&session_id.to_string())
+        .await;
+    Ok(())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────

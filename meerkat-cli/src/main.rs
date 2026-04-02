@@ -4418,11 +4418,9 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
 
     let (config, _) = load_config(scope).await?;
     let (service, _runtime_adapter) = build_cli_persistent_service(scope, config.clone()).await?;
-    let service: Arc<dyn meerkat_core::service::SessionService> = Arc::new(service);
 
-    // Wrap with mob cleanup decorator so archive() destroys session-owned mobs.
-    // This is the single cleanup path — no separate registry scanning needed.
-    let service: Arc<dyn meerkat_core::service::SessionService> = if config.tools.mob_enabled
+    // Archive and clean up any session-owned mobs.
+    if config.tools.mob_enabled
         && let Ok(mob_persistent) =
             get_or_create_mob_persistent_service(scope, config.clone()).await
         && let Ok((state, _registry)) = hydrate_mob_state(
@@ -4436,17 +4434,15 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         )
         .await
     {
-        Arc::new(meerkat_mob_mcp::MobCleanupSessionService::new(
-            service, state,
-        ))
+        meerkat_mob_mcp::archive_session_with_mob_cleanup(&service, &state, &session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
     } else {
         service
-    };
-
-    service
-        .archive(&session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+            .archive(&session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
+    }
 
     println!("Deleted session: {session_id}");
     println!(

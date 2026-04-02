@@ -108,7 +108,7 @@ schema level, and CI gates enforce zero open findings.
 </Note>
 
 <Note>
-**Mob runtime contract vs backend selection:** Mob tools are exposed through `meerkat-mob-mcp` dispatcher composition (`SessionBuildOptions.external_tools`). CLI `run`/`resume` pre-compose this path, while `rkat mob ...` is the explicit direct lifecycle surface. Backend selection remains realm-driven (`realm_manifest.json`) and independent from mob tool composition.
+**Mob runtime contract vs backend selection:** Agent-side mob tools are exposed through `meerkat-mob-mcp` dispatcher composition (`SessionBuildOptions.external_tools`). CLI `run`/`resume` pre-compose this path, while `rkat mob ...` is the explicit direct lifecycle surface. Public host APIs use typed `mob/*` or `meerkat_mob_*` control planes instead of re-exporting the raw dispatcher. Backend selection remains realm-driven (`realm_manifest.json`) and independent from mob tool composition.
 </Note>
 
 ### Detailed component view
@@ -335,14 +335,15 @@ MCP protocol client implementation:
 </Accordion>
 
 <Accordion title="meerkat-mcp-server">
-MCP server exposing Meerkat as tools for other MCP clients (25 tools total):
+MCP server exposing Meerkat as tools for other MCP clients:
 
 - **Core**: `meerkat_run`, `meerkat_resume`, `meerkat_config`, `meerkat_capabilities`, `meerkat_models_catalog`
 - **Session lifecycle**: `meerkat_read`, `meerkat_sessions`, `meerkat_interrupt`, `meerkat_archive`
 - **Skills**: `meerkat_skills`
 - **MCP management**: `meerkat_mcp_add`, `meerkat_mcp_remove`, `meerkat_mcp_reload`
 - **Event streaming**: `meerkat_event_stream_open`, `meerkat_event_stream_read`, `meerkat_event_stream_close`
-- **Mob** (feature-gated): `meerkat_mob_event_stream_open`, `meerkat_mob_event_stream_read`, `meerkat_mob_event_stream_close`
+- **Mob host control plane** (feature-gated): typed `meerkat_mob_*` tools such as `meerkat_mob_create`, `meerkat_mob_list`, `meerkat_mob_status`, `meerkat_mob_lifecycle`, `meerkat_mob_spawn`, `meerkat_mob_member_send`
+- **Mob streaming** (feature-gated): `meerkat_mob_event_stream_open`, `meerkat_mob_event_stream_read`, `meerkat_mob_event_stream_close`
 - **Comms** (feature-gated): `meerkat_comms_send`, `meerkat_comms_peers`
 
 Tools with `handler: "callback"` support a callback pattern where the MCP client executes tools and returns results via `meerkat_resume`.
@@ -411,12 +412,16 @@ Depends on `meerkat-mob` for mob definition types.
 </Accordion>
 
 <Accordion title="meerkat-mob-mcp">
-Tool-dispatch bridge that exposes mob capabilities to non-Rust-SDK surfaces:
+Mob integration seam that serves two distinct roles:
 
 - **MobMcpState**: shared state handle wrapping the `MobSessionService`
-- **MobMcpDispatcher**: implements `AgentToolDispatcher`, routing `mob_*` tool calls into the mob runtime
+- **MobMcpDispatcher**: implements `AgentToolDispatcher`, routing agent-side `mob_*` tool calls into the mob runtime
+- **Public MCP helpers**: `public_tools_list()` / `handle_public_tools_call()` expose typed `meerkat_mob_*` host control-plane tools for mob-only MCP hosts
 
-Composed via `SessionBuildOptions.external_tools` so CLI, REST, RPC, and MCP server surfaces all get mob tool capability through the same path.
+Composed via `SessionBuildOptions.external_tools` when a surface wants to grant
+agent-side `mob_*` capability. Public host surfaces use the typed helpers or
+their own canonical typed transport contracts instead of re-exporting the raw
+dispatcher.
 </Accordion>
 
 <Accordion title="meerkat-rpc">

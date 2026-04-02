@@ -150,7 +150,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.mob_enabled {
         methods.extend([
-            RpcMethodDescriptor::basic("mob/create", "Create a mob from a definition"),
+            RpcMethodDescriptor::typed(
+                "mob/create",
+                "Create a mob from a definition",
+                "MobCreateParams",
+                "MobCreateResult",
+            ),
             RpcMethodDescriptor::basic("mob/list", "List active mobs"),
             RpcMethodDescriptor::basic("mob/status", "Get mob lifecycle status"),
             RpcMethodDescriptor::basic("mob/lifecycle", "Apply a mob lifecycle action"),
@@ -172,6 +177,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::basic("mob/members", "List members in a mob roster"),
             RpcMethodDescriptor::basic("mob/events", "Read mob event history"),
+            RpcMethodDescriptor::typed(
+                "mob/member_send",
+                "Deliver ordinary content to a specific mob member via the host control plane",
+                "MobMemberSendParams",
+                "MobMemberSendResult",
+            ),
             RpcMethodDescriptor::basic(
                 "mob/append_system_context",
                 "Append system context for a mob member",
@@ -190,8 +201,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::basic("mob/force_cancel", "Force-cancel a mob member"),
             RpcMethodDescriptor::basic("mob/member_status", "Get live status for a mob member"),
-            RpcMethodDescriptor::basic("mob/tools", "List available mob tools"),
-            RpcMethodDescriptor::basic("mob/call", "Call a mob tool"),
             RpcMethodDescriptor::basic("mob/stream_open", "Open a mob event stream"),
             RpcMethodDescriptor::basic("mob/stream_close", "Close a mob event stream"),
         ]);
@@ -298,6 +307,7 @@ mod tests {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         assert!(methods.iter().any(|m| m == "session/inject_context"));
         assert!(methods.iter().any(|m| m == "mob/events"));
+        assert!(methods.iter().any(|m| m == "mob/member_send"));
     }
 
     #[test]

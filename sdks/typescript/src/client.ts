@@ -454,7 +454,6 @@ export class MeerkatClient {
       return (
         this._methods.has("mob/create")
         || this._methods.has("mob/list")
-        || this._methods.has("mob/call")
       );
     }
     return this._capabilities.some(
@@ -555,21 +554,6 @@ export class MeerkatClient {
       mediaType: String(result.media_type ?? ""),
       dataBase64: String(result.data ?? ""),
     };
-  }
-
-  async listMobTools(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.request("mob/tools", {});
-    return (result.tools as Array<Record<string, unknown>>) ?? [];
-  }
-
-  async callMobTool(
-    name: string,
-    argumentsPayload?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return this.request("mob/call", {
-      name,
-      arguments: argumentsPayload ?? {},
-    });
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {

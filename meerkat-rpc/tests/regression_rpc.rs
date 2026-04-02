@@ -854,6 +854,7 @@ async fn initialize_methods_list_complete() {
             "mob/unwire",
             "mob/members",
             "mob/events",
+            "mob/member_send",
             "mob/append_system_context",
             "mob/flows",
             "mob/flow_run",
@@ -863,8 +864,6 @@ async fn initialize_methods_list_complete() {
             "mob/fork_helper",
             "mob/force_cancel",
             "mob/member_status",
-            "mob/tools",
-            "mob/call",
             "mob/stream_open",
             "mob/stream_close",
         ];
@@ -1051,6 +1050,39 @@ async fn mob_create_rejects_invalid_definition() {
     assert!(
         !resp["error"].is_null(),
         "mob/create with empty profiles must return an error, got: {resp}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_create_rejects_reserved_internal_fields() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {
+            "definition": {
+                "id": "reserved-mob",
+                "owner_session_id": "session-123",
+                "is_implicit": true,
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6"
+                    }
+                }
+            }
+        }
+    });
+    send_request(&mut writer, &req).await;
+    let resp = read_response(&mut reader).await;
+    assert!(
+        !resp["error"].is_null(),
+        "mob/create with reserved internal fields must return an error, got: {resp}"
     );
 
     drop(writer);

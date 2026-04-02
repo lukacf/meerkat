@@ -196,17 +196,6 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/mob/tools",
-            vec![RestOperationDescriptor::new("get", "List mob tools")],
-        ),
-        RestPathDescriptor::new(
-            "/mob/call",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Invoke a mob tool call",
-            )],
-        ),
-        RestPathDescriptor::new(
             "/mob/{id}/events",
             vec![RestOperationDescriptor::new("get", "SSE mob event stream")],
         ),

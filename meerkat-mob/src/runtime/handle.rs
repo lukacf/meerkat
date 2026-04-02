@@ -8,7 +8,7 @@ use meerkat_core::comms::{
 };
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-use meerkat_core::service::SessionError;
+use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::time_compat::Instant;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
 use serde::{Deserialize, Serialize};
@@ -784,6 +784,33 @@ impl MobHandle {
         MobEventsView {
             inner: self.events.clone(),
         }
+    }
+
+    /// Append a dispatcher-owned operator provenance projection.
+    ///
+    /// This is audit/projection data only. It must never become
+    /// authorization truth.
+    pub async fn record_operator_action_provenance(
+        &self,
+        tool_name: &str,
+        authority_context: &MobToolAuthorityContext,
+    ) -> Result<(), MobError> {
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::OperatorActionRecorded {
+                    tool_name: tool_name.to_string(),
+                    principal_token: authority_context.principal_token().clone(),
+                    caller_provenance: authority_context.caller_provenance().cloned(),
+                    audit_invocation_id: authority_context
+                        .audit_invocation_id()
+                        .map(ToOwned::to_owned),
+                },
+            })
+            .await
+            .map(|_| ())
+            .map_err(MobError::from)
     }
 
     /// Subscribe to agent-level events for a specific meerkat.

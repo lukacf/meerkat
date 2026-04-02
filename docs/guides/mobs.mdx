@@ -222,12 +222,8 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
     ```
   </Tab>
   <Tab title="REST">
-    ```bash
-    curl http://localhost:8080/mob/tools
-    curl -X POST http://localhost:8080/mob/call \
-      -H "Content-Type: application/json" \
-      -d '{"name":"mob_create","arguments":{"definition":{"id":"my-mob","profiles":{}}}}'
-    ```
+    REST keeps mob event streams and helper endpoints, but direct lifecycle
+    control for app hosts uses the canonical JSON-RPC / SDK `mob/*` methods.
   </Tab>
   <Tab title="Python">
     ```python

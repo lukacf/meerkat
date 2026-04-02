@@ -46,16 +46,6 @@
         "summary": "Get a runtime input state"
       }
     },
-    "/mob/call": {
-      "post": {
-        "summary": "Invoke a mob tool call"
-      }
-    },
-    "/mob/tools": {
-      "get": {
-        "summary": "List mob tools"
-      }
-    },
     "/mob/{id}/events": {
       "get": {
         "summary": "SSE mob event stream"

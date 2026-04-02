@@ -4,15 +4,17 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
+use std::convert::TryFrom;
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
+use meerkat_contracts::{MobCreateParams, MobCreateResult};
 use meerkat_core::service::AppendSystemContextRequest;
-use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, SessionId};
+use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_mob::{
-    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobDefinition, MobId, MobRespawnError,
+    FlowId, MeerkatId, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
     MobRuntimeMode, RunId, SpawnMemberSpec,
 };
 use meerkat_mob_mcp::MobMcpState;
@@ -32,49 +34,6 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
     Ok(MobId::from(raw))
 }
 
-#[derive(Debug, Serialize)]
-struct MobToolsResult {
-    tools: Vec<serde_json::Value>,
-}
-
-/// Handle `mob/tools` — list callable mob lifecycle tools.
-pub async fn handle_tools(id: Option<RpcId>) -> RpcResponse {
-    RpcResponse::success(
-        id,
-        MobToolsResult {
-            tools: meerkat_mob_mcp::tools_list(),
-        },
-    )
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MobCallParams {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: serde_json::Value,
-}
-
-/// Handle `mob/call` — call a mob lifecycle tool by name with JSON args.
-pub async fn handle_call(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobCallParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    match meerkat_mob_mcp::handle_tools_call(state, &params.name, &params.arguments).await {
-        Ok(value) => RpcResponse::success(id, value),
-        Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.message),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MobCreateParams {
-    pub definition: MobDefinition,
-}
-
 pub async fn handle_create(
     id: Option<RpcId>,
     params: Option<&RawValue>,
@@ -85,10 +44,20 @@ pub async fn handle_create(
         Err(resp) => return resp.with_id(id),
     };
 
-    let result = state.mob_create_definition(params.definition).await;
+    let definition = match meerkat_mob_mcp::decode_public_mob_definition(params.definition) {
+        Ok(definition) => definition,
+        Err(error) => return invalid_params(id, format!("invalid mob definition: {error}")),
+    };
+
+    let result = state.mob_create_definition(definition).await;
 
     match result {
-        Ok(mob_id) => RpcResponse::success(id, serde_json::json!({"mob_id": mob_id})),
+        Ok(mob_id) => RpcResponse::success(
+            id,
+            MobCreateResult {
+                mob_id: mob_id.to_string(),
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -528,16 +497,8 @@ pub struct MobAppendSystemContextParams {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MobMemberSendParams {
-    pub mob_id: String,
-    pub meerkat_id: String,
-    pub content: ContentInput,
-    #[serde(default)]
-    pub handling_mode: HandlingMode,
-    #[serde(default)]
-    pub render_metadata: Option<RenderMetadata>,
-}
+pub type MobMemberSendParams = meerkat_contracts::MobMemberSendParams;
+pub type MobMemberSendResult = meerkat_contracts::MobMemberSendResult;
 
 pub async fn handle_member_send(
     id: Option<RpcId>,
@@ -553,24 +514,28 @@ pub async fn handle_member_send(
         Err(resp) => return resp,
     };
     let meerkat_id = MeerkatId::from(params.meerkat_id.as_str());
+    let content = match ContentInput::try_from(params.content) {
+        Ok(content) => content,
+        Err(error) => return invalid_params(id, error),
+    };
     match state
         .mob_member_send(
             &mob_id,
             meerkat_id.clone(),
-            params.content,
-            params.handling_mode,
-            params.render_metadata,
+            content,
+            params.handling_mode.into(),
+            params.render_metadata.map(Into::into),
         )
         .await
     {
         Ok(receipt) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "mob_id": mob_id,
-                "member_id": receipt.member_id,
-                "session_id": receipt.session_id,
-                "handling_mode": receipt.handling_mode,
-            }),
+            MobMemberSendResult {
+                mob_id: mob_id.to_string(),
+                member_id: receipt.member_id.to_string(),
+                session_id: receipt.session_id,
+                handling_mode: receipt.handling_mode.into(),
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -1050,6 +1015,64 @@ mod tests {
             meerkat_mob::PeerTarget::Local(MeerkatId::from("worker-b"))
         );
         Ok(())
+    }
+
+    #[test]
+    fn mob_create_params_reject_reserved_owner_session_id() {
+        let value = serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "owner_session_id": "session-123",
+                "profiles": {
+                    "worker": { "model": "claude-sonnet-4-6" }
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobCreateParams>(value)
+            .expect_err("reserved owner_session_id must be rejected");
+        assert!(err.to_string().contains("unknown field `owner_session_id`"));
+    }
+
+    #[test]
+    fn mob_create_params_reject_reserved_internal_lifecycle_flags() {
+        let value = serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "is_implicit": true,
+                "session_cleanup_policy": "destroy_on_owner_archive",
+                "profiles": {
+                    "worker": { "model": "claude-sonnet-4-6" }
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobCreateParams>(value)
+            .expect_err("reserved lifecycle fields must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field `is_implicit`")
+                || message.contains("unknown field `session_cleanup_policy`"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn mob_create_params_reject_internal_profile_tool_bundles() {
+        let value = serde_json::json!({
+            "definition": {
+                "id": "mob-1",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": {
+                            "rust_bundles": ["internal-only"]
+                        }
+                    }
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobCreateParams>(value)
+            .expect_err("internal rust bundle fields must be rejected");
+        assert!(err.to_string().contains("unknown field `rust_bundles`"));
     }
 
     #[test]

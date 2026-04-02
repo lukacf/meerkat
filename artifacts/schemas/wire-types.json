@@ -249,6 +249,1308 @@
     "title": "McpLiveOperation",
     "type": "string"
   },
+  "MobCreateResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/create`.",
+    "properties": {
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id"
+    ],
+    "title": "MobCreateResult",
+    "type": "object"
+  },
+  "MobDefinitionInput": {
+    "$defs": {
+      "MobBackendConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "$ref": "#/$defs/WireMobBackendKind",
+            "default": "session"
+          },
+          "external": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MobExternalBackendConfigInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MobCollectionPolicyInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "all",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "any",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "n": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "quorum",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "n"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobConditionExprInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "op": {
+                "const": "eq",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "in",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "values": {
+                "items": true,
+                "type": "array"
+              }
+            },
+            "required": [
+              "op",
+              "path",
+              "values"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "gt",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "op": {
+                "const": "lt",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "op",
+              "path",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "exprs": {
+                "items": {
+                  "$ref": "#/$defs/MobConditionExprInput"
+                },
+                "type": "array"
+              },
+              "op": {
+                "const": "and",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "exprs"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "exprs": {
+                "items": {
+                  "$ref": "#/$defs/MobConditionExprInput"
+                },
+                "type": "array"
+              },
+              "op": {
+                "const": "or",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "exprs"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "expr": {
+                "$ref": "#/$defs/MobConditionExprInput"
+              },
+              "op": {
+                "const": "not",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "expr"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobDependencyModeInput": {
+        "enum": [
+          "all",
+          "any"
+        ],
+        "type": "string"
+      },
+      "MobDispatchModeInput": {
+        "enum": [
+          "fan_out",
+          "one_to_one",
+          "fan_in"
+        ],
+        "type": "string"
+      },
+      "MobEventRouterConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "buffer_size": {
+            "default": 256,
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exclude_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "include_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MobExternalBackendConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "address_base": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address_base"
+        ],
+        "type": "object"
+      },
+      "MobFlowNodeInput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "depends_on": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "depends_on_mode": {
+                "$ref": "#/$defs/MobDependencyModeInput",
+                "default": "all"
+              },
+              "kind": {
+                "const": "step",
+                "type": "string"
+              },
+              "step_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "step_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/MobFrameSpecInput"
+              },
+              "depends_on": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "depends_on_mode": {
+                "$ref": "#/$defs/MobDependencyModeInput",
+                "default": "all"
+              },
+              "kind": {
+                "const": "repeat_until",
+                "type": "string"
+              },
+              "loop_id": {
+                "type": "string"
+              },
+              "max_iterations": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "until": {
+                "$ref": "#/$defs/MobConditionExprInput"
+              }
+            },
+            "required": [
+              "kind",
+              "loop_id",
+              "body",
+              "until",
+              "max_iterations"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobFlowSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MobFrameSpecInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "additionalProperties": {
+              "$ref": "#/$defs/MobFlowStepInput"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "MobFlowStepInput": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "collection_policy": {
+            "$ref": "#/$defs/MobCollectionPolicyInput",
+            "default": {
+              "type": "all"
+            }
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MobConditionExprInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "depends_on_mode": {
+            "$ref": "#/$defs/MobDependencyModeInput",
+            "default": "all"
+          },
+          "dispatch_mode": {
+            "$ref": "#/$defs/MobDispatchModeInput",
+            "default": "fan_out"
+          },
+          "expected_schema_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "$ref": "#/$defs/WireContentInput"
+          },
+          "output_format": {
+            "$ref": "#/$defs/MobStepOutputFormatInput",
+            "default": "json"
+          },
+          "role": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "role",
+          "message"
+        ],
+        "type": "object"
+      },
+      "MobFrameSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "nodes": {
+            "additionalProperties": {
+              "$ref": "#/$defs/MobFlowNodeInput"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "nodes"
+        ],
+        "type": "object"
+      },
+      "MobLimitsSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "cancel_grace_timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_active_frames": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_active_nodes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_flow_duration_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_frame_depth": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_orphaned_turns": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_step_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MobMcpServerConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MobOrchestratorInput": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "type": "object"
+      },
+      "MobPolicyModeInput": {
+        "enum": [
+          "advisory",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "MobProfileInput": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_addressable": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_inline_peer_notifications": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": true,
+          "peer_description": {
+            "type": "string"
+          },
+          "provider_params": true,
+          "runtime_mode": {
+            "$ref": "#/$defs/WireMobRuntimeMode",
+            "default": "autonomous_host"
+          },
+          "skills": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "$ref": "#/$defs/MobToolConfigInput",
+            "default": {
+              "builtins": false,
+              "comms": false,
+              "memory": false,
+              "mob": false,
+              "mob_tasks": false,
+              "shell": false
+            }
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "MobRoleWiringRuleInput": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "type": "object"
+      },
+      "MobSkillSourceInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "source": {
+                "const": "inline",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "source": {
+                "const": "path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobSpawnPolicyInput": {
+        "oneOf": [
+          {
+            "properties": {
+              "mode": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "mode": {
+                "const": "auto",
+                "type": "string"
+              },
+              "profile_map": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "mode",
+              "profile_map"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "MobStepOutputFormatInput": {
+        "enum": [
+          "json",
+          "text"
+        ],
+        "type": "string"
+      },
+      "MobSupervisorSpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "escalation_threshold": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "escalation_threshold"
+        ],
+        "type": "object"
+      },
+      "MobToolConfigInput": {
+        "additionalProperties": false,
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob_tasks": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "MobTopologyRuleInput": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "from_role": {
+            "type": "string"
+          },
+          "to_role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_role",
+          "to_role",
+          "allowed"
+        ],
+        "type": "object"
+      },
+      "MobTopologySpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "$ref": "#/$defs/MobPolicyModeInput"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/$defs/MobTopologyRuleInput"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "mode",
+          "rules"
+        ],
+        "type": "object"
+      },
+      "MobWiringRulesInput": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_wire_orchestrator": {
+            "default": false,
+            "type": "boolean"
+          },
+          "role_wiring": {
+            "items": {
+              "$ref": "#/$defs/MobRoleWiringRuleInput"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
+      "WireMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Public mob definition input for `mob/create`.\n\nThis mirrors the public creation contract shape. Runtime-owned lifecycle and\nbookkeeping fields such as `owner_session_id`, `session_cleanup_policy`,\n`is_implicit`, and internal-only profile tool bundles are intentionally not\npart of this schema.",
+    "properties": {
+      "backend": {
+        "$ref": "#/$defs/MobBackendConfigInput",
+        "default": {
+          "default": "session"
+        }
+      },
+      "event_router": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobEventRouterConfigInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "flows": {
+        "additionalProperties": {
+          "$ref": "#/$defs/MobFlowSpecInput"
+        },
+        "type": "object"
+      },
+      "id": {
+        "type": "string"
+      },
+      "limits": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobLimitsSpecInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "mcp_servers": {
+        "additionalProperties": {
+          "$ref": "#/$defs/MobMcpServerConfigInput"
+        },
+        "type": "object"
+      },
+      "orchestrator": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobOrchestratorInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "profiles": {
+        "additionalProperties": {
+          "$ref": "#/$defs/MobProfileInput"
+        },
+        "type": "object"
+      },
+      "skills": {
+        "additionalProperties": {
+          "$ref": "#/$defs/MobSkillSourceInput"
+        },
+        "type": "object"
+      },
+      "spawn_policy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobSpawnPolicyInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "supervisor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobSupervisorSpecInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "topology": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobTopologySpecInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "wiring": {
+        "$ref": "#/$defs/MobWiringRulesInput",
+        "default": {
+          "auto_wire_orchestrator": false
+        }
+      }
+    },
+    "required": [
+      "id",
+      "profiles"
+    ],
+    "title": "MobDefinitionInput",
+    "type": "object"
+  },
+  "MobMemberSendParams": {
+    "$defs": {
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireContentInput": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Wire-safe content input (mirrors `ContentInput`)."
+      },
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      },
+      "WireRenderClass": {
+        "description": "Public render class contract for mob member delivery.",
+        "enum": [
+          "user_prompt",
+          "peer_message",
+          "peer_request",
+          "peer_response",
+          "external_event",
+          "flow_step",
+          "continuation",
+          "system_notice",
+          "tool_scope_notice",
+          "ops_progress"
+        ],
+        "type": "string"
+      },
+      "WireRenderMetadata": {
+        "description": "Public render metadata contract for mob member delivery.",
+        "properties": {
+          "class": {
+            "$ref": "#/$defs/WireRenderClass"
+          },
+          "salience": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireRenderSalience"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "class"
+        ],
+        "type": "object"
+      },
+      "WireRenderSalience": {
+        "description": "Public render salience contract for mob member delivery.",
+        "enum": [
+          "background",
+          "normal",
+          "important",
+          "urgent"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for host-side mob member delivery.",
+    "properties": {
+      "content": {
+        "$ref": "#/$defs/WireContentInput"
+      },
+      "handling_mode": {
+        "$ref": "#/$defs/WireHandlingMode",
+        "default": "queue"
+      },
+      "meerkat_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "render_metadata": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireRenderMetadata"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "mob_id",
+      "meerkat_id",
+      "content"
+    ],
+    "title": "MobMemberSendParams",
+    "type": "object"
+  },
+  "MobMemberSendResult": {
+    "$defs": {
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for host-side mob member delivery.",
+    "properties": {
+      "handling_mode": {
+        "$ref": "#/$defs/WireHandlingMode"
+      },
+      "member_id": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "member_id",
+      "session_id",
+      "handling_mode"
+    ],
+    "title": "MobMemberSendResult",
+    "type": "object"
+  },
   "MobPeerTarget": {
     "$defs": {
       "WireTrustedPeerSpec": {

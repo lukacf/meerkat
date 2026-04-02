@@ -534,9 +534,7 @@ class MeerkatClient:
     def has_capability(self, capability_id: str) -> bool:
         """Check if a capability is available."""
         if capability_id == "mob":
-            return bool(
-                {"mob/create", "mob/list", "mob/call"} & self._methods
-            )
+            return bool({"mob/create", "mob/list"} & self._methods)
         return any(
             c.id == capability_id and c.available
             for c in self.capabilities
@@ -664,23 +662,6 @@ class MeerkatClient:
         if source is not None:
             params["source"] = source
         return await self._request("skills/inspect", params)
-
-    async def list_mob_tools(self) -> list[dict[str, Any]]:
-        result = await self._request("mob/tools", {})
-        return result.get("tools", [])
-
-    async def call_mob_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await self._request(
-            "mob/call",
-            {
-                "name": name,
-                "arguments": arguments or {},
-            },
-        )
 
     async def subscribe_session_events(self, session_id: str) -> EventSubscription:
         return await self._open_event_subscription(

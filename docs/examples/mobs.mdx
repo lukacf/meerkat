@@ -93,9 +93,9 @@ A mob definition declares profiles (agent templates), wiring rules, and flows. D
 
 ---
 
-## Mob tools reference
+## Agent-side mob tools reference
 
-When `enable_mob` is set, the agent gets these tools:
+When `enable_mob` is set, the running agent gets these in-session tools:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -110,6 +110,15 @@ When `enable_mob` is set, the agent gets these tools:
 | `meerkat_retire` | `mob_id`, `meerkat_id` | Remove a member |
 | `meerkat_wire` | `mob_id`, `a`, `b` | Establish trusted comms channel |
 | `meerkat_list` | `mob_id` | List mob members and their state |
+
+<Note>
+These are the agent-side `mob_*` tools. Public host surfaces use typed control
+planes instead:
+
+- JSON-RPC / SDKs: explicit `mob/*` methods
+- Public MCP hosts: typed `meerkat_mob_*` tools
+- REST: typed mob endpoints where available, rather than agent-side `mob_*`
+</Note>
 
 ---
 
@@ -402,23 +411,30 @@ Execute a named DAG flow. Steps execute in dependency order with configured disp
     ```
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `mob_list` and `mob_flow_status` tools:
+    Host calls typed methods such as `mob/list`, `mob/status`, and
+    `mob/flow_status`:
     ```json
     {"mob_id": "my-mob"}
     {"mob_id": "my-mob", "run_id": "01936f8a-..."}
     ```
   </Tab>
   <Tab title="REST">
-    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+    Use the typed mob/member status routes documented in the REST API. REST does
+    not re-export the agent-side `mob_*` dispatcher.
   </Tab>
   <Tab title="MCP">
-    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+    Host calls `meerkat_mob_list`, `meerkat_mob_status`, and
+    `meerkat_mob_flow_status`.
   </Tab>
   <Tab title="Python">
-    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+    Use the typed client methods: `await client.list_mobs()`,
+    `await client.mob_status("my-mob")`, and
+    `await client.get_mob_flow_status("my-mob", run_id)`.
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `mob_list` / `mob_flow_status` tools (same JSON as RPC).
+    Use the typed client methods: `await client.listMobs()`,
+    `await client.mobStatus("my-mob")`, and
+    `await client.getMobFlowStatus("my-mob", runId)`.
   </Tab>
   <Tab title="Rust">
     ```rust
@@ -439,22 +455,23 @@ Read the structural event log (spawns, retires, wires, flow transitions).
     ```
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `mob_events` tool:
+    Host calls typed `mob/events`:
     ```json
     {"mob_id": "my-mob", "after_cursor": 0, "limit": 50}
     ```
   </Tab>
   <Tab title="REST">
-    Agent calls `mob_events` tool (same JSON as RPC).
+    Use the typed `/mob/{id}/events` stream route.
   </Tab>
   <Tab title="MCP">
-    Agent calls `mob_events` tool (same JSON as RPC).
+    Use `meerkat_mob_events` for history and `meerkat_mob_event_stream_*` for
+    streaming.
   </Tab>
   <Tab title="Python">
-    Agent calls `mob_events` tool (same JSON as RPC).
+    Use `await client.subscribe_mob_events("my-mob")`.
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `mob_events` tool (same JSON as RPC).
+    Use `await client.subscribeMobEvents("my-mob")`.
   </Tab>
   <Tab title="Rust">
     ```rust
@@ -478,7 +495,7 @@ Control mob state transitions.
     ```
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `mob_lifecycle` tool:
+    Host calls typed `mob/lifecycle`:
     ```json
     {"mob_id": "my-mob", "action": "stop"}
     {"mob_id": "my-mob", "action": "resume"}
@@ -487,16 +504,17 @@ Control mob state transitions.
     ```
   </Tab>
   <Tab title="REST">
-    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+    Use JSON-RPC, MCP, or the SDKs for general mob lifecycle control; REST does
+    not expose the full lifecycle surface.
   </Tab>
   <Tab title="MCP">
-    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+    Host calls `meerkat_mob_lifecycle`.
   </Tab>
   <Tab title="Python">
-    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+    Use `await client.mob_lifecycle("my-mob", "stop")` and related actions.
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `mob_lifecycle` tool (same JSON as RPC).
+    Use `await client.mobLifecycle("my-mob", "stop")` and related actions.
   </Tab>
   <Tab title="Rust">
     ```rust

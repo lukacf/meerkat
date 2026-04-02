@@ -11,7 +11,7 @@
 
 use crate::Provider;
 use crate::peer_meta::PeerMeta;
-use crate::service::AppendSystemContextRequest;
+use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
 use crate::types::{Message, SessionId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -99,6 +99,9 @@ fn default_version() -> u32 {
 
 /// Metadata key used to store durable system-context control state.
 pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
+
+/// Metadata key used to store durable typed mob operator authority.
+pub const SESSION_MOB_TOOL_AUTHORITY_CONTEXT_KEY: &str = "session_mob_tool_authority_context";
 
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
@@ -412,6 +415,12 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Remove a metadata value.
+    pub fn remove_metadata(&mut self, key: &str) {
+        self.metadata.remove(key);
+        self.updated_at = SystemTime::now();
+    }
+
     /// Store SessionMetadata in the session metadata map.
     pub fn set_session_metadata(
         &mut self,
@@ -443,6 +452,28 @@ impl Session {
     pub fn system_context_state(&self) -> Option<SessionSystemContextState> {
         self.metadata
             .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store durable typed mob operator authority in the session metadata map.
+    pub fn set_mob_tool_authority_context(
+        &mut self,
+        authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), serde_json::Error> {
+        match authority_context {
+            Some(authority_context) => {
+                let value = serde_json::to_value(authority_context)?;
+                self.set_metadata(SESSION_MOB_TOOL_AUTHORITY_CONTEXT_KEY, value);
+            }
+            None => self.remove_metadata(SESSION_MOB_TOOL_AUTHORITY_CONTEXT_KEY),
+        }
+        Ok(())
+    }
+
+    /// Load durable typed mob operator authority from the session metadata map.
+    pub fn mob_tool_authority_context(&self) -> Option<MobToolAuthorityContext> {
+        self.metadata
+            .get(SESSION_MOB_TOOL_AUTHORITY_CONTEXT_KEY)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 
@@ -875,6 +906,27 @@ mod tests {
         session.set_metadata("key", serde_json::json!("value"));
 
         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_session_mob_tool_authority_context_roundtrip() {
+        let mut session = Session::new();
+        let authority = MobToolAuthorityContext::new(
+            crate::service::OpaquePrincipalToken::new("opaque-principal"),
+            false,
+        )
+        .with_managed_mob_scope(["mob-a"])
+        .with_audit_invocation_id("audit-1");
+
+        session
+            .set_mob_tool_authority_context(Some(authority.clone()))
+            .expect("authority should serialize");
+        assert_eq!(session.mob_tool_authority_context(), Some(authority));
+
+        session
+            .set_mob_tool_authority_context(None)
+            .expect("authority should clear");
+        assert!(session.mob_tool_authority_context().is_none());
     }
 
     #[test]

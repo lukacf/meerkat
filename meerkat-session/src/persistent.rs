@@ -618,7 +618,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .as_ref()
                 .map(|meta| meta.tooling.clone())
                 .unwrap_or_default();
-            let build = SessionBuildOptions {
+            let mut build = SessionBuildOptions {
                 provider: stored_metadata.as_ref().map(|meta| meta.provider),
                 comms_name: stored_metadata
                     .as_ref()
@@ -635,7 +635,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 override_builtins: tooling.builtins.to_override(),
                 override_shell: tooling.shell.to_override(),
                 override_memory: tooling.memory.to_override(),
-                override_mob: tooling.mob.to_override(),
+                override_mob: None,
                 realm_id: stored_metadata
                     .as_ref()
                     .and_then(|meta| meta.realm_id.clone()),
@@ -650,6 +650,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .and_then(|meta| meta.config_generation),
                 ..SessionBuildOptions::default()
             };
+            build.apply_persisted_mob_operator_access(
+                tooling.mob.to_override(),
+                build
+                    .resume_session
+                    .as_ref()
+                    .and_then(Session::mob_tool_authority_context),
+            );
 
             self.create_session(CreateSessionRequest {
                 model: stored_metadata
@@ -1514,6 +1521,43 @@ mod tests {
             req: &CreateSessionRequest,
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+            })
+        }
+    }
+
+    struct CapturingBuildBuilder {
+        captured_builds: Arc<tokio::sync::Mutex<Vec<SessionBuildOptions>>>,
+    }
+
+    impl CapturingBuildBuilder {
+        fn new() -> Self {
+            Self {
+                captured_builds: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for CapturingBuildBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            if let Some(build) = req.build.clone() {
+                self.captured_builds.lock().await.push(build);
+            }
             let session = req
                 .build
                 .as_ref()
@@ -2898,6 +2942,169 @@ mod tests {
             })
             .expect("persisted session should contain a system prompt");
         assert!(persisted_prompt.contains("recover me"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_runtime_context_appends_reinjects_generated_create_only_mob_authority() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let builder = CapturingBuildBuilder::new();
+        let captured_builds = Arc::clone(&builder.captured_builds);
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model: "test-model".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling {
+                    builtins: meerkat_core::ToolCategoryOverride::Enable,
+                    shell: meerkat_core::ToolCategoryOverride::Disable,
+                    comms: meerkat_core::ToolCategoryOverride::Disable,
+                    mob: meerkat_core::ToolCategoryOverride::Enable,
+                    memory: meerkat_core::ToolCategoryOverride::Enable,
+                    active_skills: None,
+                },
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some("realm-test".to_string()),
+                instance_id: Some("instance-test".to_string()),
+                backend: Some("redb".to_string()),
+                config_generation: Some(7),
+            })
+            .expect("session metadata should serialize");
+        store
+            .save(&session)
+            .await
+            .expect("persisted session should save");
+
+        service
+            .apply_runtime_context_appends(
+                &id,
+                RunId::new(),
+                vec![ConversationContextAppend {
+                    key: "system-generated:test".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "recover me".to_string(),
+                    },
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("stored-only runtime append should recover the live session");
+
+        let captured_builds = captured_builds.lock().await;
+        let build = captured_builds
+            .last()
+            .expect("recovery builder should capture a build");
+        assert_eq!(build.override_mob, Some(true));
+        let authority = build
+            .mob_tool_authority_context
+            .as_ref()
+            .expect("explicit mob enable should rehydrate generated create-only authority");
+        assert!(
+            authority.can_create_mobs(),
+            "recovered runtime build should keep create authority"
+        );
+        assert!(
+            authority.managed_mob_scope().is_empty(),
+            "stored-only recovery must not widen exact scope from bookkeeping state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_runtime_context_appends_rehydrates_persisted_typed_mob_authority() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let builder = CapturingBuildBuilder::new();
+        let captured_builds = Arc::clone(&builder.captured_builds);
+        let service = PersistentSessionService::new(
+            builder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let mut session = Session::new();
+        let id = session.id().clone();
+        session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model: "test-model".to_string(),
+                max_tokens: 1024,
+                structured_output_retries: 2,
+                provider: meerkat_core::Provider::Anthropic,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling {
+                    builtins: meerkat_core::ToolCategoryOverride::Enable,
+                    shell: meerkat_core::ToolCategoryOverride::Disable,
+                    comms: meerkat_core::ToolCategoryOverride::Disable,
+                    mob: meerkat_core::ToolCategoryOverride::Inherit,
+                    memory: meerkat_core::ToolCategoryOverride::Enable,
+                    active_skills: None,
+                },
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: Some("realm-test".to_string()),
+                instance_id: Some("instance-test".to_string()),
+                backend: Some("redb".to_string()),
+                config_generation: Some(7),
+            })
+            .expect("session metadata should serialize");
+        let expected_authority = meerkat_core::service::MobToolAuthorityContext::new(
+            meerkat_core::service::OpaquePrincipalToken::new("persisted-typed"),
+            false,
+        )
+        .with_managed_mob_scope(["mob-a", "mob-b"])
+        .with_caller_provenance(
+            meerkat_core::service::MobToolCallerProvenance::new()
+                .with_session_id(SessionId::new())
+                .with_member_id("lead-1"),
+        )
+        .with_audit_invocation_id("audit-persisted");
+        session
+            .set_mob_tool_authority_context(Some(expected_authority.clone()))
+            .expect("typed mob authority should serialize");
+        store
+            .save(&session)
+            .await
+            .expect("persisted session should save");
+
+        service
+            .apply_runtime_context_appends(
+                &id,
+                RunId::new(),
+                vec![ConversationContextAppend {
+                    key: "system-generated:test".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "recover scoped authority".to_string(),
+                    },
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("stored-only runtime append should recover the live session");
+
+        let captured_builds = captured_builds.lock().await;
+        let build = captured_builds
+            .last()
+            .expect("recovery builder should capture a build");
+        assert_eq!(build.override_mob, Some(true));
+        assert_eq!(
+            build.mob_tool_authority_context,
+            Some(expected_authority),
+            "stored-only recovery must preserve exact managed scope and provenance"
+        );
     }
 
     /// Create a session request that seeds initial SessionMetadata so

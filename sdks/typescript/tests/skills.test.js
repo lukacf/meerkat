@@ -416,30 +416,28 @@ describe("Skills v2.1", () => {
     await sub.close();
   });
 
-  it("listMobTools/callMobTool route through mob RPC methods", async () => {
+  it("createMob routes through the typed mob/create RPC method", async () => {
     const client = new MeerkatClient();
     const calls = [];
     client.request = async (method, params) => {
       calls.push({ method, params });
-      if (method === "mob/tools") {
-        return { tools: [{ name: "mob_create" }] };
-      }
-      if (method === "mob/call") {
+      if (method === "mob/create") {
         return { ok: true, mob_id: "m1" };
       }
       return {};
     };
+    client._methods = new Set(["mob/create"]);
+    client._capabilities = [];
 
-    const tools = await client.listMobTools();
-    const result = await client.callMobTool("mob_create", { definition: { id: "mob-1", profiles: { worker: { model: "claude-sonnet-4-6" } } } });
+    const mob = await client.createMob({
+      definition: { id: "mob-1", profiles: { worker: { model: "claude-sonnet-4-6" } } },
+    });
 
-    assert.deepEqual(tools, [{ name: "mob_create" }]);
-    assert.equal(result.mob_id, "m1");
+    assert.equal(mob.mobId, "m1");
     assert.deepEqual(calls, [
-      { method: "mob/tools", params: {} },
       {
-        method: "mob/call",
-        params: { name: "mob_create", arguments: { definition: { id: "mob-1", profiles: { worker: { model: "claude-sonnet-4-6" } } } } },
+        method: "mob/create",
+        params: { definition: { id: "mob-1", profiles: { worker: { model: "claude-sonnet-4-6" } } } },
       },
     ]);
   });

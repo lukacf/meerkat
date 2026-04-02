@@ -15,6 +15,7 @@ use meerkat::{AgentFactory, Config};
 use meerkat_core::service::MobToolsFactory;
 use meerkat_core::types::SessionId;
 use meerkat_core::{ConfigRuntime, MemoryConfigStore};
+use meerkat_mob::MobId;
 use meerkat_mob_mcp::MobMcpState;
 use meerkat_rpc::protocol::{RpcId, RpcRequest};
 use meerkat_rpc::router::{MethodRouter, NotificationSink};
@@ -718,6 +719,7 @@ async fn e2e_tool_error_contracts() {
     let spoofed_def = json!({
         "id": "spoofed-mob",
         "owner_session_id": "spoofed-session-999",
+        "is_implicit": true,
         "profiles": {
             "worker": {
                 "model": model,
@@ -751,6 +753,10 @@ async fn e2e_tool_error_contracts() {
     assert!(
         spoofed_mobs.is_empty(),
         "no mobs should be owned by the spoofed session"
+    );
+    assert!(
+        !mob_state.is_implicit_mob(&MobId::from("spoofed-mob")).await,
+        "mob_create must not allow callers to mint faux implicit mobs"
     );
 }
 
@@ -812,7 +818,10 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
         .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
             session_id: session_id.clone(),
             model: model_b.clone(),
-            operator_capabilities_present: true,
+            authority_context: Some(meerkat_core::service::MobToolAuthorityContext::new(
+                meerkat_core::service::OpaquePrincipalToken::new("e2e-resume-override"),
+                true,
+            )),
             comms_name: None,
             comms_runtime: None,
         })

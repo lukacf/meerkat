@@ -361,6 +361,12 @@ impl MethodRouter {
         &self.runtime_adapter
     }
 
+    /// Get a reference to the mob state for authoritative inspection (testing).
+    #[cfg(feature = "mob")]
+    pub fn mob_state(&self) -> &Arc<meerkat_mob_mcp::MobMcpState> {
+        &self.mob_state
+    }
+
     #[allow(clippy::result_large_err)]
     fn session_id_from_runtime_params(
         &self,

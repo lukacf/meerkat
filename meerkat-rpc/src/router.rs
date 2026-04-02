@@ -1071,6 +1071,12 @@ impl MethodRouter {
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
                 Ok(()) => {
+                    // Clean up session-owned mobs (implicit + explicit).
+                    #[cfg(feature = "mob")]
+                    let _ = self
+                        .mob_state
+                        .destroy_implicit_mob(&session_id.to_string())
+                        .await;
                     self.runtime_adapter.unregister_session(&session_id).await;
                     RpcResponse::success(id, json!({"archived": true}))
                 }

@@ -6430,18 +6430,15 @@ where
     runtime.set_config_runtime(config_runtime);
 
     // Set mob tools factory on the runtime's stored AgentFactory so agents
-    // built through this runtime get delegation tools. We create a temporary
-    // MobMcpState for the factory — the full hydrated state is created later
-    // and passed to the RPC server for operator-facing mob operations.
-    // Also set mob cleanup state for archive-time mob destruction.
+    // built through this runtime get delegation tools. Archive cleanup is
+    // handled by the MethodRouter which holds the real hydrated mob_state.
     {
         let mob_session_svc: Arc<dyn meerkat_mob::MobSessionService> =
             session_service.clone() as Arc<dyn meerkat_mob::MobSessionService>;
         let factory_mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_svc));
         runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
-            Arc::clone(&factory_mob_state),
+            factory_mob_state,
         )));
-        runtime.set_mob_cleanup_state(factory_mob_state);
     }
 
     // Set realm context before Arc-wrapping (requires &mut self).

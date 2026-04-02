@@ -197,9 +197,6 @@ pub struct SessionRuntime {
     callback_id_counter_slot: StdRwLock<Arc<std::sync::atomic::AtomicU64>>,
     /// Globally registered callback tool definitions (via `tools/register`).
     registered_tools_slot: StdRwLock<Arc<StdRwLock<Vec<meerkat_core::ToolDef>>>>,
-    /// Mob state for session-owned mob cleanup on archive. Set via `set_mob_cleanup_state`.
-    #[cfg(feature = "mob")]
-    mob_cleanup_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {
@@ -269,8 +266,6 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
-            #[cfg(feature = "mob")]
-            mob_cleanup_state: None,
         }
     }
 
@@ -320,8 +315,6 @@ impl SessionRuntime {
                 0,
             ))),
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
-            #[cfg(feature = "mob")]
-            mob_cleanup_state: None,
         }
     }
 
@@ -372,12 +365,6 @@ impl SessionRuntime {
     /// is not set.
     pub fn set_mob_tools(&mut self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
         self.factory.mob_tools = Some(factory);
-    }
-
-    /// Set the mob state for session-owned mob cleanup on archive.
-    #[cfg(feature = "mob")]
-    pub fn set_mob_cleanup_state(&mut self, state: Arc<meerkat_mob_mcp::MobMcpState>) {
-        self.mob_cleanup_state = Some(state);
     }
 
     /// Active realm id for this runtime, if configured.
@@ -2274,15 +2261,6 @@ impl SessionRuntime {
             .archive(session_id)
             .await
             .map_err(session_error_to_rpc);
-
-        #[cfg(feature = "mob")]
-        if result.is_ok()
-            && let Some(mob_state) = &self.mob_cleanup_state
-        {
-            let _ = mob_state
-                .destroy_implicit_mob(&session_id.to_string())
-                .await;
-        }
 
         #[cfg(feature = "mcp")]
         if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {

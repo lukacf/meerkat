@@ -575,21 +575,16 @@ pub const SESSION_METADATA_KEY: &str = "session_metadata";
 /// availability at the capabilities of the Meerkat version that created them.
 ///
 /// **Dogma §10:** Inherit, disable, and set are different facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCategoryOverride {
     /// No explicit intent — inherit runtime/factory default.
+    #[default]
     Inherit,
     /// Explicitly enabled by caller.
     Enable,
     /// Explicitly disabled by caller.
     Disable,
-}
-
-impl Default for ToolCategoryOverride {
-    fn default() -> Self {
-        Self::Inherit
-    }
 }
 
 impl ToolCategoryOverride {
@@ -647,7 +642,7 @@ where
 
     struct ToolCategoryVisitor;
 
-    impl<'de> de::Visitor<'de> for ToolCategoryVisitor {
+    impl de::Visitor<'_> for ToolCategoryVisitor {
         type Value = ToolCategoryOverride;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

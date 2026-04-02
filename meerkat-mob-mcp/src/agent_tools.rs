@@ -39,6 +39,23 @@ const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
 const TOOL_MOB_LIST_MEMBERS: &str = "mob_list_members";
 const TOOL_MOB_LIST: &str = "mob_list";
 
+type AgentCommsRuntime = Arc<dyn meerkat_core::agent::CommsRuntime>;
+
+#[derive(Default)]
+struct AgentMobToolSurfaceComms {
+    name: Option<String>,
+    peer_id: Option<String>,
+    runtime: Option<AgentCommsRuntime>,
+}
+
+struct AgentMobToolSurfaceInit {
+    implicit_mob_id: Option<MobId>,
+    authority_context: MobToolAuthorityContext,
+    model: String,
+    owner_session_id: SessionId,
+    comms: AgentMobToolSurfaceComms,
+}
+
 // ─── AgentMobToolSurface ─────────────────────────────────────────────────
 
 /// Agent-internal tool surface for mob delegation and orchestration.
@@ -62,62 +79,23 @@ pub struct AgentMobToolSurface {
     /// Parent agent's comms peer ID (ed25519 public key).
     comms_peer_id: Option<String>,
     /// Parent agent's comms runtime for bidirectional wiring.
-    comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    comms_runtime: Option<AgentCommsRuntime>,
 }
 
 impl AgentMobToolSurface {
     /// Create a new agent mob tool surface.
-    ///
-    /// # Arguments
-    /// * `state` - Shared MobMcpState for mob lifecycle operations
-    /// * `implicit_mob_id` - Pre-seeded implicit mob ID (resume case)
-    /// * `model` - Model name inherited by spawned helpers
-    /// * `owner_session_id` - Session ID of the owning agent
-    pub fn new(
-        state: Arc<MobMcpState>,
-        implicit_mob_id: Option<MobId>,
-        authority_context: MobToolAuthorityContext,
-        model: String,
-        owner_session_id: SessionId,
-        comms_name: Option<String>,
-        comms_peer_id: Option<String>,
-        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    ) -> Self {
-        Self::new_with_authority(
-            state,
-            implicit_mob_id,
-            authority_context,
-            model,
-            owner_session_id,
-            comms_name,
-            comms_peer_id,
-            comms_runtime,
-        )
-    }
-
-    /// Create with a pre-populated set of owned mob IDs (for resume).
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_authority(
-        state: Arc<MobMcpState>,
-        implicit_mob_id: Option<MobId>,
-        authority_context: MobToolAuthorityContext,
-        model: String,
-        owner_session_id: SessionId,
-        comms_name: Option<String>,
-        comms_peer_id: Option<String>,
-        comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
-    ) -> Self {
+    fn new(state: Arc<MobMcpState>, init: AgentMobToolSurfaceInit) -> Self {
         let tools = build_tool_defs();
         Self {
             state,
-            cached_implicit_mob_id: RwLock::new(implicit_mob_id),
-            authority_context,
+            cached_implicit_mob_id: RwLock::new(init.implicit_mob_id),
+            authority_context: init.authority_context,
             tools,
-            owner_session_id,
-            model,
-            comms_name,
-            comms_peer_id,
-            comms_runtime,
+            owner_session_id: init.owner_session_id,
+            model: init.model,
+            comms_name: init.comms.name,
+            comms_peer_id: init.comms.peer_id,
+            comms_runtime: init.comms.runtime,
         }
     }
 
@@ -547,15 +525,19 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
 
         // Extract parent comms identity for wiring helpers.
         let comms_peer_id = args.comms_runtime.as_ref().and_then(|r| r.public_key());
-        let surface = AgentMobToolSurface::new_with_authority(
+        let surface = AgentMobToolSurface::new(
             Arc::clone(&self.state),
-            implicit_mob_id,
-            authority_context,
-            args.model,
-            args.session_id,
-            args.comms_name,
-            comms_peer_id,
-            args.comms_runtime,
+            AgentMobToolSurfaceInit {
+                implicit_mob_id,
+                authority_context,
+                model: args.model,
+                owner_session_id: args.session_id,
+                comms: AgentMobToolSurfaceComms {
+                    name: args.comms_name,
+                    peer_id: comms_peer_id,
+                    runtime: args.comms_runtime,
+                },
+            },
         );
         Ok(Arc::new(surface))
     }
@@ -832,6 +814,25 @@ mod tests {
             .with_audit_invocation_id("audit-create")
     }
 
+    fn test_surface(
+        state: Arc<MobMcpState>,
+        implicit_mob_id: Option<MobId>,
+        authority_context: MobToolAuthorityContext,
+        model: impl Into<String>,
+        owner_session_id: SessionId,
+    ) -> AgentMobToolSurface {
+        AgentMobToolSurface::new(
+            state,
+            AgentMobToolSurfaceInit {
+                implicit_mob_id,
+                authority_context,
+                model: model.into(),
+                owner_session_id,
+                comms: AgentMobToolSurfaceComms::default(),
+            },
+        )
+    }
+
     fn sample_definition(mob_id: &str) -> MobDefinition {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
@@ -936,15 +937,12 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_unknown_tool_returns_not_found() {
         let state = MobMcpState::new_in_memory();
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             state,
             None,
             create_only_authority(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-5",
             SessionId::new(),
-            None,
-            None,
-            None,
         );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
@@ -1073,15 +1071,12 @@ mod tests {
             "claude-sonnet-4-5"
         );
 
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             Arc::clone(&state),
             Some(stale_mob_id.clone()),
             create_only_authority(),
-            "gpt-5.4".to_string(),
+            "gpt-5.4",
             SessionId::parse(&session_key).expect("session_id"),
-            None,
-            None,
-            None,
         );
         let (reconciled_mob_id, created) = surface
             .ensure_implicit_mob()
@@ -1114,15 +1109,12 @@ mod tests {
     #[tokio::test]
     async fn test_mob_list_empty() {
         let state = MobMcpState::new_in_memory();
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             state,
             None,
             create_only_authority(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-5",
             SessionId::new(),
-            None,
-            None,
-            None,
         );
 
         let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
@@ -1143,15 +1135,12 @@ mod tests {
         let state = MobMcpState::new_in_memory();
         let session_id = SessionId::new();
         let expected_session_id = session_id.to_string();
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             Arc::clone(&state),
             None,
             create_only_authority(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-5",
             session_id,
-            None,
-            None,
-            None,
         );
 
         let create_args = serde_json::value::RawValue::from_string(
@@ -1251,15 +1240,12 @@ mod tests {
             .mob_create_definition(sample_definition("scope-only-mob"))
             .await
             .expect("create scope-only mob");
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             Arc::clone(&state),
             None,
             scope_only_authority(mob_id.as_str()),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-5",
             SessionId::new(),
-            None,
-            None,
-            None,
         );
 
         let delegate_args =
@@ -1294,15 +1280,12 @@ mod tests {
     #[tokio::test]
     async fn test_successful_create_persists_operator_provenance_projection() {
         let state = MobMcpState::new_in_memory();
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             Arc::clone(&state),
             None,
             create_only_authority_with_provenance(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-5",
             SessionId::new(),
-            None,
-            None,
-            None,
         );
 
         let create_args = serde_json::value::RawValue::from_string(
@@ -1367,15 +1350,12 @@ mod tests {
             MobToolAuthorityContext::new(OpaquePrincipalToken::new("scope-principal"), false)
                 .with_managed_mob_scope([mob_id.to_string()])
                 .with_audit_invocation_id("audit-scope");
-        let surface = AgentMobToolSurface::new(
+        let surface = test_surface(
             Arc::clone(&state),
             None,
             authority,
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-5",
             SessionId::new(),
-            None,
-            None,
-            None,
         );
 
         let delegate_args = serde_json::value::RawValue::from_string(

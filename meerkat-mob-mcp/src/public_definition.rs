@@ -340,6 +340,7 @@ fn decode_event_router(input: MobEventRouterConfigInput) -> EventRouterConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_contracts::{
@@ -430,7 +431,7 @@ mod tests {
             }),
         );
 
-        let definition = decode_public_mob_definition(MobDefinitionInput {
+        let definition_result = decode_public_mob_definition(MobDefinitionInput {
             id: "triage".to_string(),
             orchestrator: None,
             profiles,
@@ -451,24 +452,26 @@ mod tests {
             limits: None,
             spawn_policy: None,
             event_router: None,
-        })
-        .expect("decode typed mob definition");
+        });
+        let Ok(definition) = definition_result else {
+            panic!("decode typed mob definition");
+        };
 
-        let lead = definition
-            .profiles
-            .get(&ProfileName::from("lead"))
-            .expect("lead profile");
+        let Some(lead) = definition.profiles.get(&ProfileName::from("lead")) else {
+            panic!("lead profile");
+        };
         assert_eq!(lead.backend, Some(MobBackendKind::External));
         assert_eq!(lead.runtime_mode, MobRuntimeMode::TurnDriven);
         assert_eq!(lead.tools.rust_bundles, Vec::<String>::new());
 
-        let flow = definition
-            .flows
-            .get(&FlowId::from("main"))
-            .expect("main flow");
+        let Some(flow) = definition.flows.get(&FlowId::from("main")) else {
+            panic!("main flow");
+        };
         assert_eq!(flow.description.as_deref(), Some("main flow"));
         assert!(flow.root.is_some());
-        let step = flow.steps.get(&StepId::from("plan")).expect("plan step");
+        let Some(step) = flow.steps.get(&StepId::from("plan")) else {
+            panic!("plan step");
+        };
         assert_eq!(step.branch, Some(BranchId::from("winner")));
         assert_eq!(step.output_format, StepOutputFormat::Text);
     }

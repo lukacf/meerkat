@@ -75,6 +75,50 @@ struct MeerkatMobSpawnInputSpec {
     additional_instructions: Option<Vec<String>>,
 }
 
+struct SpawnSpecInput {
+    profile: String,
+    meerkat_id: String,
+    initial_message: Option<WireContentInput>,
+    runtime_mode: Option<WireMobRuntimeMode>,
+    backend: Option<WireMobBackendKind>,
+    resume_session_id: Option<String>,
+    labels: Option<BTreeMap<String, String>>,
+    context: Option<Value>,
+    additional_instructions: Option<Vec<String>>,
+}
+
+impl From<MeerkatMobSpawnInput> for SpawnSpecInput {
+    fn from(input: MeerkatMobSpawnInput) -> Self {
+        Self {
+            profile: input.profile,
+            meerkat_id: input.meerkat_id,
+            initial_message: input.initial_message,
+            runtime_mode: input.runtime_mode,
+            backend: input.backend,
+            resume_session_id: input.resume_session_id,
+            labels: input.labels,
+            context: input.context,
+            additional_instructions: input.additional_instructions,
+        }
+    }
+}
+
+impl From<MeerkatMobSpawnInputSpec> for SpawnSpecInput {
+    fn from(input: MeerkatMobSpawnInputSpec) -> Self {
+        Self {
+            profile: input.profile,
+            meerkat_id: input.meerkat_id,
+            initial_message: input.initial_message,
+            runtime_mode: input.runtime_mode,
+            backend: input.backend,
+            resume_session_id: input.resume_session_id,
+            labels: input.labels,
+            context: input.context,
+            additional_instructions: input.additional_instructions,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobMemberInput {
@@ -354,24 +398,15 @@ pub async fn handle_public_tools_call(
         "meerkat_mob_spawn" => {
             let input: MeerkatMobSpawnInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
-            let spec = build_spawn_spec(
-                input.profile,
-                input.meerkat_id.clone(),
-                input.initial_message,
-                input.runtime_mode,
-                input.backend,
-                input.resume_session_id,
-                input.labels,
-                input.context,
-                input.additional_instructions,
-            )?;
+            let meerkat_id = input.meerkat_id.clone();
+            let spec = build_spawn_spec(input.into())?;
             let member_ref = state
                 .mob_spawn_spec(&mob_id, spec)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({
                 "mob_id": mob_id,
-                "meerkat_id": input.meerkat_id,
+                "meerkat_id": meerkat_id,
                 "member_ref": member_ref,
                 "session_id": member_ref.session_id(),
             }))
@@ -382,19 +417,7 @@ pub async fn handle_public_tools_call(
             let specs = input
                 .specs
                 .into_iter()
-                .map(|spec| {
-                    build_spawn_spec(
-                        spec.profile,
-                        spec.meerkat_id,
-                        spec.initial_message,
-                        spec.runtime_mode,
-                        spec.backend,
-                        spec.resume_session_id,
-                        spec.labels,
-                        spec.context,
-                        spec.additional_instructions,
-                    )
-                })
+                .map(|spec| build_spawn_spec(spec.into()))
                 .collect::<Result<Vec<_>, _>>()?;
             let results = state
                 .mob_spawn_many(&mob_id, specs)
@@ -405,7 +428,7 @@ pub async fn handle_public_tools_call(
                     Ok(member_ref) => json!({
                         "ok": true,
                         "member_ref": member_ref,
-                        "session_id": member_ref.session_id().map(|id| id.to_string()),
+                        "session_id": member_ref.session_id().map(std::string::ToString::to_string),
                     }),
                     Err(error) => json!({
                         "ok": false,
@@ -692,25 +715,19 @@ fn backend_kind_from_wire(kind: WireMobBackendKind) -> meerkat_mob::MobBackendKi
     }
 }
 
-fn build_spawn_spec(
-    profile: String,
-    meerkat_id: String,
-    initial_message: Option<WireContentInput>,
-    runtime_mode: Option<WireMobRuntimeMode>,
-    backend: Option<WireMobBackendKind>,
-    resume_session_id: Option<String>,
-    labels: Option<BTreeMap<String, String>>,
-    context: Option<Value>,
-    additional_instructions: Option<Vec<String>>,
-) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
-    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), meerkat_id.as_str());
-    spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
-    spec.runtime_mode = runtime_mode.map(runtime_mode_from_wire);
-    spec.backend = backend.map(backend_kind_from_wire);
-    spec.labels = labels;
-    spec.context = context;
-    spec.additional_instructions = additional_instructions;
-    if let Some(session_id) = resume_session_id {
+fn build_spawn_spec(input: SpawnSpecInput) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
+    let mut spec =
+        meerkat_mob::SpawnMemberSpec::new(input.profile.as_str(), input.meerkat_id.as_str());
+    spec.initial_message = input
+        .initial_message
+        .map(content_input_from_wire)
+        .transpose()?;
+    spec.runtime_mode = input.runtime_mode.map(runtime_mode_from_wire);
+    spec.backend = input.backend.map(backend_kind_from_wire);
+    spec.labels = input.labels;
+    spec.context = input.context;
+    spec.additional_instructions = input.additional_instructions;
+    if let Some(session_id) = input.resume_session_id {
         let parsed = meerkat_core::types::SessionId::parse(&session_id)
             .map_err(invalid_session_id_message)
             .map_err(McpToolError::invalid_params)?;
@@ -720,6 +737,7 @@ fn build_spawn_spec(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::MobMcpState;
@@ -727,9 +745,10 @@ mod tests {
     #[tokio::test]
     async fn public_tools_reject_raw_dispatcher_tool_names() {
         let state = MobMcpState::new_in_memory();
-        let err = handle_public_tools_call(&state, "mob_create", &json!({}))
-            .await
-            .expect_err("raw mob_create must stay unavailable on public MCP surface");
+        let result = handle_public_tools_call(&state, "mob_create", &json!({})).await;
+        let Err(err) = result else {
+            panic!("raw mob_create must stay unavailable on public MCP surface");
+        };
         assert_eq!(err.code, -32601);
     }
 
@@ -737,7 +756,7 @@ mod tests {
     async fn public_tools_create_mob_and_reject_internal_fields() {
         let state = MobMcpState::new_in_memory();
 
-        let created = handle_public_tools_call(
+        let created_result = handle_public_tools_call(
             &state,
             "meerkat_mob_create",
             &json!({
@@ -752,11 +771,13 @@ mod tests {
                 }
             }),
         )
-        .await
-        .expect("typed public create");
+        .await;
+        let Ok(created) = created_result else {
+            panic!("typed public create");
+        };
         assert_eq!(created["mob_id"], "typed-public-mob");
 
-        let err = handle_public_tools_call(
+        let err_result = handle_public_tools_call(
             &state,
             "meerkat_mob_create",
             &json!({
@@ -774,8 +795,10 @@ mod tests {
                 }
             }),
         )
-        .await
-        .expect_err("internal profile tool bundles must be rejected");
+        .await;
+        let Err(err) = err_result else {
+            panic!("internal profile tool bundles must be rejected");
+        };
         assert_eq!(err.code, -32602);
 
         let names: Vec<_> = public_tools_list()

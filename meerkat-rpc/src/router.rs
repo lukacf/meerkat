@@ -361,6 +361,12 @@ impl MethodRouter {
         &self.runtime_adapter
     }
 
+    /// Get a reference to the mob state for authoritative inspection (testing).
+    #[cfg(feature = "mob")]
+    pub fn mob_state(&self) -> &Arc<meerkat_mob_mcp::MobMcpState> {
+        &self.mob_state
+    }
+
     #[allow(clippy::result_large_err)]
     fn session_id_from_runtime_params(
         &self,
@@ -1071,6 +1077,12 @@ impl MethodRouter {
         match self.resolve_session_owner(&session_id).await {
             Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
                 Ok(()) => {
+                    // Clean up session-owned mobs (implicit + explicit).
+                    #[cfg(feature = "mob")]
+                    let _ = self
+                        .mob_state
+                        .destroy_session_mobs(&session_id.to_string())
+                        .await;
                     self.runtime_adapter.unregister_session(&session_id).await;
                     RpcResponse::success(id, json!({"archived": true}))
                 }

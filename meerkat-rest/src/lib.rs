@@ -285,6 +285,10 @@ impl AppState {
 
         let builder =
             FactoryAgentBuilder::new_with_config_store(factory, config, Arc::clone(&config_store));
+        // Capture the mob tools slot before the builder is consumed into the session service.
+        // We set the actual factory after mob_state is constructed (circular dep break).
+        #[cfg(feature = "mob")]
+        let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let runtime_adapter = persistence.runtime_adapter();
         let (session_store, runtime_store, blob_store) = persistence.into_parts();
         let mut session_service =
@@ -330,7 +334,15 @@ impl AppState {
             skill_runtime,
             runtime_adapter,
             #[cfg(feature = "mob")]
-            mob_state: Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_service)),
+            mob_state: {
+                let state = Arc::new(meerkat_mob_mcp::MobMcpState::new(mob_session_service));
+                *mob_tools_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+                    meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
+                ));
+                state
+            },
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             request_executor: Arc::new(SurfaceRequestExecutor::new(
@@ -582,6 +594,7 @@ async fn apply_runtime_turn(
                 resume_override_mask: Default::default(),
                 call_timeout_override: Default::default(),
                 blob_store_override: None,
+                mob_tools: None,
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -2435,6 +2448,7 @@ async fn create_session_inner(
         },
         call_timeout_override: Default::default(),
         blob_store_override: None,
+        mob_tools: None,
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -2737,6 +2751,11 @@ async fn archive_session(
     let session_id = resolve_session_id_for_state(&id, &state)?;
     match state.session_service.archive(&session_id).await {
         Ok(()) => {
+            #[cfg(feature = "mob")]
+            let _ = state
+                .mob_state
+                .destroy_session_mobs(&session_id.to_string())
+                .await;
             #[cfg(feature = "mcp")]
             cleanup_mcp_session(&state, &session_id).await;
             #[cfg(feature = "comms")]
@@ -3009,6 +3028,7 @@ async fn continue_session_inner(
             },
             call_timeout_override: Default::default(),
             blob_store_override: None,
+            mob_tools: None,
         };
         let create_req = SvcCreateSessionRequest {
             model: req

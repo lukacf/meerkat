@@ -40,7 +40,7 @@ impl Pack for ArchitectPack {
         steps.insert(StepId::from("synthesize"), flow_step("synthesizer", "Produce a final ADR: context, decision, consequences, alternatives.\n\n## Revised Plan\n{{ steps.revise }}".into(), &["revise"], 600_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Architecture deliberation".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Architecture deliberation".into()), steps, root: None });
 
         mob_definition("architect", profiles, skills, flows, identity_spawn_policy(&["planner", "critic", "synthesizer"]))
     }

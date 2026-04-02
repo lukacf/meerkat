@@ -19,6 +19,15 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `continuation_execution_cancel_updates_ingress`: `turn_execution`.`RunCancelled` -> `runtime_ingress`.`RunCancelled` [Immediate]
 - `continuation_execution_cancel_notifies_control`: `turn_execution`.`RunCancelled` -> `runtime_control`.`RunCancelled` [Immediate]
 
+## Target Selectors
+- `(none)`
+
+## Driver
+- `(none)`
+
+## Transaction Plans
+- `(none)`
+
 ## Scheduler Rules
 - `PreemptWhenReady(control_plane, ordinary_ingress)`
 

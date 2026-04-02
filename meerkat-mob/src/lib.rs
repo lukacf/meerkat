@@ -40,6 +40,7 @@ pub mod build;
 pub mod definition;
 pub mod error;
 pub mod event;
+mod generated;
 pub mod ids;
 pub mod launch;
 pub mod profile;
@@ -58,14 +59,19 @@ pub use backend::MobBackendKind;
 pub use definition::MobDefinition;
 pub use error::MobError;
 pub use event::{AttributedEvent, MemberRef, MobEvent, MobEventKind, NewMobEvent};
-pub use ids::{BranchId, FlowId, MeerkatId, MobId, ProfileName, RunId, StepId, TaskId};
+pub use ids::{
+    BranchId, FlowId, FlowNodeId, FrameId, LoopId, LoopInstanceId, MeerkatId, MobId, ProfileName,
+    RunId, StepId, TaskId,
+};
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 pub use profile::{Profile, ToolConfig};
 pub use roster::{MemberState, Roster, RosterAddEntry, RosterEntry};
 pub use run::{
-    FailureLedgerEntry, FlowContext, FlowRunConfig, MobRun, MobRunStatus, StepLedgerEntry,
-    StepRunStatus,
+    FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,
+    LoopIterationLedgerEntry, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
+pub use runtime::RestoreIncompatible;
+pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
@@ -74,6 +80,7 @@ pub use runtime::{
     MobSessionService, MobState, MobUnreachablePeer, PeerTarget, SpawnMemberSpec, SpawnPolicy,
     SpawnSpec,
 };
+pub use runtime::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use runtime_mode::MobRuntimeMode;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;

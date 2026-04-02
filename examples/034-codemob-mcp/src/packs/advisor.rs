@@ -33,7 +33,7 @@ impl Pack for AdvisorPack {
         steps.insert(StepId::from("respond"), flow_step("advisor", format!("{task}{ctx}"), &[], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Single-agent advisory opinion".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Single-agent advisory opinion".into()), steps, root: None });
 
         mob_definition("advisor", profiles, skills, flows, identity_spawn_policy(&["advisor"]))
     }

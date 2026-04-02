@@ -1047,6 +1047,35 @@
           "payload"
         ],
         "type": "object"
+      },
+      {
+        "description": "A background shell job completed (or failed/cancelled/timed out).",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "type": {
+            "const": "background_job_completed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "job_id",
+          "display_name",
+          "status",
+          "detail"
+        ],
+        "type": "object"
       }
     ],
     "title": "AgentEvent"
@@ -1794,6 +1823,35 @@
             "required": [
               "type",
               "payload"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A background shell job completed (or failed/cancelled/timed out).",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "display_name": {
+                "type": "string"
+              },
+              "job_id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "type": {
+                "const": "background_job_completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "job_id",
+              "display_name",
+              "status",
+              "detail"
             ],
             "type": "object"
           }

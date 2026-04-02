@@ -449,6 +449,7 @@ pub fn mob_orchestrator_machine() -> MachineSchema {
                 ],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![
             disposition(
                 "ActivateSupervisor",

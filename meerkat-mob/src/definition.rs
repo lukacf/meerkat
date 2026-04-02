@@ -5,7 +5,7 @@
 //! so they can be stored in `MobCreated` events for resume recovery.
 
 use crate::MobBackendKind;
-use crate::ids::{BranchId, FlowId, MobId, ProfileName, StepId};
+use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
 use crate::profile::Profile;
 use indexmap::IndexMap;
 use meerkat_core::types::ContentInput;
@@ -160,6 +160,40 @@ pub enum ConditionExpr {
     },
 }
 
+/// A frame is a DAG of nodes that executes as a unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameSpec {
+    pub nodes: IndexMap<FlowNodeId, FlowNodeSpec>,
+}
+
+/// A node in a FrameSpec: either a step or a repeat_until loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FlowNodeSpec {
+    Step(FrameStepSpec),
+    RepeatUntil(RepeatUntilSpec),
+}
+
+/// A step node within a frame (like FlowStepSpec but scoped to a frame).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameStepSpec {
+    pub step_id: StepId,
+    pub depends_on: Vec<FlowNodeId>,
+    pub depends_on_mode: DependencyMode,
+    pub branch: Option<BranchId>,
+}
+
+/// A repeat_until loop node within a frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatUntilSpec {
+    pub loop_id: LoopId,
+    pub depends_on: Vec<FlowNodeId>,
+    pub depends_on_mode: DependencyMode,
+    pub body: FrameSpec,
+    pub until: ConditionExpr,
+    pub max_iterations: u32,
+}
+
 /// Per-step flow execution configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowStepSpec {
@@ -190,12 +224,15 @@ pub struct FlowStepSpec {
 }
 
 /// Flow definition for a named workflow.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FlowSpec {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub steps: IndexMap<StepId, FlowStepSpec>,
+    /// v2 flows carry a FrameSpec as the execution root. v1 flows omit this field.
+    #[serde(default)]
+    pub root: Option<FrameSpec>,
 }
 
 /// Topology enforcement mode.
@@ -230,13 +267,22 @@ pub struct SupervisorSpec {
 }
 
 /// Runtime guardrails for flow execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LimitsSpec {
     pub max_flow_duration_ms: Option<u64>,
     pub max_step_retries: Option<u32>,
     pub max_orphaned_turns: Option<u32>,
     #[serde(default)]
     pub cancel_grace_timeout_ms: Option<u64>,
+    /// Maximum number of concurrently active nodes across all frames (0 = unlimited).
+    #[serde(default)]
+    pub max_active_nodes: Option<u64>,
+    /// Maximum number of concurrently active body frames (0 = unlimited).
+    #[serde(default)]
+    pub max_active_frames: Option<u64>,
+    /// Maximum nesting depth for body frames (0 = unlimited).
+    #[serde(default)]
+    pub max_frame_depth: Option<u64>,
 }
 
 /// Declarative spawn policy for automatic member provisioning.
@@ -952,5 +998,91 @@ include_patterns = ["text_complete"]
             router.include_patterns,
             Some(vec!["text_complete".to_string()])
         );
+    }
+
+    #[test]
+    fn test_frame_step_spec_roundtrip_json() {
+        let spec = FrameStepSpec {
+            step_id: StepId::from("step-a"),
+            depends_on: vec![FlowNodeId::from("node-1")],
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        };
+        let encoded = serde_json::to_string(&spec).expect("serialize");
+        let decoded: FrameStepSpec = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn test_repeat_until_spec_roundtrip_json() {
+        let spec = RepeatUntilSpec {
+            loop_id: LoopId::from("loop-a"),
+            depends_on: vec![],
+            depends_on_mode: DependencyMode::All,
+            body: FrameSpec {
+                nodes: indexmap::IndexMap::new(),
+            },
+            until: ConditionExpr::Eq {
+                path: "steps.review.passed".into(),
+                value: serde_json::json!(true),
+            },
+            max_iterations: 5,
+        };
+        let encoded = serde_json::to_string(&spec).expect("serialize");
+        let decoded: RepeatUntilSpec = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn test_flow_node_spec_step_roundtrip_json() {
+        let spec = FlowNodeSpec::Step(FrameStepSpec {
+            step_id: StepId::from("step-b"),
+            depends_on: vec![],
+            depends_on_mode: DependencyMode::Any,
+            branch: Some(BranchId::from("branch-1")),
+        });
+        let encoded = serde_json::to_string(&spec).expect("serialize");
+        let decoded: FlowNodeSpec = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn test_frame_spec_roundtrip_json() {
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            FlowNodeId::from("node-a"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: StepId::from("step-a"),
+                depends_on: vec![],
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        );
+        let spec = FrameSpec { nodes };
+        let encoded = serde_json::to_string(&spec).expect("serialize");
+        let decoded: FrameSpec = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_flow_spec_with_root_roundtrip_json() {
+        let spec = FlowSpec {
+            description: Some("test flow".into()),
+            steps: indexmap::IndexMap::new(),
+            root: Some(FrameSpec {
+                nodes: indexmap::IndexMap::new(),
+            }),
+        };
+        let encoded = serde_json::to_string(&spec).expect("serialize");
+        let decoded: FlowSpec = serde_json::from_str(&encoded).expect("deserialize");
+        assert!(decoded.root.is_some());
+    }
+
+    #[test]
+    fn test_flow_spec_without_root_deserializes_none() {
+        // Legacy FlowSpec without root field deserializes with root: None
+        let json = r#"{"description":null,"steps":{}}"#;
+        let decoded: FlowSpec = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(decoded.root, None);
     }
 }

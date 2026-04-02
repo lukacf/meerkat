@@ -1593,6 +1593,201 @@ impl MobRunStore for RecordingRunStore {
     ) -> Result<(), MobStoreError> {
         self.inner.append_failure_entry(run_id, entry).await
     }
+
+    async fn upsert_loop_snapshot(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        snapshot: crate::run::LoopSnapshot,
+        ledger_entry: Option<crate::run::LoopIterationLedgerEntry>,
+    ) -> Result<(), MobStoreError> {
+        self.inner
+            .upsert_loop_snapshot(run_id, loop_instance_id, snapshot, ledger_entry)
+            .await
+    }
+
+    async fn cas_frame_state(
+        &self,
+        run_id: &RunId,
+        frame_id: &crate::ids::FrameId,
+        expected: Option<&crate::run::FrameSnapshot>,
+        next: crate::run::FrameSnapshot,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_frame_state(run_id, frame_id, expected, next)
+            .await
+    }
+
+    async fn cas_grant_node_slot(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_grant_node_slot(
+                run_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+            )
+            .await
+    }
+
+    async fn cas_complete_step_and_record_output(
+        &self,
+        run_id: &RunId,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+        loop_context: Option<(&crate::ids::LoopId, u64)>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_complete_step_and_record_output(
+                run_id,
+                frame_id,
+                expected_frame,
+                next_frame,
+                step_output_key,
+                step_output,
+                loop_context,
+            )
+            .await
+    }
+
+    async fn cas_start_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        initial_loop: crate::run::LoopSnapshot,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_start_loop(
+                run_id,
+                loop_instance_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                initial_loop,
+            )
+            .await
+    }
+
+    async fn cas_loop_request_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_loop_request_body_frame(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
+
+    async fn cas_grant_body_frame_start(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        initial_frame: crate::run::FrameSnapshot,
+        ledger_entry: crate::run::LoopIterationLedgerEntry,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_grant_body_frame_start(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                initial_frame,
+                ledger_entry,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
+
+    async fn cas_complete_body_frame(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_complete_body_frame(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
+
+    async fn cas_complete_loop(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        expected_run_state: &meerkat_machine_kernels::KernelState,
+        next_run_state: meerkat_machine_kernels::KernelState,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_complete_loop(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+            )
+            .await
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -1791,6 +1986,7 @@ fn sample_definition_with_single_step_flow(
         FlowSpec {
             description: Some("single step demo flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1799,6 +1995,7 @@ fn sample_definition_with_single_step_flow(
         max_step_retries: None,
         max_orphaned_turns: Some(max_orphaned_turns),
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     def
 }
@@ -1812,6 +2009,7 @@ fn with_cancel_grace_timeout(
         max_step_retries: None,
         max_orphaned_turns: None,
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     limits.cancel_grace_timeout_ms = Some(cancel_grace_timeout_ms);
     def
@@ -1851,6 +2049,7 @@ fn sample_definition_with_branch_flow() -> MobDefinition {
         FlowSpec {
             description: Some("branch winner flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1924,6 +2123,7 @@ fn sample_definition_with_collection_policy(policy: CollectionPolicy) -> MobDefi
         FlowSpec {
             description: Some("collection policy flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1945,6 +2145,7 @@ fn sample_definition_with_dispatch_mode(mode: DispatchMode) -> MobDefinition {
         FlowSpec {
             description: Some("dispatch mode flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1969,6 +2170,7 @@ fn sample_definition_with_dispatch_mode_and_policy(
         FlowSpec {
             description: Some("dispatch mode flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -1982,6 +2184,7 @@ fn sample_definition_with_retry_flow(max_step_retries: u32) -> MobDefinition {
         max_step_retries: Some(max_step_retries),
         max_orphaned_turns: Some(8),
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     def
 }
@@ -2030,6 +2233,7 @@ fn sample_definition_with_branch_fallback_flow() -> MobDefinition {
         FlowSpec {
             description: Some("branch fallback flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -2069,6 +2273,7 @@ fn sample_definition_with_shared_path_resolution_flow() -> MobDefinition {
         FlowSpec {
             description: Some("shared path resolver flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -2115,6 +2320,7 @@ fn sample_definition_with_two_step_flow(timeout_ms: u64) -> MobDefinition {
         FlowSpec {
             description: Some("cooperative cancel flow".to_string()),
             steps,
+            root: None,
         },
     );
     def.flows = flows;
@@ -10381,6 +10587,7 @@ async fn test_handle_list_flows_returns_definition_flow_ids() {
         FlowSpec {
             description: Some("secondary flow".to_string()),
             steps: extra_steps,
+            root: None,
         },
     );
 
@@ -11102,6 +11309,7 @@ async fn test_cancel_flow_fallback_uses_configured_grace_timeout() {
         max_step_retries: None,
         max_orphaned_turns: Some(8),
         cancel_grace_timeout_ms: Some(25),
+        ..Default::default()
     });
     let (handle, service) = create_test_mob(definition).await;
     handle
@@ -11270,6 +11478,15 @@ async fn test_timeout_maps_to_step_failed_reason_and_run_failed() {
             .iter()
             .any(|entry| entry.reason.contains("timeout after")),
         "timeout path should persist failure ledger reason"
+    );
+    assert_eq!(
+        terminal
+            .failure_ledger
+            .iter()
+            .filter(|entry| entry.reason.contains("timeout after"))
+            .count(),
+        1,
+        "timeout path should persist exactly one timeout failure ledger entry"
     );
     assert!(
         terminal
@@ -11723,6 +11940,57 @@ async fn test_collection_policy_quorum_requires_threshold_successes() {
 }
 
 #[tokio::test]
+async fn test_impossible_quorum_fails_before_dispatching_any_targets() {
+    let (handle, _service) = create_test_mob(sample_definition_with_collection_policy(
+        CollectionPolicy::Quorum { n: 3 },
+    ))
+    .await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+
+    let run_id = handle
+        .run_flow(FlowId::from("collect"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        terminal.failure_ledger.iter().any(|entry| {
+            entry.step_id.as_str() == "collect" && entry.reason.contains("insufficient targets")
+        }) || events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::FlowFailed { run_id: id, reason, .. }
+                    if id == &run_id && reason.contains("insufficient targets")
+            )
+        }),
+        "impossible quorum should surface an explicit insufficient-targets reason"
+    );
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::StepDispatched { run_id: id, step_id, .. }
+                        if id == &run_id && step_id.as_str() == "collect"
+                )
+            })
+            .count(),
+        0,
+        "impossible quorum should fail before dispatching any target turns"
+    );
+}
+
+#[tokio::test]
 async fn test_collection_policy_all_uses_map_shape_for_single_target() {
     let (handle, _service) = create_test_mob(sample_definition_with_collection_policy(
         CollectionPolicy::All,
@@ -11764,6 +12032,7 @@ async fn test_max_flow_duration_limit_is_enforced() {
         max_step_retries: None,
         max_orphaned_turns: Some(8),
         cancel_grace_timeout_ms: None,
+        ..Default::default()
     });
     let (handle, service) = create_test_mob(definition).await;
     handle
@@ -14346,5 +14615,1159 @@ async fn test_restored_member_gets_external_tools() {
     assert!(
         flags[1],
         "restored member should have external tools from provider"
+    );
+}
+
+/// Integration test: a flow with `root: Some(FrameSpec { ... })` executes frame nodes
+/// via the FlowFrameEngine path (not the flat-step path).
+///
+/// This validates the wiring added in task #16 — FlowSpec.root dispatches to
+/// FlowFrameEngine with a scripted step executor.
+#[tokio::test]
+async fn test_flow_with_root_frame_spec_executes_frame_nodes() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::{FlowNodeId, FrameId};
+    use crate::run::FlowContext;
+    use crate::runtime::flow_frame_engine::{FlowFrameEngine, FrameStepExecutor, FrameStepResult};
+
+    /// Scripted executor that returns pre-configured output per node.
+    struct ScriptedExecutor {
+        outputs: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl FrameStepExecutor for ScriptedExecutor {
+        async fn execute_step(
+            &self,
+            _run_id: &crate::ids::RunId,
+            _frame_id: &FrameId,
+            node_id: &FlowNodeId,
+            _step_id: &crate::ids::StepId,
+            _context: &FlowContext,
+        ) -> Result<FrameStepResult, MobError> {
+            self.outputs
+                .get(&node_id.to_string())
+                .cloned()
+                .map(FrameStepResult::Completed)
+                .ok_or_else(|| MobError::Internal(format!("no scripted output for {node_id}")))
+        }
+    }
+
+    // Build store + run.
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        meerkat_machine_kernels::KernelState::default(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create_run");
+
+    // Build a root FrameSpec: setup -> finalize
+    let root_spec = {
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            FlowNodeId::from("setup-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: crate::ids::StepId::from("setup"),
+                depends_on: vec![],
+                depends_on_mode: crate::definition::DependencyMode::All,
+                branch: None,
+            }),
+        );
+        nodes.insert(
+            FlowNodeId::from("finalize-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: crate::ids::StepId::from("finalize"),
+                depends_on: vec![FlowNodeId::from("setup-node")],
+                depends_on_mode: crate::definition::DependencyMode::All,
+                branch: None,
+            }),
+        );
+        FrameSpec { nodes }
+    };
+
+    let mut scripted_outputs = std::collections::HashMap::new();
+    scripted_outputs.insert(
+        "setup-node".to_string(),
+        serde_json::json!({"initialized": true}),
+    );
+    scripted_outputs.insert(
+        "finalize-node".to_string(),
+        serde_json::json!({"complete": true}),
+    );
+
+    let executor = Arc::new(ScriptedExecutor {
+        outputs: scripted_outputs,
+    });
+    let engine = FlowFrameEngine::new(store.clone(), executor, 0, 0);
+    let context = FlowContext {
+        run_id: run_id.clone(),
+        activation_params: serde_json::json!({}),
+        step_outputs: IndexMap::new(),
+        loop_outputs: IndexMap::new(),
+    };
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+
+    let outputs = engine
+        .execute_frame(&run_id, &frame_id, &root_spec, &context)
+        .await
+        .expect("frame-based execution should complete");
+
+    assert!(
+        outputs
+            .outputs
+            .contains_key(&crate::ids::StepId::from("setup")),
+        "setup output missing; outputs: {outputs:?}"
+    );
+    assert!(
+        outputs
+            .outputs
+            .contains_key(&crate::ids::StepId::from("finalize")),
+        "finalize output missing; outputs: {outputs:?}"
+    );
+    assert_eq!(
+        outputs.outputs[&crate::ids::StepId::from("finalize")],
+        serde_json::json!({"complete": true}),
+    );
+
+    // Verify frame state is Completed in the store.
+    let run = store
+        .get_run(&run_id)
+        .await
+        .expect("get_run")
+        .expect("run exists");
+    let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
+    assert_eq!(
+        frame_snap.kernel_state.phase, "Completed",
+        "frame should be in Completed phase"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_condition_skip_emits_single_skip_projection() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition_with_single_step_flow(500, 8);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    let step = flow.steps.get_mut(&step_id("start")).expect("start step");
+    step.condition = Some(ConditionExpr::Eq {
+        path: "params.ok".to_string(),
+        value: serde_json::json!(true),
+    });
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("start-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({ "ok": false }))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let run = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("flow status")
+        .expect("run exists");
+    assert_eq!(
+        run.step_ledger
+            .iter()
+            .filter(|entry| {
+                entry.step_id.as_str() == "start" && entry.status == StepRunStatus::Skipped
+            })
+            .count(),
+        1,
+        "root-frame skipped step should appear exactly once in the step ledger"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::StepSkipped { run_id: id, step_id, .. }
+                        if id == &run_id && step_id.as_str() == "start"
+                )
+            })
+            .count(),
+        1,
+        "root-frame skipped step should emit exactly one StepSkipped event"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_step_failure_does_not_abort_independent_siblings() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition();
+    let mut steps = IndexMap::new();
+    steps.insert(step_id("needs_lead"), flow_step("lead", "Lead-only task"));
+    steps.insert(step_id("worker_task"), flow_step("worker", "Worker task"));
+
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("needs-lead-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("needs_lead"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    root_nodes.insert(
+        FlowNodeId::from("worker-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("worker_task"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+
+    definition.flows = BTreeMap::from([(
+        flow_id("demo"),
+        FlowSpec {
+            description: Some("independent root siblings".to_string()),
+            steps,
+            root: Some(FrameSpec { nodes: root_nodes }),
+        },
+    )]);
+
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert!(
+        terminal.step_ledger.iter().any(|entry| {
+            entry.step_id.as_str() == "worker_task" && entry.status == StepRunStatus::Completed
+        }),
+        "independent worker sibling should still complete even if another root node fails"
+    );
+    assert!(
+        terminal.step_ledger.iter().any(|entry| {
+            entry.step_id.as_str() == "needs_lead"
+                && entry.status == StepRunStatus::Failed
+                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+        }),
+        "root-frame failure should project a failed step entry for the failed node"
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::StepCompleted { run_id: id, step_id }
+                    if id == &run_id && step_id.as_str() == "worker_task"
+            )
+        }),
+        "independent worker sibling should still emit StepCompleted"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_step_failure_records_failure_ledger_once() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition_with_single_step_flow(500, 8);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    flow.root = Some(FrameSpec {
+        nodes: IndexMap::from([(
+            FlowNodeId::from("start-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: step_id("start"),
+                depends_on: Vec::new(),
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        )]),
+    });
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert_eq!(
+        terminal
+            .failure_ledger
+            .iter()
+            .filter(|entry| entry.step_id.as_str() == "start")
+            .count(),
+        1,
+        "frame-mode target failures should record exactly one failure ledger row per failed step"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_supervisor_threshold_is_respected_before_reset() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition_with_supervisor_threshold(2);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("start-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead supervisor");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_fail(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::SupervisorEscalation { run_id: id, .. } if id == &run_id
+            )
+        }),
+        "frame-root failures should not escalate before the configured threshold"
+    );
+    assert_eq!(
+        handle.list_members().await.len(),
+        2,
+        "force_reset should not retire members before the escalation threshold is crossed"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_fan_in_persists_canonical_completed_aggregate_output() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition =
+        sample_definition_with_dispatch_mode_and_policy(DispatchMode::FanIn, CollectionPolicy::All);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("dispatch"))
+        .expect("dispatch flow");
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("dispatch-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("dispatch"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn w-2");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1");
+
+    let run_id = handle
+        .run_flow(FlowId::from("dispatch"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+
+    let aggregate_output = terminal
+        .step_ledger
+        .iter()
+        .find(|entry| {
+            entry.step_id.as_str() == "dispatch"
+                && entry.meerkat_id == crate::runtime::flow_system_member_id()
+                && entry.status == StepRunStatus::Completed
+        })
+        .and_then(|entry| entry.output.clone())
+        .expect("frame-root fan_in should persist canonical aggregate completed output");
+    assert_eq!(
+        aggregate_output,
+        serde_json::json!([
+            {"target":"w-1","output":"Turn completed"},
+            {"target":"w-2","output":"Turn completed"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn test_resume_running_loop_node_completes_instead_of_failing() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec};
+    use crate::ids::{FlowNodeId, FrameId, LoopId};
+    use crate::run::FlowContext;
+    use crate::runtime::flow_frame_engine::{FlowFrameEngine, FrameStepExecutor, FrameStepResult};
+    use crate::runtime::flow_frame_kernel::FlowFrameMutator;
+    use meerkat_machine_kernels::KernelState;
+
+    struct ScriptedExecutor;
+
+    #[async_trait]
+    impl FrameStepExecutor for ScriptedExecutor {
+        async fn execute_step(
+            &self,
+            _run_id: &crate::ids::RunId,
+            _frame_id: &FrameId,
+            _node_id: &FlowNodeId,
+            _step_id: &crate::ids::StepId,
+            _context: &FlowContext,
+        ) -> Result<FrameStepResult, MobError> {
+            Ok(FrameStepResult::Completed(
+                serde_json::json!({"done": true}),
+            ))
+        }
+    }
+
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        KernelState::default(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create_run");
+
+    let mut body_nodes = IndexMap::new();
+    body_nodes.insert(
+        FlowNodeId::from("body-step"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: crate::ids::StepId::from("body"),
+            depends_on: vec![],
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    let body_spec = FrameSpec { nodes: body_nodes };
+    let root_spec = {
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            FlowNodeId::from("loop-node"),
+            FlowNodeSpec::RepeatUntil(RepeatUntilSpec {
+                loop_id: LoopId::from("retry"),
+                depends_on: vec![],
+                depends_on_mode: DependencyMode::All,
+                body: body_spec.clone(),
+                until: ConditionExpr::Eq {
+                    path: "steps.body.done".to_string(),
+                    value: serde_json::json!(true),
+                },
+                max_iterations: 3,
+            }),
+        );
+        FrameSpec { nodes }
+    };
+
+    let frame_kernel = crate::runtime::flow_frame_kernel::FlowFrameKernel::new(store.clone());
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+    frame_kernel
+        .start_frame(&run_id, &frame_id, &root_spec)
+        .await
+        .expect("start frame");
+    frame_kernel
+        .admit_next_ready_node_with_retry(&run_id, &frame_id, 5)
+        .await
+        .expect("admit loop node")
+        .expect("loop node effects");
+
+    let loop_instance_id =
+        crate::ids::LoopInstanceId::from(format!("{frame_id}::loop-node").as_str());
+    store
+        .upsert_loop_snapshot(
+            &run_id,
+            &loop_instance_id,
+            crate::run::LoopSnapshot {
+                kernel_state: KernelState {
+                    phase: "Running".into(),
+                    fields: std::collections::BTreeMap::from([
+                        (
+                            "loop_instance_id".into(),
+                            meerkat_machine_kernels::KernelValue::String(
+                                loop_instance_id.to_string(),
+                            ),
+                        ),
+                        (
+                            "current_iteration".into(),
+                            meerkat_machine_kernels::KernelValue::U64(0),
+                        ),
+                        (
+                            "max_iterations".into(),
+                            meerkat_machine_kernels::KernelValue::U64(3),
+                        ),
+                        (
+                            "parent_frame_id".into(),
+                            meerkat_machine_kernels::KernelValue::String(frame_id.to_string()),
+                        ),
+                        (
+                            "parent_node_id".into(),
+                            meerkat_machine_kernels::KernelValue::String("loop-node".into()),
+                        ),
+                        (
+                            "loop_id".into(),
+                            meerkat_machine_kernels::KernelValue::String("retry".into()),
+                        ),
+                        ("depth".into(), meerkat_machine_kernels::KernelValue::U64(1)),
+                        (
+                            "stage".into(),
+                            meerkat_machine_kernels::KernelValue::NamedVariant {
+                                enum_name: "LoopIterationStage".into(),
+                                variant: "AwaitingBodyFrame".into(),
+                            },
+                        ),
+                        (
+                            "last_completed_iteration".into(),
+                            meerkat_machine_kernels::KernelValue::U64(0),
+                        ),
+                        (
+                            "active_body_frame_id".into(),
+                            meerkat_machine_kernels::KernelValue::None,
+                        ),
+                    ]),
+                },
+            },
+            None,
+        )
+        .await
+        .expect("seed running loop snapshot");
+
+    let engine = FlowFrameEngine::new(store.clone(), Arc::new(ScriptedExecutor), 0, 0);
+    let context = FlowContext {
+        run_id: run_id.clone(),
+        activation_params: serde_json::json!({}),
+        step_outputs: IndexMap::new(),
+        loop_outputs: IndexMap::new(),
+    };
+
+    let outputs = engine
+        .execute_frame(&run_id, &frame_id, &root_spec, &context)
+        .await
+        .expect("resume running loop node");
+    assert_eq!(
+        outputs.outputs.get(&crate::ids::StepId::from("body")),
+        Some(&serde_json::json!({"done": true}))
+    );
+
+    let run = store
+        .get_run(&run_id)
+        .await
+        .expect("get_run")
+        .expect("run exists");
+    let frame_snap = run.frames.get(&frame_id).expect("frame snapshot");
+    let node_status = match frame_snap.kernel_state.fields.get("node_status") {
+        Some(meerkat_machine_kernels::KernelValue::Map(map)) => map,
+        other => panic!("expected node_status map, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            node_status.get(&meerkat_machine_kernels::KernelValue::String("loop-node".into())),
+            Some(meerkat_machine_kernels::KernelValue::NamedVariant { variant, .. })
+                if variant == "Completed"
+        ),
+        "running loop node should resume to completion instead of being failed on restart"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_running_loop_node_does_not_duplicate_iteration_ledger_entry() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec};
+    use crate::ids::{FlowNodeId, FrameId, LoopId};
+    use crate::run::FlowContext;
+    use crate::runtime::flow_frame_engine::{FlowFrameEngine, FrameStepExecutor, FrameStepResult};
+    use crate::runtime::flow_frame_kernel::FlowFrameMutator;
+    use meerkat_machine_kernels::KernelState;
+
+    struct ScriptedExecutor;
+
+    #[async_trait]
+    impl FrameStepExecutor for ScriptedExecutor {
+        async fn execute_step(
+            &self,
+            _run_id: &crate::ids::RunId,
+            _frame_id: &FrameId,
+            _node_id: &FlowNodeId,
+            _step_id: &crate::ids::StepId,
+            _context: &FlowContext,
+        ) -> Result<FrameStepResult, MobError> {
+            Ok(FrameStepResult::Completed(
+                serde_json::json!({"done": true}),
+            ))
+        }
+    }
+
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        KernelState::default(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create_run");
+
+    let mut body_nodes = IndexMap::new();
+    body_nodes.insert(
+        FlowNodeId::from("body-step"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: crate::ids::StepId::from("body"),
+            depends_on: vec![],
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    let body_spec = FrameSpec { nodes: body_nodes };
+    let root_spec = {
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            FlowNodeId::from("loop-node"),
+            FlowNodeSpec::RepeatUntil(RepeatUntilSpec {
+                loop_id: LoopId::from("retry"),
+                depends_on: vec![],
+                depends_on_mode: DependencyMode::All,
+                body: body_spec.clone(),
+                until: ConditionExpr::Eq {
+                    path: "steps.body.done".to_string(),
+                    value: serde_json::json!(true),
+                },
+                max_iterations: 3,
+            }),
+        );
+        FrameSpec { nodes }
+    };
+
+    let frame_kernel = crate::runtime::flow_frame_kernel::FlowFrameKernel::new(store.clone());
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+    frame_kernel
+        .start_frame(&run_id, &frame_id, &root_spec)
+        .await
+        .expect("start frame");
+    frame_kernel
+        .admit_next_ready_node_with_retry(&run_id, &frame_id, 5)
+        .await
+        .expect("admit loop node")
+        .expect("loop node effects");
+
+    let loop_instance_id =
+        crate::ids::LoopInstanceId::from(format!("{frame_id}::loop-node").as_str());
+    let body_frame_id = FrameId::from(format!("{loop_instance_id}::iter-0").as_str());
+    store
+        .upsert_loop_snapshot(
+            &run_id,
+            &loop_instance_id,
+            crate::run::LoopSnapshot {
+                kernel_state: KernelState {
+                    phase: "Running".into(),
+                    fields: std::collections::BTreeMap::from([
+                        (
+                            "loop_instance_id".into(),
+                            meerkat_machine_kernels::KernelValue::String(
+                                loop_instance_id.to_string(),
+                            ),
+                        ),
+                        (
+                            "current_iteration".into(),
+                            meerkat_machine_kernels::KernelValue::U64(0),
+                        ),
+                        (
+                            "max_iterations".into(),
+                            meerkat_machine_kernels::KernelValue::U64(3),
+                        ),
+                        (
+                            "parent_frame_id".into(),
+                            meerkat_machine_kernels::KernelValue::String(frame_id.to_string()),
+                        ),
+                        (
+                            "parent_node_id".into(),
+                            meerkat_machine_kernels::KernelValue::String("loop-node".into()),
+                        ),
+                        (
+                            "loop_id".into(),
+                            meerkat_machine_kernels::KernelValue::String("retry".into()),
+                        ),
+                        ("depth".into(), meerkat_machine_kernels::KernelValue::U64(1)),
+                        (
+                            "stage".into(),
+                            meerkat_machine_kernels::KernelValue::NamedVariant {
+                                enum_name: "LoopIterationStage".into(),
+                                variant: "BodyFrameActive".into(),
+                            },
+                        ),
+                        (
+                            "last_completed_iteration".into(),
+                            meerkat_machine_kernels::KernelValue::U64(0),
+                        ),
+                        (
+                            "active_body_frame_id".into(),
+                            meerkat_machine_kernels::KernelValue::String(body_frame_id.to_string()),
+                        ),
+                    ]),
+                },
+            },
+            Some(crate::run::LoopIterationLedgerEntry {
+                loop_instance_id: loop_instance_id.clone(),
+                iteration: 0,
+                frame_id: body_frame_id.clone(),
+            }),
+        )
+        .await
+        .expect("seed running loop snapshot with ledger entry");
+    let root_body_frame = frame_kernel
+        .start_frame(&run_id, &body_frame_id, &body_spec)
+        .await
+        .expect("seed body frame");
+    let mut body_frame = root_body_frame.clone();
+    body_frame.kernel_state.fields.insert(
+        "frame_scope".into(),
+        meerkat_machine_kernels::KernelValue::NamedVariant {
+            enum_name: "FrameScope".into(),
+            variant: "Body".into(),
+        },
+    );
+    body_frame.kernel_state.fields.insert(
+        "loop_instance_id".into(),
+        meerkat_machine_kernels::KernelValue::String(loop_instance_id.to_string()),
+    );
+    body_frame.kernel_state.fields.insert(
+        "iteration".into(),
+        meerkat_machine_kernels::KernelValue::U64(0),
+    );
+    assert!(
+        store
+            .cas_frame_state(&run_id, &body_frame_id, Some(&root_body_frame), body_frame)
+            .await
+            .expect("promote body frame scope"),
+        "body frame scope update should succeed"
+    );
+
+    let engine = FlowFrameEngine::new(store.clone(), Arc::new(ScriptedExecutor), 0, 0);
+    let context = FlowContext {
+        run_id: run_id.clone(),
+        activation_params: serde_json::json!({}),
+        step_outputs: IndexMap::new(),
+        loop_outputs: IndexMap::new(),
+    };
+
+    engine
+        .execute_frame(&run_id, &frame_id, &root_spec, &context)
+        .await
+        .expect("resume running loop node");
+
+    let run = store
+        .get_run(&run_id)
+        .await
+        .expect("get_run")
+        .expect("run exists");
+    assert_eq!(
+        run.loop_iteration_ledger
+            .iter()
+            .filter(|entry| {
+                entry.loop_instance_id == loop_instance_id
+                    && entry.iteration == 0
+                    && entry.frame_id == body_frame_id
+            })
+            .count(),
+        1,
+        "resume retries must not duplicate the logical loop iteration ledger row"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_timeout_cleans_up_inflight_node() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+    use meerkat_machine_kernels::KernelValue;
+
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    definition.limits = Some(LimitsSpec {
+        max_flow_duration_ms: Some(25),
+        max_step_retries: None,
+        max_orphaned_turns: Some(8),
+        cancel_grace_timeout_ms: None,
+        ..Default::default()
+    });
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("start-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    let events = handle.events().replay_all().await.expect("replay");
+    assert!(
+        terminal
+            .failure_ledger
+            .iter()
+            .any(|entry| { entry.reason.contains("max flow duration exceeded") })
+            || events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    MobEventKind::FlowFailed { run_id: id, reason, .. }
+                        if id == &run_id && reason.contains("max flow duration exceeded")
+                )
+            }),
+        "root-frame timeout should surface an explicit flow-duration failure reason"
+    );
+
+    let run = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("flow status")
+        .expect("run exists");
+    let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
+    let frame = run.frames.get(&frame_id).expect("root frame snapshot");
+    let node_status = match frame.kernel_state.fields.get("node_status") {
+        Some(KernelValue::Map(map)) => map,
+        other => panic!("expected node_status map, got {other:?}"),
+    };
+    let start_status = node_status
+        .get(&KernelValue::String("start-node".to_string()))
+        .expect("start node status");
+    assert!(
+        matches!(start_status, KernelValue::NamedVariant { variant, .. } if variant == "Failed"),
+        "timed-out root-frame step should not remain Running after terminalization: {start_status:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_root_frame_max_active_nodes_limits_nested_body_step_admission() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, LimitsSpec, RepeatUntilSpec};
+    use crate::ids::{FlowNodeId, LoopId};
+    use meerkat_machine_kernels::KernelValue;
+
+    let mut definition = sample_definition();
+    definition.limits = Some(LimitsSpec {
+        max_active_nodes: Some(1),
+        max_orphaned_turns: Some(8),
+        ..Default::default()
+    });
+
+    let mut steps = IndexMap::new();
+    steps.insert(step_id("body"), flow_step("worker", "Loop body step"));
+    steps.insert(
+        step_id("sibling"),
+        flow_step("lead", "Independent sibling step"),
+    );
+
+    let body = FrameSpec {
+        nodes: IndexMap::from([(
+            FlowNodeId::from("body-step-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: step_id("body"),
+                depends_on: Vec::new(),
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        )]),
+    };
+
+    let root = FrameSpec {
+        nodes: IndexMap::from([
+            (
+                FlowNodeId::from("loop-node"),
+                FlowNodeSpec::RepeatUntil(RepeatUntilSpec {
+                    loop_id: LoopId::from("test-loop"),
+                    depends_on: Vec::new(),
+                    depends_on_mode: DependencyMode::All,
+                    body,
+                    until: ConditionExpr::Eq {
+                        path: "steps.body.done".to_string(),
+                        value: serde_json::json!(true),
+                    },
+                    max_iterations: 3,
+                }),
+            ),
+            (
+                FlowNodeId::from("sibling-node"),
+                FlowNodeSpec::Step(FrameStepSpec {
+                    step_id: step_id("sibling"),
+                    depends_on: Vec::new(),
+                    depends_on_mode: DependencyMode::All,
+                    branch: None,
+                }),
+            ),
+        ]),
+    };
+
+    definition.flows = BTreeMap::from([(
+        flow_id("demo"),
+        FlowSpec {
+            description: Some("nested body-frame admission obeys max_active_nodes".to_string()),
+            steps,
+            root: Some(root),
+        },
+    )]);
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn lead");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let run = handle
+            .flow_status(run_id.clone())
+            .await
+            .expect("flow status")
+            .expect("run exists");
+        let active_node_count = match run.flow_state.fields.get("active_node_count") {
+            Some(KernelValue::U64(value)) => *value,
+            other => panic!("expected active_node_count u64, got {other:?}"),
+        };
+        let ready_frames_len = match run.flow_state.fields.get("ready_frames") {
+            Some(KernelValue::Seq(queue)) => queue.len(),
+            other => panic!("expected ready_frames seq, got {other:?}"),
+        };
+        let has_body_frame = run.frames.values().any(|frame| {
+            matches!(
+                frame.kernel_state.fields.get("frame_scope"),
+                Some(KernelValue::NamedVariant { variant, .. }) if variant == "Body"
+            )
+        });
+
+        if has_body_frame && active_node_count > 0 && ready_frames_len > 0 {
+            assert_eq!(
+                active_node_count, 1,
+                "run scheduler should admit at most one active node when max_active_nodes=1; run={run:?}"
+            );
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for nested body frame admission under max_active_nodes; last run={run:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+#[tokio::test]
+async fn test_root_frame_cancel_cleans_up_inflight_node() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::FlowNodeId;
+    use meerkat_machine_kernels::KernelValue;
+
+    let mut definition = sample_definition_with_single_step_flow(60_000, 8);
+    let flow = definition
+        .flows
+        .get_mut(&FlowId::from("demo"))
+        .expect("demo flow");
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("start-node"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    flow.root = Some(FrameSpec { nodes: root_nodes });
+
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    service.set_flow_turn_never_terminal(true);
+
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    handle
+        .cancel_flow(run_id.clone())
+        .await
+        .expect("cancel flow");
+
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
+    assert_eq!(terminal.status, MobRunStatus::Canceled);
+
+    let run = handle
+        .flow_status(run_id.clone())
+        .await
+        .expect("flow status")
+        .expect("run exists");
+    let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
+    let frame = run.frames.get(&frame_id).expect("root frame snapshot");
+    let node_status = match frame.kernel_state.fields.get("node_status") {
+        Some(KernelValue::Map(map)) => map,
+        other => panic!("expected node_status map, got {other:?}"),
+    };
+    let start_status = node_status
+        .get(&KernelValue::String("start-node".to_string()))
+        .expect("start node status");
+    assert!(
+        !matches!(start_status, KernelValue::NamedVariant { variant, .. } if variant == "Running"),
+        "canceled root-frame step should not remain Running after terminalization: {start_status:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_root_loop_body_failure_stops_after_first_failed_iteration() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec, RepeatUntilSpec};
+    use crate::ids::FlowNodeId;
+
+    let mut definition = sample_definition();
+    let mut steps = IndexMap::new();
+    steps.insert(
+        step_id("needs_lead"),
+        flow_step("lead", "Lead-only loop body"),
+    );
+
+    let mut body_nodes = IndexMap::new();
+    body_nodes.insert(
+        FlowNodeId::from("body-step"),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("needs_lead"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+
+    let mut root_nodes = IndexMap::new();
+    root_nodes.insert(
+        FlowNodeId::from("retry-loop"),
+        FlowNodeSpec::RepeatUntil(RepeatUntilSpec {
+            loop_id: crate::ids::LoopId::from("retry"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            body: FrameSpec { nodes: body_nodes },
+            until: ConditionExpr::Eq {
+                path: "steps.needs_lead.done".to_string(),
+                value: serde_json::json!(true),
+            },
+            max_iterations: 3,
+        }),
+    );
+
+    definition.flows = BTreeMap::from([(
+        flow_id("demo"),
+        FlowSpec {
+            description: Some("loop failure should stop immediately".to_string()),
+            steps,
+            root: Some(FrameSpec { nodes: root_nodes }),
+        },
+    )]);
+
+    let (handle, _service) = create_test_mob(definition).await;
+    let run_id = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Failed);
+    assert_eq!(
+        terminal.loop_iteration_ledger.len(),
+        1,
+        "failed loop body should stop loop execution instead of advancing to extra iterations"
     );
 }

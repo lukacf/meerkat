@@ -1290,6 +1290,7 @@ pub fn external_tool_surface_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![
             EffectDispositionRule {
                 effect_variant: "ScheduleSurfaceCompletion".into(),

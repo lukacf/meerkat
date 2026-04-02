@@ -887,16 +887,36 @@ enum ConfigCommands {
     Get {
         #[arg(long, default_value = "toml")]
         format: ConfigFormat,
+        /// Include the monotonic config generation in the output envelope/header
+        #[arg(long)]
+        with_generation: bool,
     },
     /// Replace the config with the provided content
     Set {
         /// Path to a TOML or JSON config file
-        file: PathBuf,
+        #[arg(value_name = "FILE", required_unless_present_any = ["json", "toml_payload"])]
+        file: Option<PathBuf>,
+        /// Raw JSON config payload
+        #[arg(long, conflicts_with = "toml_payload")]
+        json: Option<String>,
+        /// Raw TOML config payload
+        #[arg(long = "toml", conflicts_with = "json")]
+        toml_payload: Option<String>,
+        /// Reject the write unless the current generation matches
+        #[arg(long = "expected-generation")]
+        expected_generation: Option<u64>,
     },
     /// Apply a JSON merge patch to the config
     Patch {
-        /// Raw JSON patch payload or path to a JSON file
-        value: String,
+        /// Path to a JSON patch file
+        #[arg(value_name = "FILE", required_unless_present = "json")]
+        file: Option<PathBuf>,
+        /// Raw JSON patch payload
+        #[arg(long, conflicts_with = "file")]
+        json: Option<String>,
+        /// Reject the write unless the current generation matches
+        #[arg(long = "expected-generation")]
+        expected_generation: Option<u64>,
     },
 }
 
@@ -1489,11 +1509,21 @@ async fn main() -> anyhow::Result<ExitCode> {
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
-            ConfigCommands::Get { format } => handle_config_get(format, false, &cli_scope).await,
-            ConfigCommands::Set { file } => {
-                handle_config_set(Some(file), None, None, None, &cli_scope).await
-            }
-            ConfigCommands::Patch { value } => handle_config_patch_value(&value, &cli_scope).await,
+            ConfigCommands::Get {
+                format,
+                with_generation,
+            } => handle_config_get(format, with_generation, &cli_scope).await,
+            ConfigCommands::Set {
+                file,
+                json,
+                toml_payload,
+                expected_generation,
+            } => handle_config_set(file, json, toml_payload, expected_generation, &cli_scope).await,
+            ConfigCommands::Patch {
+                file,
+                json,
+                expected_generation,
+            } => handle_config_patch(file, json, expected_generation, &cli_scope).await,
         },
         Commands::Capabilities => handle_capabilities(&cli_scope).await,
         Commands::Models { command } => match command {
@@ -1948,15 +1978,6 @@ async fn handle_config_patch(
         .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
     println!("generation={}", snapshot.generation);
     Ok(())
-}
-
-async fn handle_config_patch_value(value: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
-    let path = PathBuf::from(value);
-    if path.exists() {
-        handle_config_patch(Some(path), None, None, scope).await
-    } else {
-        handle_config_patch(None, Some(value.to_string()), None, scope).await
-    }
 }
 
 async fn handle_capabilities(scope: &RuntimeScope) -> anyhow::Result<()> {
@@ -9977,6 +9998,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
             flow_state: Default::default(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: Default::default(),
+            loop_iteration_outputs: Default::default(),
         };
 
         let run_json = render_flow_status_json(Some(run)).expect("encode run json");
@@ -10014,6 +10041,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
                             flow_state: Default::default(),
+                            frames: std::collections::BTreeMap::new(),
+                            loops: std::collections::BTreeMap::new(),
+                            loop_iteration_ledger: Vec::new(),
+                            schema_version: 4,
+                            root_step_outputs: Default::default(),
+                            loop_iteration_outputs: Default::default(),
                         },
                     ),
                     (
@@ -10029,6 +10062,12 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
                             step_ledger: Vec::new(),
                             failure_ledger: Vec::new(),
                             flow_state: Default::default(),
+                            frames: std::collections::BTreeMap::new(),
+                            loops: std::collections::BTreeMap::new(),
+                            loop_iteration_ledger: Vec::new(),
+                            schema_version: 4,
+                            root_step_outputs: Default::default(),
+                            loop_iteration_outputs: Default::default(),
                         },
                     ),
                 ]),

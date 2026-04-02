@@ -39,6 +39,7 @@ impl AuditPolicy {
                 AuthorityModuleRule::new("meerkat-mob/src/runtime/mob_lifecycle_authority.rs"),
                 AuthorityModuleRule::new("meerkat-mob/src/runtime/mob_orchestrator_authority.rs"),
                 AuthorityModuleRule::new("meerkat-mob/src/runtime/flow_run_kernel.rs"),
+                AuthorityModuleRule::new("meerkat-mob/src/runtime/loop_iteration_authority.rs"),
                 AuthorityModuleRule::new("meerkat-runtime/src/runtime_ingress_authority.rs"),
                 AuthorityModuleRule::new("meerkat-runtime/src/ops_lifecycle_authority.rs"),
                 AuthorityModuleRule::new("meerkat-core/src/turn_execution_authority.rs"),

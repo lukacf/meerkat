@@ -131,6 +131,12 @@ mod tests {
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: indexmap::IndexMap::new(),
+            loop_iteration_outputs: std::collections::BTreeMap::new(),
         };
         runs.create_run(run.clone()).await.unwrap();
         assert!(runs.get_run(&run.run_id).await.unwrap().is_some());
@@ -175,6 +181,12 @@ model = "test"
             completed_at: None,
             step_ledger: Vec::new(),
             failure_ledger: Vec::new(),
+            frames: std::collections::BTreeMap::new(),
+            loops: std::collections::BTreeMap::new(),
+            loop_iteration_ledger: Vec::new(),
+            schema_version: 4,
+            root_step_outputs: indexmap::IndexMap::new(),
+            loop_iteration_outputs: std::collections::BTreeMap::new(),
         };
         storage.runs.create_run(run.clone()).await.unwrap();
         assert!(storage.runs.get_run(&run.run_id).await.unwrap().is_some());

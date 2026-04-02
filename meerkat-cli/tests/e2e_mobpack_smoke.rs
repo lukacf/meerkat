@@ -195,6 +195,7 @@ async fn write_rpc_state_probe_mobpack_fixture(
     "worker":{{
       "model":"{model}",
       "tools":{{"comms":true}},
+      "external_addressable":true,
       "peer_description":"Worker specialist"
     }},
     "reviewer":{{
@@ -906,7 +907,11 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         &mut surface,
         4,
         "mob/wire",
-        json!({"mob_id": mob_id, "a":"lead-1", "b":"worker-1"}),
+        json!({
+            "mob_id": mob_id,
+            "member": "lead-1",
+            "peer": { "local": "worker-1" }
+        }),
         15,
     )
     .await?;
@@ -930,7 +935,11 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         &mut surface,
         5,
         "mob/unwire",
-        json!({"mob_id": mob_id, "a":"lead-1", "b":"worker-1"}),
+        json!({
+            "mob_id": mob_id,
+            "member": "lead-1",
+            "peer": { "local": "worker-1" }
+        }),
         15,
     )
     .await?;
@@ -959,7 +968,7 @@ async fn e2e_cli_mob_rpc_state_machine_probe() -> Result<(), Box<dyn std::error:
         json!({
             "mob_id": mob_id,
             "meerkat_id": "worker-1",
-            "message": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
+            "content": "Reply with TURN_PROBE_29 and include CTX_MOB_29."
         }),
         120,
     )

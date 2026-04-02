@@ -263,6 +263,14 @@ export interface ToolConfigChangedEvent {
   type: "tool_config_changed";
 }
 
+export interface BackgroundJobCompletedEvent {
+  detail: string;
+  display_name: string;
+  job_id: string;
+  status: string;
+  type: "background_job_completed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -330,4 +338,5 @@ export type AgentEvent =
   InteractionCompleteEvent |
   InteractionFailedEvent |
   StreamTruncatedEvent |
-  ToolConfigChangedEvent;
+  ToolConfigChangedEvent |
+  BackgroundJobCompletedEvent;

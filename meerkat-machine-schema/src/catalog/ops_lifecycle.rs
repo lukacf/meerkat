@@ -1421,6 +1421,7 @@ pub fn ops_lifecycle_machine() -> MachineSchema {
                 }],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![
             disposition(
                 "SubmitOpEvent",

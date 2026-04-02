@@ -328,6 +328,7 @@ pub fn comms_drain_lifecycle_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![
             EffectDispositionRule {
                 effect_variant: "SpawnDrainTask".into(),

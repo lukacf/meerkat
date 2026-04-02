@@ -1,11 +1,13 @@
 use crate::{
-    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionInvariant,
-    CompositionInvariantKind, CompositionSchema, CompositionStateLimits, CompositionWitness,
-    CompositionWitnessField, CompositionWitnessInput, CompositionWitnessState,
-    CompositionWitnessTransition, CompositionWitnessTransitionOrder, EffectHandoffProtocol,
-    EntryInput, Expr, FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
+    ActorKind, ActorPriority, ActorSchema, ClosurePolicy, CompositionDriverRustBinding,
+    CompositionInvariant, CompositionInvariantKind, CompositionSchema, CompositionStateLimits,
+    CompositionTransactionPlan, CompositionWitness, CompositionWitnessField,
+    CompositionWitnessInput, CompositionWitnessState, CompositionWitnessTransition,
+    CompositionWitnessTransitionOrder, EffectHandoffProtocol, EntryInput, Expr,
+    FeedbackFieldBinding, FeedbackFieldSource, FeedbackInputRef, MachineInstance,
     ProtocolGenerationMode, ProtocolHelperReturnShape, ProtocolRustBinding, Route,
-    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, SchedulerRule,
+    RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetSelector,
+    SchedulerRule,
 };
 use std::collections::BTreeMap;
 
@@ -377,6 +379,9 @@ pub fn runtime_pipeline_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "ordinary_ingress".into(),
@@ -2086,6 +2091,9 @@ pub fn external_tool_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "surface_boundary".into(),
@@ -2749,6 +2757,9 @@ pub fn peer_runtime_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "peer_plane".into(),
@@ -3567,6 +3578,9 @@ pub fn ops_runtime_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "ordinary_ingress".into(),
@@ -4703,6 +4717,9 @@ pub fn surface_event_runtime_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "ordinary_ingress".into(),
@@ -5732,6 +5749,9 @@ pub fn continuation_runtime_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "ordinary_ingress".into(),
@@ -7102,6 +7122,9 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![ActorPriority {
             higher: "control_plane".into(),
             lower: "ordinary_ingress".into(),
@@ -7485,6 +7508,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                             },
                             CompositionWitnessField {
                                 field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
                                 expr: Expr::U64(0),
                             },
                         ],
@@ -8006,6 +8041,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 field: "max_step_retries".into(),
                                 expr: Expr::U64(0),
                             },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
+                                expr: Expr::U64(0),
+                            },
                         ],
                     },
                     CompositionWitnessInput {
@@ -8189,6 +8236,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                             },
                             CompositionWitnessField {
                                 field: "max_step_retries".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
                                 expr: Expr::U64(0),
                             },
                         ],
@@ -8561,6 +8620,18 @@ pub fn mob_bundle_composition() -> CompositionSchema {
                                 field: "max_step_retries".into(),
                                 expr: Expr::U64(0),
                             },
+                            CompositionWitnessField {
+                                field: "max_active_nodes".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_active_frames".into(),
+                                expr: Expr::U64(0),
+                            },
+                            CompositionWitnessField {
+                                field: "max_frame_depth".into(),
+                                expr: Expr::U64(0),
+                            },
                         ],
                     },
                     CompositionWitnessInput {
@@ -8837,6 +8908,581 @@ pub fn mob_bundle_composition() -> CompositionSchema {
     }
 }
 
+pub fn flow_frame_loop_composition() -> CompositionSchema {
+    CompositionSchema {
+        name: "flow_frame_loop".into(),
+        machines: vec![
+            MachineInstance {
+                instance_id: "flow_run".into(),
+                machine_name: "FlowRunMachine".into(),
+                actor: "run_engine".into(),
+            },
+            MachineInstance {
+                instance_id: "flow_frame".into(),
+                machine_name: "FlowFrameMachine".into(),
+                actor: "frame_engine".into(),
+            },
+            MachineInstance {
+                instance_id: "loop_iteration".into(),
+                machine_name: "LoopIterationMachine".into(),
+                actor: "loop_engine".into(),
+            },
+        ],
+        actors: vec![
+            machine_actor("run_engine"),
+            machine_actor("frame_engine"),
+            machine_actor("loop_engine"),
+            owner_actor("flow_runtime"),
+        ],
+        handoff_protocols: vec![EffectHandoffProtocol {
+            name: "flow_loop_until_evaluation".into(),
+            producer_instance: "loop_iteration".into(),
+            effect_variant: "EvaluateUntilCondition".into(),
+            realizing_actor: "flow_runtime".into(),
+            correlation_fields: vec!["loop_instance_id".into(), "iteration".into()],
+            obligation_fields: vec![
+                "loop_instance_id".into(),
+                "iteration".into(),
+                "parent_frame_id".into(),
+                "parent_node_id".into(),
+                "loop_id".into(),
+            ],
+            allowed_feedback_inputs: vec![
+                FeedbackInputRef {
+                    machine_instance: "loop_iteration".into(),
+                    input_variant: "UntilConditionMet".into(),
+                    field_bindings: vec![
+                        binding("loop_instance_id", obligation_field("loop_instance_id")),
+                        binding("iteration", obligation_field("iteration")),
+                    ],
+                },
+                FeedbackInputRef {
+                    machine_instance: "loop_iteration".into(),
+                    input_variant: "UntilConditionFailed".into(),
+                    field_bindings: vec![
+                        binding("loop_instance_id", obligation_field("loop_instance_id")),
+                        binding("iteration", obligation_field("iteration")),
+                    ],
+                },
+            ],
+            closure_policy: ClosurePolicy::AckRequired,
+            liveness_annotation: Some(
+                "eventual feedback under task-scheduling fairness".into(),
+            ),
+            rust: protocol_rust(
+                "meerkat-mob/src/generated/protocol_flow_loop_until_evaluation.rs",
+                ProtocolGenerationMode::ShellBridge,
+                Some("crate::runtime::loop_iteration_authority::LoopIterationAuthority"),
+                Some("crate::runtime::loop_iteration_authority::LoopIterationMutator"),
+                Some("crate::runtime::loop_iteration_authority::LoopIterationInput"),
+                None,
+                Some("crate::runtime::loop_iteration_authority::LoopIterationTransition"),
+                Some("crate::error::MobError"),
+                None,
+                Some("crate::runtime::loop_iteration_authority::LoopUntilEvaluationRequested"),
+                ProtocolHelperReturnShape::Obligations,
+                &[
+                    "use crate::error::MobError;",
+                    "use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};",
+                    "use crate::runtime::loop_iteration_authority::{LoopIterationAuthority, LoopIterationInput, LoopIterationMutator, LoopIterationTransition, LoopUntilEvaluationRequested};",
+                ],
+            ),
+        }],
+        entry_inputs: vec![
+            EntryInput {
+                name: "flow_run_register_ready_frame".into(),
+                machine: "flow_run".into(),
+                input_variant: "RegisterReadyFrame".into(),
+            },
+            EntryInput {
+                name: "flow_run_register_pending_body_frame".into(),
+                machine: "flow_run".into(),
+                input_variant: "RegisterPendingBodyFrame".into(),
+            },
+            EntryInput {
+                name: "flow_run_node_execution_released".into(),
+                machine: "flow_run".into(),
+                input_variant: "NodeExecutionReleased".into(),
+            },
+            EntryInput {
+                name: "flow_run_frame_terminated".into(),
+                machine: "flow_run".into(),
+                input_variant: "FrameTerminated".into(),
+            },
+            EntryInput {
+                name: "flow_frame_start_root_frame".into(),
+                machine: "flow_frame".into(),
+                input_variant: "StartRootFrame".into(),
+            },
+            EntryInput {
+                name: "flow_frame_start_body_frame".into(),
+                machine: "flow_frame".into(),
+                input_variant: "StartBodyFrame".into(),
+            },
+            EntryInput {
+                name: "flow_frame_complete_node".into(),
+                machine: "flow_frame".into(),
+                input_variant: "CompleteNode".into(),
+            },
+            EntryInput {
+                name: "flow_frame_fail_node".into(),
+                machine: "flow_frame".into(),
+                input_variant: "FailNode".into(),
+            },
+            EntryInput {
+                name: "flow_frame_cancel_node".into(),
+                machine: "flow_frame".into(),
+                input_variant: "CancelNode".into(),
+            },
+            EntryInput {
+                name: "flow_frame_seal_frame".into(),
+                machine: "flow_frame".into(),
+                input_variant: "SealFrame".into(),
+            },
+            EntryInput {
+                name: "loop_start_loop".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "StartLoop".into(),
+            },
+            EntryInput {
+                name: "loop_body_frame_started".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "BodyFrameStarted".into(),
+            },
+            EntryInput {
+                name: "loop_body_frame_completed".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "BodyFrameCompleted".into(),
+            },
+            EntryInput {
+                name: "loop_body_frame_failed".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "BodyFrameFailed".into(),
+            },
+            EntryInput {
+                name: "loop_body_frame_canceled".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "BodyFrameCanceled".into(),
+            },
+            EntryInput {
+                name: "loop_until_condition_met".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "UntilConditionMet".into(),
+            },
+            EntryInput {
+                name: "loop_until_condition_failed".into(),
+                machine: "loop_iteration".into(),
+                input_variant: "UntilConditionFailed".into(),
+            },
+        ],
+        routes: vec![
+            Route {
+                name: "flow_frame_ready_frontier_updates_run_ready_frames".into(),
+                from_machine: "flow_frame".into(),
+                effect_variant: "ReadyFrontierChanged".into(),
+                to: RouteTarget {
+                    machine: "flow_run".into(),
+                    input_variant: "RegisterReadyFrame".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "frame_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "frame_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "flow_frame_node_release_updates_run_slots".into(),
+                from_machine: "flow_frame".into(),
+                effect_variant: "NodeExecutionReleased".into(),
+                to: RouteTarget {
+                    machine: "flow_run".into(),
+                    input_variant: "NodeExecutionReleased".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "frame_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "frame_id".into(),
+                        allow_named_alias: false,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "loop_request_body_frame_updates_run_pending_queue".into(),
+                from_machine: "loop_iteration".into(),
+                effect_variant: "RequestBodyFrameStart".into(),
+                to: RouteTarget {
+                    machine: "flow_run".into(),
+                    input_variant: "RegisterPendingBodyFrame".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "loop_instance_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "loop_instance_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "depth".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "depth".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "body_frame_completed_advances_loop_iteration".into(),
+                from_machine: "flow_frame".into(),
+                effect_variant: "BodyFrameCompleted".into(),
+                to: RouteTarget {
+                    machine: "loop_iteration".into(),
+                    input_variant: "BodyFrameCompleted".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "loop_instance_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "loop_instance_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "iteration".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "iteration".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "body_frame_failed_fails_loop_iteration".into(),
+                from_machine: "flow_frame".into(),
+                effect_variant: "BodyFrameFailed".into(),
+                to: RouteTarget {
+                    machine: "loop_iteration".into(),
+                    input_variant: "BodyFrameFailed".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "loop_instance_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "loop_instance_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "iteration".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "iteration".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "body_frame_canceled_cancels_loop_iteration".into(),
+                from_machine: "flow_frame".into(),
+                effect_variant: "BodyFrameCanceled".into(),
+                to: RouteTarget {
+                    machine: "loop_iteration".into(),
+                    input_variant: "BodyFrameCanceled".into(),
+                },
+                bindings: vec![
+                    RouteFieldBinding {
+                        to_field: "loop_instance_id".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "loop_instance_id".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                    RouteFieldBinding {
+                        to_field: "iteration".into(),
+                        source: RouteBindingSource::Field {
+                            from_field: "iteration".into(),
+                            allow_named_alias: false,
+                        },
+                    },
+                ],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "loop_completed_completes_parent_loop_node".into(),
+                from_machine: "loop_iteration".into(),
+                effect_variant: "LoopCompleted".into(),
+                to: RouteTarget {
+                    machine: "flow_frame".into(),
+                    input_variant: "CompleteNode".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "node_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "parent_node_id".into(),
+                        allow_named_alias: true,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "loop_exhausted_fails_parent_loop_node".into(),
+                from_machine: "loop_iteration".into(),
+                effect_variant: "LoopExhausted".into(),
+                to: RouteTarget {
+                    machine: "flow_frame".into(),
+                    input_variant: "FailNode".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "node_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "parent_node_id".into(),
+                        allow_named_alias: true,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "loop_failed_fails_parent_loop_node".into(),
+                from_machine: "loop_iteration".into(),
+                effect_variant: "LoopFailed".into(),
+                to: RouteTarget {
+                    machine: "flow_frame".into(),
+                    input_variant: "FailNode".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "node_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "parent_node_id".into(),
+                        allow_named_alias: true,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+            Route {
+                name: "loop_canceled_cancels_parent_loop_node".into(),
+                from_machine: "loop_iteration".into(),
+                effect_variant: "LoopCanceled".into(),
+                to: RouteTarget {
+                    machine: "flow_frame".into(),
+                    input_variant: "CancelNode".into(),
+                },
+                bindings: vec![RouteFieldBinding {
+                    to_field: "node_id".into(),
+                    source: RouteBindingSource::Field {
+                        from_field: "parent_node_id".into(),
+                        allow_named_alias: true,
+                    },
+                }],
+                delivery: RouteDelivery::Immediate,
+            },
+        ],
+        route_target_selectors: vec![
+            route_target_selector(
+                "loop_completed_completes_parent_loop_node",
+                "frame_id",
+                RouteBindingSource::Field {
+                    from_field: "parent_frame_id".into(),
+                    allow_named_alias: true,
+                },
+            ),
+            route_target_selector(
+                "loop_exhausted_fails_parent_loop_node",
+                "frame_id",
+                RouteBindingSource::Field {
+                    from_field: "parent_frame_id".into(),
+                    allow_named_alias: true,
+                },
+            ),
+            route_target_selector(
+                "loop_failed_fails_parent_loop_node",
+                "frame_id",
+                RouteBindingSource::Field {
+                    from_field: "parent_frame_id".into(),
+                    allow_named_alias: true,
+                },
+            ),
+            route_target_selector(
+                "loop_canceled_cancels_parent_loop_node",
+                "frame_id",
+                RouteBindingSource::Field {
+                    from_field: "parent_frame_id".into(),
+                    allow_named_alias: true,
+                },
+            ),
+        ],
+        driver: Some(composition_driver_rust(
+            "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+            "FlowFrameLoopDriver",
+            "FlowFrameLoopStorePlan",
+            "FlowFrameLoopWork",
+            "FlowFrameLoopDecision",
+            &[
+                "use crate::definition::{FlowNodeSpec, FrameSpec, RepeatUntilSpec};",
+                "use crate::error::MobError;",
+                "use crate::generated::protocol_flow_loop_until_evaluation::{FlowLoopUntilEvaluationObligation, accept_evaluate_until_condition, submit_until_condition_failed, submit_until_condition_met};",
+                "use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, StepId};",
+                "use crate::run::{FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot};",
+                "use crate::runtime::flow_frame_kernel::{build_start_body_frame_input, topological_order};",
+                "use crate::runtime::loop_iteration_authority::{LoopIterationAuthority, LoopUntilEvaluationRequested};",
+                "use meerkat_machine_kernels::generated::{flow_frame, flow_run, loop_iteration};",
+                "use meerkat_machine_kernels::{KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome};",
+                "use std::collections::BTreeMap;",
+            ],
+        )),
+        transaction_plans: vec![
+            transaction_plan(
+                "grant_node_slot_step",
+                "acknowledge_node_grant",
+                "Grant a node slot, admit a step node, and persist the updated run/frame state before spawning step work.",
+                "cas_grant_node_slot",
+                &[
+                    "flow_frame_ready_frontier_updates_run_ready_frames",
+                ],
+                &[],
+            ),
+            transaction_plan(
+                "grant_node_slot_loop_start",
+                "acknowledge_node_grant",
+                "Grant a node slot, admit a loop node, start the loop instance, and route pending-body-frame registration through run state.",
+                "cas_start_loop",
+                &[
+                    "flow_frame_node_release_updates_run_slots",
+                    "flow_frame_ready_frontier_updates_run_ready_frames",
+                    "loop_request_body_frame_updates_run_pending_queue",
+                ],
+                &[],
+            ),
+            transaction_plan(
+                "grant_body_frame_start",
+                "acknowledge_body_frame_start",
+                "Acknowledge a body-frame grant, transition the loop to BodyFrameActive, create the initial body frame, and register ready work.",
+                "cas_grant_body_frame_start",
+                &[
+                    "flow_frame_ready_frontier_updates_run_ready_frames",
+                ],
+                &[],
+            ),
+            transaction_plan(
+                "run_state_only",
+                "revisit_frame",
+                "Apply a run-state-only routed effect such as ready-frame registration, node-slot release, or pending-body-frame registration.",
+                "cas_flow_state",
+                &[
+                    "flow_frame_ready_frontier_updates_run_ready_frames",
+                    "flow_frame_node_release_updates_run_slots",
+                    "loop_request_body_frame_updates_run_pending_queue",
+                ],
+                &[],
+            ),
+            transaction_plan(
+                "seal_frame",
+                "revisit_frame",
+                "Seal a frame whose tracked nodes are all terminal so the frame machine emits its typed root/body terminal effect.",
+                "cas_frame_state",
+                &[],
+                &[],
+            ),
+            transaction_plan(
+                "complete_body_frame",
+                "advance_body_frame_after_seal",
+                "Persist body-frame terminalization into loop state and release the active body-frame slot before until evaluation feedback.",
+                "cas_complete_body_frame",
+                &[
+                    "body_frame_completed_advances_loop_iteration",
+                    "body_frame_failed_fails_loop_iteration",
+                    "body_frame_canceled_cancels_loop_iteration",
+                ],
+                &[
+                    "flow_loop_until_evaluation",
+                ],
+            ),
+            transaction_plan(
+                "loop_request_body_frame",
+                "resolve_until_feedback",
+                "Persist an UntilConditionFailed replay that re-requests the next body frame through the run scheduler.",
+                "cas_loop_request_body_frame",
+                &[
+                    "loop_request_body_frame_updates_run_pending_queue",
+                ],
+                &[
+                    "flow_loop_until_evaluation",
+                ],
+            ),
+            transaction_plan(
+                "complete_loop",
+                "resolve_until_feedback",
+                "Persist a terminal loop outcome and project its routed parent-frame node transition in the same CAS bundle.",
+                "cas_complete_loop",
+                &[
+                    "loop_completed_completes_parent_loop_node",
+                    "loop_exhausted_fails_parent_loop_node",
+                    "loop_failed_fails_parent_loop_node",
+                    "loop_canceled_cancels_parent_loop_node",
+                    "flow_frame_ready_frontier_updates_run_ready_frames",
+                ],
+                &[
+                    "flow_loop_until_evaluation",
+                ],
+            ),
+        ],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![CompositionInvariant {
+            name: "flow_loop_until_protocol_covered".into(),
+            kind: CompositionInvariantKind::HandoffProtocolCovered {
+                producer_instance: "loop_iteration".into(),
+                effect_variant: "EvaluateUntilCondition".into(),
+                protocol_name: "flow_loop_until_evaluation".into(),
+            },
+            statement: "EvaluateUntilCondition is covered by the flow_loop_until_evaluation handoff protocol".into(),
+            references_machines: vec!["loop_iteration".into()],
+            references_actors: vec!["flow_runtime".into()],
+        }],
+        witnesses: vec![CompositionWitness {
+            name: "flow_frame_loop_route_coverage".into(),
+            preload_inputs: vec![],
+            expected_routes: vec![
+                "flow_frame_ready_frontier_updates_run_ready_frames".into(),
+                "flow_frame_node_release_updates_run_slots".into(),
+                "loop_request_body_frame_updates_run_pending_queue".into(),
+                "body_frame_completed_advances_loop_iteration".into(),
+                "body_frame_failed_fails_loop_iteration".into(),
+                "body_frame_canceled_cancels_loop_iteration".into(),
+                "loop_completed_completes_parent_loop_node".into(),
+                "loop_exhausted_fails_parent_loop_node".into(),
+                "loop_failed_fails_parent_loop_node".into(),
+                "loop_canceled_cancels_parent_loop_node".into(),
+            ],
+            expected_scheduler_rules: vec![],
+            expected_states: vec![],
+            expected_transitions: vec![],
+            expected_transition_order: vec![],
+            state_limits: CompositionStateLimits::ci_defaults(),
+        }],
+        deep_domain_cardinality: 1,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 1,
+        ci_limits: Some(CompositionStateLimits {
+            step_limit: 0,
+            pending_input_limit: 1,
+            pending_route_limit: 1,
+            delivered_route_limit: 1,
+            emitted_effect_limit: 1,
+            seq_limit: 1,
+            set_limit: 1,
+            map_limit: 1,
+        }),
+        closed_world: true,
+    }
+}
+
 pub fn ops_peer_bundle_composition() -> CompositionSchema {
     CompositionSchema {
         name: "ops_peer_bundle".into(),
@@ -8942,6 +9588,9 @@ pub fn ops_peer_bundle_composition() -> CompositionSchema {
                 delivery: RouteDelivery::Immediate,
             },
         ],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![
@@ -9363,6 +10012,9 @@ pub fn comms_drain_lifecycle_composition() -> CompositionSchema {
             },
         ],
         routes: vec![],
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
         invariants: vec![
@@ -9683,5 +10335,53 @@ fn protocol_rust(
         executor_trigger_input_variant: executor_trigger_input_variant.map(str::to_owned),
         bridge_source_type_path: bridge_source_type_path.map(str::to_owned),
         helper_return_shape,
+    }
+}
+
+fn route_target_selector(
+    route_name: &str,
+    selector_field: &str,
+    source: RouteBindingSource,
+) -> RouteTargetSelector {
+    RouteTargetSelector {
+        route_name: route_name.into(),
+        selector_field: selector_field.into(),
+        source,
+    }
+}
+
+fn composition_driver_rust(
+    module_path: &str,
+    driver_type: &str,
+    store_plan_type: &str,
+    work_type: &str,
+    decision_type: &str,
+    required_imports: &[&str],
+) -> CompositionDriverRustBinding {
+    CompositionDriverRustBinding {
+        module_path: module_path.into(),
+        driver_type: driver_type.into(),
+        store_plan_type: store_plan_type.into(),
+        work_type: work_type.into(),
+        decision_type: decision_type.into(),
+        required_imports: required_imports.iter().map(|item| (*item).into()).collect(),
+    }
+}
+
+fn transaction_plan(
+    name: &str,
+    trigger: &str,
+    description: &str,
+    store_primitive: &str,
+    route_names: &[&str],
+    protocol_names: &[&str],
+) -> CompositionTransactionPlan {
+    CompositionTransactionPlan {
+        name: name.into(),
+        trigger: trigger.into(),
+        description: description.into(),
+        store_primitive: store_primitive.into(),
+        route_names: route_names.iter().map(|item| (*item).into()).collect(),
+        protocol_names: protocol_names.iter().map(|item| (*item).into()).collect(),
     }
 }

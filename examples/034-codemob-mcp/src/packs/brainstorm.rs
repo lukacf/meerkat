@@ -54,7 +54,7 @@ impl Pack for BrainstormPack {
             &["ideate_a", "ideate_b", "ideate_c"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Multi-perspective brainstorm".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Multi-perspective brainstorm".into()), steps, root: None });
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();
         mob_definition("brainstorm", profiles, skills, flows, identity_spawn_policy(&names))

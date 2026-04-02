@@ -138,6 +138,7 @@ pub fn mob_wiring_anchor_machine() -> MachineSchema {
                 }],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![disposition(
             "WiringSnapshotUpdated",
             EffectDisposition::Local,

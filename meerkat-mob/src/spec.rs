@@ -1,7 +1,10 @@
 //! Flow specification validation.
 
-use crate::definition::{CollectionPolicy, DependencyMode, FlowSpec, FlowStepSpec, MobDefinition};
-use crate::ids::{BranchId, FlowId, StepId};
+use crate::definition::{
+    CollectionPolicy, DependencyMode, FlowNodeSpec, FlowSpec, FlowStepSpec, FrameSpec,
+    MobDefinition,
+};
+use crate::ids::{BranchId, FlowId, FlowNodeId, StepId};
 use crate::validate::{Diagnostic, DiagnosticCode, DiagnosticSeverity};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -60,6 +63,143 @@ impl SpecValidator {
         }
 
         diagnostics
+    }
+
+    /// Validate a `FrameSpec` rooted at `location` within `flow`.
+    /// Called recursively for loop body frames.
+    /// `seen_loop_ids` collects all LoopIds across the entire flow graph to reject duplicates
+    /// (dogma Rule 1: LoopId keys loop_iteration_outputs globally, so duplicates alias).
+    #[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
+    fn validate_frame_spec(
+        definition: &MobDefinition,
+        flow_name: &FlowId,
+        flow: &FlowSpec,
+        location: &str,
+        spec: &FrameSpec,
+        depth: usize,
+        seen_loop_ids: &mut BTreeSet<crate::ids::LoopId>,
+        seen_step_ids: &mut BTreeSet<StepId>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if depth > 32 {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::FlowDepthExceeded,
+                message: format!("frame '{location}' exceeds max nesting depth of 32"),
+                location: Some(location.to_string()),
+                severity: DiagnosticSeverity::Error,
+            });
+            return;
+        }
+
+        let node_ids: BTreeSet<&FlowNodeId> = spec.nodes.keys().collect();
+
+        for (node_id, node_spec) in &spec.nodes {
+            let node_loc = format!("{location}.nodes.{node_id}");
+
+            match node_spec {
+                FlowNodeSpec::Step(step_spec) => {
+                    // StepId must be unique across the entire flow graph so that
+                    // from_run_aggregate's iteration order doesn't change steps.* values
+                    // after a restart (dogma Rule 1).
+                    if !seen_step_ids.insert(step_spec.step_id.clone()) {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::FlowCycleDetected,
+                            message: format!(
+                                "duplicate step_id '{}' in flow '{flow_name}'; \
+                                 step IDs must be unique across the entire frame graph \
+                                 (including loop bodies) to ensure deterministic resume",
+                                step_spec.step_id
+                            ),
+                            location: Some(format!("{node_loc}.step_id")),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                    // step_id must exist in the enclosing flow.steps (it drives execution).
+                    if !flow.steps.contains_key(&step_spec.step_id) {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::FlowUnknownStep,
+                            message: format!(
+                                "frame node '{node_id}' references step_id '{}' which is not defined in flow '{flow_name}'",
+                                step_spec.step_id
+                            ),
+                            location: Some(format!("{node_loc}.step_id")),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                    // depends_on references must exist within this frame.
+                    for dep in &step_spec.depends_on {
+                        if !node_ids.contains(dep) {
+                            diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::FlowUnknownStep,
+                                message: format!("frame node '{node_id}' depends_on unknown node '{dep}' in frame '{location}'"),
+                                location: Some(format!("{node_loc}.depends_on")),
+                                severity: DiagnosticSeverity::Error,
+                            });
+                        }
+                    }
+                }
+                FlowNodeSpec::RepeatUntil(repeat_spec) => {
+                    // LoopId must be unique across the entire flow graph.
+                    // loop_iteration_outputs is keyed by LoopId globally — duplicates alias.
+                    if !seen_loop_ids.insert(repeat_spec.loop_id.clone()) {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::FlowCycleDetected, // reuse: structural conflict
+                            message: format!(
+                                "duplicate loop_id '{}' in flow '{flow_name}'; \
+                                 loop IDs must be unique across the entire flow graph",
+                                repeat_spec.loop_id
+                            ),
+                            location: Some(format!("{node_loc}.loop_id")),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                    // depends_on references must exist within this frame.
+                    for dep in &repeat_spec.depends_on {
+                        if !node_ids.contains(dep) {
+                            diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::FlowUnknownStep,
+                                message: format!("loop node '{node_id}' depends_on unknown node '{dep}' in frame '{location}'"),
+                                location: Some(format!("{node_loc}.depends_on")),
+                                severity: DiagnosticSeverity::Error,
+                            });
+                        }
+                    }
+                    if repeat_spec.max_iterations == 0 {
+                        diagnostics.push(Diagnostic {
+                            code: DiagnosticCode::QuorumInvalid,
+                            message: format!(
+                                "loop node '{node_id}' has invalid max_iterations=0; must be >= 1"
+                            ),
+                            location: Some(format!("{node_loc}.max_iterations")),
+                            severity: DiagnosticSeverity::Error,
+                        });
+                    }
+                    // Recursively validate the loop body.
+                    Self::validate_frame_spec(
+                        definition,
+                        flow_name,
+                        flow,
+                        &format!("{node_loc}.body"),
+                        &repeat_spec.body,
+                        depth + 1,
+                        seen_loop_ids,
+                        seen_step_ids,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+
+        // Cycle detection within this frame's dependency graph.
+        let has_cycle = frame_spec_has_cycle(spec);
+        if has_cycle {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::FlowCycleDetected,
+                message: format!("frame '{location}' contains a dependency cycle"),
+                location: Some(location.to_string()),
+                severity: DiagnosticSeverity::Error,
+            });
+        }
     }
 
     fn validate_flow(
@@ -192,7 +332,91 @@ impl SpecValidator {
                 severity: DiagnosticSeverity::Error,
             });
         }
+
+        // Validate root FrameSpec if present.
+        if let Some(root) = &flow.root {
+            let mut seen_loop_ids = BTreeSet::new();
+            let mut seen_step_ids = BTreeSet::new();
+            Self::validate_frame_spec(
+                definition,
+                flow_name,
+                flow,
+                &format!("flows.{flow_name}.root"),
+                root,
+                0,
+                &mut seen_loop_ids,
+                &mut seen_step_ids,
+                diagnostics,
+            );
+
+            let omitted_steps: Vec<_> = flow
+                .steps
+                .keys()
+                .filter(|step_id| !seen_step_ids.contains(*step_id))
+                .cloned()
+                .collect();
+            if !omitted_steps.is_empty() {
+                diagnostics.push(Diagnostic {
+                    code: DiagnosticCode::FlowUnknownStep,
+                    message: format!(
+                        "root frame for flow '{flow_name}' does not reference declared flow steps: {}",
+                        omitted_steps
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    location: Some(format!("flows.{flow_name}.root")),
+                    severity: DiagnosticSeverity::Error,
+                });
+            }
+        }
     }
+}
+
+/// Kahn's algorithm cycle detection for a FrameSpec dependency graph.
+fn frame_spec_has_cycle(spec: &FrameSpec) -> bool {
+    let mut indegree: BTreeMap<&FlowNodeId, usize> =
+        spec.nodes.keys().map(|k| (k, 0usize)).collect();
+    let mut adjacency: BTreeMap<&FlowNodeId, Vec<&FlowNodeId>> = BTreeMap::new();
+
+    for (node_id, node_spec) in &spec.nodes {
+        let deps: &[crate::ids::FlowNodeId] = match node_spec {
+            FlowNodeSpec::Step(s) => &s.depends_on,
+            FlowNodeSpec::RepeatUntil(r) => &r.depends_on,
+        };
+        for dep in deps {
+            if indegree.contains_key(dep) {
+                if let Some(entry) = indegree.get_mut(node_id) {
+                    *entry += 1;
+                }
+                adjacency.entry(dep).or_default().push(node_id);
+            }
+        }
+    }
+
+    let mut queue: VecDeque<&FlowNodeId> = indegree
+        .iter()
+        .filter(|(_, d)| **d == 0)
+        .map(|(k, _)| *k)
+        .collect();
+    let mut visited = 0usize;
+
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        if let Some(neighbors) = adjacency.get(node) {
+            for &next in neighbors {
+                if let Some(d) = indegree.get_mut(next) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+
+    visited != spec.nodes.len()
 }
 
 fn analyze_dag(flow: &FlowSpec) -> (bool, usize) {
@@ -337,6 +561,7 @@ mod tests {
             FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
         );
 
@@ -374,6 +599,7 @@ mod tests {
             FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
         );
 
@@ -428,6 +654,7 @@ mod tests {
             FlowSpec {
                 description: None,
                 steps,
+                root: None,
             },
         );
 
@@ -506,6 +733,47 @@ mod tests {
                 .iter()
                 .all(|d| d.code != DiagnosticCode::TopologyUnknownRole),
             "wildcard topology roles should bypass unknown-role diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_root_frame_must_reference_all_declared_steps() {
+        use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+        use crate::ids::FlowNodeId;
+
+        let mut def = base_definition();
+        let mut steps = IndexMap::new();
+        steps.insert(StepId::from("included"), step("worker", "included"));
+        steps.insert(StepId::from("omitted"), step("worker", "omitted"));
+
+        let mut root_nodes = IndexMap::new();
+        root_nodes.insert(
+            FlowNodeId::from("included-node"),
+            FlowNodeSpec::Step(FrameStepSpec {
+                step_id: StepId::from("included"),
+                depends_on: Vec::new(),
+                depends_on_mode: DependencyMode::All,
+                branch: None,
+            }),
+        );
+
+        def.flows.insert(
+            FlowId::from("flow"),
+            FlowSpec {
+                description: None,
+                steps,
+                root: Some(FrameSpec { nodes: root_nodes }),
+            },
+        );
+
+        let diagnostics = SpecValidator::validate(&def);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.code == DiagnosticCode::FlowUnknownStep
+                    && d.message.contains("does not reference declared flow steps")
+                    && d.message.contains("omitted")
+            }),
+            "expected validator to reject root frames that omit declared steps"
         );
     }
 }

@@ -43,7 +43,7 @@ impl Pack for RedTeamPack {
             &["advocate_case", "adversary_case"], 300_000));
 
         let mut flows = BTreeMap::new();
-        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Adversarial risk assessment".into()), steps });
+        flows.insert(FlowId::from("main"), FlowSpec { description: Some("Adversarial risk assessment".into()), steps, root: None });
 
         mob_definition("redteam", profiles, skills, flows, identity_spawn_policy(&["advocate", "adversary", "judge"]))
     }

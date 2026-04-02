@@ -368,6 +368,7 @@ pub fn input_lifecycle_machine() -> MachineSchema {
                 ],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![
             disposition("InputLifecycleNotice", EffectDisposition::Local),
             disposition("RecordTerminalOutcome", EffectDisposition::Local),

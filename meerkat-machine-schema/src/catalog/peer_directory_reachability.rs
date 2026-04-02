@@ -236,6 +236,7 @@ pub fn peer_directory_reachability_machine() -> MachineSchema {
                 emit: vec![],
             },
         ],
+        ci_step_limit: None,
         effect_dispositions: vec![],
     }
 }

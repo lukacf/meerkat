@@ -179,12 +179,12 @@ required-features = ["jsonl-store"]
 [[test]]
 name = "e2e"
 path = "tests/e2e.rs"
-required-features = ["integration-real-tests"]
+required-features = ["integration-real-tests", "jsonl-store"]
 
 [[test]]
 name = "e2e_comms"
 path = "tests/e2e_comms.rs"
-required-features = ["integration-real-tests"]
+required-features = ["integration-real-tests", "jsonl-store"]
 
 [[test]]
 name = "e2e_shell"
@@ -194,7 +194,7 @@ required-features = ["integration-real-tests"]
 [[test]]
 name = "e2e_smoke"
 path = "tests/e2e_smoke.rs"
-required-features = ["integration-real-tests"]
+required-features = ["integration-real-tests", "jsonl-store"]
 
 [[test]]
 name = "e2e_regression"

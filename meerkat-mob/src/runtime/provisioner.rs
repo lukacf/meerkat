@@ -287,6 +287,11 @@ impl SessionBackend {
         match completion {
             meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
             meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+                Err(MobError::Internal(format!(
+                    "callback pending for tool '{tool_name}': {args}"
+                )))
+            }
             meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
                 Err(MobError::Internal(format!("turn abandoned: {reason}")))
             }

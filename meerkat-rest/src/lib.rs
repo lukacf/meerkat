@@ -2207,6 +2207,50 @@ fn run_result_to_response(
     response
 }
 
+fn callback_pending_api_error(
+    session_id: &SessionId,
+    realm_id: &str,
+    tool_name: String,
+    args: Value,
+    session_created: bool,
+) -> ApiError {
+    ApiError::InternalWithData {
+        message: format!("callback pending for tool '{tool_name}'"),
+        code: "CALLBACK_PENDING".to_string(),
+        details: json!({
+            "session_id": session_id.to_string(),
+            "session_ref": format_session_ref(realm_id, session_id),
+            "session_created": session_created,
+            "resumable": true,
+            "tool_name": tool_name,
+            "args": args,
+        }),
+    }
+}
+
+fn completion_outcome_to_api_result(
+    outcome: meerkat_runtime::completion::CompletionOutcome,
+    session_id: &SessionId,
+    realm_id: &str,
+    session_created: bool,
+) -> Result<meerkat_core::types::RunResult, ApiError> {
+    match outcome {
+        meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => Ok(run_result),
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
+            ApiError::Internal("turn completed without result".to_string()),
+        ),
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => Err(
+            callback_pending_api_error(session_id, realm_id, tool_name, args, session_created),
+        ),
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+            Err(ApiError::Internal(format!("turn abandoned: {reason}")))
+        }
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            Err(ApiError::Internal(format!("runtime terminated: {reason}")))
+        }
+    }
+}
+
 fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<SessionId, ApiError> {
     let locator = SessionLocator::parse(input)
         .map_err(|e| ApiError::BadRequest(format!("Invalid session locator '{input}': {e}")))?;
@@ -2519,18 +2563,12 @@ async fn create_session_inner(
     };
 
     let result = match handle {
-        Some(handle) => match handle.wait().await {
-            meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => Ok(run_result),
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
-                ApiError::Internal("turn completed without result".to_string()),
-            ),
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                Err(ApiError::Internal(format!("turn abandoned: {reason}")))
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                Err(ApiError::Internal(format!("runtime terminated: {reason}")))
-            }
-        },
+        Some(handle) => completion_outcome_to_api_result(
+            handle.wait().await,
+            &session_id,
+            &state.realm_id,
+            true,
+        ),
         None => {
             let existing_id = match &outcome {
                 meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -3095,20 +3133,12 @@ async fn continue_session_inner(
             }
         };
         match handle {
-            Some(handle) => match handle.wait().await {
-                meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => {
-                    Ok(run_result)
-                }
-                meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
-                    ApiError::Internal("turn completed without result".to_string()),
-                ),
-                meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                    Err(ApiError::Internal(format!("turn abandoned: {reason}")))
-                }
-                meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                    Err(ApiError::Internal(format!("runtime terminated: {reason}")))
-                }
-            },
+            Some(handle) => completion_outcome_to_api_result(
+                handle.wait().await,
+                &session_id,
+                &state.realm_id,
+                false,
+            ),
             None => Err(ApiError::DuplicateInput {
                 existing_id: String::new(),
             }),
@@ -3205,20 +3235,12 @@ async fn continue_session_inner(
         };
 
         match handle {
-            Some(handle) => match handle.wait().await {
-                meerkat_runtime::completion::CompletionOutcome::Completed(run_result) => {
-                    Ok(run_result)
-                }
-                meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Err(
-                    ApiError::Internal("turn completed without result".to_string()),
-                ),
-                meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                    Err(ApiError::Internal(format!("turn abandoned: {reason}")))
-                }
-                meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                    Err(ApiError::Internal(format!("runtime terminated: {reason}")))
-                }
-            },
+            Some(handle) => completion_outcome_to_api_result(
+                handle.wait().await,
+                &session_id,
+                &state.realm_id,
+                false,
+            ),
             None => {
                 let existing_id = match &outcome {
                     meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
@@ -4761,6 +4783,41 @@ mod tests {
             response.session_ref.as_deref().expect("session_ref"),
             format_session_ref("test-realm", &session_id)
         );
+    }
+
+    #[test]
+    fn completion_outcome_to_api_result_surfaces_callback_pending_payload() {
+        let session_id = SessionId::new();
+        let err = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            },
+            &session_id,
+            "test-realm",
+            false,
+        )
+        .expect_err("callback pending should map to an API error");
+
+        let ApiError::InternalWithData {
+            message,
+            code,
+            details,
+        } = err
+        else {
+            panic!("expected InternalWithData callback error");
+        };
+
+        assert_eq!(message, "callback pending for tool 'external_mock'");
+        assert_eq!(code, "CALLBACK_PENDING");
+        assert_eq!(details["session_id"], session_id.to_string());
+        assert_eq!(
+            details["session_ref"],
+            format_session_ref("test-realm", &session_id)
+        );
+        assert_eq!(details["resumable"], true);
+        assert_eq!(details["tool_name"], "external_mock");
+        assert_eq!(details["args"], json!({ "value": "browser" }));
     }
 
     #[cfg(feature = "mob")]

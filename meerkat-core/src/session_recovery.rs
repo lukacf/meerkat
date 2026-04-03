@@ -159,10 +159,14 @@ pub fn build_recovered_session(
         .model
         .clone()
         .unwrap_or_else(|| metadata.model.clone());
-    let system_prompt = overrides
-        .system_prompt
-        .clone()
-        .or(build_state.system_prompt.clone());
+    let system_prompt = if session_allows_first_turn_build_overrides(&session) {
+        overrides
+            .system_prompt
+            .clone()
+            .or(build_state.system_prompt.clone())
+    } else {
+        None
+    };
     let max_tokens = overrides.max_tokens.or(Some(metadata.max_tokens));
     let keep_alive = overrides.keep_alive.unwrap_or(metadata.keep_alive);
     let recoverable_tool_defs = overrides
@@ -596,6 +600,33 @@ mod tests {
             "late build-only override should be treated as InvalidOverride"
         );
         assert_eq!(error.to_string(), BUILD_ONLY_RECOVERY_OVERRIDE_ERROR);
+    }
+
+    #[test]
+    fn build_recovered_session_preserves_existing_system_prompt_after_first_turn_started() {
+        let mut session = sample_session();
+        let mut deferred = session
+            .deferred_turn_state()
+            .expect("deferred turn state should exist");
+        assert!(
+            deferred.mark_initial_turn_started(),
+            "pending deferred phase should transition to consumed"
+        );
+        session
+            .set_deferred_turn_state(deferred)
+            .expect("updated deferred turn state");
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session without rewriting prompt");
+
+        assert!(
+            recovered.system_prompt.is_none(),
+            "consumed sessions must not re-emit a create-time system_prompt override"
+        );
     }
 
     #[test]

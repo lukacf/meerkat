@@ -358,6 +358,15 @@ fn spawn_completion_bridge(
                     interaction_id,
                     result: String::new(),
                 },
+                CompletionOutcome::CallbackPending { tool_name, args } => {
+                    AgentEvent::InteractionFailed {
+                        interaction_id,
+                        error: format!(
+                            "callback pending for tool '{tool_name}' with args {}",
+                            args
+                        ),
+                    }
+                }
                 CompletionOutcome::Abandoned(reason)
                 | CompletionOutcome::RuntimeTerminated(reason) => AgentEvent::InteractionFailed {
                     interaction_id,

@@ -830,7 +830,6 @@ impl SessionRuntime {
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         use meerkat_runtime::accept::AcceptOutcome;
-        use meerkat_runtime::completion::CompletionOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
@@ -961,24 +960,7 @@ impl SessionRuntime {
             });
         };
 
-        match handle.wait().await {
-            CompletionOutcome::Completed(result) => Ok(result),
-            CompletionOutcome::CompletedWithoutResult => Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: "turn completed without result".to_string(),
-                data: None,
-            }),
-            CompletionOutcome::Abandoned(reason) => Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("turn abandoned: {reason}"),
-                data: None,
-            }),
-            CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime terminated: {reason}"),
-                data: None,
-            }),
-        }
+        completion_outcome_to_rpc_result(handle.wait().await, session_id)
     }
 
     /// Admit a canonical external event through the runtime-backed path.
@@ -2887,6 +2869,42 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         code,
         message: err.to_string(),
         data: None,
+    }
+}
+
+fn completion_outcome_to_rpc_result(
+    outcome: meerkat_runtime::completion::CompletionOutcome,
+    session_id: &SessionId,
+) -> Result<RunResult, RpcError> {
+    use meerkat_runtime::completion::CompletionOutcome;
+
+    match outcome {
+        CompletionOutcome::Completed(result) => Ok(result),
+        CompletionOutcome::CompletedWithoutResult => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "turn completed without result".to_string(),
+            data: None,
+        }),
+        CompletionOutcome::CallbackPending { tool_name, args } => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("callback pending for tool '{tool_name}'"),
+            data: Some(serde_json::json!({
+                "session_id": session_id.to_string(),
+                "resumable": true,
+                "tool_name": tool_name,
+                "args": args,
+            })),
+        }),
+        CompletionOutcome::Abandoned(reason) => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("turn abandoned: {reason}"),
+            data: None,
+        }),
+        CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("runtime terminated: {reason}"),
+            data: None,
+        }),
     }
 }
 
@@ -5133,6 +5151,27 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    #[test]
+    fn completion_outcome_to_rpc_result_surfaces_callback_pending_payload() {
+        let session_id = SessionId::new();
+        let err = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({ "value": "browser" }),
+            },
+            &session_id,
+        )
+        .expect_err("callback pending should map to an RPC error");
+
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert_eq!(err.message, "callback pending for tool 'external_mock'");
+        let data = err.data.expect("callback pending error data");
+        assert_eq!(data["session_id"], session_id.to_string());
+        assert_eq!(data["resumable"], true);
+        assert_eq!(data["tool_name"], "external_mock");
+        assert_eq!(data["args"], serde_json::json!({ "value": "browser" }));
     }
 
     // -- P2-6: Typed BuildError → PROVIDER_ERROR classification --

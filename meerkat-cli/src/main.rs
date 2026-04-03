@@ -258,6 +258,9 @@ fn completion_outcome_to_result(
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             Err(anyhow::anyhow!("turn completed without result"))
         }
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => Err(
+            anyhow::anyhow!("callback pending for tool '{tool_name}': {args}"),
+        ),
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
@@ -6848,6 +6851,23 @@ mod tests {
                 .contains("turn abandoned: synthetic failure"),
             "failure-path finalizer should return the original turn error"
         );
+    }
+
+    #[test]
+    fn completion_outcome_to_result_surfaces_callback_pending() {
+        let err = completion_outcome_to_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({ "value": "browser" }),
+            },
+        )
+        .expect_err("callback pending should surface as an error");
+
+        assert!(
+            err.to_string()
+                .contains("callback pending for tool 'external_mock'")
+        );
+        assert!(err.to_string().contains("\"value\":\"browser\""));
     }
 
     struct StaticDispatcher {

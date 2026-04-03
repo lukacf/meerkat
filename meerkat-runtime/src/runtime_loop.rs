@@ -6,6 +6,7 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
+use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
@@ -90,6 +91,38 @@ fn input_turn_metadata(
             },
         ),
         _ => None,
+    }
+}
+
+fn resolve_completion_waiters(
+    registry: &mut crate::completion::CompletionRegistry,
+    input_ids: &[InputId],
+    run_result: Option<meerkat_core::types::RunResult>,
+    terminal: Option<CoreApplyTerminal>,
+) {
+    match terminal {
+        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
+            for input_id in input_ids {
+                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
+            }
+        }
+        Some(CoreApplyTerminal::RunResult(_)) => match run_result {
+            Some(result) => {
+                for input_id in input_ids {
+                    registry.resolve_completed(input_id, result.clone());
+                }
+            }
+            None => {
+                for input_id in input_ids {
+                    registry.resolve_without_result(input_id);
+                }
+            }
+        },
+        None => {
+            for input_id in input_ids {
+                registry.resolve_without_result(input_id);
+            }
+        }
     }
 }
 
@@ -496,8 +529,12 @@ async fn process_queue(
                 let mut d = driver.lock().await;
                 match result {
                     Ok(output) => {
-                        // Capture run_result before moving output fields
-                        let run_result = output.run_result;
+                        let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                            receipt,
+                            session_snapshot,
+                            run_result,
+                            terminal,
+                        } = output;
 
                         // BoundaryApplied transitions Staged → Applied → APC
                         // and triggers atomic persistence in PersistentRuntimeDriver
@@ -505,8 +542,8 @@ async fn process_queue(
                             .as_driver_mut()
                             .on_run_event(RunEvent::BoundaryApplied {
                                 run_id: run_id.clone(),
-                                receipt: output.receipt,
-                                session_snapshot: output.session_snapshot,
+                                receipt,
+                                session_snapshot,
                             })
                             .await
                         {
@@ -557,18 +594,7 @@ async fn process_queue(
                         // Resolve completion waiters unconditionally
                         if let Some(completions) = completions.as_ref() {
                             let mut reg = completions.lock().await;
-                            match run_result {
-                                Some(result) => {
-                                    for input_id in &input_ids {
-                                        reg.resolve_completed(input_id, result.clone());
-                                    }
-                                }
-                                None => {
-                                    for input_id in &input_ids {
-                                        reg.resolve_without_result(input_id);
-                                    }
-                                }
-                            }
+                            resolve_completion_waiters(&mut reg, &input_ids, run_result, terminal);
                         }
                     }
                     Err(e) => {
@@ -1131,5 +1157,30 @@ mod tests {
             Some(render_metadata)
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_completion_waiters_surfaces_callback_pending() {
+        let mut registry = crate::completion::CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+
+        resolve_completion_waiters(
+            &mut registry,
+            std::slice::from_ref(&input_id),
+            None,
+            Some(CoreApplyTerminal::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: serde_json::json!({ "value": "browser" }),
+            }),
+        );
+
+        match handle.wait().await {
+            crate::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+                assert_eq!(tool_name, "external_mock");
+                assert_eq!(args, serde_json::json!({ "value": "browser" }));
+            }
+            other => panic!("Expected CallbackPending, got {other:?}"),
+        }
     }
 }

@@ -254,9 +254,11 @@ pub fn to_create_session_request(
         skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution
-        // during create_session so spawn does not block on LLM latency.
+        // during create_session so spawn does not block on LLM latency, and do
+        // not stage the kickoff prompt here because the runtime will send it
+        // explicitly on the first real turn.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-        deferred_prompt_policy: DeferredPromptPolicy::Stage,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build_options),
         labels: None,
     }
@@ -836,6 +838,11 @@ mod tests {
         assert_eq!(req.model, "claude-opus-4-6");
         assert_eq!(req.prompt.text_content(), "Hello mob");
         assert!(req.system_prompt.is_some());
+        assert_eq!(
+            req.initial_turn,
+            meerkat_core::service::InitialTurnPolicy::Defer
+        );
+        assert_eq!(req.deferred_prompt_policy, DeferredPromptPolicy::Discard);
 
         let build = req.build.expect("build options should be set");
         assert_eq!(build.comms_name.as_deref(), Some("test-mob/lead/lead-1"));
@@ -867,6 +874,7 @@ mod tests {
 
         let req = to_create_session_request(&config, "Start working".to_string().into());
         assert_eq!(req.model, "claude-sonnet-4-5");
+        assert_eq!(req.deferred_prompt_policy, DeferredPromptPolicy::Discard);
         let build = req.build.expect("build options");
         assert_eq!(build.override_shell, Some(false));
     }

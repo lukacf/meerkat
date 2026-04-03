@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::RunResult;
+use serde_json::Value;
 
 use crate::tokio::sync::oneshot;
 
@@ -23,6 +24,9 @@ pub enum CompletionOutcome {
     Completed(RunResult),
     /// The input was consumed but produced no RunResult (e.g. context-append ops).
     CompletedWithoutResult,
+    /// The input reached a callback boundary and requires external tool
+    /// fulfillment before the turn can continue.
+    CallbackPending { tool_name: String, args: Value },
     /// The input was abandoned before completing.
     Abandoned(String),
     /// The runtime was stopped or destroyed while the input was pending.
@@ -102,6 +106,23 @@ impl CompletionRegistry {
         if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::CompletedWithoutResult);
+            }
+        }
+    }
+
+    /// Resolve all waiters for an input that reached a callback boundary.
+    pub(crate) fn resolve_callback_pending(
+        &mut self,
+        input_id: &InputId,
+        tool_name: String,
+        args: Value,
+    ) {
+        if let Some(senders) = self.take_waiters(input_id) {
+            for tx in senders {
+                let _ = tx.send(CompletionOutcome::CallbackPending {
+                    tool_name: tool_name.clone(),
+                    args: args.clone(),
+                });
             }
         }
     }
@@ -309,6 +330,27 @@ mod tests {
                 CompletionOutcome::CompletedWithoutResult => {}
                 other => panic!("Expected CompletedWithoutResult, got {other:?}"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_callback_pending_sends_variant() {
+        let mut registry = CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+
+        registry.resolve_callback_pending(
+            &input_id,
+            "browser".to_string(),
+            serde_json::json!({ "url": "https://example.com" }),
+        );
+
+        match handle.wait().await {
+            CompletionOutcome::CallbackPending { tool_name, args } => {
+                assert_eq!(tool_name, "browser");
+                assert_eq!(args, serde_json::json!({ "url": "https://example.com" }));
+            }
+            other => panic!("Expected CallbackPending, got {other:?}"),
         }
     }
 

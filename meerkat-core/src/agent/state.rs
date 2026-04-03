@@ -482,37 +482,60 @@ where
                         ))));
                     }
 
-                    // 3b. Background shell job completion notices.
+                    // 3b. Background shell job completion notices via CompletionFeed.
                     const BG_JOB_PREFIX: &str = "[SYSTEM NOTICE][BG_JOB] ";
                     self.session.messages_mut().retain(
                         |m| !matches!(m, Message::User(u) if u.text_content().starts_with(BG_JOB_PREFIX)),
                     );
-                    for completion in &ext.background_completions {
-                        if !completion.status.is_terminal() {
-                            tracing::warn!(
-                                job_id = %completion.job_id,
-                                status = ?completion.status,
-                                "non-terminal status in background completion, skipping"
+                    if let Some(ref feed) = self.completion_feed {
+                        let batch = feed.list_since(self.applied_cursor);
+                        for entry in &batch.entries {
+                            let enrichment = self
+                                .completion_enrichment
+                                .as_ref()
+                                .and_then(|e| e.enrich(&entry.operation_id));
+
+                            let job_id = enrichment
+                                .as_ref()
+                                .map(|e| e.job_id.clone())
+                                .unwrap_or_else(|| entry.operation_id.to_string());
+                            let detail = enrichment
+                                .as_ref()
+                                .map(|e| e.detail.clone())
+                                .unwrap_or_default();
+                            let status_str = completion_outcome_status_str(&entry.terminal_outcome);
+
+                            emit_event!(AgentEvent::BackgroundJobCompleted {
+                                job_id: job_id.clone(),
+                                display_name: entry.display_name.clone(),
+                                status: status_str.to_string(),
+                                detail: detail.clone(),
+                            });
+
+                            let kind_label = match entry.kind {
+                                crate::ops_lifecycle::OperationKind::BackgroundToolOp => {
+                                    "Background job"
+                                }
+                                crate::ops_lifecycle::OperationKind::MobMemberChild => {
+                                    "Delegated task"
+                                }
+                            };
+                            let mut notice = format!(
+                                "{BG_JOB_PREFIX}{kind_label} `{}` (id={}) {}: {}",
+                                entry.display_name, job_id, status_str, detail,
                             );
-                            continue;
+                            if entry.kind == crate::ops_lifecycle::OperationKind::BackgroundToolOp {
+                                notice.push_str("\nUse shell_job_status to get the full output.");
+                            }
+                            self.session.push(Message::User(UserMessage::text(notice)));
                         }
+                        self.applied_cursor = batch.watermark;
 
-                        emit_event!(AgentEvent::BackgroundJobCompleted {
-                            job_id: completion.job_id.clone(),
-                            display_name: completion.display_name.clone(),
-                            status: completion.status.as_str().to_string(),
-                            detail: completion.detail.clone(),
-                        });
-
-                        let mut notice = format!(
-                            "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
-                            completion.display_name,
-                            completion.job_id,
-                            completion.status.as_str(),
-                            completion.detail,
-                        );
-                        notice.push_str("\nUse shell_job_status to get the full output.");
-                        self.session.push(Message::User(UserMessage::text(notice)));
+                        // Stamp the interrupt baseline so the wait tool only
+                        // reacts to completions that arrive AFTER this point.
+                        if let Some(ref baseline) = self.interrupt_baseline {
+                            baseline.store(batch.watermark, std::sync::atomic::Ordering::Release);
+                        }
                     }
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.
@@ -1541,6 +1564,21 @@ fn compute_retry_delay(
         Some(h) if h > computed => h,
         _ if is_rate_limited => computed.max(std::time::Duration::from_secs(30)),
         _ => computed,
+    }
+}
+
+/// Map a terminal outcome to a stable status string for display.
+fn completion_outcome_status_str(
+    outcome: &crate::ops_lifecycle::OperationTerminalOutcome,
+) -> &'static str {
+    use crate::ops_lifecycle::OperationTerminalOutcome;
+    match outcome {
+        OperationTerminalOutcome::Completed(_) => "completed",
+        OperationTerminalOutcome::Failed { .. } => "failed",
+        OperationTerminalOutcome::Aborted { .. } => "aborted",
+        OperationTerminalOutcome::Cancelled { .. } => "cancelled",
+        OperationTerminalOutcome::Retired => "retired",
+        OperationTerminalOutcome::Terminated { .. } => "terminated",
     }
 }
 

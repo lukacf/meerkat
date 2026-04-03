@@ -586,6 +586,9 @@ impl RuntimeSessionAdapter {
         let detached_wake_state = Arc::new(crate::detached_wake::DetachedWakeState::new());
         ops_lifecycle.set_detached_wake(Arc::clone(&detached_wake_state));
 
+        // Get the completion feed from the registry for feed-based idle wake.
+        let completion_feed = ops_lifecycle.completion_feed_handle();
+
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let mut pending_loop_handle =
@@ -596,6 +599,7 @@ impl RuntimeSessionAdapter {
                 control_rx,
                 Some(completions.clone()),
                 Some(Arc::clone(&detached_wake_state)),
+                Some(completion_feed),
             ));
 
         let (published, detach_after_abort) = {

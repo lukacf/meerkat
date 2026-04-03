@@ -3,10 +3,13 @@
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
+use meerkat_core::completion_feed::{CompletionFeed, CompletionSeq};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::wait_interrupt::WaitInterruptReceiver;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 // Re-export for backward compatibility
 pub use meerkat_core::wait_interrupt::WaitInterrupt;
@@ -27,17 +30,26 @@ const MAX_WAIT_SECONDS: f64 = 60.0;
 /// - Rate limiting when interacting with external services
 /// - Coordinating timing-sensitive workflows
 ///
-/// The wait can be interrupted by incoming messages if an interrupt receiver is configured.
+/// The wait can be interrupted by incoming messages if an interrupt receiver is configured,
+/// or by background operation completions if a completion feed is wired in.
 #[derive(Debug, Clone)]
 pub struct WaitTool {
     /// Optional interrupt receiver - when a message arrives, wait is interrupted
     interrupt_rx: Option<WaitInterruptReceiver>,
+    /// Optional completion feed for background op completion interrupts.
+    completion_feed: Option<Arc<dyn CompletionFeed>>,
+    /// Shared baseline for feed-based interrupts (stamped by agent before dispatch).
+    interrupt_baseline: Option<Arc<AtomicU64>>,
 }
 
 impl WaitTool {
     /// Create a new WaitTool without interrupt support
     pub fn new() -> Self {
-        Self { interrupt_rx: None }
+        Self {
+            interrupt_rx: None,
+            completion_feed: None,
+            interrupt_baseline: None,
+        }
     }
 
     /// Create a WaitTool with an interrupt receiver
@@ -47,6 +59,26 @@ impl WaitTool {
     pub fn with_interrupt(rx: WaitInterruptReceiver) -> Self {
         Self {
             interrupt_rx: Some(rx),
+            completion_feed: None,
+            interrupt_baseline: None,
+        }
+    }
+
+    /// Create a WaitTool with both comms interrupt and completion feed.
+    ///
+    /// The tool races sleep against both the comms interrupt channel and
+    /// the completion feed. A `BackgroundToolOp` completion in the feed
+    /// interrupts the wait; non-bg completions advance the observed cursor
+    /// without interrupting.
+    pub fn with_interrupt_and_feed(
+        rx: WaitInterruptReceiver,
+        feed: Option<Arc<dyn CompletionFeed>>,
+        baseline: Option<Arc<AtomicU64>>,
+    ) -> Self {
+        Self {
+            interrupt_rx: Some(rx),
+            completion_feed: feed,
+            interrupt_baseline: baseline,
         }
     }
 
@@ -76,6 +108,18 @@ struct WaitArgs {
     seconds: f64,
 }
 
+/// Check for pending completions in the feed.
+///
+/// Any operation kind (BackgroundToolOp or MobMemberChild) interrupts the wait.
+fn check_feed_for_completions(
+    feed: &dyn CompletionFeed,
+    after_seq: CompletionSeq,
+) -> (bool, CompletionSeq) {
+    let batch = feed.list_since(after_seq);
+    let has_completions = !batch.entries.is_empty();
+    (has_completions, batch.watermark)
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for WaitTool {
@@ -86,7 +130,7 @@ impl BuiltinTool for WaitTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "wait".into(),
-            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like delegated work or long-running background tasks. Wait is interrupted early when peer messages arrive. Maximum wait time is 60 seconds (1 minute).".into(),
+            description: "Pause execution for the specified number of seconds. Use this to wait between status checks on async operations like delegated work or long-running background tasks. Wait is interrupted early when peer messages arrive or background operations complete. Maximum wait time is 60 seconds (1 minute).".into(),
             input_schema: crate::schema::schema_for::<WaitArgs>(),
         }
     }
@@ -109,7 +153,135 @@ impl BuiltinTool for WaitTool {
         let duration = Duration::from_secs_f64(seconds);
         let start = Instant::now();
 
-        // If we have an interrupt receiver, race between sleep and interrupt
+        // Feed-aware path: race sleep, feed advance, and comms interrupt
+        if let (Some(feed), Some(baseline_atomic)) = (
+            self.completion_feed.as_ref(),
+            self.interrupt_baseline.as_ref(),
+        ) {
+            let baseline = baseline_atomic.load(std::sync::atomic::Ordering::Acquire);
+
+            // Check for already-pending BackgroundToolOp completions
+            let (has_completions, watermark) = check_feed_for_completions(feed.as_ref(), baseline);
+            if has_completions {
+                return Ok(ToolOutput::Json(json!({
+                    "waited_seconds": 0.0,
+                    "requested_seconds": seconds,
+                    "status": "interrupted",
+                    "reason": "Background operation completed before wait started"
+                })));
+            }
+
+            let mut observed = watermark;
+            let sleep_fut = sleep(duration);
+            futures::pin_mut!(sleep_fut);
+
+            if let Some(ref rx) = self.interrupt_rx {
+                let mut rx = rx.clone();
+                // Mark the current value as seen — only react to NEW interrupts
+                rx.borrow_and_update();
+
+                // Three-way race: sleep, feed advance, comms interrupt.
+                // We track which sub-future fired so we can read rx.borrow()
+                // after the mutable borrow from rx.changed() is dropped.
+                enum WakeReason {
+                    Sleep,
+                    FeedAdvanced,
+                    CommsChanged(Result<(), tokio::sync::watch::error::RecvError>),
+                }
+
+                loop {
+                    let wait_advance = feed.wait_for_advance(observed);
+                    futures::pin_mut!(wait_advance);
+
+                    let reason = {
+                        let changed_fut = rx.changed();
+                        futures::pin_mut!(changed_fut);
+
+                        let inner = futures::future::select(wait_advance, changed_fut);
+                        futures::pin_mut!(inner);
+
+                        match futures::future::select(&mut sleep_fut, inner).await {
+                            futures::future::Either::Left(_) => WakeReason::Sleep,
+                            futures::future::Either::Right((inner_result, _)) => match inner_result
+                            {
+                                futures::future::Either::Left(_) => WakeReason::FeedAdvanced,
+                                futures::future::Either::Right((result, _)) => {
+                                    WakeReason::CommsChanged(result)
+                                }
+                            },
+                        }
+                    };
+                    // changed_fut is dropped here — rx is no longer mutably borrowed.
+
+                    match reason {
+                        WakeReason::Sleep => {
+                            return Ok(ToolOutput::Json(json!({
+                                "waited_seconds": seconds,
+                                "status": "complete"
+                            })));
+                        }
+                        WakeReason::FeedAdvanced => {
+                            let (has_completions, new_observed) =
+                                check_feed_for_completions(feed.as_ref(), observed);
+                            observed = new_observed;
+                            if has_completions {
+                                let waited = start.elapsed().as_secs_f64();
+                                return Ok(ToolOutput::Json(json!({
+                                    "waited_seconds": waited,
+                                    "requested_seconds": seconds,
+                                    "status": "interrupted",
+                                    "reason": format!("Background operation completed after {:.1}s", waited)
+                                })));
+                            }
+                        }
+                        WakeReason::CommsChanged(result) => {
+                            if result.is_ok()
+                                && let Some(interrupt) = rx.borrow().as_ref()
+                            {
+                                let waited = start.elapsed().as_secs_f64();
+                                return Ok(ToolOutput::Json(json!({
+                                    "waited_seconds": waited,
+                                    "requested_seconds": seconds,
+                                    "status": "interrupted",
+                                    "reason": format!("Wait interrupted after {:.1}s: {}", waited, interrupt.reason)
+                                })));
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Feed but no comms — two-way race
+                loop {
+                    let wait_advance = feed.wait_for_advance(observed);
+                    futures::pin_mut!(wait_advance);
+
+                    match futures::future::select(&mut sleep_fut, wait_advance).await {
+                        futures::future::Either::Left(_) => {
+                            return Ok(ToolOutput::Json(json!({
+                                "waited_seconds": seconds,
+                                "status": "complete"
+                            })));
+                        }
+                        futures::future::Either::Right((_new_wm, _)) => {
+                            let (has_completions, new_observed) =
+                                check_feed_for_completions(feed.as_ref(), observed);
+                            observed = new_observed;
+                            if has_completions {
+                                let waited = start.elapsed().as_secs_f64();
+                                return Ok(ToolOutput::Json(json!({
+                                    "waited_seconds": waited,
+                                    "requested_seconds": seconds,
+                                    "status": "interrupted",
+                                    "reason": format!("Background operation completed after {:.1}s", waited)
+                                })));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: comms-only or no interrupt at all (original behavior)
         if let Some(ref rx) = self.interrupt_rx {
             let mut rx = rx.clone();
             // Mark the current value as seen - we only want to react to NEW interrupts

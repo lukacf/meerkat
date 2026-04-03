@@ -454,6 +454,14 @@ impl AgentToolDispatcher for ToolGateway {
             .any(|e| e.dispatcher.supports_ops_lifecycle_binding())
     }
 
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
+        self.entries
+            .iter()
+            .find_map(|e| e.dispatcher.completion_enrichment())
+    }
+
     /// Aggregate external updates across all dispatcher entries.
     ///
     /// Deduplicates by server name for pending, by `(server, operation, status)`
@@ -597,6 +605,14 @@ impl AgentToolDispatcher for DynamicToolComposite {
         self.dispatchers
             .iter()
             .any(|d| d.supports_ops_lifecycle_binding())
+    }
+
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
+        self.dispatchers
+            .iter()
+            .find_map(|d| d.completion_enrichment())
     }
 
     fn bind_ops_lifecycle(

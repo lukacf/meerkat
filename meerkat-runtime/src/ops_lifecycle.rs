@@ -5,11 +5,15 @@
 //! layer owns I/O concerns: watcher channels, timestamps, peer handles, and
 //! snapshot assembly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::task::{Context, Poll};
+
+use meerkat_core::completion_feed::{
+    CompletionBatch, CompletionEntry, CompletionFeed, CompletionSeq,
+};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -25,6 +29,114 @@ use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 use crate::ops_lifecycle_authority::{
     OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput, OpsLifecycleMutator,
 };
+
+// ---------------------------------------------------------------------------
+// Concrete completion feed buffer
+// ---------------------------------------------------------------------------
+
+/// Shared inner state of the completion feed buffer.
+///
+/// Protected by the registry's `RwLock<ShellState>` for writes, and by its
+/// own `RwLock` for reads by external consumers (agent, wait tool, idle wake).
+#[derive(Debug)]
+struct FeedBufferInner {
+    entries: VecDeque<CompletionEntry>,
+    watermark: CompletionSeq,
+    max_retained: usize,
+}
+
+/// Shared completion feed buffer owned by the runtime registry.
+///
+/// The registry writes entries under its own write lock. External consumers
+/// read through the [`RuntimeCompletionFeed`] handle.
+#[derive(Debug)]
+struct FeedBuffer {
+    inner: RwLock<FeedBufferInner>,
+    /// Atomic mirror of watermark for lock-free `watermark()` reads.
+    watermark_atomic: AtomicU64,
+    /// Notifies all waiters when new entries are appended.
+    notify: tokio::sync::Notify,
+}
+
+impl FeedBuffer {
+    fn new(max_retained: usize) -> Self {
+        Self {
+            inner: RwLock::new(FeedBufferInner {
+                entries: VecDeque::new(),
+                watermark: 0,
+                max_retained,
+            }),
+            watermark_atomic: AtomicU64::new(0),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn push(&self, entry: CompletionEntry) {
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let seq = entry.seq;
+        inner.entries.push_back(entry);
+        inner.watermark = seq;
+
+        // Evict oldest if over capacity.
+        while inner.entries.len() > inner.max_retained {
+            inner.entries.pop_front();
+        }
+
+        drop(inner);
+
+        self.watermark_atomic.store(seq, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+/// Read-only handle to the runtime completion feed.
+///
+/// Implements [`CompletionFeed`] for external consumers. Obtained via
+/// [`RuntimeOpsLifecycleRegistry::completion_feed()`].
+#[derive(Debug, Clone)]
+pub struct RuntimeCompletionFeed {
+    buffer: Arc<FeedBuffer>,
+}
+
+impl CompletionFeed for RuntimeCompletionFeed {
+    fn watermark(&self) -> CompletionSeq {
+        self.buffer.watermark_atomic.load(Ordering::Acquire)
+    }
+
+    fn list_since(&self, after_seq: CompletionSeq) -> CompletionBatch {
+        let inner = self
+            .buffer
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries: Vec<CompletionEntry> = inner
+            .entries
+            .iter()
+            .filter(|e| e.seq > after_seq)
+            .cloned()
+            .collect();
+        let watermark = inner.watermark;
+        CompletionBatch { entries, watermark }
+    }
+
+    fn wait_for_advance(
+        &self,
+        after_seq: CompletionSeq,
+    ) -> std::pin::Pin<Box<dyn Future<Output = CompletionSeq> + Send + '_>> {
+        Box::pin(async move {
+            loop {
+                let current = self.buffer.watermark_atomic.load(Ordering::Acquire);
+                if current > after_seq {
+                    return current;
+                }
+                self.buffer.notify.notified().await;
+            }
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shell-only per-operation record (not part of canonical machine state)
@@ -106,6 +218,8 @@ struct ShellState {
     /// sets pending and fires the Notify so the waker task can inject a
     /// continuation into the quiescent session.
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
+    /// Shared feed buffer for completion events.
+    feed_buffer: Arc<FeedBuffer>,
 }
 
 impl ShellState {
@@ -115,6 +229,7 @@ impl ShellState {
             records: HashMap::new(),
             pending_wait: None,
             detached_wake: None,
+            feed_buffer: Arc::new(FeedBuffer::new(max_completed)),
         }
     }
 
@@ -197,6 +312,48 @@ impl ShellState {
                 OpsLifecycleEffect::EvictCompletedRecord { operation_id } => {
                     self.records.remove(operation_id);
                     self.authority.remove_operation(operation_id);
+                }
+                OpsLifecycleEffect::CompletionProduced {
+                    seq,
+                    operation_id,
+                    kind,
+                } => {
+                    // Build a CompletionEntry from authority + shell data and
+                    // push to the shared feed buffer.
+                    let (display_name, terminal_outcome, completed_at_ms) =
+                        if let Some(canonical) = self.authority.operation(operation_id) {
+                            let outcome = canonical.terminal_outcome().cloned().unwrap_or(
+                                OperationTerminalOutcome::Terminated {
+                                    reason: "missing outcome".into(),
+                                },
+                            );
+                            let completed_ms = self.records.get(operation_id).and_then(|r| {
+                                r.completed_at.map(|i| r.epoch_millis_for_instant(i))
+                            });
+                            let name = self
+                                .records
+                                .get(operation_id)
+                                .map(|r| r.spec.display_name.clone())
+                                .unwrap_or_default();
+                            (name, outcome, completed_ms)
+                        } else {
+                            (
+                                String::new(),
+                                OperationTerminalOutcome::Terminated {
+                                    reason: "unknown operation".into(),
+                                },
+                                None,
+                            )
+                        };
+
+                    self.feed_buffer.push(CompletionEntry {
+                        seq: *seq,
+                        operation_id: operation_id.clone(),
+                        kind: *kind,
+                        display_name,
+                        terminal_outcome,
+                        completed_at_ms,
+                    });
                 }
                 OpsLifecycleEffect::SubmitOpEvent { .. } => {
                     // Future: emit observability events. Currently a no-op.
@@ -314,6 +471,17 @@ impl RuntimeOpsLifecycleRegistry {
         if let Ok(mut state) = self.state.write() {
             state.detached_wake = Some(wake);
         }
+    }
+
+    /// Return a read handle to the completion feed.
+    pub fn completion_feed_handle(&self) -> Arc<dyn CompletionFeed> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::new(RuntimeCompletionFeed {
+            buffer: Arc::clone(&state.feed_buffer),
+        })
     }
 
     fn read_state(&self) -> Result<RwLockReadGuard<'_, ShellState>, OpsLifecycleError> {
@@ -699,6 +867,10 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         Ok(collected)
+    }
+
+    fn completion_feed(&self) -> Option<Arc<dyn CompletionFeed>> {
+        Some(self.completion_feed_handle())
     }
 
     fn wait_all(

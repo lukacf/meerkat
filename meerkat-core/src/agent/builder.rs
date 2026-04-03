@@ -40,6 +40,10 @@ pub struct AgentBuilder {
     pub(super) blob_store: Option<Arc<dyn crate::BlobStore>>,
     pub(super) silent_comms_intents: Vec<String>,
     pub(super) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
+    pub(super) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
+    pub(super) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub(super) completion_enrichment:
+        Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,
     pub(super) max_inline_peer_notifications: Option<i32>,
     pub(super) event_tap: Option<crate::event_tap::EventTap>,
     pub(super) default_event_tx: Option<mpsc::Sender<crate::event::AgentEvent>>,
@@ -68,6 +72,9 @@ impl AgentBuilder {
             blob_store: None,
             silent_comms_intents: Vec::new(),
             ops_lifecycle: None,
+            completion_feed: None,
+            interrupt_baseline: None,
+            completion_enrichment: None,
             max_inline_peer_notifications: None,
             event_tap: None,
             default_event_tx: None,
@@ -245,6 +252,10 @@ impl AgentBuilder {
             system_context_state,
             default_event_tx: self.default_event_tx,
             ops_lifecycle: self.ops_lifecycle,
+            completion_feed: self.completion_feed,
+            applied_cursor: 0,
+            interrupt_baseline: self.interrupt_baseline,
+            completion_enrichment: self.completion_enrichment,
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
@@ -322,6 +333,30 @@ impl AgentBuilder {
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
     ) -> Self {
         self.ops_lifecycle = Some(registry);
+        self
+    }
+
+    /// Set the completion feed for cursor-based completion delivery.
+    pub fn with_completion_feed(
+        mut self,
+        feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+    ) -> Self {
+        self.completion_feed = Some(feed);
+        self
+    }
+
+    /// Set the shared interrupt baseline for the wait tool.
+    pub fn with_interrupt_baseline(mut self, baseline: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        self.interrupt_baseline = Some(baseline);
+        self
+    }
+
+    /// Set the enrichment provider for completion display details.
+    pub fn with_completion_enrichment(
+        mut self,
+        enrichment: Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>,
+    ) -> Self {
+        self.completion_enrichment = Some(enrichment);
         self
     }
 

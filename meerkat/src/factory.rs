@@ -1099,6 +1099,8 @@ impl AgentFactory {
             skill_engine,
             // Public API defaults to true (all tools visible).
             true,
+            None,
+            None,
         )
         .await
     }
@@ -1119,6 +1121,8 @@ impl AgentFactory {
             Arc<meerkat_core::skills::SkillRuntime>,
         >,
         image_tool_results: bool,
+        completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+        interrupt_baseline: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -1158,6 +1162,12 @@ impl AgentFactory {
         if let Some(engine) = skill_engine {
             composite
                 .register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(engine));
+        }
+
+        // Set completion feed + baseline on the composite so bind_wait_interrupt
+        // can pass them through to WaitTool.
+        if let (Some(feed), Some(baseline)) = (completion_feed, interrupt_baseline) {
+            composite.set_completion_feed(feed, baseline);
         }
 
         // (wait binding happens in build_agent via bind_wait_interrupt)
@@ -1407,6 +1417,18 @@ impl AgentFactory {
             )
         };
 
+        // Create the completion feed + interrupt baseline for cursor-based
+        // completion delivery. The feed is obtained from the ops lifecycle
+        // registry; the baseline is a shared atomic stamped by the agent
+        // before each tool dispatch.
+        let completion_feed = ops_lifecycle.completion_feed();
+        let interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>> =
+            if completion_feed.is_some() {
+                Some(Arc::new(std::sync::atomic::AtomicU64::new(0)))
+            } else {
+                None
+            };
+
         // Build the tool dispatcher WITHOUT wait interrupt wiring.
         // The interrupt is bound once after full composition (including comms gateway).
         // This ensures all dispatcher paths (builtin, override, WASM, composed) are covered.
@@ -1428,6 +1450,8 @@ impl AgentFactory {
                         _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
                         image_tool_results,
+                        completion_feed.clone(),
+                        interrupt_baseline.clone(),
                     )
                     .await?
                 }
@@ -1979,6 +2003,19 @@ impl AgentFactory {
         }
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
 
+        // 12h. Wire completion feed + baseline + enrichment for cursor-based delivery
+        if let Some(feed) = completion_feed {
+            builder = builder.with_completion_feed(feed);
+        }
+        if let Some(baseline) = interrupt_baseline {
+            builder = builder.with_interrupt_baseline(baseline);
+        }
+        // Extract enrichment provider from the tool dispatcher (if the dispatcher
+        // has a shell job manager, it implements CompletionEnrichmentProvider).
+        if let Some(enrichment) = tools.completion_enrichment() {
+            builder = builder.with_completion_enrichment(enrichment);
+        }
+
         // 13. Build agent
         let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
 
@@ -2076,6 +2113,8 @@ impl AgentFactory {
         session_id: String,
         ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
         image_tool_results: bool,
+        completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+        interrupt_baseline: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -2143,6 +2182,8 @@ impl AgentFactory {
                 Some(ops_lifecycle),
                 skill_engine,
                 image_tool_results,
+                completion_feed,
+                interrupt_baseline,
             )
             .await?;
 

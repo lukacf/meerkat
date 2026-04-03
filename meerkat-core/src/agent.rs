@@ -232,6 +232,16 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn supports_ops_lifecycle_binding(&self) -> bool {
         false
     }
+
+    /// Return the completion enrichment provider, if available.
+    ///
+    /// Dispatchers with shell job management return a provider that maps
+    /// operation IDs to display details (job ID, status detail string).
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
+        None
+    }
 }
 
 /// Error from [`AgentToolDispatcher::bind_ops_lifecycle`].
@@ -330,6 +340,12 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
 
     fn supports_ops_lifecycle_binding(&self) -> bool {
         self.inner.supports_ops_lifecycle_binding()
+    }
+
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
+        self.inner.completion_enrichment()
     }
 }
 
@@ -612,6 +628,16 @@ where
     /// When set, the agent loop waits on the exact turn-local operation IDs
     /// registered in `turn_authority.pending_op_refs()`.
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
+    /// Optional completion feed for cursor-based completion delivery.
+    pub(crate) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
+    /// Local cursor into the completion feed — only the agent boundary advances this.
+    pub(crate) applied_cursor: crate::completion_feed::CompletionSeq,
+    /// Shared baseline for the wait tool's interrupt check.
+    /// Stamped to `applied_cursor` before each tool dispatch.
+    pub(crate) interrupt_baseline: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Optional enrichment provider for completion display details.
+    pub(crate) completion_enrichment:
+        Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>>,
     /// Machine authority for turn-execution state transitions (RMAT).
     pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).

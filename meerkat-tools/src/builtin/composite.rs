@@ -58,6 +58,10 @@ pub struct CompositeDispatcher {
     /// Stashed interrupt receiver for carry-forward across dispatcher rebuilds.
     /// Set by `bind_wait_interrupt`, re-applied by `bind_ops_lifecycle`.
     wait_interrupt_rx: Option<meerkat_core::wait_interrupt::WaitInterruptReceiver>,
+    /// Stashed completion feed for carry-forward across dispatcher rebuilds.
+    completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
+    /// Shared interrupt baseline for the wait tool (stamped by agent before dispatch).
+    interrupt_baseline: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl CompositeDispatcher {
@@ -193,6 +197,8 @@ impl CompositeDispatcher {
             job_manager,
             allowed_tools,
             wait_interrupt_rx: None,
+            completion_feed: None,
+            interrupt_baseline: None,
         })
     }
 
@@ -244,6 +250,8 @@ impl CompositeDispatcher {
             image_tool_results: true,
             allowed_tools,
             wait_interrupt_rx: None,
+            completion_feed: None,
+            interrupt_baseline: None,
         })
     }
 
@@ -295,6 +303,19 @@ impl CompositeDispatcher {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn shell_job_manager(&self) -> Option<Arc<JobManager>> {
         self.job_manager.clone()
+    }
+
+    /// Set the completion feed and interrupt baseline for the wait tool.
+    ///
+    /// Called by the factory before `bind_wait_interrupt`. Both are carried
+    /// forward across dispatcher rebuilds (bind_ops_lifecycle).
+    pub fn set_completion_feed(
+        &mut self,
+        feed: std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
+        baseline: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        self.completion_feed = Some(feed);
+        self.interrupt_baseline = Some(baseline);
     }
 }
 
@@ -434,21 +455,13 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
-        #[allow(unused_mut)] // mut needed on non-wasm32 for background_completions extend
-        let mut update = if let Some(ref ext) = self.external {
+        // Background completions are no longer delivered through poll_external_updates.
+        // The agent boundary drains them via the CompletionFeed.
+        if let Some(ref ext) = self.external {
             ext.poll_external_updates().await
         } else {
             ExternalToolUpdate::default()
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(ref mgr) = self.job_manager {
-            update
-                .background_completions
-                .extend(mgr.drain_completed().await);
         }
-
-        update
     }
 
     fn bind_wait_interrupt(
@@ -458,9 +471,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
     {
         let mut owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        // Swap the wait tool with an interrupt-aware version
+        // Swap the wait tool with an interrupt-aware version, including
+        // completion feed + baseline if available.
         use crate::builtin::utility::WaitTool;
-        let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
+        let new_wait = Arc::new(WaitTool::with_interrupt_and_feed(
+            rx.clone(),
+            owned.completion_feed.clone(),
+            owned.interrupt_baseline.clone(),
+        ));
         for tool in &mut owned.builtin_tools {
             if tool.name() == "wait" {
                 *tool = new_wait;
@@ -499,9 +517,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 return Err(OpsLifecycleBindError::Unsupported);
             }
 
-            // Carry forward interrupt receiver so comms-driven wait interrupts
-            // survive the ops-lifecycle rebuild.
+            // Carry forward interrupt receiver, completion feed, and baseline
+            // so they survive the ops-lifecycle rebuild.
             let interrupt_rx = owned.wait_interrupt_rx.take();
+            let feed = owned.completion_feed.take();
+            let baseline = owned.interrupt_baseline.take();
 
             #[cfg_attr(not(feature = "skills"), allow(unused_mut))]
             let mut rebound = CompositeDispatcher::new_with_ops_lifecycle(
@@ -516,11 +536,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
             )
             .map_err(|_| OpsLifecycleBindError::Unsupported)?;
 
-            // Re-apply the interrupt receiver on the new wait tool and stash
-            // it for any future rebuilds.
+            // Carry forward completion feed + baseline.
+            rebound.completion_feed = feed;
+            rebound.interrupt_baseline = baseline;
+
+            // Re-apply the interrupt receiver on the new wait tool, including
+            // completion feed + baseline for feed-aware wait interrupts.
             if let Some(rx) = interrupt_rx {
                 use crate::builtin::utility::WaitTool;
-                let new_wait = Arc::new(WaitTool::with_interrupt(rx.clone()));
+                let new_wait = Arc::new(WaitTool::with_interrupt_and_feed(
+                    rx.clone(),
+                    rebound.completion_feed.clone(),
+                    rebound.interrupt_baseline.clone(),
+                ));
                 for tool in &mut rebound.builtin_tools {
                     if tool.name() == "wait" {
                         *tool = new_wait;
@@ -556,6 +584,19 @@ impl AgentToolDispatcher for CompositeDispatcher {
         self.external
             .as_ref()
             .is_some_and(|ext| ext.supports_ops_lifecycle_binding())
+    }
+
+    fn completion_enrichment(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::completion_feed::CompletionEnrichmentProvider>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref mgr) = self.job_manager {
+            return Some(Arc::clone(mgr)
+                as Arc<
+                    dyn meerkat_core::completion_feed::CompletionEnrichmentProvider,
+                >);
+        }
+        None
     }
 }
 

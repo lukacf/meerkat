@@ -8,6 +8,7 @@ use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
     SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason,
 };
+use std::convert::TryFrom;
 
 /// Canonical session info for wire protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +201,24 @@ impl From<ContentBlock> for WireContentBlock {
     }
 }
 
+impl TryFrom<WireContentBlock> for ContentBlock {
+    type Error = &'static str;
+
+    fn try_from(block: WireContentBlock) -> Result<Self, Self::Error> {
+        match block {
+            WireContentBlock::Text { text } => Ok(ContentBlock::Text { text }),
+            WireContentBlock::Image { media_type, data } => Ok(ContentBlock::Image {
+                media_type,
+                data: match data {
+                    WireImageData::Inline { data } => ImageData::Inline { data },
+                    WireImageData::Blob { blob_id } => ImageData::Blob { blob_id },
+                },
+            }),
+            WireContentBlock::Unknown => Err("unknown content block type"),
+        }
+    }
+}
+
 /// Wire-safe content input (mirrors `ContentInput`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -216,6 +235,22 @@ impl From<ContentInput> for WireContentInput {
             ContentInput::Blocks(blocks) => {
                 WireContentInput::Blocks(blocks.into_iter().map(Into::into).collect())
             }
+        }
+    }
+}
+
+impl TryFrom<WireContentInput> for ContentInput {
+    type Error = &'static str;
+
+    fn try_from(input: WireContentInput) -> Result<Self, Self::Error> {
+        match input {
+            WireContentInput::Text(text) => Ok(ContentInput::Text(text)),
+            WireContentInput::Blocks(blocks) => Ok(ContentInput::Blocks(
+                blocks
+                    .into_iter()
+                    .map(ContentBlock::try_from)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
         }
     }
 }

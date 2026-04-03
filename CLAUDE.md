@@ -150,8 +150,6 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 | `mcp/remove` | Stage live MCP server removal |
 | `mcp/reload` | Reload one or all MCP servers |
 | `mob/prefabs` | List built-in mob prefab templates |
-| `mob/tools` | List protocol-callable mob lifecycle tools |
-| `mob/call` | Invoke a mob lifecycle tool directly |
 | `capabilities/get` | List runtime capabilities |
 | `config/get` | Read config |
 | `config/set` | Replace config |

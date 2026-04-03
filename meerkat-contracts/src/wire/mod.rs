@@ -17,8 +17,17 @@ pub use mcp_live::{
     McpRemoveParams,
 };
 pub use mob::{
-    MobPeerTarget, MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult,
-    WireHandlingMode, WireRenderClass, WireRenderMetadata, WireRenderSalience, WireTrustedPeerSpec,
+    MobBackendConfigInput, MobCollectionPolicyInput, MobConditionExprInput, MobCreateParams,
+    MobCreateResult, MobDefinitionInput, MobDependencyModeInput, MobDispatchModeInput,
+    MobEventRouterConfigInput, MobExternalBackendConfigInput, MobFlowNodeInput, MobFlowSpecInput,
+    MobFlowStepInput, MobFrameSpecInput, MobFrameStepInput, MobLimitsSpecInput,
+    MobMcpServerConfigInput, MobMemberSendParams, MobMemberSendResult, MobOrchestratorInput,
+    MobPeerTarget, MobPolicyModeInput, MobProfileInput, MobRepeatUntilInput,
+    MobRoleWiringRuleInput, MobSkillSourceInput, MobSpawnPolicyInput, MobStepOutputFormatInput,
+    MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput,
+    MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult, MobWiringRulesInput,
+    WireHandlingMode, WireMobBackendKind, WireMobRuntimeMode, WireRenderClass, WireRenderMetadata,
+    WireRenderSalience, WireTrustedPeerSpec,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,

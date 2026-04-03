@@ -1423,6 +1423,7 @@ impl FaultInjectedMobEventStore {
             MobEventKind::StepSkipped { .. } => "StepSkipped",
             MobEventKind::TopologyViolation { .. } => "TopologyViolation",
             MobEventKind::SupervisorEscalation { .. } => "SupervisorEscalation",
+            MobEventKind::OperatorActionRecorded { .. } => "OperatorActionRecorded",
         }
     }
 }
@@ -1857,6 +1858,7 @@ fn sample_definition() -> MobDefinition {
         spawn_policy: None,
         event_router: None,
         owner_session_id: None,
+        session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
         is_implicit: false,
     }
 }
@@ -3746,6 +3748,88 @@ async fn test_mob_management_tools_hidden_without_operator_context() {
         handle.get_member(&MeerkatId::from("w-2")).await.is_none(),
         "hidden operator tools must not mutate roster state"
     );
+}
+
+#[tokio::test]
+async fn test_visible_mob_operator_reads_still_require_exact_scope() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile");
+    let dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        crate::build::MobToolAccessContext::InjectedAuthority(
+            meerkat_core::service::MobToolAuthorityContext::new(
+                meerkat_core::service::OpaquePrincipalToken::new("out-of-scope"),
+                false,
+            )
+            .with_managed_mob_scope(["different-mob"]),
+        ),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher should be visible when authority is injected");
+
+    let tools = dispatcher.tools();
+    let tool_names = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        tool_names.contains(&"list_meerkats"),
+        "tool visibility should depend on injected authority presence, not scope success"
+    );
+
+    let args = RawValue::from_string("{}".to_string()).expect("raw args");
+    let error = dispatcher
+        .dispatch(ToolCallView {
+            id: "call-1",
+            name: "list_meerkats",
+            args: &args,
+        })
+        .await
+        .expect_err("out-of-scope operator read should be denied");
+    assert!(matches!(error, ToolError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn test_visible_mob_operator_tools_deny_before_arg_validation_when_scope_missing() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile");
+    let dispatcher = super::tools::compose_external_tools_for_profile(
+        profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        crate::build::MobToolAccessContext::InjectedAuthority(
+            meerkat_core::service::MobToolAuthorityContext::new(
+                meerkat_core::service::OpaquePrincipalToken::new("out-of-scope"),
+                false,
+            )
+            .with_managed_mob_scope(["different-mob"]),
+        ),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher should be visible when authority is injected");
+
+    let args = RawValue::from_string("{}".to_string()).expect("raw args");
+    let error = dispatcher
+        .dispatch(ToolCallView {
+            id: "call-2",
+            name: "spawn_meerkat",
+            args: &args,
+        })
+        .await
+        .expect_err("out-of-scope operator call should be denied before args are parsed");
+    assert!(matches!(error, ToolError::AccessDenied { .. }));
 }
 
 #[tokio::test]

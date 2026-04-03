@@ -147,6 +147,20 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
+    fn update_mob_tool_authority_context(
+        &mut self,
+        authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .set_mob_tool_authority_context(authority_context)
+            .map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update mob tool authority context in session metadata: {err}"
+                ))
+            })
+    }
+
     fn update_system_prompt(
         &mut self,
         system_prompt: String,

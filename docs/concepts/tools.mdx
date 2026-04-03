@@ -139,5 +139,8 @@ through `SessionBuildOptions.external_tools`.
 
 - CLI `run` composes this dispatcher when `--enable-mob` (`-M`) is passed (opt-in, disabled by default).
 - `rkat mob ...` remains the explicit direct lifecycle surface.
-- Other session-driven surfaces (RPC/REST/MCP/SDK hosts) can expose the same `mob_*`
-  capability by composing `MobMcpDispatcher` into their session build path.
+- Other session-driven surfaces can grant the same agent-side `mob_*` capability
+  by composing `MobMcpDispatcher` into their session build path.
+- Public host APIs should not re-export that raw dispatcher. They use typed
+  control planes instead: `mob/*` on RPC/SDK surfaces and `meerkat_mob_*` on
+  public MCP surfaces.

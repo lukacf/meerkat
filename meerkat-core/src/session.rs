@@ -11,7 +11,7 @@
 
 use crate::Provider;
 use crate::peer_meta::PeerMeta;
-use crate::service::AppendSystemContextRequest;
+use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
 use crate::types::{ContentInput, Message, SessionId, ToolDef, ToolResult, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -196,6 +196,8 @@ pub struct SessionBuildState {
     pub additional_instructions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
     #[serde(default, skip_serializing_if = "is_default_call_timeout_override")]
     pub call_timeout_override: crate::CallTimeoutOverride,
 }
@@ -586,6 +588,12 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Remove a metadata value.
+    pub fn remove_metadata(&mut self, key: &str) {
+        self.metadata.remove(key);
+        self.updated_at = SystemTime::now();
+    }
+
     /// Store SessionMetadata in the session metadata map.
     pub fn set_session_metadata(
         &mut self,
@@ -649,6 +657,22 @@ impl Session {
         self.metadata
             .get(SESSION_BUILD_STATE_KEY)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store typed mob operator authority inside canonical build-state metadata.
+    pub fn set_mob_tool_authority_context(
+        &mut self,
+        authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), serde_json::Error> {
+        let mut build_state = self.build_state().unwrap_or_default();
+        build_state.mob_tool_authority_context = authority_context;
+        self.set_build_state(build_state)
+    }
+
+    /// Load typed mob operator authority from canonical build-state metadata.
+    pub fn mob_tool_authority_context(&self) -> Option<MobToolAuthorityContext> {
+        self.build_state()
+            .and_then(|state| state.mob_tool_authority_context)
     }
 
     /// Fork the session at a specific message index
@@ -1080,6 +1104,27 @@ mod tests {
         session.set_metadata("key", serde_json::json!("value"));
 
         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_session_mob_tool_authority_context_roundtrip() {
+        let mut session = Session::new();
+        let authority = MobToolAuthorityContext::new(
+            crate::service::OpaquePrincipalToken::new("opaque-principal"),
+            false,
+        )
+        .with_managed_mob_scope(["mob-a"])
+        .with_audit_invocation_id("audit-1");
+
+        session
+            .set_mob_tool_authority_context(Some(authority.clone()))
+            .expect("authority should serialize");
+        assert_eq!(session.mob_tool_authority_context(), Some(authority));
+
+        session
+            .set_mob_tool_authority_context(None)
+            .expect("authority should clear");
+        assert!(session.mob_tool_authority_context().is_none());
     }
 
     #[test]

@@ -235,6 +235,12 @@ pub struct AgentBuildConfig {
     pub override_memory: Option<bool>,
     /// Per-build override for factory-level `enable_mob`.
     pub override_mob: Option<bool>,
+    /// Runtime-injected mob operator authority context.
+    ///
+    /// Tool visibility may depend on this context being present, but
+    /// dispatch-time authorization must still re-check the typed create/scope
+    /// fields on every operator tool call.
+    pub mob_tool_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
     /// Late-binding mob tool factory, invoked inside `build_agent()` with
     /// session-scoped args (session ID, ops lifecycle, comms runtime) to produce
     /// the mob tool dispatcher. Composed into the tool gateway after comms.
@@ -342,6 +348,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
             .field("override_mob", &self.override_mob)
+            .field(
+                "mob_tool_authority_context",
+                &self.mob_tool_authority_context.is_some(),
+            )
             .field("mob_tools", &self.mob_tools.is_some())
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
@@ -398,6 +408,7 @@ impl AgentBuildConfig {
             override_shell: None,
             override_memory: None,
             override_mob: None,
+            mob_tool_authority_context: None,
             mob_tools: None,
             preload_skills: None,
             realm_id: None,
@@ -435,6 +446,29 @@ impl AgentBuildConfig {
         build
     }
 
+    /// Apply the shared host/runtime default for explicit mob operator
+    /// enablement.
+    ///
+    /// This keeps `override_mob` and the generated create-only authority
+    /// context aligned at the composition seam. Existing-mob scope must be
+    /// injected explicitly elsewhere; this helper never infers it.
+    pub fn apply_persisted_mob_operator_access(
+        &mut self,
+        enable_mob: Option<bool>,
+        persisted_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
+    ) {
+        let (override_mob, authority_context) = meerkat_core::service::resolve_mob_operator_access(
+            enable_mob,
+            persisted_authority_context,
+        );
+        self.override_mob = override_mob;
+        self.mob_tool_authority_context = authority_context;
+    }
+
+    pub fn apply_generated_create_only_mob_operator_access(&mut self, enable_mob: Option<bool>) {
+        self.apply_persisted_mob_operator_access(enable_mob, None);
+    }
+
     /// Merge `SessionBuildOptions` into this build config.
     pub fn apply_session_build_options(&mut self, build: &SessionBuildOptions) {
         self.provider = build.provider;
@@ -458,6 +492,7 @@ impl AgentBuildConfig {
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
         self.override_mob = build.override_mob;
+        self.mob_tool_authority_context = build.mob_tool_authority_context.clone();
         self.mob_tools = build.mob_tools.clone();
         self.preload_skills = build.preload_skills.clone();
         self.realm_id = build.realm_id.clone();
@@ -500,6 +535,7 @@ impl AgentBuildConfig {
             override_shell: self.override_shell,
             override_memory: self.override_memory,
             override_mob: self.override_mob,
+            mob_tool_authority_context: self.mob_tool_authority_context.clone(),
             mob_tools: self.mob_tools.clone(),
             preload_skills: self.preload_skills.clone(),
             realm_id: self.realm_id.clone(),
@@ -859,7 +895,13 @@ impl AgentFactory {
             build_config.override_memory = metadata.tooling.memory.to_override();
         }
         if !mask.override_mob {
-            build_config.override_mob = metadata.tooling.mob.to_override();
+            build_config.apply_persisted_mob_operator_access(
+                metadata.tooling.mob.to_override(),
+                build_config
+                    .resume_session
+                    .as_ref()
+                    .and_then(Session::mob_tool_authority_context),
+            );
         }
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
@@ -1572,7 +1614,6 @@ impl AgentFactory {
 
         // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
         // already-composed comms gateway).
-        let operator_capabilities_present = build_config.override_mob == Some(true);
         let effective_mob = build_config.override_mob.unwrap_or(self.enable_mob);
         let mob_factory = build_config
             .mob_tools
@@ -1590,7 +1631,7 @@ impl AgentFactory {
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
-                operator_capabilities_present,
+                authority_context: build_config.mob_tool_authority_context.clone(),
                 comms_name: build_config.comms_name.clone(),
                 comms_runtime: mob_comms,
             };
@@ -1835,6 +1876,7 @@ impl AgentFactory {
             app_context: build_config.app_context.clone(),
             additional_instructions: build_config.additional_instructions.clone(),
             shell_env: build_config.shell_env.clone(),
+            mob_tool_authority_context: build_config.mob_tool_authority_context.clone(),
             call_timeout_override: build_config.call_timeout_override.clone(),
         };
 

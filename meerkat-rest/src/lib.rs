@@ -1011,8 +1011,6 @@ pub fn router(state: AppState) -> Router {
 
     #[cfg(feature = "mob")]
     let r = r
-        .route("/mob/tools", get(mob_tools))
-        .route("/mob/call", post(mob_call))
         .route("/mob/{id}/events", get(mob_event_stream))
         .route("/mob/{id}/spawn-helper", post(mob_spawn_helper))
         .route("/mob/{id}/fork-helper", post(mob_fork_helper))
@@ -1285,32 +1283,6 @@ async fn input_state(
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
-}
-
-/// GET /mob/tools — list protocol-callable mob lifecycle tools.
-#[cfg(feature = "mob")]
-async fn mob_tools() -> Json<Value> {
-    Json(json!({ "tools": meerkat_mob_mcp::tools_list() }))
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg(feature = "mob")]
-struct MobCallRequest {
-    name: String,
-    #[serde(default)]
-    arguments: Value,
-}
-
-/// POST /mob/call — invoke a mob lifecycle tool.
-#[cfg(feature = "mob")]
-async fn mob_call(
-    State(state): State<AppState>,
-    Json(req): Json<MobCallRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let result = meerkat_mob_mcp::handle_tools_call(&state.mob_state, &req.name, &req.arguments)
-        .await
-        .map_err(|e| ApiError::BadRequest(e.message))?;
-    Ok(Json(result))
 }
 
 /// Query parameters for `GET /mob/{id}/events`.
@@ -2396,7 +2368,7 @@ async fn create_session_inner(
     }
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: req.provider,
         output_schema: req.output_schema,
         structured_output_retries: req
@@ -2418,7 +2390,8 @@ async fn create_session_inner(
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_memory: req.enable_memory,
-        override_mob: req.enable_mob,
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills: req
             .preload_skills
             .clone()
@@ -2453,6 +2426,7 @@ async fn create_session_inner(
         blob_store_override: None,
         mob_tools: None,
     };
+    build.apply_generated_create_only_mob_operator_access(req.enable_mob);
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
@@ -2980,7 +2954,7 @@ async fn continue_session_inner(
                 return RequestOutcome::Unpublished(Err(ApiError::Internal(message)));
             }
         };
-        let build = SessionBuildOptions {
+        let mut build = SessionBuildOptions {
             provider: req.provider,
             output_schema: req.output_schema,
             structured_output_retries: req
@@ -3003,6 +2977,7 @@ async fn continue_session_inner(
             override_shell: None,
             override_memory: None,
             override_mob: None,
+            mob_tool_authority_context: None,
             preload_skills: None,
             realm_id: Some(state.realm_id.clone()),
             instance_id: state.instance_id.clone(),
@@ -3029,6 +3004,7 @@ async fn continue_session_inner(
             blob_store_override: None,
             mob_tools: None,
         };
+        build.apply_generated_create_only_mob_operator_access(None);
         let create_req = SvcCreateSessionRequest {
             model: req
                 .model
@@ -4822,9 +4798,8 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn test_mob_tools_and_call_routes_work() {
+    async fn test_compatibility_mob_routes_are_not_found() {
         use axum::body::Body;
-        use http_body_util::BodyExt;
         use tower::ServiceExt;
 
         let temp = TempDir::new().unwrap();
@@ -4839,16 +4814,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let tools_resp = app.clone().oneshot(tools_req).await.unwrap();
-        assert_eq!(tools_resp.status(), StatusCode::OK);
-        let tools_bytes = tools_resp.into_body().collect().await.unwrap().to_bytes();
-        let tools_payload: serde_json::Value = serde_json::from_slice(&tools_bytes).unwrap();
-        assert!(
-            tools_payload["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| tool["name"] == "mob_create")
-        );
+        assert_eq!(tools_resp.status(), StatusCode::NOT_FOUND);
 
         let call_req = axum::http::Request::builder()
             .method("POST")
@@ -4863,10 +4829,7 @@ mod tests {
             ))
             .unwrap();
         let call_resp = app.oneshot(call_req).await.unwrap();
-        assert_eq!(call_resp.status(), StatusCode::OK);
-        let call_bytes = call_resp.into_body().collect().await.unwrap().to_bytes();
-        let call_payload: serde_json::Value = serde_json::from_slice(&call_bytes).unwrap();
-        assert!(call_payload["mob_id"].as_str().is_some());
+        assert_eq!(call_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(feature = "mob")]

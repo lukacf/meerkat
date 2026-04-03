@@ -53,6 +53,12 @@ second surface-local execution loop.
 | `meerkat_event_stream_open` | Open a session-level agent event stream |
 | `meerkat_event_stream_read` | Read the next item from an open event stream |
 | `meerkat_event_stream_close` | Close a previously opened event stream |
+| `meerkat_mob_create` | Create a mob from a typed public definition (mob feature) |
+| `meerkat_mob_list` | List active mobs (mob feature) |
+| `meerkat_mob_status` | Get lifecycle status for one mob (mob feature) |
+| `meerkat_mob_lifecycle` | Apply a lifecycle action to a mob (mob feature) |
+| `meerkat_mob_spawn` | Spawn a member into a mob (mob feature) |
+| `meerkat_mob_member_send` | Deliver host-owned work to a specific mob member (mob feature) |
 | `meerkat_mob_event_stream_open` | Open a mob-level event stream (mob feature) |
 | `meerkat_mob_event_stream_read` | Read the next event from an open mob stream (mob feature) |
 | `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
@@ -60,11 +66,11 @@ second surface-local execution loop.
 | `meerkat_comms_peers` | List peers visible to a session (comms feature) |
 
 <Note>
-When the `mob` feature is enabled, `meerkat-mob-mcp` mob lifecycle tools (e.g.
-`mob_create`, `mob_list`, `mob_lifecycle`) are also exposed alongside the
-`meerkat_*` tools listed above. Additionally, mob capability within sessions is
-provided by composing `MobMcpDispatcher` into `SessionBuildOptions.external_tools`
-used by `meerkat_run`/`meerkat_resume`.
+When the `mob` feature is enabled, the public MCP host surface uses typed
+`meerkat_mob_*` control-plane tools. Inside running sessions, mob capability is
+still agent-side and comes from composing `MobMcpDispatcher` into
+`SessionBuildOptions.external_tools`, which provides `mob_*` tools to the
+model. Public host MCP surfaces should not re-export that raw dispatcher.
 </Note>
 
 ## Use MCP servers as tools (client)
@@ -180,7 +186,14 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
 
 ### Hosting the MCP server
 
-`meerkat-mcp-server` is a library crate that provides tool schemas and handlers. If you need a standalone MCP server process, add a thin binary wrapper around its `tools_list()` and `handle_tools_call*` entrypoints, or embed it in an existing MCP host.
+`meerkat-mcp-server` is a library crate that provides tool schemas and handlers.
+If you need a full public MCP host, embed its `tools_list()` and
+`handle_tools_call*` entrypoints or run the bundled `rkat-mcp` binary. If you
+need a mob-only MCP host, `meerkat-mob-mcp` exposes `public_tools_list()` and
+`handle_public_tools_call()` for the typed `meerkat_mob_*` control plane.
+
+`meerkat-mob-mcp::tools_list()` and `handle_tools_call()` remain the internal
+agent-side `mob_*` dispatcher helpers; they are not the public host contract.
 
 The bundled `rkat-mcp` binary supports realm scope flags:
 

@@ -3398,7 +3398,7 @@ async fn run_agent(
         .await
         .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
 
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: Some(provider.as_core()),
         output_schema,
         structured_output_retries,
@@ -3414,7 +3414,8 @@ async fn run_agent(
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_shell),
         override_memory: Some(enable_memory),
-        override_mob: Some(effective_mob),
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills,
         realm_id: Some(scope.locator.realm_id.clone()),
         instance_id: scope.instance_id.clone(),
@@ -3437,6 +3438,7 @@ async fn run_agent(
         blob_store_override: None,
         mob_tools: mob_tools_factory,
     };
+    build.apply_generated_create_only_mob_operator_access(Some(effective_mob));
 
     let parsed_labels = if labels.is_empty() {
         None
@@ -3912,7 +3914,7 @@ async fn resume_session_with_llm_override(
         .await
         .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
 
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: Some(provider_core),
         output_schema: None,
         structured_output_retries: 2,
@@ -3927,7 +3929,8 @@ async fn resume_session_with_llm_override(
         override_builtins: tooling.builtins.to_override(),
         override_shell: tooling.shell.to_override(),
         override_memory: tooling.memory.to_override(),
-        override_mob: tooling.mob.to_override(),
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills: None,
         peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
         realm_id: stored_metadata
@@ -3959,6 +3962,13 @@ async fn resume_session_with_llm_override(
         blob_store_override: None,
         mob_tools: mob_tools_factory,
     };
+    build.apply_persisted_mob_operator_access(
+        tooling.mob.to_override(),
+        build
+            .resume_session
+            .as_ref()
+            .and_then(Session::mob_tool_authority_context),
+    );
 
     let turn_result = async {
         // Route through SessionService::create_session() with the resumed session
@@ -9443,14 +9453,14 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
             captured_system_prompt.clone(),
         ));
 
-        let build = SessionBuildOptions {
+        let mut build = SessionBuildOptions {
             mob_tools: Some(mob_factory),
-            override_mob: Some(true),
             llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                 llm_override,
             )),
             ..SessionBuildOptions::default()
         };
+        build.apply_generated_create_only_mob_operator_access(Some(true));
 
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),

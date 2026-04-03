@@ -61,8 +61,17 @@ describe("E2E Smoke: TypeScript SDK package", { skip: !binaryPath }, () => {
   });
 
   it("opens and explicitly closes a live mob stream through the packaged SDK", async () => {
-    const created = await client.callMobTool("mob_create", { definition: { id: "coding_swarm", orchestrator: { profile: "lead" }, profiles: { lead: { model: "claude-opus-4-6" }, worker: { model: "claude-sonnet-4-6" } } } });
-    const mobId = String(created.mob_id ?? "");
+    const mob = await client.createMob({
+      definition: {
+        id: "coding_swarm",
+        orchestrator: { profile: "lead" },
+        profiles: {
+          lead: { model: "claude-opus-4-6" },
+          worker: { model: "claude-sonnet-4-6" },
+        },
+      },
+    });
+    const mobId = mob.mobId;
     assert.ok(mobId, "mob_create should return mob_id");
 
     const sub = await client.subscribeMobEvents(mobId);

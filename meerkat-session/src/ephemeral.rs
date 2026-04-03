@@ -14,10 +14,11 @@ use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    DeferredPromptPolicy, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
+    DeferredPromptPolicy, MobToolAuthorityContext, SessionControlError, SessionError,
+    SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
+    SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
+    SessionUsage, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
@@ -107,6 +108,10 @@ enum SessionCommand {
     UpdateKeepAlive {
         keep_alive: bool,
         reply_tx: oneshot::Sender<()>,
+    },
+    UpdateMobToolAuthority {
+        authority_context: Option<MobToolAuthorityContext>,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     UpdateSystemPrompt {
         system_prompt: String,
@@ -306,6 +311,16 @@ pub trait SessionAgent: Send {
     /// live session. This ensures subsequent inheriting calls observe the
     /// updated value.
     fn update_keep_alive(&mut self, _keep_alive: bool) {}
+
+    /// Update the canonical mob operator authority persisted on the session.
+    fn update_mob_tool_authority_context(
+        &mut self,
+        _authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "mob tool authority updates are not supported by this session agent".to_string(),
+        ))
+    }
 
     /// Update the session system prompt before the first turn starts.
     fn update_system_prompt(
@@ -1331,6 +1346,38 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         })
     }
 
+    async fn update_session_mob_authority_context(
+        &self,
+        id: &SessionId,
+        authority_context: Option<MobToolAuthorityContext>,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::UpdateMobToolAuthority {
+                authority_context,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     async fn subscribe_session_events(
         &self,
         id: &SessionId,
@@ -1737,6 +1784,12 @@ async fn session_task<A: SessionAgent>(
             } => {
                 agent.update_keep_alive(keep_alive);
                 let _ = reply_tx.send(());
+            }
+            SessionCommand::UpdateMobToolAuthority {
+                authority_context,
+                reply_tx,
+            } => {
+                let _ = reply_tx.send(agent.update_mob_tool_authority_context(authority_context));
             }
             SessionCommand::UpdateSystemPrompt {
                 system_prompt,

@@ -1,6 +1,12 @@
 mod agent_tools;
+mod public_definition;
+mod public_mcp;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
+};
+pub use public_definition::decode_public_mob_definition;
+pub use public_mcp::{
+    handle_public_tools_call, public_tool_names, public_tools_list, wrap_public_tool_payload,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -11,6 +17,7 @@ mod tokio {
 use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
+use meerkat_contracts::MobDefinitionInput;
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
@@ -236,7 +243,8 @@ impl MobMcpState {
     }
 
     /// Destroy a mob without the implicit-mob guard.
-    /// Used by session cleanup paths and model-refresh that intentionally destroy implicit mobs.
+    ///
+    /// Used by session cleanup paths and canonical implicit-mob reconciliation.
     pub(crate) async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
         let managed = {
             let mut mobs = self.mobs.write().await;
@@ -631,7 +639,7 @@ impl MobMcpState {
         mobs.iter()
             .find(|(_, m)| {
                 let def = m.handle.definition();
-                def.is_implicit && def.owner_session_id.as_deref() == Some(session_id)
+                def.is_implicit && def.is_owned_by_session(session_id)
             })
             .map(|(id, _)| id.clone())
     }
@@ -646,12 +654,12 @@ impl MobMcpState {
             .unwrap_or(false)
     }
 
-    /// Find all mobs owned by the given session (both implicit and explicit).
+    /// Find all mobs indexed to the given session (both implicit and explicit).
     pub async fn find_mobs_for_session(&self, session_id: &str) -> Vec<MobId> {
         let mobs = self.mobs.read().await;
         mobs.iter()
             .filter_map(|(id, m)| {
-                if m.handle.definition().owner_session_id.as_deref() == Some(session_id) {
+                if m.handle.definition().is_owned_by_session(session_id) {
                     Some(id.clone())
                 } else {
                     None
@@ -660,16 +668,58 @@ impl MobMcpState {
             .collect()
     }
 
-    /// Get or create the implicit delegation mob for the given session.
+    async fn find_session_scoped_mobs(&self, session_id: &str) -> Vec<MobId> {
+        let mobs = self.mobs.read().await;
+        mobs.iter()
+            .filter_map(|(id, m)| {
+                if m.handle.definition().is_session_scoped_to(session_id) {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    async fn implicit_mob_matches_session_model(
+        &self,
+        mob_id: &MobId,
+        session_id: &str,
+        model: &str,
+    ) -> bool {
+        let delegate_profile = ProfileName::from("delegate");
+        let mobs = self.mobs.read().await;
+        mobs.get(mob_id).is_some_and(|managed| {
+            let definition = managed.handle.definition();
+            definition.is_implicit
+                && definition.is_owned_by_session(session_id)
+                && definition
+                    .profiles
+                    .get(&delegate_profile)
+                    .is_some_and(|profile| profile.model == model)
+        })
+    }
+
+    /// Ensure the canonical implicit delegation mob exists for the given
+    /// session/model pair.
     ///
-    /// Uses a per-session mutex to ensure single-flight creation: the first
-    /// caller creates the mob, concurrent callers block and receive the same
-    /// mob ID. The mob is tagged with `owner_session_id` on its definition.
-    pub async fn get_or_create_implicit_mob(
+    /// This is the sole owner of implicit-mob model reconciliation. Tool
+    /// surfaces may provide a cached mob-id hint for the fast path, but they
+    /// must not destroy or recreate mobs themselves.
+    pub async fn ensure_implicit_mob_for_model(
         &self,
         session_id: &str,
         model: &str,
-    ) -> Result<MobId, MobError> {
+        cached_mob_id: Option<&MobId>,
+    ) -> Result<(MobId, bool), MobError> {
+        if let Some(cached_mob_id) = cached_mob_id
+            && self
+                .implicit_mob_matches_session_model(cached_mob_id, session_id, model)
+                .await
+        {
+            return Ok((cached_mob_id.clone(), false));
+        }
+
         // Get or create a per-session lock
         let session_lock = {
             let mut locks = self.implicit_mob_locks.lock().await;
@@ -680,21 +730,43 @@ impl MobMcpState {
         };
         let _guard = session_lock.lock().await;
 
-        // Under lock: check if already exists
         if let Some(mob_id) = self.find_implicit_mob(session_id).await {
-            return Ok(mob_id);
+            if self
+                .implicit_mob_matches_session_model(&mob_id, session_id, model)
+                .await
+            {
+                return Ok((mob_id, false));
+            }
+            self.mob_destroy_unchecked(&mob_id).await?;
         }
 
-        // Create and return
-        let def = MobDefinition::implicit(session_id, model);
-        self.mob_create_definition(def).await
+        let mob_id = self
+            .mob_create_definition(MobDefinition::implicit(session_id, model))
+            .await?;
+        Ok((mob_id, true))
     }
 
-    /// Destroy all mobs owned by the given session (both implicit and explicit).
+    /// Get or create the implicit delegation mob for the given session.
     ///
-    /// Called during session archive to clean up session-scoped mobs.
+    /// Uses a per-session mutex to ensure single-flight creation: the first
+    /// caller creates the mob, concurrent callers block and receive the same
+    /// mob ID. The mob is indexed to the owning session and marked session-scoped.
+    pub async fn get_or_create_implicit_mob(
+        &self,
+        session_id: &str,
+        model: &str,
+    ) -> Result<MobId, MobError> {
+        self.ensure_implicit_mob_for_model(session_id, model, None)
+            .await
+            .map(|(mob_id, _created)| mob_id)
+    }
+
+    /// Destroy all session-scoped mobs for the given session.
+    ///
+    /// Called during session archive to clean up mobs whose cleanup truth is
+    /// `DestroyOnOwnerArchive`. `owner_session_id` alone is not sufficient.
     pub async fn destroy_session_mobs(&self, session_id: &str) -> Result<(), MobError> {
-        let mob_ids = self.find_mobs_for_session(session_id).await;
+        let mob_ids = self.find_session_scoped_mobs(session_id).await;
         if mob_ids.is_empty() {
             return Ok(());
         }
@@ -704,7 +776,7 @@ impl MobMcpState {
                     mob_id = %mob_id,
                     session_id = %session_id,
                     error = %error,
-                    "failed to destroy session-owned mob during cleanup"
+                    "failed to destroy session-scoped mob during cleanup"
                 );
             }
         }
@@ -714,22 +786,28 @@ impl MobMcpState {
         Ok(())
     }
 
-    /// Scavenge orphaned implicit mobs whose owning sessions no longer exist.
+    /// Scavenge orphaned session-scoped mobs whose owning sessions no longer exist.
     ///
-    /// Called during hydration at startup. For each mob with `owner_session_id`
-    /// set, checks whether the owning session still exists. If not, destroys
-    /// the mob. Returns the list of scavenged mob IDs.
-    pub async fn scavenge_orphaned_implicit_mobs(&self) -> Vec<MobId> {
-        // Collect implicit mob candidates under a read lock
+    /// Called during hydration at startup. For each mob marked
+    /// `DestroyOnOwnerArchive`, checks whether the indexed owning session still
+    /// exists. If not, destroys the mob. Returns the list of scavenged mob IDs.
+    pub async fn scavenge_orphaned_session_scoped_mobs(&self) -> Vec<MobId> {
+        // Collect session-scoped cleanup candidates under a read lock.
         let candidates: Vec<(MobId, String)> = {
             let mobs = self.mobs.read().await;
             mobs.iter()
                 .filter_map(|(id, m)| {
-                    m.handle
-                        .definition()
-                        .owner_session_id
-                        .as_ref()
-                        .map(|sid| (id.clone(), sid.clone()))
+                    let definition = m.handle.definition();
+                    if definition.session_cleanup_policy
+                        == meerkat_mob::definition::SessionCleanupPolicy::DestroyOnOwnerArchive
+                    {
+                        definition
+                            .owner_session_id
+                            .as_ref()
+                            .map(|sid| (id.clone(), sid.clone()))
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         };
@@ -751,13 +829,13 @@ impl MobMcpState {
                         mob_id = %mob_id,
                         session_id = %session_id,
                         error = %error,
-                        "failed to scavenge orphaned implicit mob"
+                        "failed to scavenge orphaned session-scoped mob"
                     );
                 } else {
                     tracing::info!(
                         mob_id = %mob_id,
                         session_id = %session_id,
-                        "scavenged orphaned implicit mob"
+                        "scavenged orphaned session-scoped mob"
                     );
                     scavenged.push(mob_id);
                     // Prune per-session lock to avoid unbounded growth.
@@ -1395,7 +1473,7 @@ fn map_mob_err(call: ToolCallView<'_>, err: MobError) -> ToolError {
 
 #[derive(Deserialize)]
 struct MobCreateArgs {
-    definition: MobDefinition,
+    definition: MobDefinitionInput,
 }
 #[derive(Deserialize)]
 struct MobListArgs {
@@ -1550,9 +1628,11 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let args: MobCreateArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let definition = decode_public_mob_definition(args.definition)
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
                 let mob_id = self
                     .state
-                    .mob_create_definition(args.definition)
+                    .mob_create_definition(definition)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"mob_id": mob_id}))
@@ -1884,6 +1964,37 @@ pub struct McpToolError {
     pub data: Option<serde_json::Value>,
 }
 
+impl McpToolError {
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn method_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: -32601,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: -32603,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+/// Return the agent-side `mob_*` dispatcher tool inventory.
+///
+/// This mirrors `MobMcpDispatcher` and is intended for in-session/agent tool
+/// composition helpers. Public host surfaces should use `public_tools_list()`
+/// instead.
 pub fn tools_list() -> Vec<serde_json::Value> {
     let dispatcher = MobMcpDispatcher::new(MobMcpState::new_in_memory());
     dispatcher
@@ -1899,6 +2010,10 @@ pub fn tools_list() -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Dispatch an agent-side `mob_*` tool call against `MobMcpDispatcher`.
+///
+/// This is the internal dispatcher helper for in-session agent tools. Public
+/// host MCP surfaces should use `handle_public_tools_call()` instead.
 pub async fn handle_tools_call(
     state: &Arc<MobMcpState>,
     name: &str,
@@ -3418,6 +3533,36 @@ timeout_ms = 1000
         );
     }
 
+    #[tokio::test]
+    async fn test_mob_create_rejects_internal_profile_tool_bundles() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(svc));
+        let d = MobMcpDispatcher::new(state);
+
+        let error = call_tool_err(
+            &d,
+            "mob_create",
+            json!({
+                "definition": {
+                    "id": "bad_mob",
+                    "profiles": {
+                        "worker": {
+                            "model": "claude-sonnet-4-6",
+                            "tools": {
+                                "rust_bundles": ["internal-only"]
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(error, ToolError::InvalidArguments { .. }),
+            "mob_create with internal rust bundle fields must return InvalidArguments, got: {error:?}"
+        );
+    }
+
     // ── Implicit mob methods ──────────────────────────────────────────
 
     #[tokio::test]
@@ -3464,6 +3609,59 @@ timeout_ms = 1000
     }
 
     #[tokio::test]
+    async fn test_ensure_implicit_mob_for_model_reconciles_stale_model_in_state() {
+        let state = MobMcpState::new_in_memory();
+        let sid = SessionId::new().to_string();
+
+        let old_mob_id = state
+            .get_or_create_implicit_mob(&sid, "claude-sonnet-4-5")
+            .await
+            .expect("create initial implicit mob");
+        let old_handle = state
+            .handle_for(&old_mob_id)
+            .await
+            .expect("initial implicit mob handle");
+        assert_eq!(
+            old_handle
+                .definition()
+                .profiles
+                .get(&ProfileName::from("delegate"))
+                .expect("delegate profile")
+                .model,
+            "claude-sonnet-4-5"
+        );
+
+        let (new_mob_id, created) = state
+            .ensure_implicit_mob_for_model(&sid, "gpt-5.4", Some(&old_mob_id))
+            .await
+            .expect("reconcile implicit mob");
+
+        assert!(created, "model mismatch should force a fresh implicit mob");
+        assert_eq!(
+            state.find_implicit_mob(&sid).await,
+            Some(new_mob_id.clone()),
+            "session should now point at the reconciled implicit mob"
+        );
+        assert_eq!(
+            new_mob_id, old_mob_id,
+            "implicit mob IDs are canonical per session even when the runtime refreshes their model"
+        );
+        let new_handle = state
+            .handle_for(&new_mob_id)
+            .await
+            .expect("reconciled implicit mob handle");
+        assert_eq!(
+            new_handle
+                .definition()
+                .profiles
+                .get(&ProfileName::from("delegate"))
+                .expect("delegate profile")
+                .model,
+            "gpt-5.4"
+        );
+    }
+
+    #[tokio::test]
     async fn test_is_implicit_mob_true_for_implicit_false_for_explicit() {
         let state = MobMcpState::new_in_memory();
 
@@ -3475,6 +3673,17 @@ timeout_ms = 1000
             .unwrap();
 
         // Create an explicit mob via mob_create_definition
+        let explicit_id = state
+            .mob_create_definition(explicit_definition("explicit-mob"))
+            .await
+            .unwrap();
+
+        assert!(state.is_implicit_mob(&implicit_id).await);
+        assert!(!state.is_implicit_mob(&explicit_id).await);
+        assert!(!state.is_implicit_mob(&MobId::from("nonexistent")).await);
+    }
+
+    fn explicit_definition(mob_id: &str) -> MobDefinition {
         let mut explicit_profiles = BTreeMap::new();
         explicit_profiles.insert(
             ProfileName::from("worker"),
@@ -3491,8 +3700,8 @@ timeout_ms = 1000
                 provider_params: None,
             },
         );
-        let explicit_def = MobDefinition {
-            id: MobId::from("explicit-mob"),
+        MobDefinition {
+            id: MobId::from(mob_id),
             orchestrator: None,
             profiles: explicit_profiles,
             mcp_servers: BTreeMap::new(),
@@ -3506,13 +3715,9 @@ timeout_ms = 1000
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
-        };
-        let explicit_id = state.mob_create_definition(explicit_def).await.unwrap();
-
-        assert!(state.is_implicit_mob(&implicit_id).await);
-        assert!(!state.is_implicit_mob(&explicit_id).await);
-        assert!(!state.is_implicit_mob(&MobId::from("nonexistent")).await);
+        }
     }
 
     #[tokio::test]
@@ -3528,6 +3733,37 @@ timeout_ms = 1000
 
         state.destroy_session_mobs(&sid).await.unwrap();
         assert!(state.find_implicit_mob(&sid).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_destroy_session_mobs_uses_cleanup_policy_not_owner_index() {
+        let state = MobMcpState::new_in_memory();
+        let sid = SessionId::new().to_string();
+
+        let mut manual = explicit_definition("manual-owner-index");
+        manual.owner_session_id = Some(sid.clone());
+        let manual_id = state
+            .mob_create_definition(manual)
+            .await
+            .expect("create manual owner-indexed mob");
+
+        let mut session_scoped = explicit_definition("session-scoped-owner");
+        session_scoped.mark_session_scoped(&sid);
+        let session_scoped_id = state
+            .mob_create_definition(session_scoped)
+            .await
+            .expect("create session-scoped mob");
+
+        state.destroy_session_mobs(&sid).await.unwrap();
+
+        assert!(
+            state.handle_for(&manual_id).await.is_ok(),
+            "owner_session_id alone must not make a mob eligible for cleanup"
+        );
+        assert!(
+            state.handle_for(&session_scoped_id).await.is_err(),
+            "DestroyOnOwnerArchive must remain the cleanup truth"
+        );
     }
 
     #[tokio::test]
@@ -3572,7 +3808,7 @@ timeout_ms = 1000
     }
 
     #[tokio::test]
-    async fn test_scavenge_orphaned_implicit_mobs() {
+    async fn test_scavenge_orphaned_session_scoped_mobs() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc.clone()));
 
@@ -3599,19 +3835,32 @@ timeout_ms = 1000
             .await
             .unwrap();
 
-        // Session exists — scavenge should find nothing
-        let scavenged = state.scavenge_orphaned_implicit_mobs().await;
+        // Also create a manual owner-indexed explicit mob that should survive scavenging.
+        let mut manual = explicit_definition("manual-owner-index");
+        manual.owner_session_id = Some(sid.clone());
+        let manual_id = state
+            .mob_create_definition(manual)
+            .await
+            .expect("create manual owner-indexed mob");
+
+        // Session exists — scavenge should find nothing.
+        let scavenged = state.scavenge_orphaned_session_scoped_mobs().await;
         assert!(scavenged.is_empty(), "no orphans while session exists");
 
         // Archive the session — now the mob is orphaned
         svc.archive(&result.session_id).await.unwrap();
 
-        // Scavenge should find and destroy the orphan
-        let scavenged = state.scavenge_orphaned_implicit_mobs().await;
+        // Scavenge should find and destroy the session-scoped orphan, but not
+        // the manual owner-indexed mob.
+        let scavenged = state.scavenge_orphaned_session_scoped_mobs().await;
         assert_eq!(scavenged, vec![mob_id.clone()]);
 
         // Mob should be gone
         assert!(state.find_implicit_mob(&sid).await.is_none());
+        assert!(
+            state.handle_for(&manual_id).await.is_ok(),
+            "manual owner-indexed mob must survive orphan scavenging"
+        );
     }
 
     #[tokio::test]

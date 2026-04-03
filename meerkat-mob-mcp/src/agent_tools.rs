@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::service::{SessionError, SessionService};
+use meerkat_core::service::{MobToolAuthorityContext, SessionError, SessionService};
 use meerkat_core::types::{ContentInput, SessionId, ToolCallView, ToolDef, ToolResult};
 use meerkat_mob::{
     MeerkatId, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
@@ -50,8 +50,9 @@ pub struct AgentMobToolSurface {
     /// Pre-seeded on resume; otherwise set by first delegate via get_or_create_implicit_mob.
     /// Read-only cache — MobMcpState is the canonical owner.
     cached_implicit_mob_id: RwLock<Option<MobId>>,
-    /// Mobs owned by this session (implicit + explicitly created). Session-scoped access control.
-    owned_mob_ids: RwLock<std::collections::HashSet<MobId>>,
+    /// Typed runtime-injected operator authority. This is the only source of
+    /// authorization for agent-facing mob tools.
+    authority_context: RwLock<MobToolAuthorityContext>,
     tools: Arc<[Arc<ToolDef>]>,
     owner_session_id: SessionId,
     /// Model name inherited by implicit mob helpers.
@@ -75,20 +76,17 @@ impl AgentMobToolSurface {
     pub fn new(
         state: Arc<MobMcpState>,
         implicit_mob_id: Option<MobId>,
+        authority_context: MobToolAuthorityContext,
         model: String,
         owner_session_id: SessionId,
         comms_name: Option<String>,
         comms_peer_id: Option<String>,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> Self {
-        let mut owned = std::collections::HashSet::new();
-        if let Some(ref id) = implicit_mob_id {
-            owned.insert(id.clone());
-        }
-        Self::new_with_owned(
+        Self::new_with_authority(
             state,
             implicit_mob_id,
-            owned.into_iter().collect(),
+            authority_context,
             model,
             owner_session_id,
             comms_name,
@@ -99,10 +97,10 @@ impl AgentMobToolSurface {
 
     /// Create with a pre-populated set of owned mob IDs (for resume).
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_owned(
+    pub fn new_with_authority(
         state: Arc<MobMcpState>,
         implicit_mob_id: Option<MobId>,
-        owned_mob_ids: Vec<MobId>,
+        authority_context: MobToolAuthorityContext,
         model: String,
         owner_session_id: SessionId,
         comms_name: Option<String>,
@@ -113,7 +111,7 @@ impl AgentMobToolSurface {
         Self {
             state,
             cached_implicit_mob_id: RwLock::new(implicit_mob_id),
-            owned_mob_ids: RwLock::new(owned_mob_ids.into_iter().collect()),
+            authority_context: RwLock::new(authority_context),
             tools,
             owner_session_id,
             model,
@@ -153,14 +151,88 @@ impl AgentMobToolSurface {
         ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
 
-    /// Check if this session owns the given mob.
-    async fn owns_mob(&self, mob_id: &MobId) -> bool {
-        self.owned_mob_ids.read().await.contains(mob_id)
+    async fn authority_context_snapshot(&self) -> MobToolAuthorityContext {
+        self.authority_context.read().await.clone()
     }
 
-    /// Register a mob as owned by this session.
-    async fn register_owned_mob(&self, mob_id: MobId) {
-        self.owned_mob_ids.write().await.insert(mob_id);
+    async fn ensure_create_authority(&self, tool_name: &str) -> Result<(), ToolError> {
+        if self.authority_context.read().await.can_create_mobs() {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
+    }
+
+    async fn ensure_mob_scope_authority(
+        &self,
+        tool_name: &str,
+        mob_id: &MobId,
+    ) -> Result<(), ToolError> {
+        if self
+            .authority_context
+            .read()
+            .await
+            .can_manage_mob(mob_id.as_str())
+        {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
+    }
+
+    async fn record_successful_operator_action(
+        &self,
+        handle: &meerkat_mob::MobHandle,
+        tool_name: &str,
+    ) {
+        let authority_context = self.authority_context_snapshot().await;
+        if let Err(error) = handle
+            .record_operator_action_provenance(tool_name, &authority_context)
+            .await
+        {
+            tracing::warn!(
+                tool_name,
+                mob_id = %handle.definition().id,
+                error = %error,
+                "agent mob operator provenance projection append failed"
+            );
+        }
+    }
+
+    async fn grant_exact_mob_scope_after_create(
+        &self,
+        tool_name: &str,
+        mob_id: &MobId,
+    ) -> Result<(), ToolError> {
+        let authority_context = self
+            .authority_context_snapshot()
+            .await
+            .grant_manage_mob(mob_id.to_string());
+
+        match self
+            .state
+            .session_service()
+            .update_session_mob_authority_context(
+                &self.owner_session_id,
+                Some(authority_context.clone()),
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(SessionError::Unsupported(_)) => {
+                tracing::debug!(
+                    session_id = %self.owner_session_id,
+                    mob_id = %mob_id,
+                    "session service does not persist mob authority updates; keeping in-memory scope only"
+                );
+            }
+            Err(error) => {
+                return Err(ToolError::execution_failed(format!(
+                    "tool '{tool_name}' failed: unable to persist exact mob scope for {mob_id}: {error}"
+                )));
+            }
+        }
+
+        *self.authority_context.write().await = authority_context;
+        Ok(())
     }
 
     /// Get or create the implicit mob for this agent's session.
@@ -168,30 +240,18 @@ impl AgentMobToolSurface {
     /// Returns (mob_id, first_delegate) where first_delegate is true if the
     /// mob was just created.
     async fn ensure_implicit_mob(&self) -> Result<(MobId, bool), MobError> {
-        // Fast path: check cache
-        {
-            let cache = self.cached_implicit_mob_id.read().await;
-            if let Some(ref mob_id) = *cache {
-                return Ok((mob_id.clone(), false));
-            }
-        }
-
-        // Slow path: create via single-flight on MobMcpState
-        let mob_id: MobId = self
+        let cached_mob_id = self.cached_implicit_mob_id.read().await.clone();
+        let (mob_id, first_delegate) = self
             .state
-            .get_or_create_implicit_mob(&self.owner_session_id.to_string(), &self.model)
+            .ensure_implicit_mob_for_model(
+                &self.owner_session_id.to_string(),
+                &self.model,
+                cached_mob_id.as_ref(),
+            )
             .await?;
 
-        // Check if we were the creator by seeing if cache was empty
-        let first_delegate = {
-            let mut cache = self.cached_implicit_mob_id.write().await;
-            let was_empty = cache.is_none();
-            *cache = Some(mob_id.clone());
-            was_empty
-        };
-
-        // Register as owned by this session
-        self.register_owned_mob(mob_id.clone()).await;
+        let mut cache = self.cached_implicit_mob_id.write().await;
+        *cache = Some(mob_id.clone());
 
         Ok((mob_id, first_delegate))
     }
@@ -200,6 +260,7 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_create_authority(call.name).await?;
         let args: DelegateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
@@ -308,6 +369,11 @@ impl AgentMobToolSurface {
             result["system_notice"] = json!(notice);
         }
 
+        if let Ok(handle) = self.state.handle_for(&mob_id).await {
+            self.record_successful_operator_action(&handle, call.name)
+                .await;
+        }
+
         Self::encode_result(call, result)
     }
 
@@ -315,17 +381,18 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.ensure_create_authority(call.name).await?;
         let args: MobCreateArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
-        // Always tag with the owning session — the agent surface is the authority
-        // for session ownership. Caller-supplied owner_session_id is ignored to
-        // prevent cross-session ownership spoofing.
+        // Explicit mob creation owns its lifecycle semantics here. Caller-
+        // supplied bookkeeping/lifecycle fields must not mint faux implicit
+        // mobs, spoof cross-session ownership, or bypass session-scoped
+        // cleanup policy.
         let mut definition = args.definition;
-        {
-            definition.owner_session_id = Some(self.owner_session_id.to_string());
-        }
+        definition.clear_internal_lifecycle_flags();
+        definition.mark_session_scoped(&self.owner_session_id.to_string());
 
         let mob_id = self
             .state
@@ -333,7 +400,24 @@ impl AgentMobToolSurface {
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        self.register_owned_mob(mob_id.clone()).await;
+        if let Err(error) = self
+            .grant_exact_mob_scope_after_create(call.name, &mob_id)
+            .await
+        {
+            if let Err(cleanup_error) = self.state.mob_destroy(&mob_id).await {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    error = %cleanup_error,
+                    "failed to roll back explicit mob after authority persistence error"
+                );
+            }
+            return Err(error);
+        }
+
+        if let Ok(handle) = self.state.handle_for(&mob_id).await {
+            self.record_successful_operator_action(&handle, call.name)
+                .await;
+        }
 
         Self::encode_result(call, json!({"mob_id": mob_id}))
     }
@@ -347,19 +431,18 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id);
 
-        // Session-scoped: only allow destroying mobs created by this session.
-        if !self.owns_mob(&mob_id).await {
-            return Err(ToolError::Other(format!(
-                "Mob '{mob_id}' is not owned by this session"
-            )));
-        }
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self.state.handle_for(&mob_id).await.ok();
 
         self.state
             .mob_destroy(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
-        self.owned_mob_ids.write().await.remove(&mob_id);
+        if let Some(handle) = audit_handle.as_ref() {
+            self.record_successful_operator_action(handle, call.name)
+                .await;
+        }
 
         Self::encode_result(call, json!({"ok": true}))
     }
@@ -373,11 +456,12 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = MobId::from(args.mob_id);
 
-        if !self.owns_mob(&mob_id).await {
-            return Err(ToolError::Other(format!(
-                "Mob '{mob_id}' is not owned by this session"
-            )));
-        }
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self
+            .state
+            .handle_for(&mob_id)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
 
         let mut spec = SpawnMemberSpec::new(
             ProfileName::from(args.profile),
@@ -395,6 +479,9 @@ impl AgentMobToolSurface {
             .mob_spawn_spec(&mob_id, spec)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+
+        self.record_successful_operator_action(&audit_handle, call.name)
+            .await;
 
         Self::encode_result(
             call,
@@ -414,16 +501,20 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         let mob_id = MobId::from(args.mob_id);
-        if !self.owns_mob(&mob_id).await {
-            return Err(ToolError::Other(format!(
-                "Mob '{mob_id}' is not owned by this session"
-            )));
-        }
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let audit_handle = self
+            .state
+            .handle_for(&mob_id)
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
 
         self.state
             .mob_retire(&mob_id, MeerkatId::from(args.member_id))
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+
+        self.record_successful_operator_action(&audit_handle, call.name)
+            .await;
 
         Self::encode_result(call, json!({"ok": true}))
     }
@@ -437,11 +528,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         let mob_id = MobId::from(args.mob_id);
-        if !self.owns_mob(&mob_id).await {
-            return Err(ToolError::Other(format!(
-                "Mob '{mob_id}' is not owned by this session"
-            )));
-        }
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
 
         let snapshot = self
             .state
@@ -461,11 +548,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         let mob_id = MobId::from(args.mob_id);
-        if !self.owns_mob(&mob_id).await {
-            return Err(ToolError::Other(format!(
-                "Mob '{mob_id}' is not owned by this session"
-            )));
-        }
+        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
 
         let members = self
             .state
@@ -480,11 +563,11 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let owned = self.owned_mob_ids.read().await;
+        let authority_context = self.authority_context_snapshot().await;
         let mobs = self.state.mob_list().await;
         let mob_list: Vec<serde_json::Value> = mobs
             .into_iter()
-            .filter(|(id, _)| owned.contains(id))
+            .filter(|(id, _)| authority_context.can_manage_mob(id.as_str()))
             .map(|(id, status)| {
                 json!({
                     "mob_id": id,
@@ -523,37 +606,18 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
         &self,
         args: meerkat_core::service::MobToolsBuildArgs,
     ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
-        if !args.operator_capabilities_present {
+        let Some(authority_context) = args.authority_context else {
             return Ok(Arc::new(EmptyAgentToolSurface));
-        }
+        };
         let session_id_str = args.session_id.to_string();
-        let mut implicit_mob_id = self.state.find_implicit_mob(&session_id_str).await;
+        let implicit_mob_id = self.state.find_implicit_mob(&session_id_str).await;
 
-        // If the implicit mob exists but its delegate profile has a stale model
-        // (e.g. session resumed with --model override), destroy and recreate it
-        // so new helpers inherit the current model.
-        if let Some(ref mob_id) = implicit_mob_id
-            && let Ok(handle) = self.state.handle_for(mob_id).await
-        {
-            let profile_model = handle
-                .definition()
-                .profiles
-                .get(&ProfileName::from("delegate"))
-                .map(|p| p.model.as_str());
-            if profile_model != Some(&args.model) {
-                let _ = self.state.mob_destroy_unchecked(mob_id).await;
-                implicit_mob_id = None;
-            }
-        }
-
-        // Find all mobs owned by this session (implicit + explicit) for resume.
-        let owned_mob_ids = self.state.find_mobs_for_session(&session_id_str).await;
         // Extract parent comms identity for wiring helpers.
         let comms_peer_id = args.comms_runtime.as_ref().and_then(|r| r.public_key());
-        let surface = AgentMobToolSurface::new_with_owned(
+        let surface = AgentMobToolSurface::new_with_authority(
             Arc::clone(&self.state),
             implicit_mob_id,
-            owned_mob_ids,
+            authority_context,
             args.model,
             args.session_id,
             args.comms_name,
@@ -814,7 +878,85 @@ pub async fn archive_session_with_mob_cleanup(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::service::MobToolsFactory;
+    use meerkat_core::service::{MobToolAuthorityContext, MobToolsFactory, OpaquePrincipalToken};
+
+    fn create_only_authority() -> MobToolAuthorityContext {
+        MobToolAuthorityContext::new(OpaquePrincipalToken::new("create-only"), true)
+    }
+
+    fn scope_only_authority(mob_id: &str) -> MobToolAuthorityContext {
+        MobToolAuthorityContext::new(OpaquePrincipalToken::new("scope-only"), false)
+            .with_managed_mob_scope([mob_id])
+    }
+
+    fn create_only_authority_with_provenance() -> MobToolAuthorityContext {
+        create_only_authority()
+            .with_caller_provenance(
+                meerkat_core::service::MobToolCallerProvenance::new()
+                    .with_session_id(SessionId::new())
+                    .with_member_id("lead-1"),
+            )
+            .with_audit_invocation_id("audit-create")
+    }
+
+    fn sample_definition(mob_id: &str) -> MobDefinition {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            ProfileName::from("delegate"),
+            meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig {
+                    comms: true,
+                    ..Default::default()
+                },
+                peer_description: "delegate helper".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::AutonomousHost,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            },
+        );
+        profiles.insert(
+            ProfileName::from("worker"),
+            meerkat_mob::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::ToolConfig {
+                    comms: true,
+                    ..Default::default()
+                },
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            },
+        );
+
+        MobDefinition {
+            id: MobId::from(mob_id),
+            orchestrator: None,
+            profiles,
+            mcp_servers: std::collections::BTreeMap::new(),
+            wiring: Default::default(),
+            skills: std::collections::BTreeMap::new(),
+            backend: Default::default(),
+            flows: std::collections::BTreeMap::new(),
+            topology: None,
+            supervisor: None,
+            limits: None,
+            spawn_policy: None,
+            event_router: None,
+            owner_session_id: None,
+            session_cleanup_policy: meerkat_mob::definition::SessionCleanupPolicy::Manual,
+            is_implicit: false,
+        }
+    }
 
     #[test]
     fn test_all_tool_definitions_present() {
@@ -864,6 +1006,7 @@ mod tests {
         let surface = AgentMobToolSurface::new(
             state,
             None,
+            create_only_authority(),
             "claude-sonnet-4-5".to_string(),
             SessionId::new(),
             None,
@@ -889,7 +1032,7 @@ mod tests {
             .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
                 session_id: SessionId::new(),
                 model: "claude-sonnet-4-5".to_string(),
-                operator_capabilities_present: false,
+                authority_context: None,
                 comms_name: None,
                 comms_runtime: None,
             })
@@ -903,11 +1046,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_mob_tools_does_not_widen_scope_from_session_owned_mobs() {
+        let state = MobMcpState::new_in_memory();
+        let factory = AgentMobToolSurfaceFactory::new(Arc::clone(&state));
+        let session_id = SessionId::new();
+        let mut definition = sample_definition("owned-without-scope");
+        definition.owner_session_id = Some(session_id.to_string());
+        let mob_id = state
+            .mob_create_definition(definition)
+            .await
+            .expect("create explicit mob");
+
+        let dispatcher = factory
+            .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
+                session_id,
+                model: "claude-sonnet-4-5".to_string(),
+                authority_context: Some(create_only_authority()),
+                comms_name: None,
+                comms_runtime: None,
+            })
+            .await
+            .expect("build_mob_tools");
+
+        let list_args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let list_result = dispatcher
+            .dispatch(ToolCallView {
+                id: "list-owned",
+                name: "mob_list",
+                args: &list_args,
+            })
+            .await
+            .expect("mob_list should still succeed");
+        let listed: serde_json::Value =
+            serde_json::from_str(&list_result.result.text_content()).unwrap();
+        assert_eq!(
+            listed["mobs"],
+            json!([]),
+            "session-owned mobs must not be widened into scope during rebuild"
+        );
+
+        let members_args =
+            serde_json::value::RawValue::from_string(json!({ "mob_id": mob_id }).to_string())
+                .unwrap();
+        let members_error = dispatcher
+            .dispatch(ToolCallView {
+                id: "members-owned",
+                name: "mob_list_members",
+                args: &members_args,
+            })
+            .await
+            .expect_err("owned mobs still require reinjected exact scope");
+        assert!(matches!(members_error, ToolError::AccessDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_build_mob_tools_does_not_mutate_implicit_mob_and_surface_reconciles_on_demand() {
+        let state = MobMcpState::new_in_memory();
+        let factory = AgentMobToolSurfaceFactory::new(Arc::clone(&state));
+        let session_id = SessionId::new();
+        let session_key = session_id.to_string();
+        let stale_mob_id = state
+            .get_or_create_implicit_mob(&session_key, "claude-sonnet-4-5")
+            .await
+            .expect("create stale implicit mob");
+
+        let _dispatcher = factory
+            .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
+                session_id,
+                model: "gpt-5.4".to_string(),
+                authority_context: Some(create_only_authority()),
+                comms_name: None,
+                comms_runtime: None,
+            })
+            .await
+            .expect("build_mob_tools");
+
+        assert_eq!(
+            state.find_implicit_mob(&session_key).await,
+            Some(stale_mob_id.clone()),
+            "surface building must not own implicit-mob reconciliation"
+        );
+        let stale_handle = state
+            .handle_for(&stale_mob_id)
+            .await
+            .expect("stale implicit mob should still exist after build");
+        assert_eq!(
+            stale_handle
+                .definition()
+                .profiles
+                .get(&ProfileName::from("delegate"))
+                .expect("delegate profile")
+                .model,
+            "claude-sonnet-4-5"
+        );
+
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            Some(stale_mob_id.clone()),
+            create_only_authority(),
+            "gpt-5.4".to_string(),
+            SessionId::parse(&session_key).expect("session_id"),
+            None,
+            None,
+            None,
+        );
+        let (reconciled_mob_id, created) = surface
+            .ensure_implicit_mob()
+            .await
+            .expect("surface should reconcile the implicit mob on demand");
+
+        assert!(
+            created,
+            "on-demand surface reconciliation should report a fresh implicit mob when the model changes"
+        );
+        assert_eq!(
+            reconciled_mob_id, stale_mob_id,
+            "implicit mob ids stay stable while the runtime refreshes their definition"
+        );
+        let reconciled_handle = state
+            .handle_for(&reconciled_mob_id)
+            .await
+            .expect("reconciled implicit mob must exist");
+        assert_eq!(
+            reconciled_handle
+                .definition()
+                .profiles
+                .get(&ProfileName::from("delegate"))
+                .expect("delegate profile")
+                .model,
+            "gpt-5.4"
+        );
+    }
+
+    #[tokio::test]
     async fn test_mob_list_empty() {
         let state = MobMcpState::new_in_memory();
         let surface = AgentMobToolSurface::new(
             state,
             None,
+            create_only_authority(),
             "claude-sonnet-4-5".to_string(),
             SessionId::new(),
             None,
@@ -925,5 +1202,308 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&result.result.text_content()).unwrap();
         assert_eq!(parsed["mobs"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_create_only_authority_grants_exact_scope_for_new_explicit_mob() {
+        let state = MobMcpState::new_in_memory();
+        let session_id = SessionId::new();
+        let expected_session_id = session_id.to_string();
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            session_id,
+            None,
+            None,
+            None,
+        );
+
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "definition": {
+                    "id": "created-by-create-only",
+                    "profiles": {
+                        "worker": {
+                            "model": "claude-sonnet-4-5",
+                            "tools": { "comms": true },
+                            "peer_description": "worker",
+                            "runtime_mode": "turn_driven"
+                        }
+                    },
+                    "owner_session_id": "spoofed-session",
+                    "is_implicit": true,
+                    "session_cleanup_policy": "manual"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let create_result = surface
+            .dispatch(ToolCallView {
+                id: "create-1",
+                name: "mob_create",
+                args: &create_args,
+            })
+            .await
+            .expect("create-only authority should allow mob_create");
+        let created: serde_json::Value =
+            serde_json::from_str(&create_result.result.text_content()).unwrap();
+        let mob_id = created["mob_id"].as_str().expect("mob_id").to_string();
+
+        assert!(
+            state
+                .handle_for(&MobId::from(mob_id.as_str()))
+                .await
+                .is_ok(),
+            "mob_create should still create the mob"
+        );
+        let created_handle = state
+            .handle_for(&MobId::from(mob_id.as_str()))
+            .await
+            .expect("created mob handle");
+        let created_definition = created_handle.definition();
+        assert_eq!(
+            created_definition.owner_session_id.as_deref(),
+            Some(expected_session_id.as_str()),
+            "mob_create must rebind session indexing to the current owner session"
+        );
+        assert_eq!(
+            created_definition.session_cleanup_policy,
+            meerkat_mob::definition::SessionCleanupPolicy::DestroyOnOwnerArchive,
+            "mob_create must set explicit session-scoped cleanup truth"
+        );
+        assert!(
+            !created_definition.is_implicit,
+            "mob_create must not allow callers to mint faux implicit mobs"
+        );
+
+        let list_args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let list_result = surface
+            .dispatch(ToolCallView {
+                id: "list-1",
+                name: "mob_list",
+                args: &list_args,
+            })
+            .await
+            .expect("mob_list should still be callable");
+        let listed: serde_json::Value =
+            serde_json::from_str(&list_result.result.text_content()).unwrap();
+        assert_eq!(
+            listed["mobs"].as_array().map(Vec::len),
+            Some(1),
+            "mob_create should grant exact scope for the new explicit mob"
+        );
+        assert_eq!(listed["mobs"][0]["mob_id"], json!(mob_id));
+
+        let destroy_args =
+            serde_json::value::RawValue::from_string(json!({ "mob_id": mob_id }).to_string())
+                .unwrap();
+        let destroy_result = surface
+            .dispatch(ToolCallView {
+                id: "destroy-1",
+                name: "mob_destroy",
+                args: &destroy_args,
+            })
+            .await
+            .expect("newly-created explicit mob should be immediately manageable");
+        let destroyed: serde_json::Value =
+            serde_json::from_str(&destroy_result.result.text_content()).unwrap();
+        assert_eq!(destroyed, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn test_scope_only_authority_denies_delegate_but_allows_in_scope_operator_reads() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("scope-only-mob"))
+            .await
+            .expect("create scope-only mob");
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            scope_only_authority(mob_id.as_str()),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+
+        let delegate_args =
+            serde_json::value::RawValue::from_string(json!({ "task": "say hi" }).to_string())
+                .unwrap();
+        let delegate_error = surface
+            .dispatch(ToolCallView {
+                id: "delegate-1",
+                name: "delegate",
+                args: &delegate_args,
+            })
+            .await
+            .expect_err("scope-only authority must deny delegate");
+        assert!(matches!(delegate_error, ToolError::AccessDenied { .. }));
+
+        let list_members_args =
+            serde_json::value::RawValue::from_string(json!({ "mob_id": mob_id }).to_string())
+                .unwrap();
+        let list_members_result = surface
+            .dispatch(ToolCallView {
+                id: "members-1",
+                name: "mob_list_members",
+                args: &list_members_args,
+            })
+            .await
+            .expect("in-scope operator read should succeed");
+        let listed: serde_json::Value =
+            serde_json::from_str(&list_members_result.result.text_content()).unwrap();
+        assert_eq!(listed["members"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_successful_create_persists_operator_provenance_projection() {
+        let state = MobMcpState::new_in_memory();
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority_with_provenance(),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+
+        let create_args = serde_json::value::RawValue::from_string(
+            json!({
+                "definition": sample_definition("provenance-create")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let result = surface
+            .dispatch(ToolCallView {
+                id: "create-provenance",
+                name: "mob_create",
+                args: &create_args,
+            })
+            .await
+            .expect("mob_create should succeed");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).unwrap();
+        let mob_id = MobId::from(payload["mob_id"].as_str().expect("mob_id"));
+
+        let handle = state.handle_for(&mob_id).await.expect("mob handle");
+        let events = handle.events().replay_all().await.expect("replay events");
+        let audit_event = events
+            .into_iter()
+            .find_map(|event| match event.kind {
+                meerkat_mob::MobEventKind::OperatorActionRecorded {
+                    tool_name,
+                    principal_token,
+                    caller_provenance,
+                    audit_invocation_id,
+                } => Some((
+                    tool_name,
+                    principal_token,
+                    caller_provenance,
+                    audit_invocation_id,
+                )),
+                _ => None,
+            })
+            .expect("operator action event");
+
+        assert_eq!(audit_event.0, "mob_create");
+        assert_eq!(audit_event.1.as_str(), "create-only");
+        assert_eq!(audit_event.3.as_deref(), Some("audit-create"));
+        assert_eq!(
+            audit_event
+                .2
+                .as_ref()
+                .and_then(|provenance| provenance.caller_member_id()),
+            Some("lead-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_successful_in_scope_mutation_persists_provenance_and_denied_calls_do_not() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("provenance-scope"))
+            .await
+            .expect("create mob");
+        let authority =
+            MobToolAuthorityContext::new(OpaquePrincipalToken::new("scope-principal"), false)
+                .with_managed_mob_scope([mob_id.to_string()])
+                .with_audit_invocation_id("audit-scope");
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            authority,
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+
+        let delegate_args = serde_json::value::RawValue::from_string(
+            json!({ "task": "denied delegate" }).to_string(),
+        )
+        .unwrap();
+        let delegate_error = surface
+            .dispatch(ToolCallView {
+                id: "delegate-denied",
+                name: "delegate",
+                args: &delegate_args,
+            })
+            .await
+            .expect_err("delegate should be denied without create authority");
+        assert!(matches!(delegate_error, ToolError::AccessDenied { .. }));
+
+        let spawn_args = serde_json::value::RawValue::from_string(
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "member_id": "w-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        surface
+            .dispatch(ToolCallView {
+                id: "spawn-scope",
+                name: "mob_spawn_member",
+                args: &spawn_args,
+            })
+            .await
+            .expect("in-scope spawn should succeed");
+
+        let handle = state.handle_for(&mob_id).await.expect("handle");
+        let audit_events = handle
+            .events()
+            .replay_all()
+            .await
+            .expect("replay events")
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                meerkat_mob::MobEventKind::OperatorActionRecorded {
+                    tool_name,
+                    principal_token,
+                    audit_invocation_id,
+                    ..
+                } => Some((tool_name, principal_token, audit_invocation_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            audit_events.len(),
+            1,
+            "denied calls must not persist provenance"
+        );
+        assert_eq!(audit_events[0].0, "mob_spawn_member");
+        assert_eq!(audit_events[0].1.as_str(), "scope-principal");
+        assert_eq!(audit_events[0].2.as_deref(), Some("audit-scope"));
     }
 }

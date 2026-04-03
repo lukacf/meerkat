@@ -174,7 +174,7 @@ pub fn build_recovered_session(
         .clone()
         .unwrap_or_else(|| build_state.recoverable_tool_defs.clone());
 
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: Some(overrides.provider.unwrap_or(metadata.provider)),
         output_schema: overrides
             .output_schema
@@ -242,10 +242,17 @@ pub fn build_recovered_session(
             .shell_env
             .clone()
             .or_else(|| build_state.shell_env.clone()),
+        mob_tool_authority_context: None,
         call_timeout_override: build_state.call_timeout_override,
         resume_override_mask,
         mob_tools: None,
     };
+    build.apply_persisted_mob_operator_access(
+        overrides
+            .override_mob
+            .or_else(|| metadata.tooling.mob.to_override()),
+        build_state.mob_tool_authority_context.clone(),
+    );
 
     Ok(RecoveredSessionBuild {
         model,
@@ -282,7 +289,7 @@ mod tests {
                     builtins: ToolCategoryOverride::Disable,
                     shell: ToolCategoryOverride::Enable,
                     comms: ToolCategoryOverride::Inherit,
-                    mob: ToolCategoryOverride::Disable,
+                    mob: ToolCategoryOverride::Inherit,
                     memory: ToolCategoryOverride::Enable,
                     active_skills: Some(vec![SkillId("persisted/skill".to_string())]),
                 },
@@ -330,6 +337,13 @@ mod tests {
                     "MEERKAT_MODE".to_string(),
                     "test".to_string(),
                 )])),
+                mob_tool_authority_context: Some(
+                    crate::service::MobToolAuthorityContext::new(
+                        crate::service::OpaquePrincipalToken::new("persisted-authority"),
+                        false,
+                    )
+                    .grant_manage_mob("mob-a"),
+                ),
                 call_timeout_override: CallTimeoutOverride::Value(Duration::from_secs(42)),
             })
             .expect("session build state");
@@ -390,8 +404,15 @@ mod tests {
         assert!(build.keep_alive);
         assert_eq!(build.override_builtins, Some(false));
         assert_eq!(build.override_shell, Some(true));
-        assert_eq!(build.override_mob, Some(false));
+        assert_eq!(build.override_mob, Some(true));
         assert_eq!(build.override_memory, Some(true));
+        assert_eq!(
+            build
+                .mob_tool_authority_context
+                .as_ref()
+                .map(|authority| authority.managed_mob_scope().clone()),
+            Some(std::collections::BTreeSet::from([String::from("mob-a")]))
+        );
         assert_eq!(build.silent_comms_intents, vec!["peer-b".to_string()]);
         assert_eq!(build.max_inline_peer_notifications, Some(4));
         assert_eq!(build.app_context, Some(json!({ "surface": "rpc" })));

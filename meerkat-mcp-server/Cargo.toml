@@ -20,7 +20,7 @@ path = "src/main.rs"
 meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
-meerkat-contracts = { workspace = true }
+meerkat-contracts = { workspace = true, features = ["schema"] }
 meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-mob = { workspace = true, optional = true }

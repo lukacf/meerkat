@@ -125,7 +125,9 @@
     },
     {
       "description": "Create a mob from a definition",
-      "name": "mob/create"
+      "name": "mob/create",
+      "params_type": "MobCreateParams",
+      "result_type": "MobCreateResult"
     },
     {
       "description": "List active mobs",
@@ -176,6 +178,12 @@
       "name": "mob/events"
     },
     {
+      "description": "Deliver ordinary content to a specific mob member via the host control plane",
+      "name": "mob/member_send",
+      "params_type": "MobMemberSendParams",
+      "result_type": "MobMemberSendResult"
+    },
+    {
       "description": "Append system context for a mob member",
       "name": "mob/append_system_context"
     },
@@ -210,14 +218,6 @@
     {
       "description": "Get live status for a mob member",
       "name": "mob/member_status"
-    },
-    {
-      "description": "List available mob tools",
-      "name": "mob/tools"
-    },
-    {
-      "description": "Call a mob tool",
-      "name": "mob/call"
     },
     {
       "description": "Open a mob event stream",

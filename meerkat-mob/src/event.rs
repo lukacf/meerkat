@@ -9,6 +9,7 @@ use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -289,6 +290,17 @@ pub enum MobEventKind {
         step_id: StepId,
         escalated_to: MeerkatId,
     },
+    /// Dispatcher-owned projection of a successful operator mutation/control action.
+    ///
+    /// This event is provenance/audit only. It is never authorization truth.
+    OperatorActionRecorded {
+        tool_name: String,
+        principal_token: OpaquePrincipalToken,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_provenance: Option<MobToolCallerProvenance>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_invocation_id: Option<String>,
+    },
 }
 
 /// An agent event attributed to a specific mob member.
@@ -352,6 +364,7 @@ mod tests {
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            session_cleanup_policy: crate::definition::SessionCleanupPolicy::Manual,
             is_implicit: false,
         }
     }
@@ -543,6 +556,21 @@ mod tests {
             run_id,
             step_id,
             escalated_to: meerkat_id,
+        });
+    }
+
+    #[test]
+    fn test_operator_action_recorded_roundtrip() {
+        roundtrip(&MobEventKind::OperatorActionRecorded {
+            tool_name: "mob_create".to_string(),
+            principal_token: OpaquePrincipalToken::new("opaque-principal"),
+            caller_provenance: Some(
+                MobToolCallerProvenance::new()
+                    .with_session_id(SessionId::from_uuid(Uuid::nil()))
+                    .with_mob_id("test-mob")
+                    .with_member_id("lead-1"),
+            ),
+            audit_invocation_id: Some("audit-123".to_string()),
         });
     }
 

@@ -316,6 +316,24 @@ fn default_event_router_buffer_size() -> usize {
     256
 }
 
+/// Canonical cleanup semantics for mobs indexed to an owning session.
+///
+/// `owner_session_id` remains lookup/indexing metadata only. Cleanup eligibility
+/// is owned exclusively by this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCleanupPolicy {
+    #[default]
+    Manual,
+    DestroyOnOwnerArchive,
+}
+
+impl SessionCleanupPolicy {
+    pub fn is_manual(policy: &Self) -> bool {
+        matches!(policy, Self::Manual)
+    }
+}
+
 /// Complete mob definition.
 ///
 /// Describes profiles, MCP servers, wiring rules, and skill sources.
@@ -362,10 +380,13 @@ pub struct MobDefinition {
     /// Optional declarative event router configuration.
     #[serde(default)]
     pub event_router: Option<EventRouterConfig>,
-    /// If set, this mob is owned by the given session.
-    /// Used for resume lookup, session-scoped access control, and lifecycle cleanup.
+    /// If set, this mob is indexed to the given session.
+    /// Used for lookup, resume plumbing, and host-side bookkeeping only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    /// Canonical cleanup policy for session-indexed mobs.
+    #[serde(default, skip_serializing_if = "SessionCleanupPolicy::is_manual")]
+    pub session_cleanup_policy: SessionCleanupPolicy,
     /// Whether this is an implicit delegation mob (created by `delegate` tool).
     /// Implicit mobs cannot be destroyed directly — they are cleaned up when
     /// the owning session is archived. Explicit mobs (created by `mob_create`)
@@ -417,11 +438,12 @@ struct TomlDefinition {
 }
 
 impl MobDefinition {
-    /// Create a minimal implicit delegation mob owned by the given session.
+    /// Create a minimal implicit delegation mob indexed to the given session.
     ///
     /// The mob is tagged with `owner_session_id` for session-indexed lookup
-    /// and has `auto_wire_orchestrator = true` so spawned members are
-    /// automatically wired to the lead agent.
+    /// and marked session-scoped for cleanup. It also has
+    /// `auto_wire_orchestrator = true` so spawned members are automatically
+    /// wired to the lead agent.
     pub fn implicit(session_id: &str, model: &str) -> Self {
         let mob_id = MobId::from(format!("implicit-{session_id}"));
         let mut profiles = BTreeMap::new();
@@ -443,7 +465,7 @@ impl MobDefinition {
                 provider_params: None,
             },
         );
-        Self {
+        let mut definition = Self {
             id: mob_id,
             orchestrator: None,
             profiles,
@@ -460,9 +482,12 @@ impl MobDefinition {
             limits: None,
             spawn_policy: None,
             event_router: None,
-            owner_session_id: Some(session_id.to_string()),
+            owner_session_id: None,
+            session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: true,
-        }
+        };
+        definition.mark_session_scoped(session_id);
+        definition
     }
 
     /// Parse a mob definition from TOML content.
@@ -489,8 +514,28 @@ impl MobDefinition {
             spawn_policy: raw.spawn_policy,
             event_router: raw.event_router,
             owner_session_id: None,
+            session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: false,
         })
+    }
+
+    pub fn is_owned_by_session(&self, session_id: &str) -> bool {
+        self.owner_session_id.as_deref() == Some(session_id)
+    }
+
+    pub fn is_session_scoped_to(&self, session_id: &str) -> bool {
+        self.is_owned_by_session(session_id)
+            && self.session_cleanup_policy == SessionCleanupPolicy::DestroyOnOwnerArchive
+    }
+
+    pub fn mark_session_scoped(&mut self, session_id: &str) {
+        self.owner_session_id = Some(session_id.to_string());
+        self.session_cleanup_policy = SessionCleanupPolicy::DestroyOnOwnerArchive;
+    }
+
+    pub fn clear_internal_lifecycle_flags(&mut self) {
+        self.is_implicit = false;
+        self.session_cleanup_policy = SessionCleanupPolicy::Manual;
     }
 }
 
@@ -662,6 +707,7 @@ path = "skills/reviewer.md"
             spawn_policy: None,
             event_router: None,
             owner_session_id: None,
+            session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: false,
         };
         let json = serde_json::to_string_pretty(&def).unwrap();

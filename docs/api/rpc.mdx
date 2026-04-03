@@ -86,6 +86,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/events` | Mob | Read mob events by cursor (mob feature) |
 | `mob/stream_open` | Mob | Open mob or member event stream (mob feature) |
 | `mob/stream_close` | Mob | Close mob or member event stream (mob feature) |
+| `mob/member_send` | Mob | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
 | `mob/append_system_context` | Mob | Stage system context for a member session (mob feature) |
 | `mob/flows` | Mob | List mob flows (mob feature) |
 | `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
@@ -95,8 +96,6 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
 | `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
-| `mob/tools` | Mob | Compatibility/escape-hatch mob tool inventory (mob feature) |
-| `mob/call` | Mob | Compatibility/escape-hatch mob tool call (mob feature) |
 | `comms/send` | Comms | Dispatch a comms command to a session |
 | `comms/peers` | Comms | List discoverable peers (comms feature) |
 | `skills/list` | Skills | List skills with provenance |
@@ -116,7 +115,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 </Note>
 
 <Note>
-RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycle, send, and observation methods from apps. `mob/tools` and `mob/call` remain available only as compatibility and escape-hatch surfaces. Inside running sessions, mob capability is still exposed by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which provides `mob_*` tools to the agent.
+RPC is the canonical typed substrate for the SDKs: use explicit `mob/*` lifecycle, host-ingress, and observation methods from apps. Inside running sessions, mob capability is still exposed by composing `meerkat-mob-mcp` (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`, which provides `mob_*` tools to the agent.
 </Note>
 
 ## Protocol
@@ -189,10 +188,9 @@ Handshake. Returns server capabilities.
       "mob/retire", "mob/respawn",
       "mob/wire", "mob/unwire", "mob/lifecycle",
       "mob/events", "mob/stream_open", "mob/stream_close",
-      "mob/append_system_context", "mob/flows", "mob/flow_run",
+      "mob/member_send", "mob/append_system_context", "mob/flows", "mob/flow_run",
       "mob/flow_status", "mob/flow_cancel",
       "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
-      "mob/tools", "mob/call",
       "mcp/add", "mcp/remove", "mcp/reload",
       "comms/send", "comms/peers",
     ]

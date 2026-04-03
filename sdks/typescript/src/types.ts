@@ -172,6 +172,7 @@ export interface AttributedEvent {
   readonly envelope: EventEnvelope;
 }
 
+/** Public mob definition input for host-side `mob/create`. */
 export interface MobDefinition {
   readonly id: string;
   readonly profiles: Record<string, unknown>;
@@ -275,5 +276,5 @@ export interface AttributedMobEvent {
 
 /** Options for creating a mob through the RPC-backed SDK surface. */
 export interface MobCreateOptions {
-  definition: Record<string, unknown>;
+  definition: MobDefinition;
 }

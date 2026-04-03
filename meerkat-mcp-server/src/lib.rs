@@ -28,8 +28,6 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "mob")]
-use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
@@ -1208,6 +1206,11 @@ fn mob_event_stream_tools_list() -> Vec<Value> {
     ]
 }
 
+#[cfg(feature = "mob")]
+fn mob_host_tools_list() -> Vec<Value> {
+    meerkat_mob_mcp::public_tools_list()
+}
+
 #[cfg(feature = "comms")]
 fn comms_tools_list() -> Vec<Value> {
     vec![
@@ -1229,7 +1232,7 @@ pub fn tools_list() -> Vec<Value> {
     let mut tools = base_tools_list();
 
     #[cfg(feature = "mob")]
-    tools.extend(meerkat_mob_mcp::tools_list());
+    tools.extend(mob_host_tools_list());
 
     #[cfg(feature = "mob")]
     tools.extend(mob_event_stream_tools_list());
@@ -1238,26 +1241,6 @@ pub fn tools_list() -> Vec<Value> {
     tools.extend(comms_tools_list());
 
     tools
-}
-
-#[cfg(feature = "mob")]
-fn mob_tool_names() -> &'static HashSet<String> {
-    static MOB_TOOL_NAMES: OnceLock<HashSet<String>> = OnceLock::new();
-    MOB_TOOL_NAMES.get_or_init(|| {
-        meerkat_mob_mcp::tools_list()
-            .into_iter()
-            .filter_map(|tool| {
-                tool.get("name")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
-            .collect()
-    })
-}
-
-#[cfg(feature = "mob")]
-fn is_mob_tool_name(name: &str) -> bool {
-    mob_tool_names().contains(name)
 }
 
 /// Handle a tools/call request
@@ -1277,6 +1260,19 @@ pub async fn handle_tools_call_with_notifier(
     notifier: Option<EventNotifier>,
     request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
+    #[cfg(feature = "mob")]
+    if meerkat_mob_mcp::public_tool_names().contains(&tool_name) {
+        let payload =
+            meerkat_mob_mcp::handle_public_tools_call(&state.mob_state, tool_name, arguments)
+                .await
+                .map_err(|err| ToolCallError {
+                    code: err.code,
+                    message: err.message,
+                    data: err.data,
+                })?;
+        return Ok(wrap_tool_payload(payload));
+    }
+
     match tool_name {
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
@@ -1441,16 +1437,6 @@ pub async fn handle_tools_call_with_notifier(
             handle_meerkat_comms_peers(state, input)
                 .await
                 .map_err(ToolCallError::internal)
-        }
-        #[cfg(feature = "mob")]
-        _ if is_mob_tool_name(tool_name) => {
-            match meerkat_mob_mcp::handle_tools_call(&state.mob_state, tool_name, arguments).await {
-                Ok(value) => Ok(wrap_tool_payload(value)),
-                Err(err) if err.code == -32601 => Err(ToolCallError::method_not_found(format!(
-                    "Unknown tool: {tool_name}"
-                ))),
-                Err(err) => Err(ToolCallError::new(err.code, err.message, err.data)),
-            }
         }
         _ => Err(ToolCallError::method_not_found(format!(
             "Unknown tool: {tool_name}"
@@ -2438,7 +2424,7 @@ async fn handle_meerkat_run(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider: input.provider.map(ProviderInput::to_provider),
         output_schema,
         structured_output_retries: input
@@ -2458,7 +2444,8 @@ async fn handle_meerkat_run(
         override_builtins: input.enable_builtins,
         override_shell: enable_shell_override,
         override_memory: input.enable_memory,
-        override_mob: input.enable_mob,
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills,
         realm_id: Some(state.realm_id.clone()),
         instance_id: state.instance_id.clone(),
@@ -2489,6 +2476,7 @@ async fn handle_meerkat_run(
         blob_store_override: None,
         mob_tools: None,
     };
+    build.apply_generated_create_only_mob_operator_access(input.enable_mob);
 
     let req = CreateSessionRequest {
         model,
@@ -2708,7 +2696,7 @@ async fn handle_meerkat_resume(
                 "failed to obtain runtime ops registry for session {session_id}"
             ))
         })?;
-    let build = SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         provider,
         output_schema,
         structured_output_retries: input
@@ -2727,7 +2715,8 @@ async fn handle_meerkat_resume(
         override_builtins: enable_builtins_override,
         override_shell: enable_shell_override,
         override_memory: input.enable_memory,
-        override_mob: input.enable_mob,
+        override_mob: None,
+        mob_tool_authority_context: None,
         preload_skills,
         peer_meta: input.peer_meta.clone(),
         realm_id: stored_metadata
@@ -2768,6 +2757,7 @@ async fn handle_meerkat_resume(
         blob_store_override: None,
         mob_tools: None,
     };
+    build.apply_generated_create_only_mob_operator_access(input.enable_mob);
 
     let result = if needs_rebuild {
         let req = CreateSessionRequest {
@@ -3122,17 +3112,39 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "mob")]
+    fn unwrap_tool_payload_json(value: Value) -> Value {
+        let text = value["content"][0]["text"]
+            .as_str()
+            .expect("tool payload text");
+        serde_json::from_str(text).expect("json payload")
+    }
+
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
         #[cfg(all(feature = "comms", feature = "mob"))]
-        assert_eq!(tools.len(), 23 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(
+            tools.len(),
+            base_tools_list().len()
+                + mob_host_tools_list().len()
+                + mob_event_stream_tools_list().len()
+                + comms_tools_list().len()
+        );
         #[cfg(all(not(feature = "comms"), feature = "mob"))]
-        assert_eq!(tools.len(), 21 + meerkat_mob_mcp::tools_list().len());
+        assert_eq!(
+            tools.len(),
+            base_tools_list().len()
+                + mob_host_tools_list().len()
+                + mob_event_stream_tools_list().len()
+        );
         #[cfg(all(feature = "comms", not(feature = "mob")))]
-        assert_eq!(tools.len(), 20);
+        assert_eq!(
+            tools.len(),
+            base_tools_list().len() + comms_tools_list().len()
+        );
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), base_tools_list().len());
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -3199,9 +3211,16 @@ mod tests {
         #[cfg(feature = "mob")]
         {
             assert!(!tool_names.contains(&"meerkat_mob_prefabs"));
-            assert!(tool_names.contains(&"mob_create"));
-            assert!(tool_names.contains(&"mob_list"));
-            assert!(tool_names.contains(&"mob_lifecycle"));
+            assert!(!tool_names.contains(&"mob_create"));
+            assert!(!tool_names.contains(&"mob_list"));
+            assert!(!tool_names.contains(&"mob_lifecycle"));
+            assert!(tool_names.contains(&"meerkat_mob_create"));
+            assert!(tool_names.contains(&"meerkat_mob_list"));
+            assert!(tool_names.contains(&"meerkat_mob_status"));
+            assert!(tool_names.contains(&"meerkat_mob_lifecycle"));
+            assert!(tool_names.contains(&"meerkat_mob_spawn"));
+            assert!(tool_names.contains(&"meerkat_mob_spawn_many"));
+            assert!(tool_names.contains(&"meerkat_mob_member_send"));
             assert!(tool_names.contains(&"meerkat_mob_event_stream_open"));
             assert!(tool_names.contains(&"meerkat_mob_event_stream_read"));
             assert!(tool_names.contains(&"meerkat_mob_event_stream_close"));
@@ -3211,6 +3230,10 @@ mod tests {
             assert!(!tool_names.contains(&"mob_create"));
             assert!(!tool_names.contains(&"mob_list"));
             assert!(!tool_names.contains(&"mob_lifecycle"));
+            assert!(!tool_names.contains(&"meerkat_mob_create"));
+            assert!(!tool_names.contains(&"meerkat_mob_list"));
+            assert!(!tool_names.contains(&"meerkat_mob_status"));
+            assert!(!tool_names.contains(&"meerkat_mob_lifecycle"));
             assert!(!tool_names.contains(&"meerkat_mob_event_stream_open"));
             assert!(!tool_names.contains(&"meerkat_mob_event_stream_read"));
             assert!(!tool_names.contains(&"meerkat_mob_event_stream_close"));
@@ -3854,6 +3877,70 @@ mod tests {
             .expect_err("unknown tool must error");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_rejects_raw_mob_dispatcher_tool_names() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+        let err = handle_tools_call(&state, "mob_create", &json!({}))
+            .await
+            .expect_err("raw internal mob tool name must not be exposed");
+        assert_eq!(err.code, -32601);
+        assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn test_public_mcp_server_exposes_typed_mob_create_and_rejects_internal_fields() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let created = handle_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "mob-1",
+                    "profiles": {
+                        "worker": { "model": "claude-sonnet-4-6" }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("typed mob create should succeed");
+        let created = unwrap_tool_payload_json(created);
+        assert_eq!(created["mob_id"], "mob-1");
+
+        let listed = handle_tools_call(&state, "meerkat_mob_list", &json!({}))
+            .await
+            .expect("typed mob list should succeed");
+        let listed = unwrap_tool_payload_json(listed);
+        assert_eq!(listed["mobs"][0]["mob_id"], "mob-1");
+
+        let err = handle_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "mob-2",
+                    "profiles": {
+                        "worker": {
+                            "model": "claude-sonnet-4-6",
+                            "tools": {
+                                "rust_bundles": ["internal-only"]
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect_err("nested internal tool bundle fields must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("Invalid arguments") || err.message.contains("unknown field"));
     }
 
     #[tokio::test]

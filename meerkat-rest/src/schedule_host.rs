@@ -612,11 +612,13 @@ impl ScheduleTargetDelivery for RestScheduleTargetAdapter {
                             &self.context,
                             &resolved.session_id,
                             occurrence,
-                            prompt.clone(),
-                            render_metadata.clone(),
-                            skill_references.clone(),
-                            additional_instructions.clone(),
-                            resolved.materialized_session_id,
+                            ScheduledPromptDispatch {
+                                prompt: prompt.clone(),
+                                render_metadata: render_metadata.clone(),
+                                skill_references: skill_references.clone(),
+                                additional_instructions: additional_instructions.clone(),
+                                materialized_session_id: resolved.materialized_session_id,
+                            },
                         )
                         .await
                     }
@@ -656,7 +658,7 @@ impl AppState {
         }
 
         let context = RestScheduleContext::from_state(self);
-        let adapter = Arc::new(RestScheduleTargetAdapter::new(context.clone()));
+        let adapter = Arc::new(RestScheduleTargetAdapter::new(context));
         let driver = Arc::new(ScheduleDriver::new(
             self.schedule_service.clone(),
             self.schedule_service.store(),
@@ -709,38 +711,42 @@ impl AppState {
     }
 }
 
-async fn deliver_scheduled_prompt(
-    context: &RestScheduleContext,
-    session_id: &SessionId,
-    occurrence: &Occurrence,
+struct ScheduledPromptDispatch {
     prompt: ContentInput,
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     skill_references: Vec<String>,
     additional_instructions: Vec<String>,
     materialized_session_id: Option<SessionId>,
+}
+
+async fn deliver_scheduled_prompt(
+    context: &RestScheduleContext,
+    session_id: &SessionId,
+    occurrence: &Occurrence,
+    dispatch: ScheduledPromptDispatch,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
     match accept_scheduled_prompt_with_completion(
         context,
         session_id,
         occurrence,
-        prompt,
-        render_metadata,
-        skill_references,
-        additional_instructions,
+        dispatch.prompt,
+        dispatch.render_metadata,
+        dispatch.skill_references,
+        dispatch.additional_instructions,
     )
     .await
     {
         Ok(accepted) => Ok(build_dispatch_from_accepted(
             occurrence,
             accepted,
-            materialized_session_id,
+            dispatch.materialized_session_id,
         )),
         Err(error) => Ok(immediate_delivery_failure(
             occurrence,
             error.to_string(),
             OccurrenceFailureClass::RuntimeRejected,
             None,
-            materialized_session_id,
+            dispatch.materialized_session_id,
         )),
     }
 }
@@ -1185,7 +1191,7 @@ fn mob_flow_completion_future(
                         OccurrenceFailureClass::MobRejected,
                     ));
                 }
-                Ok(Some(_)) | Ok(None) => sleep(Duration::from_millis(100)).await,
+                Ok(Some(_) | None) => sleep(Duration::from_millis(100)).await,
                 Err(error) => return Ok(mob_delivery_failed_terminal(error)),
             }
         }

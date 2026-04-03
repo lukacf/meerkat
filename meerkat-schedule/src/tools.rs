@@ -364,7 +364,7 @@ mod tests {
                 every_seconds: 60,
                 end_at_utc: None,
             }),
-            target: TargetBinding::Session(SessionTargetBinding::ExactSession {
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
                 session_id: SessionId::new(),
                 action: ScheduledSessionAction::Prompt {
                     prompt: ContentInput::from("tool surface"),
@@ -384,22 +384,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schedule_tools_create_and_list_round_trip() {
+    async fn schedule_tools_create_and_list_round_trip() -> Result<(), String> {
         let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
-        let created = handle_schedule_tools_call(
-            &service,
-            "meerkat_schedule_create",
-            &serde_json::to_value(schedule_request()).expect("request should serialize"),
-        )
-        .await
-        .expect("create should succeed");
+        let request =
+            serde_json::to_value(schedule_request()).map_err(|error| error.to_string())?;
+        let created = handle_schedule_tools_call(&service, "meerkat_schedule_create", &request)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
         let schedule_id = created["schedule_id"]
             .as_str()
-            .expect("create should return schedule_id");
+            .ok_or_else(|| "create should return schedule_id".to_string())?;
 
         let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
             .await
-            .expect("list should succeed");
+            .map_err(|error| format!("{error:?}"))?;
         assert_eq!(
             listed["schedules"][0]["schedule_id"].as_str(),
             Some(schedule_id)
@@ -411,12 +409,14 @@ mod tests {
             &json!({ "schedule_id": schedule_id }),
         )
         .await
-        .expect("occurrences should succeed");
+        .map_err(|error| format!("{error:?}"))?;
         assert!(
             occurrences["occurrences"]
                 .as_array()
-                .is_some_and(|rows| !rows.is_empty()),
+                .map(|rows| !rows.is_empty())
+                .unwrap_or(false),
             "planning should persist occurrences"
         );
+        Ok(())
     }
 }

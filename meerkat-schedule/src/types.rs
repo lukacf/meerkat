@@ -153,9 +153,10 @@ pub struct IntervalTriggerSpec {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "values", rename_all = "snake_case")]
 pub enum CalendarFieldSpec {
+    #[default]
     Any,
     Values(Vec<u32>),
 }
@@ -193,63 +194,48 @@ pub struct CalendarTriggerSpec {
     pub year: Option<CalendarFieldSpec>,
 }
 
-impl Default for CalendarFieldSpec {
-    fn default() -> Self {
-        Self::Any
-    }
-}
-
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MisfirePolicy {
+    #[default]
     Skip,
-    CatchUpWithin { window_seconds: u64 },
-}
-
-impl Default for MisfirePolicy {
-    fn default() -> Self {
-        Self::Skip
-    }
+    CatchUpWithin {
+        window_seconds: u64,
+    },
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlapPolicy {
     AllowConcurrent,
+    #[default]
     SkipIfRunning,
 }
 
-impl Default for OverlapPolicy {
-    fn default() -> Self {
-        Self::SkipIfRunning
-    }
-}
-
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MissingTargetPolicy {
     Skip,
+    #[default]
     MarkMisfired,
-}
-
-impl Default for MissingTargetPolicy {
-    fn default() -> Self {
-        Self::MarkMisfired
-    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "target_kind", rename_all = "snake_case")]
 pub enum TargetBinding {
-    Session(SessionTargetBinding),
+    Session(Box<SessionTargetBinding>),
     Mob(MobTargetBinding),
 }
 
 impl TargetBinding {
+    pub fn session(binding: SessionTargetBinding) -> Self {
+        Self::Session(Box::new(binding))
+    }
+
     pub fn stable_key(&self) -> String {
         match self {
             Self::Session(binding) => binding.stable_key(),
@@ -278,7 +264,7 @@ pub enum SessionTargetBinding {
         action: ScheduledSessionAction,
     },
     MaterializeOnDemandSession {
-        create: SessionMaterializationSpec,
+        create: Box<SessionMaterializationSpec>,
         action: ScheduledSessionAction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bound_session_id: Option<SessionId>,
@@ -286,6 +272,17 @@ pub enum SessionTargetBinding {
 }
 
 impl SessionTargetBinding {
+    pub fn materialize_on_demand(
+        create: SessionMaterializationSpec,
+        action: ScheduledSessionAction,
+    ) -> Self {
+        Self::MaterializeOnDemandSession {
+            create: Box::new(create),
+            action,
+            bound_session_id: None,
+        }
+    }
+
     pub fn stable_key(&self) -> String {
         match self {
             Self::ExactSession { session_id, .. } => format!("session:exact:{session_id}"),
@@ -558,6 +555,7 @@ pub enum DeliveryReceiptStage {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryReceipt {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub receipt_id: Uuid,
     pub occurrence_id: OccurrenceId,
     pub attempt: u32,
@@ -806,8 +804,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_binding_round_trips_without_duplicate_type_fields() {
-        let binding = TargetBinding::Session(SessionTargetBinding::ExactSession {
+    fn target_binding_round_trips_without_duplicate_type_fields() -> Result<(), String> {
+        let binding = TargetBinding::session(SessionTargetBinding::ExactSession {
             session_id: SessionId::new(),
             action: ScheduledSessionAction::Prompt {
                 prompt: ContentInput::from("scheduled hello"),
@@ -818,12 +816,13 @@ mod tests {
             },
         });
 
-        let value = serde_json::to_value(&binding).expect("target binding should serialize");
+        let value = serde_json::to_value(&binding).map_err(|error| error.to_string())?;
         assert_eq!(value["target_kind"], "session");
         assert_eq!(value["type"], "exact_session");
 
         let round_trip: TargetBinding =
-            serde_json::from_value(value).expect("target binding should deserialize");
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
         assert_eq!(round_trip, binding);
+        Ok(())
     }
 }

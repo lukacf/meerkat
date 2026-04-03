@@ -130,7 +130,7 @@ fn next_calendar_due_after(
     after_utc: Option<DateTime<Utc>>,
 ) -> Result<Option<DateTime<Utc>>, ScheduleDomainError> {
     let tz = normalize_timezone(&spec.timezone)?;
-    let search_start = next_minute_boundary(after_utc.unwrap_or_else(|| Utc::now()));
+    let search_start = next_minute_boundary(after_utc.unwrap_or_else(Utc::now));
     let search_end = search_start + Duration::days(366 * 5);
 
     scan_calendar(spec, tz, search_start, search_end, 1).map(|mut matches| matches.pop())

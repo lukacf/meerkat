@@ -195,7 +195,7 @@ async fn wait_for_terminal_failure(
 }
 
 fn exact_session_prompt_target(session_id: &str, marker: &str) -> TargetBinding {
-    TargetBinding::Session(SessionTargetBinding::ExactSession {
+    TargetBinding::session(SessionTargetBinding::ExactSession {
         session_id: meerkat::SessionId::parse(session_id).expect("session id should parse"),
         action: ScheduledSessionAction::Prompt {
             prompt: format!("Remember the scheduled marker {marker}.").into(),
@@ -208,8 +208,8 @@ fn exact_session_prompt_target(session_id: &str, marker: &str) -> TargetBinding 
 }
 
 fn materialize_prompt_target(model: &str, marker: &str) -> TargetBinding {
-    TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
-        create: SessionMaterializationSpec {
+    TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+        SessionMaterializationSpec {
             model: model.to_string(),
             system_prompt: None,
             max_tokens: None,
@@ -229,20 +229,19 @@ fn materialize_prompt_target(model: &str, marker: &str) -> TargetBinding {
             keep_alive: false,
             app_context: None,
         },
-        action: ScheduledSessionAction::Prompt {
+        ScheduledSessionAction::Prompt {
             prompt: format!("Remember the scheduled marker {marker}.").into(),
             system_prompt: None,
             render_metadata: None,
             skill_references: Vec::new(),
             additional_instructions: Vec::new(),
         },
-        bound_session_id: None,
-    })
+    ))
 }
 
 fn invalid_materialize_target(model: &str) -> TargetBinding {
-    TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
-        create: SessionMaterializationSpec {
+    TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+        SessionMaterializationSpec {
             model: model.to_string(),
             system_prompt: None,
             max_tokens: None,
@@ -264,15 +263,14 @@ fn invalid_materialize_target(model: &str) -> TargetBinding {
             keep_alive: true,
             app_context: None,
         },
-        action: ScheduledSessionAction::Prompt {
+        ScheduledSessionAction::Prompt {
             prompt: "Trigger a materialization failure.".into(),
             system_prompt: None,
             render_metadata: None,
             skill_references: Vec::new(),
             additional_instructions: Vec::new(),
         },
-        bound_session_id: None,
-    })
+    ))
 }
 
 #[cfg(feature = "mob")]
@@ -925,11 +923,14 @@ async fn mcp_schedule_materialized_session_binds_and_reuses_over_http() {
     )
     .expect("schedule get should decode");
     let bound_session_id = match bound_schedule.target {
-        TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
-            bound_session_id: Some(session_id),
-            ..
-        }) => session_id,
-        other => panic!("expected bound materialized session target, got {other:?}"),
+        TargetBinding::Session(binding) => match *binding {
+            SessionTargetBinding::MaterializeOnDemandSession {
+                bound_session_id: Some(session_id),
+                ..
+            } => session_id,
+            other => panic!("expected bound materialized session target, got {other:?}"),
+        },
+        other => panic!("expected session target, got {other:?}"),
     };
     next_id += 1;
 

@@ -8,7 +8,7 @@ use crate::service::{
 };
 use crate::{
     AgentToolDispatcher, BudgetLimits, ContentInput, HookRunOverrides, OpsLifecycleRegistry,
-    OutputSchema, PeerMeta, Provider, Session, ToolDef, skills::SkillId,
+    OutputSchema, PeerMeta, Provider, Session, SessionDeferredTurnState, ToolDef, skills::SkillId,
 };
 
 pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens, system_prompt, output_schema, or structured_output_retries after the deferred session's first turn has started";
@@ -114,7 +114,7 @@ pub fn session_allows_first_turn_build_overrides(session: &Session) -> bool {
     session
         .deferred_turn_state()
         .as_ref()
-        .is_some_and(|state| state.allows_initial_turn_overrides())
+        .is_some_and(SessionDeferredTurnState::allows_initial_turn_overrides)
 }
 
 pub fn build_recovered_session(
@@ -139,20 +139,21 @@ pub fn build_recovered_session(
     }
 
     let build_state = session.build_state().unwrap_or_default();
-    let mut resume_override_mask = ResumeOverrideMask::default();
-    resume_override_mask.model = overrides.model.is_some();
-    resume_override_mask.provider = overrides.provider.is_some();
-    resume_override_mask.provider_params = overrides.provider_params.is_some();
-    resume_override_mask.max_tokens = overrides.max_tokens.is_some();
-    resume_override_mask.structured_output_retries = overrides.structured_output_retries.is_some();
-    resume_override_mask.override_builtins = overrides.override_builtins.is_some();
-    resume_override_mask.override_shell = overrides.override_shell.is_some();
-    resume_override_mask.override_memory = overrides.override_memory.is_some();
-    resume_override_mask.override_mob = overrides.override_mob.is_some();
-    resume_override_mask.preload_skills = overrides.preload_skills.is_some();
-    resume_override_mask.keep_alive = overrides.keep_alive.is_some();
-    resume_override_mask.comms_name = overrides.comms_name.is_some();
-    resume_override_mask.peer_meta = overrides.peer_meta.is_some();
+    let resume_override_mask = ResumeOverrideMask {
+        model: overrides.model.is_some(),
+        provider: overrides.provider.is_some(),
+        max_tokens: overrides.max_tokens.is_some(),
+        structured_output_retries: overrides.structured_output_retries.is_some(),
+        provider_params: overrides.provider_params.is_some(),
+        override_builtins: overrides.override_builtins.is_some(),
+        override_shell: overrides.override_shell.is_some(),
+        override_memory: overrides.override_memory.is_some(),
+        override_mob: overrides.override_mob.is_some(),
+        preload_skills: overrides.preload_skills.is_some(),
+        keep_alive: overrides.keep_alive.is_some(),
+        comms_name: overrides.comms_name.is_some(),
+        peer_meta: overrides.peer_meta.is_some(),
+    };
 
     let model = overrides
         .model
@@ -237,7 +238,7 @@ pub fn build_recovered_session(
             .shell_env
             .clone()
             .or_else(|| build_state.shell_env.clone()),
-        call_timeout_override: build_state.call_timeout_override.clone(),
+        call_timeout_override: build_state.call_timeout_override,
         resume_override_mask,
         mob_tools: None,
     };
@@ -462,7 +463,7 @@ mod tests {
                     "MEERKAT_MODE".to_string(),
                     "override".to_string(),
                 )])),
-                recoverable_tool_defs: Some(override_tools.clone()),
+                recoverable_tool_defs: Some(override_tools),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),

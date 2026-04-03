@@ -236,7 +236,7 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     // Later inputs override scalar fields; collection fields accumulate.
     let turn_metadata = merge_batch_turn_metadata(inputs);
 
-    RunPrimitive::StagedInput(StagedRunInput {
+    RunPrimitive::staged_input(StagedRunInput {
         boundary,
         appends,
         context_appends: vec![],

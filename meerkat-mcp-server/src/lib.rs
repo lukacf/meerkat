@@ -417,14 +417,16 @@ impl MeerkatMcpState {
 
     fn runtime_ingress_context(&self) -> runtime_ingress::McpRuntimeIngressContext {
         runtime_ingress::McpRuntimeIngressContext::new(
-            Arc::clone(&self.service),
-            Arc::clone(&self.runtime_adapter),
-            Arc::clone(&self.config_runtime),
-            self.realm_id.clone(),
-            self.instance_id.clone(),
-            self.backend.clone(),
-            Arc::clone(&self.mcp_adapters),
-            Arc::clone(&self.runtime_sessions),
+            runtime_ingress::McpRuntimeIngressResources {
+                service: Arc::clone(&self.service),
+                runtime_adapter: Arc::clone(&self.runtime_adapter),
+                config_runtime: Arc::clone(&self.config_runtime),
+                realm_id: self.realm_id.clone(),
+                instance_id: self.instance_id.clone(),
+                backend: self.backend.clone(),
+                mcp_adapters: Arc::clone(&self.mcp_adapters),
+                runtime_sessions: Arc::clone(&self.runtime_sessions),
+            },
         )
     }
 
@@ -552,7 +554,7 @@ impl MeerkatMcpState {
         ));
 
         let state = Self {
-            service,
+            service: Arc::clone(&service),
             schedule_service,
             realm_id,
             backend: manifest.backend.as_str().to_string(),
@@ -646,7 +648,7 @@ impl MeerkatMcpState {
         ));
 
         let state = Self {
-            service,
+            service: Arc::clone(&service),
             schedule_service,
             realm_id,
             backend: "sqlite".to_string(),
@@ -676,9 +678,9 @@ impl MeerkatMcpState {
             runtime_adapter,
             _realm_lease: None,
         };
-        state
-            .start_schedule_host()
-            .expect("schedule host should start");
+        if let Err(error) = state.start_schedule_host() {
+            tracing::warn!("schedule host failed to start: {error}");
+        }
         state
     }
 
@@ -2961,12 +2963,12 @@ async fn handle_meerkat_resume(
         state
             .upsert_mcp_adapter(&session_id, mcp_adapter.clone())
             .await;
-        if !input.tools.is_empty() {
+        if input.tools.is_empty() {
+            ingress.ensure_session(&session_id).await;
+        } else {
             ingress
                 .configure_session(&session_id, callback_tools.clone(), true)
                 .await;
-        } else {
-            ingress.ensure_session(&session_id).await;
         }
         if keep_alive_override.is_some() {
             let comms_rt = state.service.comms_runtime(&session_id).await;

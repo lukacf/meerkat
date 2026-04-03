@@ -74,6 +74,14 @@ struct SessionMcpState {
     drain_task_running: Arc<AtomicBool>,
 }
 
+struct RecoveredTurnRequest {
+    prompt: ContentInput,
+    event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+    flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    additional_instructions: Option<Vec<String>>,
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -331,11 +339,7 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         recovered: RecoveredSessionBuild,
-        prompt: ContentInput,
-        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
+        request: RecoveredTurnRequest,
     ) -> Result<RunResult, RpcError> {
         self.service
             .create_session(recovered.into_deferred_create_request())
@@ -345,14 +349,14 @@ impl SessionRuntime {
             .start_turn(
                 session_id,
                 StartTurnRequest {
-                    prompt,
+                    prompt: request.prompt,
                     system_prompt: None,
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
-                    event_tx: Some(event_tx),
-                    skill_references,
-                    flow_tool_overlay,
-                    additional_instructions,
+                    event_tx: Some(request.event_tx),
+                    skill_references: request.skill_references,
+                    flow_tool_overlay: request.flow_tool_overlay,
+                    additional_instructions: request.additional_instructions,
                 },
             )
             .await
@@ -1446,11 +1450,13 @@ impl SessionRuntime {
                 .run_recovered_turn(
                     session_id,
                     recovered,
-                    turn_prompt,
-                    event_tx,
-                    skill_references,
-                    flow_tool_overlay,
-                    additional_instructions,
+                    RecoveredTurnRequest {
+                        prompt: turn_prompt,
+                        event_tx,
+                        skill_references,
+                        flow_tool_overlay,
+                        additional_instructions,
+                    },
                 )
                 .await;
         }
@@ -1493,11 +1499,13 @@ impl SessionRuntime {
                 .run_recovered_turn(
                     session_id,
                     recovered,
-                    turn_prompt,
-                    event_tx,
-                    skill_references,
-                    flow_tool_overlay,
-                    additional_instructions,
+                    RecoveredTurnRequest {
+                        prompt: turn_prompt,
+                        event_tx,
+                        skill_references,
+                        flow_tool_overlay,
+                        additional_instructions,
+                    },
                 )
                 .await;
         }
@@ -1553,11 +1561,13 @@ impl SessionRuntime {
                 self.run_recovered_turn(
                     session_id,
                     recovered,
-                    turn_prompt,
-                    event_tx,
-                    skill_references,
-                    flow_tool_overlay,
-                    additional_instructions,
+                    RecoveredTurnRequest {
+                        prompt: turn_prompt,
+                        event_tx,
+                        skill_references,
+                        flow_tool_overlay,
+                        additional_instructions,
+                    },
                 )
                 .await
             }
@@ -4462,11 +4472,11 @@ mod tests {
             match field {
                 "max_tokens" => assert_eq!(metadata.max_tokens, 1024),
                 "system_prompt" => {
-                    assert_eq!(build_state.system_prompt.as_deref(), Some("override"))
+                    assert_eq!(build_state.system_prompt.as_deref(), Some("override"));
                 }
                 "output_schema" => assert!(build_state.output_schema.is_some()),
                 "structured_output_retries" => {
-                    assert_eq!(metadata.structured_output_retries, 5)
+                    assert_eq!(metadata.structured_output_retries, 5);
                 }
                 _ => unreachable!("unexpected field"),
             }

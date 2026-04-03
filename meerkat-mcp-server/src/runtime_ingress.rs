@@ -28,6 +28,17 @@ pub(crate) type SharedMcpRuntimeSessions =
     Arc<RwLock<HashMap<SessionId, Arc<McpRuntimeSessionState>>>>;
 pub(crate) type SharedMcpAdapters = Arc<Mutex<HashMap<String, Arc<McpRouterAdapter>>>>;
 
+pub(crate) struct McpRuntimeIngressResources {
+    pub service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    pub runtime_adapter: Arc<RuntimeSessionAdapter>,
+    pub config_runtime: Arc<ConfigRuntime>,
+    pub realm_id: String,
+    pub instance_id: Option<String>,
+    pub backend: String,
+    pub mcp_adapters: SharedMcpAdapters,
+    pub runtime_sessions: SharedMcpRuntimeSessions,
+}
+
 #[derive(Clone)]
 pub(crate) struct McpRuntimeIngressContext {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -41,25 +52,16 @@ pub(crate) struct McpRuntimeIngressContext {
 }
 
 impl McpRuntimeIngressContext {
-    pub(crate) fn new(
-        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-        runtime_adapter: Arc<RuntimeSessionAdapter>,
-        config_runtime: Arc<ConfigRuntime>,
-        realm_id: String,
-        instance_id: Option<String>,
-        backend: String,
-        mcp_adapters: SharedMcpAdapters,
-        runtime_sessions: SharedMcpRuntimeSessions,
-    ) -> Self {
+    pub(crate) fn new(resources: McpRuntimeIngressResources) -> Self {
         Self {
-            service,
-            runtime_adapter,
-            config_runtime,
-            realm_id,
-            instance_id,
-            backend,
-            mcp_adapters,
-            runtime_sessions,
+            service: resources.service,
+            runtime_adapter: resources.runtime_adapter,
+            config_runtime: resources.config_runtime,
+            realm_id: resources.realm_id,
+            instance_id: resources.instance_id,
+            backend: resources.backend,
+            mcp_adapters: resources.mcp_adapters,
+            runtime_sessions: resources.runtime_sessions,
         }
     }
 
@@ -107,9 +109,12 @@ impl McpRuntimeIngressContext {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn AgentToolDispatcher>> {
-        let Some(state) = self.runtime_sessions.read().await.get(session_id).cloned() else {
-            return None;
-        };
+        let state = self
+            .runtime_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()?;
         state.callback_tools().await
     }
 

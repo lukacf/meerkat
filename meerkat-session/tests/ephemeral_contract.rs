@@ -1272,7 +1272,7 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
 }
 
 #[tokio::test]
-async fn test_apply_runtime_turn_returns_callback_pending_terminal() {
+async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(), String> {
     let service = make_service(MockAgentBuilder::with_callback_pending());
     let _ = service
         .create_session(create_req_deferred("Hello"))
@@ -1306,13 +1306,12 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() {
     );
     assert!(output.session_snapshot.is_some());
     assert!(output.run_result.is_none());
-    match output.terminal {
-        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
-            assert_eq!(tool_name, "external_mock");
-            assert_eq!(args, json!({ "value": "browser" }));
-        }
-        other => panic!("expected callback pending terminal, got {other:?}"),
-    }
+    let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = output.terminal else {
+        return Err("expected callback pending terminal".to_string());
+    };
+    assert_eq!(tool_name, "external_mock");
+    assert_eq!(args, json!({ "value": "browser" }));
+    Ok(())
 }
 
 #[tokio::test]

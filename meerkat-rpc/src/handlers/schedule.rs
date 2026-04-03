@@ -51,13 +51,13 @@ pub struct ScheduleToolCallParams {
     pub arguments: Value,
 }
 
-fn parse_schedule_id(id: Option<RpcId>, raw: &str) -> Result<ScheduleId, RpcResponse> {
+fn parse_schedule_id(id: Option<RpcId>, raw: &str) -> Result<ScheduleId, Box<RpcResponse>> {
     ScheduleId::parse(raw).map_err(|error| {
-        RpcResponse::error(
+        Box::new(RpcResponse::error(
             id,
             error::INVALID_PARAMS,
             format!("invalid schedule_id '{raw}': {error}"),
-        )
+        ))
     })
 }
 
@@ -113,7 +113,7 @@ pub async fn handle_get(
     };
     let schedule_id = match parse_schedule_id(id.clone(), &params.schedule_id) {
         Ok(schedule_id) => schedule_id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match schedule_service(&runtime).get(&schedule_id).await {
@@ -157,7 +157,7 @@ pub async fn handle_update(
     };
     let schedule_id = match parse_schedule_id(id.clone(), &params.schedule_id) {
         Ok(schedule_id) => schedule_id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match schedule_service(&runtime)
@@ -180,7 +180,7 @@ pub async fn handle_pause(
     };
     let schedule_id = match parse_schedule_id(id.clone(), &params.schedule_id) {
         Ok(schedule_id) => schedule_id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match schedule_service(&runtime).pause(&schedule_id).await {
@@ -200,7 +200,7 @@ pub async fn handle_resume(
     };
     let schedule_id = match parse_schedule_id(id.clone(), &params.schedule_id) {
         Ok(schedule_id) => schedule_id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match schedule_service(&runtime).resume(&schedule_id).await {
@@ -220,7 +220,7 @@ pub async fn handle_delete(
     };
     let schedule_id = match parse_schedule_id(id.clone(), &params.schedule_id) {
         Ok(schedule_id) => schedule_id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match schedule_service(&runtime).delete(&schedule_id).await {
@@ -240,7 +240,7 @@ pub async fn handle_occurrences(
     };
     let schedule_id = match parse_schedule_id(id.clone(), &params.schedule_id) {
         Ok(schedule_id) => schedule_id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match schedule_service(&runtime)

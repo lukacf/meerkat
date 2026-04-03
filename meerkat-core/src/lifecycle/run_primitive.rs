@@ -184,7 +184,7 @@ pub struct StagedRunInput {
 #[serde(tag = "primitive_type", rename_all = "snake_case")]
 pub enum RunPrimitive {
     /// Apply conversation mutations at a boundary.
-    StagedInput(StagedRunInput),
+    StagedInput(Box<StagedRunInput>),
     /// Inject content immediately (no boundary required).
     ImmediateAppend(ConversationAppend),
     /// Inject context immediately.
@@ -209,6 +209,10 @@ pub struct RuntimeApplyPlan {
 }
 
 impl RunPrimitive {
+    pub fn staged_input(staged: StagedRunInput) -> Self {
+        Self::StagedInput(Box::new(staged))
+    }
+
     /// Get all contributing input IDs (if any).
     pub fn contributing_input_ids(&self) -> &[InputId] {
         match self {
@@ -351,14 +355,16 @@ mod tests {
     }
 
     #[test]
-    fn core_renderable_to_content_input_projects_json_to_text() {
+    fn core_renderable_to_content_input_projects_json_to_text() -> Result<(), String> {
         let renderable = CoreRenderable::Json {
             value: serde_json::json!({"hello": "world"}),
         };
-        match renderable.to_content_input() {
-            ContentInput::Text(text) => assert!(text.contains("\"hello\"")),
-            other => panic!("expected text projection, got {other:?}"),
-        }
+        let projected = renderable.to_content_input();
+        let ContentInput::Text(text) = projected else {
+            return Err("expected text projection".to_string());
+        };
+        assert!(text.contains("\"hello\""));
+        Ok(())
     }
 
     #[test]
@@ -412,7 +418,7 @@ mod tests {
 
     #[test]
     fn run_primitive_staged_input_serde() {
-        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+        let primitive = RunPrimitive::staged_input(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
             context_appends: vec![],
@@ -442,7 +448,7 @@ mod tests {
     #[test]
     fn run_primitive_contributing_input_ids() {
         let ids = vec![InputId::new(), InputId::new()];
-        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+        let primitive = RunPrimitive::staged_input(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
             context_appends: vec![],
@@ -471,25 +477,25 @@ mod tests {
     }
 
     #[test]
-    fn runtime_apply_plan_uses_context_only_action_for_immediate_context_primitive() {
+    fn runtime_apply_plan_uses_context_only_action_for_immediate_context_primitive()
+    -> Result<(), String> {
         let primitive = RunPrimitive::ImmediateContextAppend(ConversationContextAppend {
             key: "env".into(),
             text: "linux".into(),
         });
         let plan = primitive.runtime_apply_plan();
-        match plan.action {
-            RuntimeApplyAction::ApplySystemContextOnly { appends } => {
-                assert_eq!(appends.len(), 1);
-                assert_eq!(appends[0].text, "linux");
-                assert_eq!(appends[0].source.as_deref(), Some("env"));
-            }
-            other => panic!("expected context-only action, got {other:?}"),
-        }
+        let RuntimeApplyAction::ApplySystemContextOnly { appends } = plan.action else {
+            return Err("expected context-only action".to_string());
+        };
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].text, "linux");
+        assert_eq!(appends[0].source.as_deref(), Some("env"));
+        Ok(())
     }
 
     #[test]
-    fn runtime_apply_plan_projects_json_and_reference_prompt_content() {
-        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+    fn runtime_apply_plan_projects_json_and_reference_prompt_content() -> Result<(), String> {
+        let primitive = RunPrimitive::staged_input(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![
                 ConversationAppend {
@@ -512,24 +518,22 @@ mod tests {
         });
 
         let plan = primitive.runtime_apply_plan();
-        match plan.action {
-            RuntimeApplyAction::StartTurn {
-                prompt: ContentInput::Blocks(blocks),
-            } => {
-                assert_eq!(blocks.len(), 2);
-                match &blocks[0] {
-                    ContentBlock::Text { text } => assert!(text.contains("\"hello\"")),
-                    other => panic!("expected text block, got {other:?}"),
-                }
-                match &blocks[1] {
-                    ContentBlock::Text { text } => {
-                        assert!(text.contains("artifact"));
-                        assert!(text.contains("file:///tmp/a.txt"));
-                    }
-                    other => panic!("expected text block, got {other:?}"),
-                }
-            }
-            other => panic!("expected start-turn action, got {other:?}"),
-        }
+        let RuntimeApplyAction::StartTurn {
+            prompt: ContentInput::Blocks(blocks),
+        } = plan.action
+        else {
+            return Err("expected start-turn action".to_string());
+        };
+        assert_eq!(blocks.len(), 2);
+        let ContentBlock::Text { text } = &blocks[0] else {
+            return Err("expected projected json text block".to_string());
+        };
+        assert!(text.contains("\"hello\""));
+        let ContentBlock::Text { text } = &blocks[1] else {
+            return Err("expected projected reference text block".to_string());
+        };
+        assert!(text.contains("artifact"));
+        assert!(text.contains("file:///tmp/a.txt"));
+        Ok(())
     }
 }

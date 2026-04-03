@@ -59,6 +59,14 @@ struct AcceptedScheduledInput {
     handle: Option<CompletionHandle>,
 }
 
+struct ScheduledPromptDispatch {
+    prompt: ContentInput,
+    render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    skill_references: Vec<String>,
+    additional_instructions: Vec<String>,
+    materialized_session_id: Option<SessionId>,
+}
+
 impl RpcScheduleTargetAdapter {
     fn new(runtime: &Arc<SessionRuntime>) -> Self {
         Self {
@@ -465,11 +473,13 @@ impl ScheduleTargetDelivery for RpcScheduleTargetAdapter {
                             .deliver_scheduled_prompt(
                                 &resolved.session_id,
                                 occurrence,
-                                prompt.clone(),
-                                render_metadata.clone(),
-                                skill_references.clone(),
-                                additional_instructions.clone(),
-                                resolved.materialized_session_id,
+                                ScheduledPromptDispatch {
+                                    prompt: prompt.clone(),
+                                    render_metadata: render_metadata.clone(),
+                                    skill_references: skill_references.clone(),
+                                    additional_instructions: additional_instructions.clone(),
+                                    materialized_session_id: resolved.materialized_session_id,
+                                },
                             )
                             .await
                     }
@@ -619,34 +629,30 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
         occurrence: &Occurrence,
-        prompt: ContentInput,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        skill_references: Vec<String>,
-        additional_instructions: Vec<String>,
-        materialized_session_id: Option<SessionId>,
+        dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
         match self
             .accept_scheduled_prompt_with_completion(
                 session_id,
                 occurrence,
-                prompt,
-                render_metadata,
-                skill_references,
-                additional_instructions,
+                dispatch.prompt,
+                dispatch.render_metadata,
+                dispatch.skill_references,
+                dispatch.additional_instructions,
             )
             .await
         {
             Ok(accepted) => Ok(build_dispatch_from_accepted(
                 occurrence,
                 accepted,
-                materialized_session_id,
+                dispatch.materialized_session_id,
             )),
             Err(error) => Ok(immediate_delivery_failure(
                 occurrence,
                 error.to_string(),
                 OccurrenceFailureClass::RuntimeRejected,
                 None,
-                materialized_session_id,
+                dispatch.materialized_session_id,
             )),
         }
     }
@@ -1127,7 +1133,7 @@ fn mob_flow_completion_future(
                         OccurrenceFailureClass::MobRejected,
                     ));
                 }
-                Ok(Some(_)) | Ok(None) => sleep(Duration::from_millis(100)).await,
+                Ok(Some(_) | None) => sleep(Duration::from_millis(100)).await,
                 Err(error) => return Ok(mob_delivery_failed_terminal(error)),
             }
         }

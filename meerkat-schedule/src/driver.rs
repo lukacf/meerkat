@@ -368,12 +368,17 @@ async fn complete_dispatched_occurrence(
         )
     });
     let lifecycle = match terminal.phase {
-        OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
-            receipt: completed_receipt
-                .clone()
-                .expect("completed receipt must be present for completed terminal"),
-            at_utc: store_now_utc,
-        },
+        OccurrencePhase::Completed => {
+            let receipt = completed_receipt.clone().ok_or_else(|| {
+                ScheduleDomainError::Internal(
+                    "completed terminal must carry a completed receipt".to_string(),
+                )
+            })?;
+            OccurrenceLifecycleInput::Complete {
+                receipt,
+                at_utc: store_now_utc,
+            }
+        }
         OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
             detail: terminal.detail.clone(),
             failure_class: terminal.failure_class,
@@ -537,7 +542,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn driver_preserves_target_materialization_failure_classification() {
+    async fn driver_preserves_target_materialization_failure_classification()
+    -> Result<(), ScheduleDomainError> {
         let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
         let service = ScheduleService::new(store.clone());
         let schedule = service
@@ -555,8 +561,7 @@ mod tests {
                 planning_horizon_days: Some(1),
                 planning_horizon_occurrences: Some(1),
             })
-            .await
-            .expect("schedule should be created");
+            .await?;
 
         let driver = ScheduleDriver::new(
             service.clone(),
@@ -570,15 +575,12 @@ mod tests {
             },
         );
 
-        let report = driver.tick_once().await.expect("tick should succeed");
+        let report = driver.tick_once().await?;
         assert_eq!(report.claimed_occurrences, 1);
         assert_eq!(report.terminalized_occurrences, 0);
 
         let occurrence = loop {
-            let occurrences = service
-                .list_occurrences(&schedule.schedule_id)
-                .await
-                .expect("occurrences should list");
+            let occurrences = service.list_occurrences(&schedule.schedule_id).await?;
             if let Some(occurrence) = occurrences
                 .into_iter()
                 .find(|occurrence| occurrence.phase == OccurrencePhase::DeliveryFailed)
@@ -597,23 +599,21 @@ mod tests {
             Some("session creation failed")
         );
 
-        let receipts = store
-            .list_receipts(&occurrence.occurrence_id)
-            .await
-            .expect("receipts should list");
-        let last_receipt = receipts
-            .last()
-            .expect("delivery failure receipt should exist");
+        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+        let last_receipt = receipts.last().ok_or_else(|| {
+            ScheduleDomainError::Internal("delivery failure receipt should exist".to_string())
+        })?;
         assert_eq!(last_receipt.stage, DeliveryReceiptStage::DeliveryFailed);
         assert_eq!(
             last_receipt.failure_class,
             Some(OccurrenceFailureClass::TargetMaterializationFailed)
         );
+        Ok(())
     }
 
     fn materialize_on_demand_target(prompt: &str) -> TargetBinding {
-        TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
-            create: SessionMaterializationSpec {
+        TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+            SessionMaterializationSpec {
                 model: "gpt-4.1-mini".into(),
                 system_prompt: None,
                 max_tokens: None,
@@ -633,14 +633,13 @@ mod tests {
                 keep_alive: true,
                 app_context: None,
             },
-            action: ScheduledSessionAction::Prompt {
+            ScheduledSessionAction::Prompt {
                 prompt: ContentInput::from(prompt),
                 system_prompt: None,
                 render_metadata: None,
                 skill_references: Vec::new(),
                 additional_instructions: Vec::new(),
             },
-            bound_session_id: None,
-        })
+        ))
     }
 }

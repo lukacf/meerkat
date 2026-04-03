@@ -2527,7 +2527,7 @@ mod tests {
                         every_seconds: 300,
                         end_at_utc: None,
                     }),
-                    target: meerkat::TargetBinding::Session(
+                    target: meerkat::TargetBinding::session(
                         meerkat::SessionTargetBinding::ExactSession {
                             session_id: meerkat::SessionId::new(),
                             action: meerkat::ScheduledSessionAction::Prompt {
@@ -2619,7 +2619,7 @@ mod tests {
                 every_seconds: 300,
                 end_at_utc: None,
             }),
-            target: meerkat::TargetBinding::Session(meerkat::SessionTargetBinding::ExactSession {
+            target: meerkat::TargetBinding::session(meerkat::SessionTargetBinding::ExactSession {
                 session_id: meerkat::SessionId::new(),
                 action: meerkat::ScheduledSessionAction::Prompt {
                     prompt: meerkat_core::ContentInput::from("hello from schedule tools"),

@@ -238,7 +238,7 @@ async fn schedule_routes_round_trip_basic_schedule_state() {
             every_seconds: 300,
             end_at_utc: None,
         }),
-        target: meerkat::TargetBinding::Session(meerkat::SessionTargetBinding::ExactSession {
+        target: meerkat::TargetBinding::session(meerkat::SessionTargetBinding::ExactSession {
             session_id: SessionId::new(),
             action: meerkat::ScheduledSessionAction::Prompt {
                 prompt: meerkat_core::ContentInput::from("hello from rest schedule"),

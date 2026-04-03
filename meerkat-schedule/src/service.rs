@@ -389,7 +389,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
-    async fn update_bumps_revision_and_supersedes_pending_future_occurrences() {
+    async fn update_bumps_revision_and_supersedes_pending_future_occurrences()
+    -> Result<(), ScheduleDomainError> {
         let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
         let service = ScheduleService::new(store);
 
@@ -410,8 +411,7 @@ mod tests {
                 planning_horizon_days: Some(1),
                 planning_horizon_occurrences: Some(4),
             })
-            .await
-            .expect("schedule should be created");
+            .await?;
 
         let updated = service
             .update(
@@ -426,13 +426,9 @@ mod tests {
                     ..UpdateScheduleRequest::default()
                 },
             )
-            .await
-            .expect("schedule update should succeed");
+            .await?;
 
-        let occurrences = service
-            .list_occurrences(&created.schedule_id)
-            .await
-            .expect("occurrences should list");
+        let occurrences = service.list_occurrences(&created.schedule_id).await?;
 
         let superseded = occurrences
             .iter()
@@ -458,11 +454,12 @@ mod tests {
             replanned > 0,
             "revision bump should plan replacement pending occurrences"
         );
+        Ok(())
     }
 
     fn materialize_on_demand_target(prompt: &str) -> TargetBinding {
-        TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
-            create: SessionMaterializationSpec {
+        TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+            SessionMaterializationSpec {
                 model: "gpt-4.1-mini".into(),
                 system_prompt: None,
                 max_tokens: None,
@@ -482,14 +479,13 @@ mod tests {
                 keep_alive: true,
                 app_context: None,
             },
-            action: ScheduledSessionAction::Prompt {
+            ScheduledSessionAction::Prompt {
                 prompt: ContentInput::from(prompt),
                 system_prompt: None,
                 render_metadata: None,
                 skill_references: Vec::new(),
                 additional_instructions: Vec::new(),
             },
-            bound_session_id: None,
-        })
+        ))
     }
 }

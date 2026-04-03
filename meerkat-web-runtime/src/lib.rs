@@ -552,18 +552,17 @@ fn infer_provider_name(model: &str) -> Option<&'static str> {
     meerkat_core::Provider::infer_from_model(model).map(|p| p.as_str())
 }
 
+type WasmServiceInfrastructure = (
+    Arc<WasmSessionService>,
+    Arc<RuntimeSessionAdapter>,
+    Arc<MobMcpState>,
+);
+
 /// Build the shared service infrastructure from a Config populated with provider keys.
 fn build_service_infrastructure(
     config: Config,
     max_sessions: usize,
-) -> Result<
-    (
-        Arc<WasmSessionService>,
-        Arc<RuntimeSessionAdapter>,
-        Arc<MobMcpState>,
-    ),
-    JsValue,
-> {
+) -> Result<WasmServiceInfrastructure, JsValue> {
     let factory = meerkat::AgentFactory::minimal();
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
 

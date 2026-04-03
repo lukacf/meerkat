@@ -251,7 +251,7 @@ pub fn build_recovered_session(
         overrides
             .override_mob
             .or_else(|| metadata.tooling.mob.to_override()),
-        build_state.mob_tool_authority_context.clone(),
+        build_state.mob_tool_authority_context,
     );
 
     Ok(RecoveredSessionBuild {

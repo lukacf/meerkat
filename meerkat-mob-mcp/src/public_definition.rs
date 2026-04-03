@@ -340,6 +340,7 @@ fn decode_event_router(input: MobEventRouterConfigInput) -> EventRouterConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_contracts::{

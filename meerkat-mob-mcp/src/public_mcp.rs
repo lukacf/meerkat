@@ -405,7 +405,7 @@ pub async fn handle_public_tools_call(
                     Ok(member_ref) => json!({
                         "ok": true,
                         "member_ref": member_ref,
-                        "session_id": member_ref.session_id().map(|id| id.to_string()),
+                        "session_id": member_ref.session_id().map(std::string::ToString::to_string),
                     }),
                     Err(error) => json!({
                         "ok": false,
@@ -692,6 +692,7 @@ fn backend_kind_from_wire(kind: WireMobBackendKind) -> meerkat_mob::MobBackendKi
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_spawn_spec(
     profile: String,
     meerkat_id: String,
@@ -720,6 +721,7 @@ fn build_spawn_spec(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::MobMcpState;

@@ -480,18 +480,13 @@ pub struct MobMemberSendResult {
 }
 
 /// Public handling mode for mob member delivery.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireHandlingMode {
+    #[default]
     Queue,
     Steer,
-}
-
-impl Default for WireHandlingMode {
-    fn default() -> Self {
-        Self::Queue
-    }
 }
 
 impl From<WireHandlingMode> for HandlingMode {

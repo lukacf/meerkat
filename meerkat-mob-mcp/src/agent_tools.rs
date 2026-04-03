@@ -73,6 +73,7 @@ impl AgentMobToolSurface {
     /// * `implicit_mob_id` - Pre-seeded implicit mob ID (resume case)
     /// * `model` - Model name inherited by spawned helpers
     /// * `owner_session_id` - Session ID of the owning agent
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<MobMcpState>,
         implicit_mob_id: Option<MobId>,

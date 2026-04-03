@@ -13,9 +13,9 @@ use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
-    DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionHistoryQuery, SessionQuery,
-    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
-    TurnToolOverlay,
+    DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionError,
+    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
+    SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
@@ -23,7 +23,7 @@ use meerkat_core::types::{
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
     HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPoint,
-    HookReasonCode, LlmStreamResult,
+    HookReasonCode, LlmStreamResult, Session, SessionDeferredTurnState,
 };
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
@@ -840,6 +840,50 @@ async fn test_create_session_can_defer_initial_turn() {
         .await
         .expect("start_turn should run after deferred create");
     assert!(started.text.contains("Hello from mock"));
+}
+
+#[tokio::test]
+async fn test_recovered_session_does_not_rearm_consumed_first_turn_override_window() {
+    let service = make_service(MockAgentBuilder::new());
+    let mut recovered = Session::new();
+    let mut deferred = SessionDeferredTurnState::default();
+    deferred.mark_initial_turn_pending();
+    assert!(
+        deferred.mark_initial_turn_started(),
+        "pending deferred phase should transition to consumed"
+    );
+    recovered
+        .set_deferred_turn_state(deferred)
+        .expect("consumed deferred turn state");
+
+    let mut request = create_req("recovered session");
+    request.initial_turn = InitialTurnPolicy::Defer;
+    request.deferred_prompt_policy = DeferredPromptPolicy::Discard;
+    request.build = Some(SessionBuildOptions {
+        resume_session: Some(recovered),
+        ..Default::default()
+    });
+
+    let created = service
+        .create_session(request)
+        .await
+        .expect("materialize recovered session");
+
+    let error = service
+        .start_turn(
+            &created.session_id,
+            StartTurnRequest {
+                system_prompt: Some("late override".to_string()),
+                ..turn_req("resume turn")
+            },
+        )
+        .await
+        .expect_err("recovered consumed first turn must not allow build-only overrides");
+
+    assert!(
+        matches!(error, SessionError::Unsupported(ref message) if message == "system_prompt override is only allowed on a deferred session's first turn"),
+        "unexpected error: {error:?}"
+    );
 }
 
 #[tokio::test]

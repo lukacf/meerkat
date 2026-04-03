@@ -283,6 +283,14 @@ impl ScheduleDriver {
                 .await?;
         }
 
+        let mut dispatch_receipt = dispatch.receipt.clone();
+        if dispatch_receipt.correlation_id.is_none() {
+            dispatch_receipt.correlation_id = dispatch.correlation_id.clone();
+        }
+        if dispatch_receipt.materialized_session_id.is_none() {
+            dispatch_receipt.materialized_session_id = dispatch.materialized_session_id.clone();
+        }
+
         let mut dispatching = self
             .occurrence_authority
             .apply(
@@ -294,8 +302,9 @@ impl ScheduleDriver {
             )
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .into_occurrence();
+        dispatching.last_receipt = Some(dispatch_receipt.clone());
         self.store.put_occurrence(dispatching.clone()).await?;
-        self.store.append_receipt(dispatch.receipt.clone()).await?;
+        self.store.append_receipt(dispatch_receipt).await?;
 
         dispatching = self
             .occurrence_authority
@@ -848,6 +857,63 @@ mod tests {
         assert_eq!(
             last_receipt.failure_class,
             Some(OccurrenceFailureClass::TargetMaterializationFailed)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn driver_preserves_dispatch_receipt_on_in_flight_occurrence_projection()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("dispatch-receipt-projection".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        let report = driver.tick_once().await?;
+        assert_eq!(report.claimed_occurrences, 1);
+        wait_for_sender_count(&delivery, 1).await;
+
+        let occurrence = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+        let last_receipt = occurrence.last_receipt.as_ref().ok_or_else(|| {
+            ScheduleDomainError::Internal(
+                "dispatch receipt should remain projected on in-flight occurrences".to_string(),
+            )
+        })?;
+        assert_eq!(last_receipt.stage, DeliveryReceiptStage::DispatchStarted);
+        assert_eq!(
+            last_receipt.correlation_id.as_deref(),
+            Some("dispatch-attempt-1")
         );
         Ok(())
     }

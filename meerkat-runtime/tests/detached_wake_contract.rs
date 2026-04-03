@@ -77,6 +77,7 @@ impl CoreExecutor for ResultExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: Some(RunResult {
                 text: "done".into(),
                 session_id: SessionId::new(),
@@ -290,6 +291,7 @@ async fn choke_004_completion_during_running_defers_wake() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: Some(RunResult {
                     text: "done".into(),
                     session_id: SessionId::new(),

@@ -84,6 +84,7 @@ mod scenario_22_session_service_lifecycle {
 
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })

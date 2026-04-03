@@ -1266,6 +1266,7 @@ async fn setup_session(
         event_tx: None,
         skill_references: None,
         initial_turn: InitialTurnPolicy::Defer,
+        deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_opts),
         labels: None,
     };
@@ -2416,6 +2417,7 @@ mod tests {
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 llm_client_override: Some(encode_llm_client_override_for_service(
                     capture.clone() as Arc<dyn LlmClient>
@@ -2483,6 +2485,7 @@ mod tests {
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 llm_client_override: Some(encode_llm_client_override_for_service(Arc::new(
                     TestClient::default(),

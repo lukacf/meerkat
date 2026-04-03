@@ -536,6 +536,29 @@ where
                         if let Some(ref baseline) = self.interrupt_baseline {
                             baseline.store(batch.watermark, std::sync::atomic::Ordering::Release);
                         }
+                    } else {
+                        // Fallback for direct AgentBuilder paths without CompletionFeed.
+                        // Shell completions arrive through poll_external_updates().
+                        for completion in &ext.background_completions {
+                            if !completion.status.is_terminal() {
+                                continue;
+                            }
+                            emit_event!(AgentEvent::BackgroundJobCompleted {
+                                job_id: completion.job_id.clone(),
+                                display_name: completion.display_name.clone(),
+                                status: completion.status.as_str().to_string(),
+                                detail: completion.detail.clone(),
+                            });
+                            let mut notice = format!(
+                                "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
+                                completion.display_name,
+                                completion.job_id,
+                                completion.status.as_str(),
+                                completion.detail,
+                            );
+                            notice.push_str("\nUse shell_job_status to get the full output.");
+                            self.session.push(Message::User(UserMessage::text(notice)));
+                        }
                     }
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.

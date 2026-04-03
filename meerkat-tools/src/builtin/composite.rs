@@ -455,19 +455,26 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
-        let update = if let Some(ref ext) = self.external {
+        #[allow(unused_mut)]
+        let mut update = if let Some(ref ext) = self.external {
             ext.poll_external_updates().await
         } else {
             ExternalToolUpdate::default()
         };
 
-        // Background completions are no longer delivered through poll_external_updates
-        // (the agent boundary drains them via the CompletionFeed). But we still call
-        // drain_completed() for its side effect: flipping completion_notified on
-        // finished jobs so cleanup_old_jobs() can evict them after TTL expiry.
+        // When the CompletionFeed is wired, the agent boundary drains completions
+        // directly from the feed. drain_completed() still runs for its side effect
+        // (flipping completion_notified so cleanup_old_jobs can evict).
+        //
+        // When NO feed is wired (direct AgentBuilder paths without AgentFactory),
+        // background_completions is the only delivery path — return them here so
+        // the agent boundary's legacy ext.background_completions processing works.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref mgr) = self.job_manager {
-            let _ = mgr.drain_completed().await;
+            let drained = mgr.drain_completed().await;
+            if self.completion_feed.is_none() {
+                update.background_completions.extend(drained);
+            }
         }
 
         update

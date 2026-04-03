@@ -12,7 +12,7 @@
 //!   Consumed, Superseded, Coalesced, Abandoned
 //! - 9 inputs: QueueAccepted, StageForRun, RollbackStaged, MarkApplied,
 //!   MarkAppliedPendingConsumption, Consume, Supersede, Coalesce, Abandon
-//! - 3 fields: terminal_outcome, last_run_id, last_boundary_sequence
+//! - 4 fields: terminal_outcome, last_run_id, last_boundary_sequence, attempt_count
 //! - 4 terminal states: Consumed, Superseded, Coalesced, Abandoned
 //! - 4 effects: InputLifecycleNotice, RecordTerminalOutcome,
 //!   RecordRunAssociation, RecordBoundarySequence
@@ -122,11 +122,22 @@ pub enum InputLifecycleError {
 ///
 /// These fields are owned exclusively by the authority and cannot be mutated
 /// by handwritten shell code.
+/// Maximum number of stage → rollback cycles before the machine abandons the input.
+///
+/// This prevents unbounded `Queued → Staged → Queued` livelock when an executor
+/// keeps failing on the same input. The value is part of the machine schema.
+const MAX_STAGE_ATTEMPTS: u32 = 3;
+
 #[derive(Debug, Clone)]
 struct InputLifecycleFields {
     terminal_outcome: Option<InputTerminalOutcome>,
     last_run_id: Option<RunId>,
     last_boundary_sequence: Option<u64>,
+    /// How many times this input has been staged for a run. Incremented on
+    /// `StageForRun`, checked on `RollbackStaged`. When `attempt_count >=
+    /// MAX_STAGE_ATTEMPTS`, `RollbackStaged` transitions to `Abandoned`
+    /// instead of `Queued`.
+    attempt_count: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +211,7 @@ impl InputLifecycleAuthority {
                 terminal_outcome: None,
                 last_run_id: None,
                 last_boundary_sequence: None,
+                attempt_count: 0,
             },
             history: Vec::new(),
             updated_at: now,
@@ -214,6 +226,7 @@ impl InputLifecycleAuthority {
                 terminal_outcome: None,
                 last_run_id: None,
                 last_boundary_sequence: None,
+                attempt_count: 0,
             },
             history: Vec::new(),
             updated_at: Utc::now(),
@@ -238,6 +251,7 @@ impl InputLifecycleAuthority {
                 terminal_outcome,
                 last_run_id,
                 last_boundary_sequence,
+                attempt_count: 0,
             },
             history,
             updated_at,
@@ -332,9 +346,10 @@ impl InputLifecycleAuthority {
                 Queued
             }
 
-            // StageForRun: Queued -> Staged
+            // StageForRun: Queued -> Staged (increments attempt_count)
             (Queued, StageForRun { run_id }) => {
                 fields.last_run_id = Some(run_id.clone());
+                fields.attempt_count += 1;
                 effects.push(InputLifecycleEffect::InputLifecycleNotice { new_state: Staged });
                 effects.push(InputLifecycleEffect::RecordRunAssociation {
                     run_id: run_id.clone(),
@@ -342,10 +357,25 @@ impl InputLifecycleAuthority {
                 Staged
             }
 
-            // RollbackStaged: Staged -> Queued
+            // RollbackStaged: Staged -> Queued (if attempts remain)
+            //                  Staged -> Abandoned (if max attempts exhausted)
             (Staged, RollbackStaged) => {
-                effects.push(InputLifecycleEffect::InputLifecycleNotice { new_state: Queued });
-                Queued
+                if fields.attempt_count >= MAX_STAGE_ATTEMPTS {
+                    let outcome = InputTerminalOutcome::Abandoned {
+                        reason: crate::input_state::InputAbandonReason::MaxAttemptsExhausted {
+                            attempts: fields.attempt_count,
+                        },
+                    };
+                    fields.terminal_outcome = Some(outcome.clone());
+                    effects.push(InputLifecycleEffect::InputLifecycleNotice {
+                        new_state: Abandoned,
+                    });
+                    effects.push(InputLifecycleEffect::RecordTerminalOutcome { outcome });
+                    Abandoned
+                } else {
+                    effects.push(InputLifecycleEffect::InputLifecycleNotice { new_state: Queued });
+                    Queued
+                }
             }
 
             // MarkApplied: Staged -> Applied (guard: matches_last_run)

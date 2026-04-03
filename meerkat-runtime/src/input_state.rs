@@ -65,6 +65,8 @@ pub enum InputAbandonReason {
     Destroyed,
     /// Input was explicitly cancelled.
     Cancelled,
+    /// The input was staged for execution too many times without success.
+    MaxAttemptsExhausted { attempts: u32 },
 }
 
 /// Terminal outcome of an input.

@@ -349,7 +349,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                     // BackgroundToolOp that hasn't been injected yet.
                     if let Some(ref feed) = completion_feed {
                         let batch = feed.list_since(observed_seq);
-                        observed_seq = batch.watermark;
 
                         let has_new_completion = batch
                             .entries
@@ -357,7 +356,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             .any(|e| e.seq > last_injected_seq);
 
                         if has_new_completion {
-                            // Verify quiescence before injecting.
+                            // Verify quiescence before injecting. Do NOT advance
+                            // observed_seq until injection succeeds.
                             let d = driver.lock().await;
                             let quiescent =
                                 d.is_idle_or_attached() && d.as_driver().active_input_ids().is_empty();
@@ -369,7 +369,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 );
                                 let mut d = driver.lock().await;
                                 if d.as_driver_mut().accept_input(input).await.is_ok() {
-                                    last_injected_seq = observed_seq;
+                                    observed_seq = batch.watermark;
+                                    last_injected_seq = batch.watermark;
                                 }
                                 drop(d);
                                 if process_queue(
@@ -383,6 +384,9 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     break;
                                 }
                             }
+                        } else {
+                            // No actionable entries — advance past non-matching.
+                            observed_seq = batch.watermark;
                         }
                     } else if let Some(ref state) = detached_wake
                         && state.pending.load(std::sync::atomic::Ordering::Acquire)
@@ -433,15 +437,17 @@ async fn maybe_inject_feed_wake(
 ) -> bool {
     if let Some(feed) = feed {
         let batch = feed.list_since(*observed_seq);
-        *observed_seq = batch.watermark;
 
         let has_new_completion = batch.entries.iter().any(|e| e.seq > *last_injected_seq);
 
         if !has_new_completion {
+            // Safe to advance — nothing actionable, just skip past non-matching entries.
+            *observed_seq = batch.watermark;
             return false;
         }
 
-        // Verify quiescence
+        // Verify quiescence before injecting. Do NOT advance observed_seq yet —
+        // if quiescence fails, the same entries must be visible on the next pass.
         let d = driver.lock().await;
         if !d.is_idle_or_attached() || !d.as_driver().active_input_ids().is_empty() {
             return false;
@@ -453,7 +459,8 @@ async fn maybe_inject_feed_wake(
         );
         let mut d = driver.lock().await;
         if d.as_driver_mut().accept_input(input).await.is_ok() {
-            *last_injected_seq = *observed_seq;
+            *observed_seq = batch.watermark;
+            *last_injected_seq = batch.watermark;
             return true;
         }
         false

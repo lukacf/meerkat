@@ -361,10 +361,7 @@ fn spawn_completion_bridge(
                 CompletionOutcome::CallbackPending { tool_name, args } => {
                     AgentEvent::InteractionFailed {
                         interaction_id,
-                        error: format!(
-                            "callback pending for tool '{tool_name}' with args {}",
-                            args
-                        ),
+                        error: format!("callback pending for tool '{tool_name}' with args {args}"),
                     }
                 }
                 CompletionOutcome::Abandoned(reason)

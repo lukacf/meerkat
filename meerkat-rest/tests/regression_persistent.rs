@@ -67,6 +67,9 @@ fn build_state(
         config_store,
         event_tx,
         session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::default(),
+        )),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,
@@ -84,6 +87,7 @@ fn build_state(
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,
         runtime_adapter: std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
+        schedule_host: Arc::default(),
         request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
             std::time::Duration::from_secs(5),
         )),

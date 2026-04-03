@@ -258,6 +258,7 @@ impl SqliteScheduleStore {
             ensure_schedule_schema(&conn)?;
             let tx = begin_immediate_transaction(&mut conn)?;
             write_receipt_in_txn(&tx, &receipt)?;
+            update_occurrence_last_receipt_in_txn(&tx, &receipt)?;
             tx.commit()?;
             Ok(())
         })
@@ -652,6 +653,27 @@ fn write_receipt_in_txn(
         ],
     )?;
     Ok(())
+}
+
+fn update_occurrence_last_receipt_in_txn(
+    tx: &rusqlite::Transaction<'_>,
+    receipt: &DeliveryReceipt,
+) -> Result<(), StoreError> {
+    let occurrence_id = receipt.occurrence_id.to_string();
+    let Some(bytes) = tx
+        .query_row(
+            "SELECT occurrence_json FROM schedule_occurrences WHERE occurrence_id = ?1",
+            params![occurrence_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let mut occurrence: Occurrence =
+        serde_json::from_slice(&bytes).map_err(StoreError::Serialization)?;
+    occurrence.last_receipt = Some(receipt.clone());
+    write_occurrence_in_txn(tx, &occurrence)
 }
 
 fn schedule_phase_label(phase: meerkat_schedule::SchedulePhase) -> &'static str {

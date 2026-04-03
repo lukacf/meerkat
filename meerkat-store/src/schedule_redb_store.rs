@@ -241,6 +241,7 @@ impl RedbScheduleStore {
                 .begin_write()
                 .map_err(|e| StoreError::Database(Box::new(e.into())))?;
             write_receipt_in_txn(&write_txn, &receipt)?;
+            update_occurrence_last_receipt_in_txn(&write_txn, &receipt)?;
             commit(write_txn)
         })
         .await
@@ -604,6 +605,30 @@ fn write_receipt_in_txn(
     let json = serde_json::to_vec(receipt).map_err(StoreError::Serialization)?;
     table
         .insert(receipt_key(receipt).as_slice(), json.as_slice())
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+    Ok(())
+}
+
+fn update_occurrence_last_receipt_in_txn(
+    write_txn: &WriteTransaction,
+    receipt: &DeliveryReceipt,
+) -> Result<(), StoreError> {
+    let occurrence_key = occurrence_key(&receipt.occurrence_id);
+    let mut table = write_txn
+        .open_table(OCCURRENCES_BY_ID)
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?;
+    let occurrence: Option<Occurrence> = table
+        .get(occurrence_key.as_slice())
+        .map_err(|e| StoreError::Database(Box::new(e.into())))?
+        .map(|value| serde_json::from_slice(value.value()).map_err(StoreError::Serialization))
+        .transpose()?;
+    let Some(mut occurrence) = occurrence else {
+        return Ok(());
+    };
+    occurrence.last_receipt = Some(receipt.clone());
+    let json = serde_json::to_vec(&occurrence).map_err(StoreError::Serialization)?;
+    table
+        .insert(occurrence_key.as_slice(), json.as_slice())
         .map_err(|e| StoreError::Database(Box::new(e.into())))?;
     Ok(())
 }

@@ -3,12 +3,15 @@
 //! This crate provides an MCP server that exposes Meerkat agent capabilities
 //! as MCP tools: meerkat_run and meerkat_resume.
 
+mod runtime_ingress;
+mod schedule_host;
+
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::surface::{RequestContext, prepare_surface_session, request_action};
 use meerkat::{
-    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService, ToolError,
-    ToolResult,
+    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistentSessionService, ScheduleService,
+    ToolError, ToolResult,
 };
 use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
@@ -27,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
@@ -381,6 +384,7 @@ fn realm_store_path(
 /// controlled via `override_builtins` / `override_shell` in `SessionBuildOptions`.
 pub struct MeerkatMcpState {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    schedule_service: ScheduleService,
     realm_id: String,
     backend: String,
     instance_id: Option<String>,
@@ -390,9 +394,11 @@ pub struct MeerkatMcpState {
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     mcp_adapters: Arc<Mutex<HashMap<String, Arc<meerkat_mcp::McpRouterAdapter>>>>,
+    runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
     session_event_streams: Arc<Mutex<HashMap<String, Arc<SessionEventStreamHandle>>>>,
     #[cfg(feature = "mob")]
     mob_event_streams: Arc<Mutex<HashMap<String, Arc<MobEventStreamInner>>>>,
+    schedule_host: StdMutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Runtime adapter for comms drain lifecycle and runtime operations.
     #[allow(dead_code)] // Only used with `comms` feature
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
@@ -413,6 +419,27 @@ enum MobEventStreamInner {
 }
 
 impl MeerkatMcpState {
+    pub(crate) fn runtime_ingress_context(&self) -> runtime_ingress::McpRuntimeIngressContext {
+        runtime_ingress::McpRuntimeIngressContext::new(
+            runtime_ingress::McpRuntimeIngressResources {
+                service: Arc::clone(&self.service),
+                runtime_adapter: Arc::clone(&self.runtime_adapter),
+                config_runtime: Arc::clone(&self.config_runtime),
+                realm_id: self.realm_id.clone(),
+                instance_id: self.instance_id.clone(),
+                backend: self.backend.clone(),
+                mcp_adapters: Arc::clone(&self.mcp_adapters),
+                runtime_sessions: Arc::clone(&self.runtime_sessions),
+            },
+        )
+    }
+
+    pub(crate) async fn clear_surface_bindings(&self, session_id: &meerkat::SessionId) {
+        self.runtime_ingress_context()
+            .clear_session(session_id)
+            .await;
+    }
+
     /// Create a new MCP state with a session service backed by `AgentFactory`.
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_with_bootstrap_and_options(RuntimeBootstrap::default(), false).await
@@ -477,6 +504,7 @@ impl MeerkatMcpState {
         let runtime_store = persistence.runtime_store();
         let session_store = persistence.session_store();
         let blob_store = persistence.blob_store();
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, &realm_id);
         let conventions_context_root = bootstrap.context.context_root.clone();
         let project_root = conventions_context_root
@@ -529,8 +557,9 @@ impl MeerkatMcpState {
             blob_store,
         ));
 
-        Ok(Self {
+        let state = Self {
             service,
+            schedule_service,
             realm_id,
             backend: manifest.backend.as_str().to_string(),
             instance_id: bootstrap.realm.instance_id,
@@ -548,13 +577,19 @@ impl MeerkatMcpState {
                 state
             },
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
+            runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            schedule_host: StdMutex::new(None),
             runtime_adapter,
             #[cfg(feature = "comms")]
             _realm_lease: Some(_lease),
-        })
+        };
+        if let Err(error) = state.start_schedule_host() {
+            tracing::warn!("schedule host failed to start: {error}");
+        }
+        Ok(state)
     }
 
     /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
@@ -611,8 +646,11 @@ impl MeerkatMcpState {
             builder, 100, store, None, blob_store,
         ));
 
-        Self {
+        let state = Self {
             service,
+            schedule_service: ScheduleService::new(Arc::new(
+                meerkat::MemoryScheduleStore::default(),
+            )),
             realm_id,
             backend: "sqlite".to_string(),
             instance_id: bootstrap.realm.instance_id,
@@ -622,13 +660,19 @@ impl MeerkatMcpState {
             #[cfg(feature = "mob")]
             mob_state: meerkat_mob_mcp::MobMcpState::new_in_memory(),
             mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
+            runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             session_event_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mob")]
             mob_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            schedule_host: StdMutex::new(None),
             runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
             #[cfg(feature = "comms")]
             _realm_lease: None,
+        };
+        if let Err(error) = state.start_schedule_host() {
+            tracing::warn!("schedule host failed to start: {error}");
         }
+        state
     }
 
     pub fn realm_id(&self) -> &str {
@@ -1054,6 +1098,26 @@ fn format_agent_result_tool(
     format_agent_result(result, session_id).map_err(ToolCallError::internal)
 }
 
+fn build_callback_dispatcher(tools: &[McpToolDef]) -> Option<Arc<dyn AgentToolDispatcher>> {
+    if tools.is_empty() {
+        None
+    } else {
+        Some(Arc::new(MpcToolDispatcher::new(tools)) as Arc<dyn AgentToolDispatcher>)
+    }
+}
+
+fn recoverable_callback_tool_defs(tools: &[McpToolDef]) -> Vec<ToolDef> {
+    tools
+        .iter()
+        .filter(|tool| tool.handler_kind() == "callback")
+        .map(|tool| ToolDef {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+        })
+        .collect()
+}
+
 fn post_commit_session_created_error(
     session_id: &meerkat::SessionId,
     err: &SessionError,
@@ -1230,6 +1294,7 @@ fn comms_tools_list() -> Vec<Value> {
 /// Returns the list of tools exposed by this MCP server
 pub fn tools_list() -> Vec<Value> {
     let mut tools = base_tools_list();
+    tools.extend(meerkat::schedule_tools_list());
 
     #[cfg(feature = "mob")]
     tools.extend(mob_host_tools_list());
@@ -1395,6 +1460,15 @@ pub async fn handle_tools_call_with_notifier(
             handle_meerkat_event_stream_close(state, input)
                 .await
                 .map_err(ToolCallError::internal)
+        }
+        name if name.starts_with("meerkat_schedule_") => {
+            state
+                .start_schedule_host()
+                .map_err(|error| ToolCallError::internal(error.to_string()))?;
+            meerkat::handle_schedule_tools_call(&state.schedule_service, name, arguments)
+                .await
+                .map(wrap_tool_payload)
+                .map_err(map_schedule_tool_error)
         }
         #[cfg(feature = "mob")]
         "meerkat_mob_event_stream_open" => {
@@ -1607,6 +1681,10 @@ fn merge_patch(base: &mut Value, patch: Value) {
     }
 }
 
+fn map_schedule_tool_error(error: meerkat::ScheduleToolError) -> ToolCallError {
+    ToolCallError::new(error.code, error.message, error.data)
+}
+
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCallError> {
     let mut value = serde_json::to_value(config)
         .map_err(|e| ToolCallError::internal(format!("Failed to serialize config: {e}")))?;
@@ -1757,6 +1835,7 @@ async fn handle_meerkat_archive(
         .archive(&session_id)
         .await
         .map_err(|e| format!("Failed to archive session: {e}"))?;
+    state.clear_surface_bindings(&session_id).await;
     #[cfg(feature = "mob")]
     let _ = state
         .mob_state
@@ -2326,6 +2405,7 @@ async fn handle_meerkat_run(
     request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    let ingress = state.runtime_ingress_context();
     let keep_alive_override =
         resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
     // Create: no persisted session to inherit from, so None → false.
@@ -2351,14 +2431,10 @@ async fn handle_meerkat_run(
     // Build composed external tools:
     // - callback tools supplied by the MCP client
     // - per-session live MCP router adapter (for add/remove/reload parity)
-    let callback_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
-        None
-    } else {
-        Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
-    };
+    let callback_tools = build_callback_dispatcher(&input.tools);
     let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new()));
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-    let external_tools = compose_external_tool_dispatchers(callback_tools, Some(mcp_tools))
+    let external_tools = compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools))
         .map_err(ToolCallError::internal)?;
 
     let enable_shell_override = input.builtin_config.as_ref().and_then(|c| c.enable_shell);
@@ -2398,20 +2474,20 @@ async fn handle_meerkat_run(
             }
         }));
         let service = state.service.clone();
-        let runtime_adapter = Arc::clone(&state.runtime_adapter);
         let session_id_for_cleanup = session_id.clone();
+        let ingress_for_cleanup = ingress.clone();
         context.set_unpublished_cleanup(request_action(move || {
             let service = service.clone();
-            let runtime_adapter = runtime_adapter.clone();
+            let ingress = ingress_for_cleanup.clone();
             let session_id = session_id_for_cleanup.clone();
             async move {
                 let _ = service.archive(&session_id).await;
-                runtime_adapter.unregister_session(&session_id).await;
+                ingress.clear_session(&session_id).await;
             }
         }));
         if context.run_cancel_if_requested().await {
             let _ = state.service.archive(&session_id).await;
-            state.runtime_adapter.unregister_session(&session_id).await;
+            ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
         }
     }
@@ -2438,7 +2514,8 @@ async fn handle_meerkat_run(
         provider_params: input.provider_params.clone(),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
-        recoverable_tool_defs: None,
+        recoverable_tool_defs: (!input.tools.is_empty())
+            .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         override_builtins: input.enable_builtins,
@@ -2504,6 +2581,9 @@ async fn handle_meerkat_run(
     let session_exists = state.service.read(&session_id).await.is_ok();
     if session_exists {
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
+        ingress
+            .configure_session(&session_id, callback_tools, false)
+            .await;
     }
 
     // Manage comms drain lifecycle for the new session.
@@ -2524,7 +2604,7 @@ async fn handle_meerkat_run(
             if session_exists {
                 Err(post_commit_session_created_error(&session_id, &err))
             } else {
-                state.runtime_adapter.unregister_session(&session_id).await;
+                ingress.clear_session(&session_id).await;
                 format_agent_result_tool(Err(err), &session_id)
             }
         }
@@ -2538,6 +2618,7 @@ async fn handle_meerkat_resume(
     request_context: Option<RequestContext>,
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
+    let ingress = state.runtime_ingress_context();
     let config = state
         .config_runtime
         .get()
@@ -2632,11 +2713,7 @@ async fn handle_meerkat_resume(
     // Build composed external tools:
     // - callback tools supplied by the MCP client
     // - per-session live MCP router adapter
-    let callback_tools: Option<Arc<dyn AgentToolDispatcher>> = if input.tools.is_empty() {
-        None
-    } else {
-        Some(Arc::new(MpcToolDispatcher::new(&input.tools)))
-    };
+    let callback_tools = build_callback_dispatcher(&input.tools);
     let existing_adapter = state
         .mcp_adapters
         .lock()
@@ -2647,7 +2724,7 @@ async fn handle_meerkat_resume(
         .clone()
         .unwrap_or_else(|| Arc::new(meerkat_mcp::McpRouterAdapter::new(McpRouter::new())));
     let mcp_tools: Arc<dyn AgentToolDispatcher> = mcp_adapter.clone();
-    let external_tools = compose_external_tool_dispatchers(callback_tools, Some(mcp_tools))
+    let external_tools = compose_external_tool_dispatchers(callback_tools.clone(), Some(mcp_tools))
         .map_err(ToolCallError::internal)?;
 
     // Decide the branch before moving any owned request fields.
@@ -2704,7 +2781,8 @@ async fn handle_meerkat_resume(
         provider_params: input.provider_params.clone(),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
-        recoverable_tool_defs: None,
+        recoverable_tool_defs: (!input.tools.is_empty())
+            .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
         override_builtins: enable_builtins_override,
@@ -2774,7 +2852,7 @@ async fn handle_meerkat_resume(
         if keep_alive_override.is_some() {
             let comms_rt = state.service.comms_runtime(&session_id).await;
             if keep_alive && comms_rt.is_none() {
-                state.runtime_adapter.unregister_session(&session_id).await;
+                ingress.clear_session(&session_id).await;
                 return Err(ToolCallError::invalid_params(
                     "keep_alive requires a session created with comms_name",
                 ));
@@ -2829,7 +2907,7 @@ async fn handle_meerkat_resume(
     };
     let session_exists = state.service.read(&session_id).await.is_ok();
     if result.is_err() && !session_exists {
-        state.runtime_adapter.unregister_session(&session_id).await;
+        ingress.clear_session(&session_id).await;
     }
 
     drop(event_tx);
@@ -2841,6 +2919,13 @@ async fn handle_meerkat_resume(
 
     if session_exists {
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
+        if input.tools.is_empty() {
+            ingress.ensure_session(&session_id).await;
+        } else {
+            ingress
+                .configure_session(&session_id, callback_tools, false)
+                .await;
+        }
     }
 
     // Manage comms drain lifecycle for rebuilt sessions after the session
@@ -3118,10 +3203,12 @@ mod tests {
     #[test]
     fn test_tools_list_schema() {
         let tools = tools_list();
+        let schedule_tool_count = meerkat::schedule_tools_list().len();
         #[cfg(all(feature = "comms", feature = "mob"))]
         assert_eq!(
             tools.len(),
             base_tools_list().len()
+                + schedule_tool_count
                 + mob_host_tools_list().len()
                 + mob_event_stream_tools_list().len()
                 + comms_tools_list().len()
@@ -3130,16 +3217,17 @@ mod tests {
         assert_eq!(
             tools.len(),
             base_tools_list().len()
+                + schedule_tool_count
                 + mob_host_tools_list().len()
                 + mob_event_stream_tools_list().len()
         );
         #[cfg(all(feature = "comms", not(feature = "mob")))]
         assert_eq!(
             tools.len(),
-            base_tools_list().len() + comms_tools_list().len()
+            base_tools_list().len() + schedule_tool_count + comms_tools_list().len()
         );
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
-        assert_eq!(tools.len(), base_tools_list().len());
+        assert_eq!(tools.len(), base_tools_list().len() + schedule_tool_count);
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -3159,6 +3247,18 @@ mod tests {
             run_tool["inputSchema"]["properties"]
                 .get("output_schema")
                 .is_some()
+        );
+        assert_eq!(
+            find_tool("meerkat_schedule_create")["name"],
+            "meerkat_schedule_create"
+        );
+        assert_eq!(
+            find_tool("meerkat_schedule_update")["name"],
+            "meerkat_schedule_update"
+        );
+        assert_eq!(
+            find_tool("meerkat_schedule_occurrences")["name"],
+            "meerkat_schedule_occurrences"
         );
         assert!(
             run_tool["inputSchema"]["properties"]

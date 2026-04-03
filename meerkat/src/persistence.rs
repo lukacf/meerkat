@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::SessionStore;
 use meerkat_core::BlobStore;
+use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
 
 #[cfg(feature = "session-store")]
 use meerkat_runtime::{RuntimeSessionAdapter, RuntimeStore, RuntimeStoreError};
@@ -20,8 +21,8 @@ use meerkat_store::SqliteSessionStore;
 use meerkat_store::StoreError;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_store::{
-    FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, RedbSessionStore, StoreError,
-    ensure_realm_manifest_in, realm_paths_in,
+    FsBlobStore, RealmBackend, RealmManifest, RealmOrigin, RedbScheduleStore, RedbSessionStore,
+    SqliteScheduleStore, StoreError, ensure_realm_manifest_in, realm_paths_in,
 };
 
 #[cfg(feature = "session-store")]
@@ -41,6 +42,7 @@ pub struct PersistenceBundle {
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     store_path: Option<PathBuf>,
     session_store: Arc<dyn SessionStore>,
+    schedule_store: Arc<dyn ScheduleStore>,
     #[cfg(feature = "session-store")]
     runtime_store: Option<Arc<dyn RuntimeStore>>,
     blob_store: Arc<dyn BlobStore>,
@@ -55,6 +57,21 @@ impl PersistenceBundle {
         runtime_store: Option<Arc<dyn RuntimeStore>>,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
+        Self::new_with_schedule_store(
+            session_store,
+            runtime_store,
+            blob_store,
+            Arc::new(DisabledScheduleStore),
+        )
+    }
+
+    #[cfg(feature = "session-store")]
+    pub fn new_with_schedule_store(
+        session_store: Arc<dyn SessionStore>,
+        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        blob_store: Arc<dyn BlobStore>,
+        schedule_store: Arc<dyn ScheduleStore>,
+    ) -> Self {
         let runtime_adapter = match &runtime_store {
             Some(store) => Arc::new(RuntimeSessionAdapter::persistent(
                 store.clone(),
@@ -68,6 +85,7 @@ impl PersistenceBundle {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             store_path: None,
             session_store,
+            schedule_store,
             runtime_store,
             blob_store,
             runtime_adapter,
@@ -76,12 +94,22 @@ impl PersistenceBundle {
 
     #[cfg(not(feature = "session-store"))]
     pub fn new(session_store: Arc<dyn SessionStore>, blob_store: Arc<dyn BlobStore>) -> Self {
+        Self::new_with_schedule_store(session_store, blob_store, Arc::new(DisabledScheduleStore))
+    }
+
+    #[cfg(not(feature = "session-store"))]
+    pub fn new_with_schedule_store(
+        session_store: Arc<dyn SessionStore>,
+        blob_store: Arc<dyn BlobStore>,
+        schedule_store: Arc<dyn ScheduleStore>,
+    ) -> Self {
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             manifest: None,
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             store_path: None,
             session_store,
+            schedule_store,
             blob_store,
         }
     }
@@ -93,8 +121,10 @@ impl PersistenceBundle {
         session_store: Arc<dyn SessionStore>,
         runtime_store: Option<Arc<dyn RuntimeStore>>,
         blob_store: Arc<dyn BlobStore>,
+        schedule_store: Arc<dyn ScheduleStore>,
     ) -> Self {
-        let mut bundle = Self::new(session_store, runtime_store, blob_store);
+        let mut bundle =
+            Self::new_with_schedule_store(session_store, runtime_store, blob_store, schedule_store);
         bundle.manifest = Some(manifest);
         bundle.store_path = Some(store_path);
         bundle
@@ -106,6 +136,10 @@ impl PersistenceBundle {
 
     pub fn blob_store(&self) -> Arc<dyn BlobStore> {
         self.blob_store.clone()
+    }
+
+    pub fn schedule_store(&self) -> Arc<dyn ScheduleStore> {
+        self.schedule_store.clone()
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -165,16 +199,23 @@ pub async fn open_realm_persistence_in(
                 Arc::new(JsonlStore::new(paths.sessions_jsonl_dir));
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(FsBlobStore::new(paths.root.join("blobs")));
+            let schedule_store: Arc<dyn ScheduleStore> = Arc::new(DisabledScheduleStore);
             PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path.clone(),
                 session_store,
                 None,
                 blob_store,
+                schedule_store,
             )
         }
         RealmBackend::Sqlite => {
-            let sqlite_store = Arc::new(SqliteSessionStore::open(paths.sessions_sqlite_path)?);
+            let sqlite_store = Arc::new(SqliteSessionStore::open(
+                paths.sessions_sqlite_path.clone(),
+            )?);
+            let schedule_store = Arc::new(SqliteScheduleStore::open(
+                paths.sessions_sqlite_path.clone(),
+            )?) as Arc<dyn ScheduleStore>;
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
                 sqlite_store.path().to_path_buf(),
             )?) as Arc<dyn RuntimeStore>;
@@ -186,6 +227,7 @@ pub async fn open_realm_persistence_in(
                 sqlite_store as Arc<dyn SessionStore>,
                 Some(runtime_store),
                 blob_store,
+                schedule_store,
             )
         }
         RealmBackend::Redb => {
@@ -199,6 +241,8 @@ pub async fn open_realm_persistence_in(
                 .await
                 .map_err(StoreError::Join)??;
             let redb_store = Arc::new(redb_store);
+            let schedule_store = Arc::new(RedbScheduleStore::from_database(redb_store.database())?)
+                as Arc<dyn ScheduleStore>;
             let runtime_store = Arc::new(meerkat_runtime::store::RedbRuntimeStore::new(
                 redb_store.database(),
             )?) as Arc<dyn RuntimeStore>;
@@ -210,6 +254,7 @@ pub async fn open_realm_persistence_in(
                 redb_store as Arc<dyn SessionStore>,
                 Some(runtime_store),
                 blob_store,
+                schedule_store,
             )
         }
     };

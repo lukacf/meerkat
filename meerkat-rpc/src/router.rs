@@ -339,6 +339,14 @@ impl MethodRouter {
             .with_default_llm_client_provider(Some(llm_provider))
             .with_external_tools_provider(Some(tools_provider))
         });
+        #[cfg(feature = "mob")]
+        runtime.set_mob_state(mob_state.clone());
+        let schedule_runtime = runtime.clone();
+        tokio::spawn(async move {
+            if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
+                tracing::warn!("failed to start RPC schedule host: {error}");
+            }
+        });
         Self {
             runtime,
             config_store,
@@ -485,6 +493,13 @@ impl MethodRouter {
         mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
+        runtime.set_mob_state(mob_state.clone());
+        let schedule_runtime = runtime.clone();
+        tokio::spawn(async move {
+            if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
+                tracing::warn!("failed to start RPC schedule host: {error}");
+            }
+        });
         Self {
             runtime,
             config_store,
@@ -638,6 +653,34 @@ impl MethodRouter {
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
+            "schedule/create" => {
+                handlers::schedule::handle_create(id, params, self.runtime.clone()).await
+            }
+            "schedule/get" => {
+                handlers::schedule::handle_get(id, params, self.runtime.clone()).await
+            }
+            "schedule/list" => {
+                handlers::schedule::handle_list(id, params, self.runtime.clone()).await
+            }
+            "schedule/update" => {
+                handlers::schedule::handle_update(id, params, self.runtime.clone()).await
+            }
+            "schedule/pause" => {
+                handlers::schedule::handle_pause(id, params, self.runtime.clone()).await
+            }
+            "schedule/resume" => {
+                handlers::schedule::handle_resume(id, params, self.runtime.clone()).await
+            }
+            "schedule/delete" => {
+                handlers::schedule::handle_delete(id, params, self.runtime.clone()).await
+            }
+            "schedule/occurrences" => {
+                handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
+            }
+            "schedule/tools" => handlers::schedule::handle_tools(id).await,
+            "schedule/call" => {
+                handlers::schedule::handle_call(id, params, self.runtime.clone()).await
+            }
             "turn/start" => {
                 handlers::turn::handle_start(
                     id,

@@ -11,6 +11,7 @@ mod driver;
 mod error;
 mod service;
 mod store;
+mod tools;
 mod trigger;
 mod types;
 
@@ -29,6 +30,7 @@ pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
     ScheduleFilter, ScheduleStore, ScheduleStoreKind,
 };
+pub use tools::{ScheduleToolError, handle_schedule_tools_call, schedule_tools_list};
 pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryReceipt,

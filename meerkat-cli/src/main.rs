@@ -6960,8 +6960,12 @@ mod tests {
         )
         .expect("callback pending should surface as resumable CLI metadata");
 
+        assert!(
+            matches!(result, CliRuntimeTurnResult::CallbackPending(_)),
+            "expected callback pending CLI turn result"
+        );
         let CliRuntimeTurnResult::CallbackPending(pending) = result else {
-            panic!("expected callback pending CLI turn result");
+            return;
         };
 
         assert_eq!(pending.session_id, session_id);

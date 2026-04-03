@@ -144,8 +144,6 @@ pub struct SessionEvent {
 
 #[derive(Clone)]
 struct RestRuntimeExecutorContext {
-    default_model: Cow<'static, str>,
-    max_tokens: u32,
     llm_client_override: Option<Arc<dyn LlmClient>>,
     event_tx: broadcast::Sender<SessionEvent>,
     session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -347,8 +345,6 @@ impl AppState {
 
     fn runtime_executor_context(&self) -> RestRuntimeExecutorContext {
         RestRuntimeExecutorContext {
-            default_model: self.default_model.clone(),
-            max_tokens: self.max_tokens,
             llm_client_override: self.llm_client_override.clone(),
             event_tx: self.event_tx.clone(),
             session_service: self.session_service.clone(),

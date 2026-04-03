@@ -1710,6 +1710,7 @@ mod scenario_22_runtime_host_comms {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: Some(result),
             })
         }

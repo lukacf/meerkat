@@ -2389,6 +2389,7 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })
@@ -2427,6 +2428,7 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })
@@ -2495,6 +2497,7 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })
@@ -2578,6 +2581,7 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })
@@ -2621,6 +2625,7 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })
@@ -3648,6 +3653,7 @@ timeout_ms = 1000
                 event_tx: None,
                 skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,
                 labels: None,
             })

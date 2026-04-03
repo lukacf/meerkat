@@ -270,6 +270,20 @@ impl AgentMobToolSurface {
             .ensure_implicit_mob()
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        if first_delegate
+            && let Err(error) = self
+                .grant_exact_mob_scope_after_create(call.name, &mob_id)
+                .await
+        {
+            if let Err(cleanup_error) = self.state.mob_destroy(&mob_id).await {
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    error = %cleanup_error,
+                    "failed to roll back implicit mob after authority persistence error"
+                );
+            }
+            return Err(error);
+        }
 
         // Build spawn spec
         let meerkat_id = MeerkatId::from(
@@ -1312,6 +1326,77 @@ mod tests {
         let destroyed: serde_json::Value =
             serde_json::from_str(&destroy_result.result.text_content()).unwrap();
         assert_eq!(destroyed, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn test_create_only_authority_delegate_grants_exact_scope_for_new_implicit_mob() {
+        let state = MobMcpState::new_in_memory();
+        let session_id = SessionId::new();
+        let session_key = session_id.to_string();
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            "claude-sonnet-4-5".to_string(),
+            session_id,
+            None,
+            None,
+            None,
+        );
+
+        let delegate_args =
+            serde_json::value::RawValue::from_string(json!({ "task": "say hi" }).to_string())
+                .unwrap();
+        let delegate_error = surface
+            .dispatch(ToolCallView {
+                id: "delegate-1",
+                name: "delegate",
+                args: &delegate_args,
+            })
+            .await
+            .expect_err("in-memory harness cannot fully bootstrap autonomous delegate helper");
+        assert!(
+            matches!(delegate_error, ToolError::ExecutionFailed { .. }),
+            "unexpected delegate error: {delegate_error:?}"
+        );
+        let mob_id = state
+            .find_implicit_mob(&session_key)
+            .await
+            .expect("delegate should still create an implicit mob")
+            .to_string();
+
+        let list_args = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let list_result = surface
+            .dispatch(ToolCallView {
+                id: "list-1",
+                name: "mob_list",
+                args: &list_args,
+            })
+            .await
+            .expect("delegate-created implicit mob should become manageable");
+        let listed: serde_json::Value =
+            serde_json::from_str(&list_result.result.text_content()).unwrap();
+        assert_eq!(
+            listed["mobs"].as_array().map(Vec::len),
+            Some(1),
+            "delegate should grant exact scope for the new implicit mob"
+        );
+        assert_eq!(listed["mobs"][0]["mob_id"], json!(mob_id));
+
+        let list_members_args =
+            serde_json::value::RawValue::from_string(json!({ "mob_id": mob_id }).to_string())
+                .unwrap();
+        let list_members_result = surface
+            .dispatch(ToolCallView {
+                id: "members-1",
+                name: "mob_list_members",
+                args: &list_members_args,
+            })
+            .await
+            .expect("delegate-created implicit mob should allow follow-up scoped tools");
+        let members: serde_json::Value =
+            serde_json::from_str(&list_members_result.result.text_content()).unwrap();
+        assert_eq!(members["members"].as_array().map(Vec::len), Some(0));
     }
 
     #[tokio::test]

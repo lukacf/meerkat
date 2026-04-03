@@ -416,6 +416,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -489,6 +490,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -633,6 +635,7 @@ async fn accept_with_executor_triggers_loop() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -766,6 +769,7 @@ async fn failed_executor_continues_processing_backlog() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -855,6 +859,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -937,6 +942,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -1018,6 +1024,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -1052,6 +1059,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -1154,6 +1162,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -1257,6 +1266,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
                         sequence: 0,
                     },
                     session_snapshot: None,
+                    terminal: None,
                     run_result: None,
                 },
             ))
@@ -1309,6 +1319,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -1383,6 +1394,7 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }
@@ -1468,6 +1480,7 @@ async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
                             sequence: 0,
                         },
                         session_snapshot: None,
+                        terminal: None,
                         run_result: None,
                     },
                 ))
@@ -1533,6 +1546,7 @@ async fn dedup_terminal_input_returns_none_handle() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: Some(RunResult {
                     text: "done".into(),
                     session_id: SessionId::new(),
@@ -1631,6 +1645,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: Some(RunResult {
                     text: "slow done".into(),
                     session_id: SessionId::new(),
@@ -1770,6 +1785,7 @@ async fn completion_handle_resolves_without_result() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None, // No RunResult
             })
         }
@@ -2008,6 +2024,7 @@ async fn successful_execution_fires_boundary_applied() {
                     sequence: 0,
                 },
                 session_snapshot: None,
+                terminal: None,
                 run_result: None,
             })
         }

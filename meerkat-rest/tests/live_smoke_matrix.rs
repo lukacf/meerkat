@@ -144,6 +144,7 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
             event_tx: None,
             skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 llm_client_override: state
                     .llm_client_override

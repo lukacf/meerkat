@@ -89,6 +89,7 @@ impl CoreExecutor for RecordingExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
+            terminal: None,
             run_result: self.run_result.clone(),
         })
     }

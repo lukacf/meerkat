@@ -13,8 +13,8 @@ use meerkat::{
 use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
-    CreateSessionRequest, InitialTurnPolicy, ResumeOverrideMask, SessionBuildOptions, SessionError,
-    SessionService, SessionServiceHistoryExt, StartTurnRequest,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
+    SessionBuildOptions, SessionError, SessionService, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::{
     AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy,
@@ -2452,6 +2452,7 @@ async fn handle_meerkat_run(
         provider_params: input.provider_params.clone(),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: None,
         ops_lifecycle_override: Some(ops_lifecycle),
         override_builtins: input.enable_builtins,
@@ -2499,6 +2500,7 @@ async fn handle_meerkat_run(
 
         skill_references,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
         labels: input.labels,
     };
@@ -2719,6 +2721,7 @@ async fn handle_meerkat_resume(
         provider_params: input.provider_params.clone(),
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: None,
         ops_lifecycle_override: Some(ops_lifecycle),
         override_builtins: enable_builtins_override,
@@ -2777,6 +2780,7 @@ async fn handle_meerkat_resume(
 
             skill_references,
             initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
         };
@@ -2828,6 +2832,7 @@ async fn handle_meerkat_resume(
 
                     skill_references,
                     initial_turn: InitialTurnPolicy::RunImmediately,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
                     labels: None,
                 };

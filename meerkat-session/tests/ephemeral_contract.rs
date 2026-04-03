@@ -9,10 +9,13 @@ use futures::StreamExt;
 use meerkat_core::compact::{CompactionContext, CompactionResult, Compactor};
 use meerkat_core::error::ToolError;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest, InitialTurnPolicy,
-    SessionError, SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
-    SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
+    AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
+    DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionHistoryQuery, SessionQuery,
+    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::types::{
     AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
@@ -38,6 +41,7 @@ struct MockAgent {
     session_id: SessionId,
     message_count: usize,
     delay_ms: Option<u64>,
+    callback_pending: bool,
     fail_overlay_clear: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
@@ -60,6 +64,13 @@ impl SessionAgent for MockAgent {
                 prompt: "test".to_string(),
             })
             .await;
+
+        if self.callback_pending {
+            return Err(meerkat_core::error::AgentError::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            });
+        }
 
         self.message_count += 2; // user + assistant
 
@@ -164,6 +175,7 @@ impl SessionAgent for MockAgent {
 struct MockAgentBuilder {
     delay_ms: Option<u64>,
     build_delay_ms: Option<u64>,
+    callback_pending: bool,
     fail_overlay_clear: bool,
     overlay_updates: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
 }
@@ -173,6 +185,7 @@ impl MockAgentBuilder {
         Self {
             delay_ms: None,
             build_delay_ms: None,
+            callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -182,6 +195,7 @@ impl MockAgentBuilder {
         Self {
             delay_ms: Some(delay_ms),
             build_delay_ms: None,
+            callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -191,6 +205,17 @@ impl MockAgentBuilder {
         Self {
             delay_ms: None,
             build_delay_ms: Some(build_delay_ms),
+            callback_pending: false,
+            fail_overlay_clear: false,
+            overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_callback_pending() -> Self {
+        Self {
+            delay_ms: None,
+            build_delay_ms: None,
+            callback_pending: true,
             fail_overlay_clear: false,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -200,6 +225,7 @@ impl MockAgentBuilder {
         Self {
             delay_ms: None,
             build_delay_ms: None,
+            callback_pending: false,
             fail_overlay_clear: true,
             overlay_updates: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -222,6 +248,7 @@ impl SessionAgentBuilder for MockAgentBuilder {
             session_id: SessionId::new(),
             message_count: 0,
             delay_ms: self.delay_ms,
+            callback_pending: self.callback_pending,
             fail_overlay_clear: self.fail_overlay_clear,
             overlay_updates: self.overlay_updates.clone(),
             system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -743,6 +770,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
 
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }
@@ -751,6 +779,7 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
 fn create_req_deferred(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         initial_turn: InitialTurnPolicy::Defer,
+        deferred_prompt_policy: DeferredPromptPolicy::Stage,
         ..create_req(prompt)
     }
 }
@@ -1083,6 +1112,7 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
         MockAgentBuilder {
             delay_ms: Some(500),
             build_delay_ms: None,
+            callback_pending: false,
             fail_overlay_clear: false,
             overlay_updates: overlay_updates.clone(),
         },
@@ -1239,6 +1269,49 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
             blocked_tools: None,
         })]
     );
+}
+
+#[tokio::test]
+async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(), String> {
+    let service = make_service(MockAgentBuilder::with_callback_pending());
+    let _ = service
+        .create_session(create_req_deferred("Hello"))
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+    let run_id = meerkat_core::lifecycle::RunId::new();
+    let contributing_input_ids = vec![meerkat_core::lifecycle::InputId::new()];
+
+    let output = service
+        .apply_runtime_turn(
+            &session_id,
+            run_id.clone(),
+            turn_req("needs callback"),
+            RunApplyBoundary::RunStart,
+            contributing_input_ids.clone(),
+        )
+        .await
+        .expect("runtime apply should surface callback pending as terminal");
+
+    assert_eq!(output.receipt.run_id, run_id);
+    assert_eq!(output.receipt.boundary, RunApplyBoundary::RunStart);
+    assert_eq!(
+        output.receipt.contributing_input_ids,
+        contributing_input_ids
+    );
+    assert!(output.session_snapshot.is_some());
+    assert!(output.run_result.is_none());
+    let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = output.terminal else {
+        return Err("expected callback pending terminal".to_string());
+    };
+    assert_eq!(tool_name, "external_mock");
+    assert_eq!(args, json!({ "value": "browser" }));
+    Ok(())
 }
 
 #[tokio::test]

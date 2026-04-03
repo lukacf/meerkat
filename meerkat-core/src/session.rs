@@ -13,8 +13,9 @@ use crate::Provider;
 use crate::peer_meta::PeerMeta;
 use crate::service::AppendSystemContextRequest;
 use crate::time_compat::SystemTime;
-use crate::types::{Message, SessionId, Usage};
+use crate::types::{ContentInput, Message, SessionId, ToolDef, ToolResult, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Current session format version
@@ -100,6 +101,12 @@ fn default_version() -> u32 {
 /// Metadata key used to store durable system-context control state.
 pub const SESSION_SYSTEM_CONTEXT_STATE_KEY: &str = "session_system_context_state";
 
+/// Metadata key used to store deferred-turn control state.
+pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
+
+/// Metadata key used to store recoverable build-only session state.
+pub const SESSION_BUILD_STATE_KEY: &str = "session_build_state";
+
 /// Canonical separator between appended runtime system-context blocks.
 pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
 
@@ -123,6 +130,97 @@ pub struct PendingSystemContextAppend {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     pub accepted_at: SystemTime,
+}
+
+/// Durable control state for deferred first-turn prompt and staged callback tool results.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionDeferredTurnState {
+    #[serde(default, skip_serializing_if = "DeferredFirstTurnPhase::is_inactive")]
+    pub first_turn_phase: DeferredFirstTurnPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_initial_prompt: Option<PendingDeferredPrompt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tool_results: Vec<PendingToolResultsMessage>,
+}
+
+/// Canonical lifecycle phase for the session's deferred first turn.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredFirstTurnPhase {
+    /// The session was not created in deferred-first-turn mode.
+    #[default]
+    Inactive,
+    /// The session exists durably but the first turn has not started yet.
+    Pending,
+    /// The first turn has started; build-only overrides are no longer legal.
+    Consumed,
+}
+
+impl DeferredFirstTurnPhase {
+    pub fn is_inactive(&self) -> bool {
+        matches!(self, Self::Inactive)
+    }
+}
+
+fn is_default_hook_run_overrides(value: &crate::HookRunOverrides) -> bool {
+    value == &crate::HookRunOverrides::default()
+}
+
+fn is_default_call_timeout_override(value: &crate::CallTimeoutOverride) -> bool {
+    value == &crate::CallTimeoutOverride::default()
+}
+
+/// Durable build-only session state required to faithfully recover and rebuild
+/// a persisted session without surface-local shadow config.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionBuildState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<crate::OutputSchema>,
+    #[serde(default, skip_serializing_if = "is_default_hook_run_overrides")]
+    pub hooks_override: crate::HookRunOverrides,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limits: Option<crate::BudgetLimits>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recoverable_tool_defs: Vec<ToolDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub silent_comms_intents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inline_peer_notifications: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_env: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "is_default_call_timeout_override")]
+    pub call_timeout_override: crate::CallTimeoutOverride,
+}
+
+/// Deferred create-time prompt staged for the next turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingDeferredPrompt {
+    pub prompt: ContentInput,
+    pub accepted_at: SystemTime,
+}
+
+/// Staged callback tool results waiting to be admitted on the next turn seam.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingToolResultsMessage {
+    pub results: Vec<ToolResult>,
+    pub accepted_at: SystemTime,
+}
+
+impl PartialEq for PendingToolResultsMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.accepted_at == other.accepted_at
+            && serde_json::to_value(&self.results).ok() == serde_json::to_value(&other.results).ok()
+    }
 }
 
 /// Seen idempotency-key entry for system-context append requests.
@@ -206,6 +304,82 @@ impl SessionSystemContextState {
             }
         }
         self.pending.clear();
+    }
+}
+
+impl SessionDeferredTurnState {
+    /// Mark that this session has a deferred first turn waiting to start.
+    pub fn mark_initial_turn_pending(&mut self) {
+        self.first_turn_phase = DeferredFirstTurnPhase::Pending;
+    }
+
+    /// Mark the deferred first turn as started.
+    ///
+    /// Returns true when the phase transitioned from `Pending`.
+    pub fn mark_initial_turn_started(&mut self) -> bool {
+        let was_pending = matches!(self.first_turn_phase, DeferredFirstTurnPhase::Pending);
+        if was_pending {
+            self.first_turn_phase = DeferredFirstTurnPhase::Consumed;
+        }
+        was_pending
+    }
+
+    /// Restore the deferred first-turn pending phase after a failed pre-run setup.
+    pub fn restore_initial_turn_pending(&mut self) {
+        self.first_turn_phase = DeferredFirstTurnPhase::Pending;
+    }
+
+    /// Whether build-only first-turn overrides are still legal for this session.
+    pub fn allows_initial_turn_overrides(&self) -> bool {
+        matches!(self.first_turn_phase, DeferredFirstTurnPhase::Pending)
+    }
+
+    /// Stage the create-time prompt for a later first turn.
+    pub fn stage_initial_prompt(&mut self, prompt: ContentInput, accepted_at: SystemTime) {
+        if !prompt.has_images() && prompt.text_content().trim().is_empty() {
+            self.pending_initial_prompt = None;
+            return;
+        }
+
+        self.pending_initial_prompt = Some(PendingDeferredPrompt {
+            prompt,
+            accepted_at,
+        });
+    }
+
+    /// Stage one callback tool-results message for the next turn.
+    pub fn stage_tool_results(
+        &mut self,
+        results: Vec<ToolResult>,
+        accepted_at: SystemTime,
+    ) -> usize {
+        if results.is_empty() {
+            return 0;
+        }
+
+        let accepted = results.len();
+        self.pending_tool_results.push(PendingToolResultsMessage {
+            results,
+            accepted_at,
+        });
+        accepted
+    }
+
+    /// Consume the staged initial prompt, if any.
+    pub fn take_initial_prompt(&mut self) -> Option<ContentInput> {
+        self.pending_initial_prompt
+            .take()
+            .map(|pending| pending.prompt)
+    }
+
+    /// Consume all staged callback tool-results messages.
+    pub fn take_tool_results(&mut self) -> Vec<PendingToolResultsMessage> {
+        std::mem::take(&mut self.pending_tool_results)
+    }
+
+    /// Whether any callback tool results are currently staged.
+    pub fn has_pending_tool_results(&self) -> bool {
+        !self.pending_tool_results.is_empty()
     }
 }
 
@@ -443,6 +617,37 @@ impl Session {
     pub fn system_context_state(&self) -> Option<SessionSystemContextState> {
         self.metadata
             .get(SESSION_SYSTEM_CONTEXT_STATE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store durable deferred-turn control state in the session metadata map.
+    pub fn set_deferred_turn_state(
+        &mut self,
+        state: SessionDeferredTurnState,
+    ) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(state)?;
+        self.set_metadata(SESSION_DEFERRED_TURN_STATE_KEY, value);
+        Ok(())
+    }
+
+    /// Load durable deferred-turn control state from the session metadata map.
+    pub fn deferred_turn_state(&self) -> Option<SessionDeferredTurnState> {
+        self.metadata
+            .get(SESSION_DEFERRED_TURN_STATE_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Store recoverable build-only session state in the session metadata map.
+    pub fn set_build_state(&mut self, state: SessionBuildState) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(state)?;
+        self.set_metadata(SESSION_BUILD_STATE_KEY, value);
+        Ok(())
+    }
+
+    /// Load recoverable build-only session state from the session metadata map.
+    pub fn build_state(&self) -> Option<SessionBuildState> {
+        self.metadata
+            .get(SESSION_BUILD_STATE_KEY)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 

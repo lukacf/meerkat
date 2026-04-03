@@ -50,6 +50,7 @@ pub mod runtime_bootstrap;
 pub mod schema;
 pub mod service;
 pub mod session;
+pub mod session_recovery;
 pub mod session_store;
 pub mod skills;
 pub mod skills_config;
@@ -162,17 +163,25 @@ pub use schema::{
 };
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
-    CreateSessionRequest, MobToolsBuildArgs, MobToolsFactory, SessionBuildOptions,
-    SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
-    SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
-    SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
-    TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,
+    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
 };
 pub use session::{
-    PendingSystemContextAppend, SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION,
-    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
-    SessionLlmIdentity, SessionMeta, SessionMetadata, SessionSystemContextState, SessionTooling,
-    SystemContextStageError, ToolCategoryOverride,
+    DeferredFirstTurnPhase, PendingDeferredPrompt, PendingSystemContextAppend,
+    PendingToolResultsMessage, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
+    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
+    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionMeta, SessionMetadata,
+    SessionSystemContextState, SessionTooling, SystemContextStageError, ToolCategoryOverride,
+};
+pub use session_recovery::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    has_build_only_turn_overrides, has_materialization_overrides,
+    session_allows_first_turn_build_overrides,
 };
 pub use session_store::{SessionFilter, SessionStore, SessionStoreError};
 pub use state::LoopState;

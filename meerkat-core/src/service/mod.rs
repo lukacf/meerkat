@@ -32,7 +32,21 @@ pub enum InitialTurnPolicy {
     /// Run the initial turn immediately as part of session creation.
     RunImmediately,
     /// Register the session and return without running an initial turn.
+    ///
+    /// `CreateSessionRequest::deferred_prompt_policy` determines whether the
+    /// create-time prompt is discarded or staged for the first later turn.
     Defer,
+}
+
+/// How a deferred create request treats its create-time prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredPromptPolicy {
+    /// Register the session only; the caller will supply the first runtime input separately.
+    #[default]
+    Discard,
+    /// Persist the create-time prompt and merge it into the first later turn.
+    Stage,
 }
 
 /// Errors returned by `SessionService` methods.
@@ -148,6 +162,8 @@ pub struct CreateSessionRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
     pub initial_turn: InitialTurnPolicy,
+    /// How to treat `prompt` when `initial_turn == Defer`.
+    pub deferred_prompt_policy: DeferredPromptPolicy,
     /// Optional extended build options for factory-backed builders.
     pub build: Option<SessionBuildOptions>,
     /// Optional key-value labels attached at session creation.
@@ -167,6 +183,9 @@ pub struct SessionBuildOptions {
     pub budget_limits: Option<BudgetLimits>,
     pub provider_params: Option<serde_json::Value>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Serializable tool definitions used to reconstruct recoverable
+    /// surface-owned dispatchers during session resume/rebuild.
+    pub recoverable_tool_defs: Option<Vec<crate::ToolDef>>,
     /// Blob store used to externalize durable image content and hydrate refs
     /// back to bytes at execution seams.
     pub blob_store_override: Option<Arc<dyn crate::BlobStore>>,
@@ -306,6 +325,7 @@ impl Default for SessionBuildOptions {
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
             ops_lifecycle_override: None,
@@ -345,6 +365,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("budget_limits", &self.budget_limits)
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
             .field(
@@ -425,6 +446,18 @@ pub struct AppendSystemContextRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppendSystemContextResult {
     pub status: AppendSystemContextStatus,
+}
+
+/// Request to stage callback tool results for the next turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageToolResultsRequest {
+    pub results: Vec<crate::ToolResult>,
+}
+
+/// Result of staging callback tool results for the next turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageToolResultsResult {
+    pub accepted_result_count: usize,
 }
 
 /// Outcome of an append-system-context request.
@@ -720,6 +753,20 @@ pub trait SessionServiceControlExt: SessionService {
         id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError>;
+
+    /// Stage callback tool results for application on the next turn seam.
+    ///
+    /// Implementations must persist the staged results durably before a live
+    /// session can observe them so a failed call never leaves hidden pending
+    /// transcript mutations behind.
+    async fn stage_tool_results(
+        &self,
+        id: &SessionId,
+        req: StageToolResultsRequest,
+    ) -> Result<StageToolResultsResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported("stage_tool_results".to_string()))
+    }
 }
 
 /// Optional history-read extension for `SessionService`.

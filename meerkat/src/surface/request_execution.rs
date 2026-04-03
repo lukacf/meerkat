@@ -322,17 +322,24 @@ pub struct PreparedSurfaceSession {
     pub ops_lifecycle: Arc<dyn OpsLifecycleRegistry>,
 }
 
+pub async fn bind_surface_session(
+    runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
+    session_id: &SessionId,
+) -> Result<Arc<dyn OpsLifecycleRegistry>, String> {
+    runtime_adapter.register_session(session_id.clone()).await;
+    runtime_adapter
+        .ops_lifecycle_registry(session_id)
+        .await
+        .map(|registry| registry as Arc<dyn OpsLifecycleRegistry>)
+        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))
+}
+
 pub async fn prepare_surface_session(
     runtime_adapter: &meerkat_runtime::RuntimeSessionAdapter,
 ) -> Result<PreparedSurfaceSession, String> {
     let session = Session::new();
     let session_id = session.id().clone();
-    runtime_adapter.register_session(session_id.clone()).await;
-    let ops_lifecycle = runtime_adapter
-        .ops_lifecycle_registry(&session_id)
-        .await
-        .map(|registry| registry as Arc<dyn OpsLifecycleRegistry>)
-        .ok_or_else(|| format!("failed to obtain runtime ops registry for session {session_id}"))?;
+    let ops_lifecycle = bind_surface_session(runtime_adapter, &session_id).await?;
     Ok(PreparedSurfaceSession {
         session,
         session_id,

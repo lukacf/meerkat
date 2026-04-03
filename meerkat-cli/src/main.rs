@@ -14,8 +14,9 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, ResumeOverrideMask, SessionBuildOptions, SessionError, SessionQuery,
-    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, ResumeOverrideMask, SessionBuildOptions,
+    SessionError, SessionQuery, SessionService, SessionServiceCommsExt, StartTurnRequest,
+    TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, BlobId, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
@@ -2621,23 +2622,25 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                 }
             })?;
 
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                run_id,
-                boundary: match &primitive {
-                    meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
-                        staged.boundary
-                    }
-                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+        Ok(
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary: match &primitive {
+                        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(
+                            staged,
+                        ) => staged.boundary,
+                        _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                    },
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
                 },
-                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 0,
-            },
-            session_snapshot: None,
-            run_result: Some(result),
-        })
+                None,
+                result,
+            ),
+        )
     }
 
     async fn control(
@@ -3332,6 +3335,7 @@ async fn run_agent(
         budget_limits: Some(limits),
         provider_params,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: None,
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_shell),
@@ -3386,6 +3390,7 @@ async fn run_agent(
         },
         // Always defer — the runtime adapter handles execution.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
         labels: parsed_labels,
     };
@@ -3833,6 +3838,7 @@ async fn resume_session_with_llm_override(
         budget_limits: budget_override,
         provider_params: merged_provider_params,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
         override_builtins: tooling.builtins.to_override(),
         override_shell: tooling.shell.to_override(),
@@ -3891,6 +3897,7 @@ async fn resume_session_with_llm_override(
                 },
                 // Always defer — runtime adapter handles execution.
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: None,
             })
@@ -9322,6 +9329,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
         };

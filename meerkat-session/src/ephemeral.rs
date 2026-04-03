@@ -6,17 +6,26 @@
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use meerkat_core::error::AgentError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::image_content::{MissingBlobBehavior, hydrate_deferred_turn_state};
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionControlError, SessionError, SessionHistoryPage, SessionHistoryQuery, SessionInfo,
-    SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
-    SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView, StartTurnRequest,
-    TurnToolOverlay,
+    DeferredPromptPolicy, SessionControlError, SessionError, SessionHistoryPage,
+    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::{RunResult, SessionId, Usage};
-use meerkat_core::{PendingSystemContextAppend, SessionLlmIdentity, SessionSystemContextState};
+use meerkat_core::{
+    InputId, PendingDeferredPrompt, PendingSystemContextAppend, PendingToolResultsMessage, RunId,
+    SessionDeferredTurnState, SessionLlmIdentity, SessionSystemContextState,
+};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,6 +148,8 @@ struct SessionHandle {
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Shared runtime control state for system-context appends.
     system_context_state: Arc<std::sync::Mutex<SessionSystemContextState>>,
+    /// Shared control state for deferred first-turn prompt and staged tool results.
+    deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     /// Out-of-band interrupt signal consumed by the running turn loop.
     interrupt_requested: Arc<AtomicBool>,
     /// Wakes the running turn loop when an interrupt is requested.
@@ -221,6 +232,18 @@ pub trait SessionAgent: Send {
         self.run_with_events(prompt, event_tx).await
     }
 
+    /// Continue from the existing session transcript without pushing a new user
+    /// message. Used for deferred first-turn prompts and staged callback
+    /// tool-result continuations.
+    async fn run_pending_with_events(
+        &mut self,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "run_pending_with_events is not supported by this session agent".to_string(),
+        ))
+    }
+
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
 
@@ -229,6 +252,19 @@ pub trait SessionAgent: Send {
         &mut self,
         overlay: Option<TurnToolOverlay>,
     ) -> Result<(), meerkat_core::error::AgentError>;
+
+    /// Apply staged callback tool results before the next continuation turn.
+    fn apply_pending_tool_results(
+        &mut self,
+        results: Vec<meerkat_core::ToolResult>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "staged tool-result continuations are not supported by this session agent".to_string(),
+        ))
+    }
 
     /// Replace the LLM client for subsequent turns.
     fn replace_client(&mut self, _client: std::sync::Arc<dyn meerkat_core::AgentLlmClient>) {}
@@ -334,6 +370,74 @@ pub struct EphemeralSessionService<B: SessionAgentBuilder> {
 }
 
 impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
+    fn build_runtime_receipt(
+        run_id: RunId,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        session: &meerkat_core::Session,
+    ) -> Result<RunBoundaryReceipt, SessionError> {
+        let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize session for runtime receipt digest: {err}"
+            )))
+        })?;
+        let digest = format!("{:x}", Sha256::digest(encoded_messages));
+
+        Ok(RunBoundaryReceipt {
+            run_id,
+            boundary,
+            contributing_input_ids,
+            conversation_digest: Some(digest),
+            message_count: session.messages().len(),
+            sequence: 0,
+        })
+    }
+
+    fn callback_pending_terminal(error: &SessionError) -> Option<CoreApplyTerminal> {
+        match error {
+            SessionError::Agent(AgentError::CallbackPending { tool_name, args }) => {
+                Some(CoreApplyTerminal::CallbackPending {
+                    tool_name: tool_name.clone(),
+                    args: args.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    async fn build_runtime_output(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        terminal: Option<CoreApplyTerminal>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        let session = self.export_session(id).await?;
+        let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to serialize session snapshot for runtime commit: {err}"
+            )))
+        })?;
+        let receipt =
+            Self::build_runtime_receipt(run_id, boundary, contributing_input_ids, &session)?;
+
+        Ok(match terminal {
+            Some(CoreApplyTerminal::RunResult(run_result)) => {
+                CoreApplyOutput::with_run_result(receipt, Some(session_snapshot), run_result)
+            }
+            Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
+                CoreApplyOutput::with_callback_pending(
+                    receipt,
+                    Some(session_snapshot),
+                    tool_name,
+                    args,
+                )
+            }
+            None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
+        })
+    }
+
     fn llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
         let provider = req
             .build
@@ -394,14 +498,19 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<meerkat_core::Session, SessionError> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(id)
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (command_tx, deferred_turn_state) = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            (
+                handle.command_tx.clone(),
+                Arc::clone(&handle.deferred_turn_state),
+            )
+        };
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
+        command_tx
             .send(SessionCommand::ExportSession { reply_tx })
             .await
             .map_err(|_| {
@@ -410,11 +519,31 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 ))
             })?;
 
-        reply_rx.await.map_err(|_| {
+        let mut session = reply_rx.await.map_err(|_| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(
                 "Session task dropped the reply channel".to_string(),
             ))
-        })
+        })?;
+
+        let state = lock_deferred_turn_state(&deferred_turn_state).clone();
+        session.set_deferred_turn_state(state).map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to serialize deferred-turn state: {err}"
+            )))
+        })?;
+
+        Ok(session)
+    }
+
+    /// Get shared deferred-turn control state for a session, if available.
+    pub async fn deferred_turn_state(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<std::sync::Mutex<SessionDeferredTurnState>>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .map(|h| Arc::clone(&h.deferred_turn_state))
     }
 
     /// Drop a live session handle without archiving it.
@@ -456,6 +585,60 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    pub async fn apply_runtime_turn(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        match self.start_turn(id, req).await {
+            Ok(run_result) => {
+                self.build_runtime_output(
+                    id,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    Some(CoreApplyTerminal::RunResult(run_result)),
+                )
+                .await
+            }
+            Err(error) => {
+                if let Some(terminal) = Self::callback_pending_terminal(&error) {
+                    self.build_runtime_output(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(terminal),
+                    )
+                    .await
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub async fn apply_runtime_context_appends(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.apply_runtime_system_context(id, appends).await?;
+        self.build_runtime_output(
+            id,
+            run_id,
+            RunApplyBoundary::Immediate,
+            contributing_input_ids,
+            None,
+        )
+        .await
     }
 
     /// Get the event injector for a session, if available.
@@ -616,6 +799,36 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
         let labels = req.labels.clone().unwrap_or_default();
+        let mut deferred_turn_state = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .and_then(meerkat_core::Session::deferred_turn_state)
+            .unwrap_or_default();
+        if let Some(blob_store) = req
+            .build
+            .as_ref()
+            .and_then(|build| build.blob_store_override.clone())
+        {
+            hydrate_deferred_turn_state(
+                blob_store.as_ref(),
+                &mut deferred_turn_state,
+                MissingBlobBehavior::HistoricalPlaceholder,
+            )
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to hydrate deferred-turn state during session creation: {err}"
+                )))
+            })?;
+        }
+        if defer_initial_turn {
+            deferred_turn_state.mark_initial_turn_pending();
+        }
+        if defer_initial_turn && req.deferred_prompt_policy == DeferredPromptPolicy::Stage {
+            deferred_turn_state.stage_initial_prompt(prompt.clone(), SystemTime::now());
+        }
+        let deferred_turn_state = Arc::new(std::sync::Mutex::new(deferred_turn_state));
 
         // Create the permanent event channel for this session.
         let (agent_event_tx, agent_event_rx) = mpsc::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
@@ -661,6 +874,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             agent_event_tx,
             agent_event_rx,
             command_rx,
+            Arc::clone(&deferred_turn_state),
             SessionTaskControl {
                 state_tx,
                 summary_tx,
@@ -686,6 +900,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             interaction_event_injector,
             comms_runtime,
             system_context_state,
+            deferred_turn_state,
             interrupt_requested,
             interrupt_notify,
             session_event_tx,
@@ -810,7 +1025,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             Self::try_acquire_turn(id, handle)?;
 
             if let Some(system_prompt) = req.system_prompt {
-                if handle.summary_rx.borrow().message_count > 0 {
+                let allows_override = {
+                    let guard = lock_deferred_turn_state(&handle.deferred_turn_state);
+                    guard.allows_initial_turn_overrides()
+                };
+                if !allows_override {
                     handle.turn_lock.store(false, Ordering::Release);
                     return Err(SessionError::Unsupported(
                         "system_prompt override is only allowed on a deferred session's first turn"
@@ -1150,6 +1369,24 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceControlExt for EphemeralSes
 
         Ok(AppendSystemContextResult { status })
     }
+
+    async fn stage_tool_results(
+        &self,
+        id: &SessionId,
+        req: StageToolResultsRequest,
+    ) -> Result<StageToolResultsResult, SessionError> {
+        let state = self
+            .deferred_turn_state(id)
+            .await
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let accepted = {
+            let mut guard = lock_deferred_turn_state(&state);
+            guard.stage_tool_results(req.results, SystemTime::now())
+        };
+        Ok(StageToolResultsResult {
+            accepted_result_count: accepted,
+        })
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1221,11 +1458,67 @@ fn stamp_event_envelope(
     EventEnvelope::new(source_id, *next_seq, None, event)
 }
 
+fn lock_deferred_turn_state(
+    state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
+) -> std::sync::MutexGuard<'_, SessionDeferredTurnState> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("deferred-turn state lock poisoned; continuing with inner state");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn merge_content_inputs(
+    deferred: meerkat_core::types::ContentInput,
+    turn: meerkat_core::types::ContentInput,
+) -> meerkat_core::types::ContentInput {
+    match (&deferred, &turn) {
+        (
+            meerkat_core::types::ContentInput::Text(deferred_text),
+            meerkat_core::types::ContentInput::Text(turn_text),
+        ) => meerkat_core::types::ContentInput::Text(format!("{deferred_text}\n\n{turn_text}")),
+        _ => {
+            let mut blocks = deferred.into_blocks();
+            blocks.extend(turn.into_blocks());
+            meerkat_core::types::ContentInput::Blocks(blocks)
+        }
+    }
+}
+
+fn restore_deferred_turn_inputs(
+    deferred_turn_state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
+    restore_first_turn_pending: bool,
+    pending_initial_prompt: Option<PendingDeferredPrompt>,
+    pending_tool_results: Vec<PendingToolResultsMessage>,
+) {
+    if !restore_first_turn_pending
+        && pending_initial_prompt.is_none()
+        && pending_tool_results.is_empty()
+    {
+        return;
+    }
+    let mut guard = lock_deferred_turn_state(deferred_turn_state);
+    if restore_first_turn_pending {
+        guard.restore_initial_turn_pending();
+    }
+    if guard.pending_initial_prompt.is_none() {
+        guard.pending_initial_prompt = pending_initial_prompt;
+    }
+    if !pending_tool_results.is_empty() {
+        let mut restored = pending_tool_results;
+        restored.extend(std::mem::take(&mut guard.pending_tool_results));
+        guard.pending_tool_results = restored;
+    }
+}
+
 async fn session_task<A: SessionAgent>(
     mut agent: A,
     agent_event_tx: mpsc::Sender<AgentEvent>,
     mut agent_event_rx: mpsc::Receiver<AgentEvent>,
     mut commands: mpsc::Receiver<SessionCommand>,
+    deferred_turn_state: Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     control: SessionTaskControl,
 ) {
     let mut next_seq: u64 = 0;
@@ -1267,8 +1560,45 @@ async fn session_task<A: SessionAgent>(
                 skill_references,
                 flow_tool_overlay,
             } => {
+                let (restore_first_turn_pending, pending_initial_prompt, pending_tool_results) = {
+                    let mut guard = lock_deferred_turn_state(&deferred_turn_state);
+                    (
+                        guard.mark_initial_turn_started(),
+                        guard.pending_initial_prompt.take(),
+                        std::mem::take(&mut guard.pending_tool_results),
+                    )
+                };
+                let prompt = match pending_initial_prompt.as_ref() {
+                    Some(staged_prompt) => {
+                        merge_content_inputs(staged_prompt.prompt.clone(), prompt)
+                    }
+                    None => prompt,
+                };
+                let flattened_tool_results = pending_tool_results
+                    .iter()
+                    .flat_map(|pending| pending.results.clone())
+                    .collect::<Vec<_>>();
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
+                    restore_deferred_turn_inputs(
+                        &deferred_turn_state,
+                        restore_first_turn_pending,
+                        pending_initial_prompt,
+                        pending_tool_results,
+                    );
+                    control.turn_lock.store(false, Ordering::Release);
+                    control.interrupt_requested.store(false, Ordering::Release);
+                    let _ = result_tx.send(Err(error));
+                    continue;
+                }
+                if let Err(error) = agent.apply_pending_tool_results(flattened_tool_results) {
+                    let _ = agent.set_flow_tool_overlay(None);
+                    restore_deferred_turn_inputs(
+                        &deferred_turn_state,
+                        restore_first_turn_pending,
+                        pending_initial_prompt,
+                        pending_tool_results,
+                    );
                     control.turn_lock.store(false, Ordering::Release);
                     control.interrupt_requested.store(false, Ordering::Release);
                     let _ = result_tx.send(Err(error));
@@ -1297,12 +1627,18 @@ async fn session_task<A: SessionAgent>(
                                 > + 'a,
                         >,
                     >;
-                    let run_fut: RunFut<'_> = Box::pin(agent.run_turn_with_events(
-                        prompt,
-                        handling_mode,
-                        render_metadata,
-                        agent_event_tx.clone(),
-                    ));
+                    let has_prompt =
+                        prompt.has_images() || !prompt.text_content().trim().is_empty();
+                    let run_fut: RunFut<'_> = if has_prompt {
+                        Box::pin(agent.run_turn_with_events(
+                            prompt,
+                            handling_mode,
+                            render_metadata,
+                            agent_event_tx.clone(),
+                        ))
+                    } else {
+                        Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
+                    };
                     // run_fut is already Pin<Box<...>>, no tokio::pin! needed.
                     let mut run_fut = run_fut;
                     let mut interrupted = false;

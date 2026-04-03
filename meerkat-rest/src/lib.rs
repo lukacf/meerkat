@@ -30,8 +30,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    RequestAlreadyExists, RequestContext, SurfaceRequestExecutor, noop_request_action,
-    request_action,
+    RequestAlreadyExists, RequestContext, SurfaceRequestExecutor, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryOverrides, bind_surface_session, build_recovered_session,
+    noop_request_action, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -42,17 +43,19 @@ use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+};
 use meerkat_core::service::{
     AppendSystemContextRequest as SvcAppendSystemContextRequest,
-    CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, ResumeOverrideMask,
-    SessionBuildOptions, SessionControlError, SessionError,
+    CreateSessionRequest as SvcCreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy,
+    ResumeOverrideMask, SessionBuildOptions, SessionControlError, SessionError,
     StartTurnRequest as SvcStartTurnRequest,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
-    FileConfigStore, HookRunOverrides, Provider, RealmSelection, RuntimeBootstrap,
-    agent_event_type, format_verbose_event,
+    FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
+    RuntimeBootstrap, agent_event_type, format_verbose_event,
 };
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
@@ -415,6 +418,36 @@ fn extract_runtime_prompt(primitive: &RunPrimitive) -> ContentInput {
     }
 }
 
+fn render_context_append_text(content: &CoreRenderable) -> String {
+    match content {
+        CoreRenderable::Text { text } => text.clone(),
+        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+        CoreRenderable::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        CoreRenderable::Reference { uri, label } => match label {
+            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
+            _ => format!("[Reference] {uri}"),
+        },
+        _ => String::new(),
+    }
+}
+
+fn pending_system_context_appends(
+    appends: &[ConversationContextAppend],
+) -> Vec<PendingSystemContextAppend> {
+    let accepted_at = meerkat_core::time_compat::SystemTime::now();
+    appends
+        .iter()
+        .map(|append| PendingSystemContextAppend {
+            text: render_context_append_text(&append.content),
+            source: Some(append.key.clone()),
+            idempotency_key: Some(append.key.clone()),
+            accepted_at,
+        })
+        .collect()
+}
+
 async fn apply_runtime_turn(
     context: &RestRuntimeExecutorContext,
     session_id: &SessionId,
@@ -432,7 +465,7 @@ async fn apply_runtime_turn(
             .apply_runtime_context_appends(
                 session_id,
                 run_id,
-                staged.context_appends.clone(),
+                pending_system_context_appends(&staged.context_appends),
                 staged.contributing_input_ids.clone(),
             )
             .await;
@@ -508,112 +541,52 @@ async fn apply_runtime_turn(
                 .ok_or(SessionError::NotFound {
                     id: session_id.clone(),
                 })?;
-            let stored_metadata = session.session_metadata();
-            let tooling = stored_metadata
-                .as_ref()
-                .map(|meta| meta.tooling.clone())
-                .unwrap_or_default();
             let current_generation = context
                 .config_runtime
                 .get()
                 .await
                 .ok()
                 .map(|s| s.generation);
-            context
-                .runtime_adapter
-                .register_session(session_id.clone())
-                .await;
-            let ops_lifecycle = context
-                .runtime_adapter
-                .ops_lifecycle_registry(session_id)
+            let ops_lifecycle = bind_surface_session(context.runtime_adapter.as_ref(), session_id)
                 .await
-                .map(|registry| {
-                    registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
-                })
-                .ok_or_else(|| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to obtain runtime ops registry for session {session_id}"
-                    )))
+                .map_err(|message| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(message))
                 })?;
-            let build = SessionBuildOptions {
-                provider: stored_metadata.as_ref().map(|meta| meta.provider),
-                output_schema: None,
-                structured_output_retries: 2,
-                hooks_override: HookRunOverrides::default(),
-                comms_name: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.comms_name.clone()),
-                peer_meta: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.peer_meta.clone()),
-                resume_session: Some(session),
-                budget_limits: None,
-                provider_params: None,
-                external_tools: None,
-                llm_client_override: context
-                    .llm_client_override
-                    .clone()
-                    .map(encode_llm_client_override_for_service),
-                ops_lifecycle_override: Some(ops_lifecycle),
-                override_builtins: tooling.builtins.to_override(),
-                override_shell: tooling.shell.to_override(),
-                override_memory: tooling.memory.to_override(),
-                override_mob: tooling.mob.to_override(),
-                preload_skills: tooling.active_skills.clone(),
-                realm_id: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.realm_id.clone())
-                    .or_else(|| Some(context.realm_id.clone())),
-                instance_id: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.instance_id.clone())
-                    .or_else(|| context.instance_id.clone()),
-                backend: stored_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.backend.clone())
-                    .or_else(|| Some(context.backend.clone())),
-                config_generation: current_generation,
-                keep_alive,
-                checkpointer: None,
-                silent_comms_intents: Vec::new(),
-                max_inline_peer_notifications: None,
-                app_context: None,
-                additional_instructions: None,
-                shell_env: None,
-                resume_override_mask: Default::default(),
-                call_timeout_override: Default::default(),
-                blob_store_override: None,
-                mob_tools: None,
-            };
-            let create_req = SvcCreateSessionRequest {
-                model: stored_metadata.as_ref().map_or_else(
-                    || context.default_model.to_string(),
-                    |meta| meta.model.clone(),
-                ),
-                prompt,
-                render_metadata: None,
-                system_prompt: None,
-                max_tokens: Some(
-                    stored_metadata
-                        .as_ref()
-                        .map_or(context.max_tokens, |meta| meta.max_tokens),
-                ),
-                event_tx: None,
-
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                build: Some(build),
-                labels: None,
-            };
-
-            context.session_service.create_session(create_req).await?;
-            let (_, output) = context
+            let recovered = build_recovered_session(
+                session,
+                &SurfaceSessionRecoveryOverrides {
+                    keep_alive: Some(keep_alive),
+                    ..Default::default()
+                },
+                SurfaceSessionRecoveryContext {
+                    llm_client_override: context
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    external_tools: None,
+                    ops_lifecycle_override: Some(ops_lifecycle),
+                    realm_id: Some(context.realm_id.clone()),
+                    instance_id: context.instance_id.clone(),
+                    backend: Some(context.backend.clone()),
+                    config_generation: current_generation,
+                },
+            )
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    error.to_string(),
+                ))
+            })?;
+            context
                 .session_service
-                .apply_runtime_turn_with_result(
+                .create_session(recovered.into_deferred_create_request())
+                .await?;
+            let output = context
+                .session_service
+                .apply_runtime_turn_outcome(
                     session_id,
                     run_id,
                     SvcStartTurnRequest {
-                        prompt: extract_runtime_prompt(primitive),
+                        prompt,
                         system_prompt: None,
                         render_metadata: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
@@ -2396,6 +2369,7 @@ async fn create_session_inner(
         budget_limits: req.budget_limits,
         provider_params: req.provider_params.clone(),
         external_tools: mcp_external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: state
             .llm_client_override
             .clone()
@@ -2450,6 +2424,7 @@ async fn create_session_inner(
 
         skill_references: skill_references.clone(),
         initial_turn: InitialTurnPolicy::Defer,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
         labels: req.labels,
     };
@@ -2984,6 +2959,7 @@ async fn continue_session_inner(
             budget_limits: None,
             provider_params: None,
             external_tools: None,
+            recoverable_tool_defs: None,
             llm_client_override: state
                 .llm_client_override
                 .clone()
@@ -3032,6 +3008,7 @@ async fn continue_session_inner(
             event_tx: Some(caller_event_tx.clone()),
             skill_references: skill_references.clone(),
             initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
         };

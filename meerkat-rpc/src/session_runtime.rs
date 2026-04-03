@@ -28,19 +28,22 @@ use meerkat_core::RunId;
 use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
-    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
+    DeferredPromptPolicy, SessionBuildOptions, SessionControlError, SessionError,
+    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
+    SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{
-    Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionLlmIdentity,
-    SessionSystemContextState,
+    Config, ConfigStore, ContentInput, HookRunOverrides, PendingSystemContextAppend, Session,
+    SessionLlmIdentity, SessionSystemContextState,
 };
 use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
 use tokio::sync::{RwLock, mpsc};
@@ -54,6 +57,36 @@ use meerkat::{
 };
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
+
+fn render_context_append_text(content: &CoreRenderable) -> String {
+    match content {
+        CoreRenderable::Text { text } => text.clone(),
+        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+        CoreRenderable::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        CoreRenderable::Reference { uri, label } => match label {
+            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
+            _ => format!("[Reference] {uri}"),
+        },
+        _ => String::new(),
+    }
+}
+
+fn pending_system_context_appends(
+    appends: &[ConversationContextAppend],
+) -> Vec<PendingSystemContextAppend> {
+    let accepted_at = meerkat_core::time_compat::SystemTime::now();
+    appends
+        .iter()
+        .map(|append| PendingSystemContextAppend {
+            text: render_context_append_text(&append.content),
+            source: Some(append.key.clone()),
+            idempotency_key: Some(append.key.clone()),
+            accepted_at,
+        })
+        .collect()
+}
 
 #[derive(Clone)]
 struct SkillIdentityRegistryState {
@@ -1019,7 +1052,7 @@ impl SessionRuntime {
                 .apply_runtime_context_appends(
                     session_id,
                     run_id,
-                    staged.context_appends.clone(),
+                    pending_system_context_appends(&staged.context_appends),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
@@ -1225,6 +1258,7 @@ impl SessionRuntime {
 
                     skill_references: skill_references.clone(),
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
                     labels: labels.clone(),
                 })
@@ -1360,6 +1394,7 @@ impl SessionRuntime {
                 .and_then(|meta| meta.provider_params.clone()),
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools: None,
+            recoverable_tool_defs: None,
             llm_client_override: self
                 .default_llm_client
                 .clone()
@@ -1423,6 +1458,7 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: None,
             })
@@ -1737,6 +1773,7 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: labels.clone(),
             };

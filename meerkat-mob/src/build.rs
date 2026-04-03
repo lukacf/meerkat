@@ -11,7 +11,7 @@ use crate::profile::Profile;
 use meerkat::AgentBuildConfig;
 use meerkat_core::PeerMeta;
 use meerkat_core::Session;
-use meerkat_core::service::CreateSessionRequest;
+use meerkat_core::service::{CreateSessionRequest, DeferredPromptPolicy};
 use meerkat_core::session::SessionMetadata;
 use meerkat_core::types::SessionId;
 use std::sync::Arc;
@@ -256,6 +256,7 @@ pub fn to_create_session_request(
         // explicitly after provisioning. Avoid synchronous first-turn execution
         // during create_session so spawn does not block on LLM latency.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: DeferredPromptPolicy::Stage,
         build: Some(build_options),
         labels: None,
     }

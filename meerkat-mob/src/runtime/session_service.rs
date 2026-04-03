@@ -237,11 +237,10 @@ where
                 "failed to serialize session snapshot for runtime commit: {err}"
             )))
         })?;
-        Ok(CoreApplyOutput {
+        Ok(CoreApplyOutput::without_terminal(
             receipt,
-            session_snapshot: Some(session_snapshot),
-            run_result: None,
-        })
+            Some(session_snapshot),
+        ))
     }
 }
 

@@ -400,6 +400,7 @@ impl RuntimeSessionState {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{runtime_completion_to_mob_result, session_turn_error_to_mob_error};
     use crate::error::MobError;

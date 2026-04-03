@@ -122,6 +122,14 @@ pub enum MobError {
     #[error("comms error: {0}")]
     CommsError(#[from] meerkat_core::comms::SendError),
 
+    /// A runtime-backed member turn reached an external callback boundary.
+    #[error("callback pending for session {session_id} on tool '{tool_name}'")]
+    CallbackPending {
+        session_id: meerkat_core::types::SessionId,
+        tool_name: String,
+        args: serde_json::Value,
+    },
+
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
     Internal(String),

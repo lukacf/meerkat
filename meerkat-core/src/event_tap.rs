@@ -60,7 +60,7 @@ pub fn tap_try_send(tap: &EventTap, event: &AgentEvent) {
     }
 }
 
-/// Send a terminal event (InteractionComplete/InteractionFailed) to the tap.
+/// Send a terminal interaction event to the tap.
 ///
 /// Clones the sender outside the lock, then uses `tokio::time::timeout(5s)`
 /// to avoid stalling the host loop. On timeout: logs a warning and continues.

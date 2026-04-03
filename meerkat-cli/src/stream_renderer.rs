@@ -560,6 +560,24 @@ fn render_event(
             );
         }
 
+        AgentEvent::InteractionCallbackPending {
+            tool_name, args, ..
+        } => {
+            chrome_line(
+                mux,
+                scope_id,
+                &format!(
+                    "{}{}⧖ callback pending:{} {} {}{}",
+                    style(ansi, YELLOW),
+                    style(ansi, BOLD),
+                    reset(ansi),
+                    tool_name,
+                    truncate_str(&args.to_string(), MAX_TOOL_ARGS_PREVIEW),
+                    reset(ansi)
+                ),
+            );
+        }
+
         // Remaining hook/interaction/stream events - silent in stream mode
         _ => {}
     }

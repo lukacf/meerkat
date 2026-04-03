@@ -165,6 +165,16 @@ impl ActorFlowTurnExecutor {
                         }
                         return;
                     }
+                    AgentEvent::InteractionCallbackPending {
+                        tool_name, args, ..
+                    } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: format!("callback pending for tool '{tool_name}': {args}"),
+                            });
+                        }
+                        return;
+                    }
                     AgentEvent::RunFailed { error, .. }
                     | AgentEvent::InteractionFailed { error, .. } => {
                         if let Some(tx) = completion_tx.take() {

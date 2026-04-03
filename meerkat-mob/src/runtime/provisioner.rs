@@ -284,21 +284,44 @@ impl SessionBackend {
             let _ = state.discard_turn_context(&context_input_id).await;
         }
 
-        match completion {
-            meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
-            meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
-                Err(MobError::Internal(format!(
-                    "callback pending for tool '{tool_name}': {args}"
-                )))
-            }
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-                Err(MobError::Internal(format!("turn abandoned: {reason}")))
-            }
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                Err(MobError::Internal(format!("runtime terminated: {reason}")))
-            }
+        runtime_completion_to_mob_result(session_id, completion)
+    }
+}
+
+fn runtime_completion_to_mob_result(
+    session_id: &SessionId,
+    completion: meerkat_runtime::completion::CompletionOutcome,
+) -> Result<(), MobError> {
+    match completion {
+        meerkat_runtime::completion::CompletionOutcome::Completed(_) => Ok(()),
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => Ok(()),
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
+            Err(MobError::CallbackPending {
+                session_id: session_id.clone(),
+                tool_name,
+                args,
+            })
         }
+        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+            Err(MobError::Internal(format!("turn abandoned: {reason}")))
+        }
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+            Err(MobError::Internal(format!("runtime terminated: {reason}")))
+        }
+    }
+}
+
+fn session_turn_error_to_mob_error(session_id: &SessionId, error: SessionError) -> MobError {
+    match error {
+        SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+            tool_name,
+            args,
+        }) => MobError::CallbackPending {
+            session_id: session_id.clone(),
+            tool_name,
+            args,
+        },
+        other => other.into(),
     }
 }
 
@@ -373,6 +396,66 @@ impl RuntimeSessionState {
 
     async fn clear_queued_turns(&self) {
         self.queued_turns.lock().await.entries.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{runtime_completion_to_mob_result, session_turn_error_to_mob_error};
+    use crate::error::MobError;
+    use meerkat_core::service::SessionError;
+    use meerkat_core::types::SessionId;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_callback_pending_maps_to_typed_mob_error() {
+        let session_id = SessionId::new();
+        let err = runtime_completion_to_mob_result(
+            &session_id,
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            },
+        )
+        .expect_err("callback pending should remain resumable mob state");
+
+        match err {
+            MobError::CallbackPending {
+                session_id: actual_session_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(tool_name, "external_mock");
+                assert_eq!(args, json!({ "value": "browser" }));
+            }
+            other => panic!("expected callback-pending mob error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_session_callback_pending_maps_to_typed_mob_error() {
+        let session_id = SessionId::new();
+        let err = session_turn_error_to_mob_error(
+            &session_id,
+            SessionError::Agent(meerkat_core::error::AgentError::CallbackPending {
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+            }),
+        );
+
+        match err {
+            MobError::CallbackPending {
+                session_id: actual_session_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(tool_name, "external_mock");
+                assert_eq!(args, json!({ "value": "browser" }));
+            }
+            other => panic!("expected callback-pending mob error, got {other:?}"),
+        }
     }
 }
 
@@ -792,7 +875,7 @@ impl MobProvisioner for SessionBackend {
             .start_turn(&session_id, req)
             .await
             .map(|_| ())
-            .map_err(Into::into)
+            .map_err(|error| session_turn_error_to_mob_error(&session_id, error))
     }
 
     async fn start_flow_step(

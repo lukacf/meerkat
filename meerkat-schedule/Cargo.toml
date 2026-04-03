@@ -22,7 +22,7 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
-schemars = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true, features = ["chrono04"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

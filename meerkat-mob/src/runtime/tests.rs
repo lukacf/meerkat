@@ -613,10 +613,6 @@ impl MockSessionService {
             .store(enabled, Ordering::Relaxed);
     }
 
-    async fn keep_alive_prompts(&self) -> Vec<(SessionId, String)> {
-        self.keep_alive_prompts.read().await.clone()
-    }
-
     fn interrupt_call_count(&self) -> u64 {
         self.interrupt_calls.load(Ordering::Relaxed)
     }

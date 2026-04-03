@@ -1415,6 +1415,13 @@ impl AgentFactory {
                 }
             };
 
+        tracing::debug!(
+            base_tool_count = tools.tools().len(),
+            effective_builtins,
+            effective_shell,
+            "tool composition: base dispatcher built"
+        );
+
         // 7. Create session store adapter (override > factory > feature-flag default)
         let store_adapter: Arc<dyn AgentSessionStore> =
             if let Some(store) = build_config.session_store_override.take() {
@@ -1583,6 +1590,11 @@ impl AgentFactory {
             tool_usage_instructions = composed.1;
         }
 
+        tracing::debug!(
+            tool_count_after_comms = tools.tools().len(),
+            "tool composition: after comms gateway"
+        );
+
         // 9b. Compose tools with mob surface (after comms, so mob gateway wraps the
         // already-composed comms gateway).
         let operator_capabilities_present = build_config.override_mob == Some(true);
@@ -1625,6 +1637,12 @@ impl AgentFactory {
                 tool_usage_instructions.push_str(&mob_usage);
             }
         }
+
+        tracing::debug!(
+            final_tool_count = tools.tools().len(),
+            tool_names = %tools.tools().iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "),
+            "tool composition: final dispatcher"
+        );
 
         // 10. Resolve hooks (override > filesystem layered config)
         #[allow(

@@ -2206,6 +2206,7 @@ mod tests {
         parse_provider_override,
     };
     use mdm_tux::ProviderKind;
+    use super::{create_target_comms_runtime, setup_session};
     use meerkat::{
         AgentFactory, FactoryAgentBuilder, LlmClient, SessionAgentBuilder, SessionService,
         encode_llm_client_override_for_service,
@@ -2213,7 +2214,9 @@ mod tests {
     use meerkat_client::TestClient;
     use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
     use meerkat_core::Config;
-    use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
+    use meerkat_core::service::{
+        CreateSessionRequest, InitialTurnPolicy, ResumeOverrideMask, SessionBuildOptions,
+    };
     use meerkat_core::types::ContentInput;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
     use std::sync::Arc;
@@ -2408,6 +2411,221 @@ mod tests {
                 .find_implicit_mob(&session_id.to_string())
                 .await
                 .is_none()
+        );
+    }
+
+    /// Regression: ensure setup_session through PersistentSessionService
+    /// produces an agent with builtins, shell, comms, and mob tools —
+    /// not just comms tools.
+    #[tokio::test]
+    async fn setup_session_via_service_exposes_all_tool_categories() {
+        let temp = tempfile::tempdir().unwrap();
+        let comms_runtime = create_target_comms_runtime("test-full", temp.path())
+            .await
+            .unwrap();
+        // Add a peer so comms tools pass the availability gate.
+        comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+            name: "tux".into(),
+            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+            addr: "tcp://127.0.0.1:9999".into(),
+            meta: meerkat_comms::PeerMeta::default(),
+        });
+        let surface =
+            build_target_runtime_surface(temp.path(), Arc::clone(&comms_runtime))
+                .await
+                .unwrap();
+
+        // Build an agent through the full pipeline and check tool visibility.
+        let factory = AgentFactory::new(temp.path().join("sessions2"))
+            .shell(true)
+            .builtins(true)
+            .mob(true)
+            .with_comms_runtime(Arc::clone(&comms_runtime));
+        let builder = FactoryAgentBuilder::new(factory, Config::default());
+        *builder
+            .default_mob_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(AgentMobToolSurfaceFactory::new(
+                MobMcpState::new_in_memory(),
+            )));
+
+        let capture2: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+        let req2 = CreateSessionRequest {
+            model: "gpt-5.2".to_string(),
+            prompt: ContentInput::Text("list tools".into()),
+            render_metadata: None,
+            system_prompt: Some("test".into()),
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: Some(SessionBuildOptions {
+                llm_client_override: Some(encode_llm_client_override_for_service(
+                    capture2.clone() as Arc<dyn LlmClient>,
+                )),
+                override_builtins: Some(true),
+                override_shell: Some(true),
+                override_mob: Some(true),
+                resume_override_mask: ResumeOverrideMask {
+                    override_builtins: true,
+                    override_shell: true,
+                    override_mob: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        let (event_tx, _) = mpsc::channel(8);
+        let mut agent = builder.build_agent(&req2, event_tx).await.unwrap();
+        agent
+            .agent_mut()
+            .run(ContentInput::Text("list tools".into()))
+            .await
+            .unwrap();
+
+        let tool_names = capture2.tool_names();
+        // Builtins
+        assert!(
+            tool_names.iter().any(|n| n == "wait"),
+            "missing builtin 'wait', got: {tool_names:?}"
+        );
+        // Shell
+        assert!(
+            tool_names.iter().any(|n| n == "shell"),
+            "missing 'shell', got: {tool_names:?}"
+        );
+        // Comms
+        assert!(
+            tool_names.iter().any(|n| n == "send"),
+            "missing comms 'send', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "peers"),
+            "missing comms 'peers', got: {tool_names:?}"
+        );
+        // Mob
+        assert!(
+            tool_names.iter().any(|n| n == "delegate"),
+            "missing mob 'delegate', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "mob_list"),
+            "missing 'mob_list', got: {tool_names:?}"
+        );
+    }
+
+    /// Regression: auto-resumed session from disk must retain all tool categories.
+    /// Old persisted metadata with Inherit/Disable must not suppress builtins/shell.
+    #[tokio::test]
+    async fn resumed_session_retains_all_tool_categories() {
+        let temp = tempfile::tempdir().unwrap();
+        let comms_runtime = create_target_comms_runtime("test-resume", temp.path())
+            .await
+            .unwrap();
+        comms_runtime.upsert_trusted_peer(meerkat_comms::TrustedPeer {
+            name: "tux".into(),
+            pubkey: meerkat_comms::identity::Keypair::generate().public_key(),
+            addr: "tcp://127.0.0.1:9999".into(),
+            meta: meerkat_comms::PeerMeta::default(),
+        });
+
+        let session_dir = temp.path().join("sessions");
+
+        // 1. Create a fresh session via the full pipeline, persist it.
+        let surface =
+            build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime))
+                .await
+                .unwrap();
+        let fresh_id = setup_session(
+            &surface.service,
+            &surface.runtime_adapter,
+            None,
+            "gpt-5.2",
+            "test",
+            &surface.mob_state,
+            "openai",
+        )
+        .await
+        .unwrap();
+
+        // 2. Resume that session through the builder with a capture client.
+        let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+        let loaded = surface
+            .service
+            .load_persisted(&fresh_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let factory = AgentFactory::new(temp.path().join("sessions2"))
+            .shell(true)
+            .builtins(true)
+            .mob(true)
+            .with_comms_runtime(Arc::clone(&comms_runtime));
+        let builder = FactoryAgentBuilder::new(factory, Config::default());
+        *builder
+            .default_mob_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(AgentMobToolSurfaceFactory::new(
+                MobMcpState::new_in_memory(),
+            )));
+
+        let req = CreateSessionRequest {
+            model: "gpt-5.2".to_string(),
+            prompt: ContentInput::Text("list tools".into()),
+            render_metadata: None,
+            system_prompt: Some("test".into()),
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            build: Some(SessionBuildOptions {
+                llm_client_override: Some(encode_llm_client_override_for_service(
+                    capture.clone() as Arc<dyn LlmClient>,
+                )),
+                override_builtins: Some(true),
+                override_shell: Some(true),
+                override_mob: Some(true),
+                resume_session: Some(loaded),
+                resume_override_mask: ResumeOverrideMask {
+                    override_builtins: true,
+                    override_shell: true,
+                    override_mob: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        let (event_tx, _) = mpsc::channel(8);
+        let mut agent = builder.build_agent(&req, event_tx).await.unwrap();
+        agent
+            .agent_mut()
+            .run(ContentInput::Text("list tools".into()))
+            .await
+            .unwrap();
+
+        let tool_names = capture.tool_names();
+        assert!(
+            tool_names.iter().any(|n| n == "wait"),
+            "resumed session missing builtin 'wait', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "shell"),
+            "resumed session missing 'shell', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "send"),
+            "resumed session missing comms 'send', got: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|n| n == "delegate"),
+            "resumed session missing mob 'delegate', got: {tool_names:?}"
         );
     }
 }

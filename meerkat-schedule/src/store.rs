@@ -382,6 +382,51 @@ impl ScheduleStore for MemoryScheduleStore {
             .map(|(schedule_id, schedule)| (schedule_id.clone(), schedule.phase))
             .collect();
 
+        let misfired_ids: Vec<OccurrenceId> = state
+            .occurrences
+            .values()
+            .filter(|occurrence| {
+                active_schedules
+                    .get(&occurrence.schedule_id)
+                    .is_some_and(|phase| *phase == SchedulePhase::Active)
+                    && occurrence.should_misfire_at(store_now_utc)
+            })
+            .map(|occurrence| occurrence.occurrence_id.clone())
+            .collect();
+
+        for occurrence_id in misfired_ids {
+            let Some(existing) = state.occurrences.get(&occurrence_id).cloned() else {
+                continue;
+            };
+            let detail = existing.misfire_detail_at(store_now_utc);
+            let mut updated = authority
+                .apply(
+                    existing,
+                    OccurrenceLifecycleInput::Misfire {
+                        detail: detail.clone(),
+                        failure_class: None,
+                        at_utc: store_now_utc,
+                    },
+                )
+                .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
+                .into_occurrence();
+            let mut receipt = DeliveryReceipt::new(
+                updated.occurrence_id.clone(),
+                updated.attempt_count,
+                DeliveryReceiptStage::Misfired,
+            );
+            receipt.detail = detail;
+            state
+                .receipts
+                .entry(updated.occurrence_id.clone())
+                .or_default()
+                .push(receipt.clone());
+            updated.last_receipt = Some(receipt);
+            state
+                .occurrences
+                .insert(updated.occurrence_id.clone(), updated);
+        }
+
         let mut candidate_ids: Vec<OccurrenceId> = state
             .occurrences
             .values()

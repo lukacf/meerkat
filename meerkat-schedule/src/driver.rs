@@ -493,8 +493,8 @@ fn build_terminal_receipt(
 mod tests {
     use super::*;
     use crate::types::{
-        CreateScheduleRequest, ScheduledSessionAction, SessionMaterializationSpec,
-        SessionTargetBinding, TargetBinding,
+        CreateScheduleRequest, IntervalTriggerSpec, ScheduledSessionAction,
+        SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
     };
     use crate::{MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, TriggerSpec};
     use chrono::Duration;
@@ -546,6 +546,35 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct CompletingDelivery {
+        dispatched_occurrences: Arc<Mutex<Vec<crate::OccurrenceId>>>,
+    }
+
+    #[async_trait]
+    impl ScheduleTargetDelivery for CompletingDelivery {
+        async fn deliver_occurrence(
+            &self,
+            occurrence: &Occurrence,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            self.dispatched_occurrences
+                .lock()
+                .await
+                .push(occurrence.occurrence_id.clone());
+            let receipt = DeliveryReceipt::new(
+                occurrence.occurrence_id.clone(),
+                occurrence.attempt_count,
+                DeliveryReceiptStage::DispatchStarted,
+            );
+            Ok(DeliveryDispatch {
+                receipt,
+                correlation_id: Some(format!("dispatch-attempt-{}", occurrence.attempt_count)),
+                materialized_session_id: None,
+                completion: Box::pin(async { Ok(DeliveryTerminal::completed(None)) }),
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct ControlledCompletionDelivery {
         senders: Arc<Mutex<Vec<oneshot::Sender<DeliveryTerminal>>>>,
     }
@@ -572,6 +601,185 @@ mod tests {
                 }),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn driver_misfires_long_overdue_skip_occurrence_without_dispatch()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("skip-misfire".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() - Duration::minutes(2),
+                    every_seconds: 61,
+                    end_at_utc: None,
+                }),
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        let report = driver.tick_once().await?;
+        assert_eq!(report.claimed_occurrences, 0);
+        assert_eq!(report.terminalized_occurrences, 0);
+        assert!(
+            delivery.dispatched_occurrences.lock().await.is_empty(),
+            "skip policy should not dispatch materially late pending occurrences"
+        );
+
+        let occurrence =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Misfired)
+                .await?;
+        assert_eq!(occurrence.attempt_count, 0);
+
+        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+        let last_receipt = receipts.last().ok_or_else(|| {
+            ScheduleDomainError::Internal("misfired occurrence should emit a receipt".to_string())
+        })?;
+        assert_eq!(last_receipt.stage, DeliveryReceiptStage::Misfired);
+        assert!(
+            last_receipt
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("skip policy")),
+            "misfire receipt should explain why overdue work was skipped"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn driver_catches_up_overdue_occurrence_within_window() -> Result<(), ScheduleDomainError>
+    {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("catch-up-window".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() - Duration::minutes(2),
+                    every_seconds: 61,
+                    end_at_utc: None,
+                }),
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::CatchUpWithin {
+                    window_seconds: 120,
+                },
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        let report = driver.tick_once().await?;
+        assert_eq!(report.claimed_occurrences, 1);
+        assert_eq!(delivery.dispatched_occurrences.lock().await.len(), 1);
+
+        let occurrence =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Completed)
+                .await?;
+        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+        assert_eq!(
+            receipts.last().map(|receipt| receipt.stage),
+            Some(DeliveryReceiptStage::Completed),
+            "catch-up policy should still allow overdue work within its window"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn driver_misfires_overdue_occurrence_past_catch_up_window()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("catch-up-expired".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() - Duration::minutes(2),
+                    every_seconds: 61,
+                    end_at_utc: None,
+                }),
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::CatchUpWithin { window_seconds: 30 },
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(CompletingDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        let report = driver.tick_once().await?;
+        assert_eq!(report.claimed_occurrences, 0);
+        assert!(
+            delivery.dispatched_occurrences.lock().await.is_empty(),
+            "expired catch-up window should prevent stale dispatch"
+        );
+
+        let occurrence =
+            wait_for_occurrence_phase(&service, &schedule.schedule_id, OccurrencePhase::Misfired)
+                .await?;
+        let receipts = store.list_receipts(&occurrence.occurrence_id).await?;
+        let last_receipt = receipts.last().ok_or_else(|| {
+            ScheduleDomainError::Internal("misfired occurrence should emit a receipt".to_string())
+        })?;
+        assert_eq!(last_receipt.stage, DeliveryReceiptStage::Misfired);
+        assert!(
+            last_receipt
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("catch-up window")),
+            "misfire receipt should explain the expired catch-up window"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -851,6 +1059,26 @@ mod tests {
         }
         Err(ScheduleDomainError::Internal(format!(
             "timed out waiting for occurrence attempt {attempt_count}"
+        )))
+    }
+
+    async fn wait_for_occurrence_phase(
+        service: &ScheduleService,
+        schedule_id: &crate::ScheduleId,
+        expected_phase: OccurrencePhase,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        for _ in 0..50 {
+            let occurrences = service.list_occurrences(schedule_id).await?;
+            if let Some(occurrence) = occurrences
+                .into_iter()
+                .find(|occurrence| occurrence.phase == expected_phase)
+            {
+                return Ok(occurrence);
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(ScheduleDomainError::Internal(format!(
+            "timed out waiting for occurrence phase {expected_phase:?}"
         )))
     }
 }

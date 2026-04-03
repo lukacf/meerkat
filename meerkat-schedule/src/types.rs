@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use meerkat_core::types::RenderMetadata;
 use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 const DEFAULT_PLANNING_HORIZON_DAYS: u32 = 30;
 const DEFAULT_PLANNING_HORIZON_OCCURRENCES: u32 = 64;
+const DEFAULT_SKIP_MISFIRE_GRACE_SECONDS: i64 = 30;
 
 macro_rules! uuid_newtype {
     ($(#[$meta:meta])* $name:ident) => {
@@ -205,11 +206,55 @@ pub struct CalendarTriggerSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MisfirePolicy {
+    /// Skip materially late pending occurrences instead of catching them up.
+    ///
+    /// The scheduler applies a small internal grace window so normal tick
+    /// jitter does not immediately misfire on-time work.
     #[default]
     Skip,
-    CatchUpWithin {
-        window_seconds: u64,
-    },
+    /// Catch up overdue pending occurrences only while they remain within the
+    /// configured lateness window.
+    CatchUpWithin { window_seconds: u64 },
+}
+
+impl MisfirePolicy {
+    fn catch_up_window(&self) -> Option<Duration> {
+        match self {
+            Self::Skip => Some(Duration::seconds(DEFAULT_SKIP_MISFIRE_GRACE_SECONDS)),
+            Self::CatchUpWithin { window_seconds } => {
+                let seconds = i64::try_from(*window_seconds).unwrap_or(i64::MAX);
+                Some(Duration::seconds(seconds))
+            }
+        }
+    }
+
+    fn allows_pending_delivery_at(
+        &self,
+        due_at_utc: DateTime<Utc>,
+        now_utc: DateTime<Utc>,
+    ) -> bool {
+        if now_utc <= due_at_utc {
+            return true;
+        }
+        self.catch_up_window()
+            .and_then(|window| due_at_utc.checked_add_signed(window))
+            .is_some_and(|deadline| now_utc <= deadline)
+    }
+
+    fn misfire_detail(&self, due_at_utc: DateTime<Utc>, now_utc: DateTime<Utc>) -> String {
+        let lateness_seconds = now_utc
+            .signed_duration_since(due_at_utc)
+            .num_seconds()
+            .max(0);
+        match self {
+            Self::Skip => format!(
+                "missed scheduled time by {lateness_seconds}s; skip policy does not catch up materially late pending occurrences"
+            ),
+            Self::CatchUpWithin { window_seconds } => format!(
+                "missed scheduled time by {lateness_seconds}s, exceeding catch-up window of {window_seconds}s"
+            ),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -745,6 +790,19 @@ impl Occurrence {
     pub fn is_claimable_at(&self, now_utc: DateTime<Utc>) -> bool {
         self.due_at_utc <= now_utc
             && (self.phase == OccurrencePhase::Pending || self.is_reclaimable_at(now_utc))
+    }
+
+    pub fn should_misfire_at(&self, now_utc: DateTime<Utc>) -> bool {
+        self.phase == OccurrencePhase::Pending
+            && self.due_at_utc <= now_utc
+            && !self
+                .misfire_policy
+                .allows_pending_delivery_at(self.due_at_utc, now_utc)
+    }
+
+    pub fn misfire_detail_at(&self, now_utc: DateTime<Utc>) -> Option<String> {
+        self.should_misfire_at(now_utc)
+            .then(|| self.misfire_policy.misfire_detail(self.due_at_utc, now_utc))
     }
 
     pub fn is_reclaimable_at(&self, now_utc: DateTime<Utc>) -> bool {

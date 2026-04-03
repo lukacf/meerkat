@@ -35,6 +35,7 @@ meerkat-hooks = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-mob = { workspace = true }
 meerkat-mob-mcp = { workspace = true }
+meerkat-runtime = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "memory-store", "anthropic", "openai", "gemini"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
@@ -60,6 +61,7 @@ ignored = [
     "js-sys",                  # cfg(target_arch = "wasm32")
     "meerkat-comms",           # wired into session config
     "meerkat-hooks",           # wired into agent builder
+    "meerkat-runtime",         # runtime-backed browser session façades
     "meerkat-session",         # wired into agent builder
     "reqwest",                 # cfg(target_arch = "wasm32")
     "tracing",                 # logging macros

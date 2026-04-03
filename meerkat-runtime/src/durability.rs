@@ -232,6 +232,7 @@ mod tests {
     fn operator_derived_rejected() {
         let input = Input::Continuation(ContinuationInput {
             header: make_header(InputDurability::Derived, InputOrigin::Operator),
+            kind: crate::input::ContinuationKind::LegacyUnspecified,
             reason: "test".into(),
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             request_id: None,

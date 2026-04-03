@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use meerkat::{
     CreateScheduleRequest, Occurrence, Schedule, ScheduleDomainError, ScheduleId, ScheduleService,
-    ScheduleStoreError, UpdateScheduleRequest,
+    ScheduleStoreError, UpdateScheduleRequest, handle_schedule_tools_call, schedule_tools_list,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
+use serde_json::{Value, value::RawValue};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
@@ -37,6 +37,18 @@ pub struct ScheduleListResult {
 #[derive(Debug, Serialize)]
 pub struct ScheduleOccurrencesResult {
     pub occurrences: Vec<Occurrence>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleToolsResult {
+    pub tools: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScheduleToolCallParams {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
 }
 
 fn parse_schedule_id(id: Option<RpcId>, raw: &str) -> Result<ScheduleId, RpcResponse> {
@@ -237,5 +249,32 @@ pub async fn handle_occurrences(
     {
         Ok(occurrences) => RpcResponse::success(id, ScheduleOccurrencesResult { occurrences }),
         Err(error) => map_schedule_error(id, error),
+    }
+}
+
+pub async fn handle_tools(id: Option<RpcId>) -> RpcResponse {
+    RpcResponse::success(
+        id,
+        ScheduleToolsResult {
+            tools: schedule_tools_list(),
+        },
+    )
+}
+
+pub async fn handle_call(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: Arc<SessionRuntime>,
+) -> RpcResponse {
+    let params: ScheduleToolCallParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+
+    match handle_schedule_tools_call(&schedule_service(&runtime), &params.name, &params.arguments)
+        .await
+    {
+        Ok(value) => RpcResponse::success(id, value),
+        Err(error) => RpcResponse::error(id, error.code, error.message),
     }
 }

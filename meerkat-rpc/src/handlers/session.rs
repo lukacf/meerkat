@@ -308,6 +308,9 @@ pub async fn handle_create(
     // and take precedence on name collision with globals.
     {
         let inline_tools: Vec<meerkat_core::ToolDef> = params.external_tools.unwrap_or_default();
+        if !inline_tools.is_empty() {
+            build_config.recoverable_tool_defs = Some(inline_tools.clone());
+        }
         if let Some(tx) = runtime.callback_request_tx() {
             let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
                 Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
@@ -320,8 +323,8 @@ pub async fn handle_create(
         }
     }
 
-    // Validate and canonicalize skill refs before creating a pending session.
-    // This prevents invalid requests from consuming session slots.
+    // Validate and canonicalize skill refs before creating the durable deferred
+    // session record. This prevents invalid requests from consuming session slots.
     let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs, params.skill_references)
     {
         Ok(r) => r,

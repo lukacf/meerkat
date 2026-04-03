@@ -260,6 +260,7 @@ class ScheduleOccurrenceRecord:
     occurrence_ordinal: int = 0
     due_at_utc: str = ""
     phase: str = ""
+    trigger_snapshot: dict[str, Any] = field(default_factory=dict)
     target_snapshot: dict[str, Any] = field(default_factory=dict)
     attempt_count: int = 0
     overlap_policy: str = ""
@@ -267,11 +268,16 @@ class ScheduleOccurrenceRecord:
     misfire_policy: Any = None
     failure_class: str | None = None
     failure_detail: str | None = None
+    claimed_by: str | None = None
+    """Current claim owner; preferred over the deprecated lease_owner alias."""
     lease_owner: str | None = None
     lease_expires_at_utc: str | None = None
+    delivery_correlation_id: str | None = None
+    created_at_utc: str = ""
     claimed_at_utc: str | None = None
     dispatched_at_utc: str | None = None
     completed_at_utc: str | None = None
+    superseded_by_revision: int | None = None
     last_receipt: dict[str, Any] | None = None
 
 

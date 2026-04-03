@@ -10,6 +10,7 @@ use crate::types::{
     UpdateScheduleRequest,
 };
 use chrono::{Duration, Utc};
+use meerkat_core::SessionId;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -184,6 +185,73 @@ impl ScheduleService {
             self.store.put_occurrences(planned.clone()).await?;
         }
         Ok(planned)
+    }
+
+    pub async fn sync_occurrence_target_with_schedule(
+        &self,
+        mut occurrence: Occurrence,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        let current = match self.store.get_schedule(&occurrence.schedule_id).await? {
+            Some(schedule) => schedule,
+            None => return Ok(occurrence),
+        };
+        if current.revision != occurrence.schedule_revision {
+            return Ok(occurrence);
+        }
+        if occurrence.target_snapshot == current.target {
+            return Ok(occurrence);
+        }
+        occurrence.target_snapshot = current.target.clone();
+        self.store.put_occurrence(occurrence.clone()).await?;
+        Ok(occurrence)
+    }
+
+    pub async fn bind_materialized_session_for_occurrence(
+        &self,
+        occurrence: &Occurrence,
+        session_id: &SessionId,
+    ) -> Result<(), ScheduleDomainError> {
+        let Some(mut schedule) = self.store.get_schedule(&occurrence.schedule_id).await? else {
+            return Ok(());
+        };
+        if schedule.revision != occurrence.schedule_revision {
+            return Ok(());
+        }
+
+        let schedule_changed = schedule.target.bind_materialized_session(session_id);
+        if schedule_changed {
+            schedule.touch();
+            self.store.put_schedule(schedule).await?;
+        }
+
+        let pending = self
+            .store
+            .list_occurrences(OccurrenceFilter {
+                schedule_id: Some(occurrence.schedule_id.clone()),
+                include_terminal: false,
+                phase: Some(OccurrencePhase::Pending),
+                ..OccurrenceFilter::default()
+            })
+            .await?;
+
+        let mut updated_pending = Vec::new();
+        for mut pending_occurrence in pending {
+            if pending_occurrence.schedule_revision != occurrence.schedule_revision {
+                continue;
+            }
+            if pending_occurrence
+                .target_snapshot
+                .bind_materialized_session(session_id)
+            {
+                updated_pending.push(pending_occurrence);
+            }
+        }
+
+        if !updated_pending.is_empty() {
+            self.store.put_occurrences(updated_pending).await?;
+        }
+
+        Ok(())
     }
 
     async fn plan_schedule_occurrences(

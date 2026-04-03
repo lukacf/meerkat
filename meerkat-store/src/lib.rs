@@ -16,6 +16,7 @@ mod error;
 pub mod index;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod realm;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod schedule_redb_store;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 pub mod schedule_sqlite_store;

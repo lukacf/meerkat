@@ -556,7 +556,13 @@ class MeerkatClient:
         schedule_id: str,
     ) -> list[ScheduleOccurrenceRecord]:
         raw = await self._request("schedule/occurrences", {"schedule_id": schedule_id})
-        return [ScheduleOccurrenceRecord(**item) for item in raw.get("occurrences", [])]
+        records: list[ScheduleOccurrenceRecord] = []
+        for item in raw.get("occurrences", []):
+            payload = dict(item)
+            if payload.get("claimed_by") is not None and payload.get("lease_owner") is None:
+                payload["lease_owner"] = payload["claimed_by"]
+            records.append(ScheduleOccurrenceRecord(**payload))
+        return records
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
         raw = await self._request("blob/get", {"blob_id": blob_id})

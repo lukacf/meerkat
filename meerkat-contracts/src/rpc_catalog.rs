@@ -139,6 +139,14 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "ScheduleIdParams",
             "ScheduleOccurrencesResult",
         ),
+        RpcMethodDescriptor::basic(
+            "schedule/tools",
+            "List MCP-style schedule tools exposed by the active realm",
+        ),
+        RpcMethodDescriptor::basic(
+            "schedule/call",
+            "Invoke an MCP-style schedule tool by name with JSON arguments",
+        ),
         RpcMethodDescriptor::basic("turn/start", "Start a new turn on existing session"),
         RpcMethodDescriptor::basic("turn/interrupt", "Cancel in-flight turn"),
         RpcMethodDescriptor::basic("config/get", "Read config"),

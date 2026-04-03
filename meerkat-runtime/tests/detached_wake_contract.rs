@@ -67,8 +67,8 @@ impl CoreExecutor for ResultExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceipt {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -76,8 +76,8 @@ impl CoreExecutor for ResultExecutor {
                 message_count: 0,
                 sequence: 0,
             },
-            session_snapshot: None,
-            run_result: Some(RunResult {
+            None,
+            RunResult {
                 text: "done".into(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
@@ -86,8 +86,8 @@ impl CoreExecutor for ResultExecutor {
                 structured_output: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
-            }),
-        })
+            },
+        ))
     }
     async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
         Ok(())
@@ -280,8 +280,8 @@ async fn choke_004_completion_during_running_defers_wake() {
             if self.apply_count.load(Ordering::SeqCst) == 1 {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -289,8 +289,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                run_result: Some(RunResult {
+                None,
+                RunResult {
                     text: "done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -299,8 +299,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                     structured_output: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
-                }),
-            })
+                },
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())

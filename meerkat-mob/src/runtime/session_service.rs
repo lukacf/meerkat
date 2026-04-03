@@ -1,37 +1,14 @@
 use super::*;
-use meerkat_core::Session;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::StartTurnRequest;
 use meerkat_core::service::{
     SessionError, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
 };
 use meerkat_core::{InputId, RunId};
-use sha2::{Digest, Sha256};
+use meerkat_core::{PendingSystemContextAppend, Session};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, Weak};
-
-fn build_runtime_receipt(
-    run_id: RunId,
-    boundary: RunApplyBoundary,
-    contributing_input_ids: Vec<InputId>,
-    session: &Session,
-) -> Result<RunBoundaryReceipt, SessionError> {
-    let encoded_messages = serde_json::to_vec(session.messages()).map_err(|err| {
-        SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-            "failed to serialize session for runtime receipt digest: {err}"
-        )))
-    })?;
-    Ok(RunBoundaryReceipt {
-        run_id,
-        boundary,
-        contributing_input_ids,
-        conversation_digest: Some(format!("{:x}", Sha256::digest(encoded_messages))),
-        message_count: session.messages().len(),
-        sequence: 0,
-    })
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool {
@@ -161,6 +138,21 @@ pub trait MobSessionService:
         ))
     }
 
+    async fn apply_runtime_context_appends(
+        &self,
+        _session_id: &SessionId,
+        _run_id: RunId,
+        _appends: Vec<PendingSystemContextAppend>,
+        _contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(
+                "runtime-backed system-context apply is unavailable for this session service"
+                    .into(),
+            ),
+        ))
+    }
+
     async fn discard_live_session(&self, _session_id: &SessionId) -> Result<(), SessionError> {
         Ok(())
     }
@@ -228,20 +220,32 @@ where
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        meerkat_session::EphemeralSessionService::<B>::start_turn(self, session_id, req).await?;
-        let session =
-            meerkat_session::EphemeralSessionService::<B>::export_session(self, session_id).await?;
-        let receipt = build_runtime_receipt(run_id, boundary, contributing_input_ids, &session)?;
-        let session_snapshot = serde_json::to_vec(&session).map_err(|err| {
-            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                "failed to serialize session snapshot for runtime commit: {err}"
-            )))
-        })?;
-        Ok(CoreApplyOutput {
-            receipt,
-            session_snapshot: Some(session_snapshot),
-            run_result: None,
-        })
+        meerkat_session::EphemeralSessionService::<B>::apply_runtime_turn(
+            self,
+            session_id,
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::apply_runtime_context_appends(
+            self,
+            session_id,
+            run_id,
+            appends,
+            contributing_input_ids,
+        )
+        .await
     }
 }
 
@@ -315,6 +319,23 @@ where
             run_id,
             req,
             boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::apply_runtime_context_appends(
+            self,
+            session_id,
+            run_id,
+            appends,
             contributing_input_ids,
         )
         .await

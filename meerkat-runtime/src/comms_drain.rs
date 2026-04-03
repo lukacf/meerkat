@@ -354,6 +354,14 @@ fn spawn_completion_bridge(
                     interaction_id,
                     result: result.text,
                 },
+                CompletionOutcome::CallbackPending { tool_name, .. } => {
+                    AgentEvent::InteractionFailed {
+                        interaction_id,
+                        error: format!(
+                            "interaction yielded callback-pending for unsupported external tool '{tool_name}'"
+                        ),
+                    }
+                }
                 CompletionOutcome::CompletedWithoutResult => AgentEvent::InteractionComplete {
                     interaction_id,
                     result: String::new(),

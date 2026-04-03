@@ -7,12 +7,11 @@
 
 use std::sync::Arc;
 
-use meerkat_core::ContentInput;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{RunPrimitive, RuntimeApplyAction};
 use meerkat_core::service::SessionError;
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
@@ -70,49 +69,6 @@ impl SessionRuntimeExecutor {
     }
 }
 
-/// Extract prompt content from a `RunPrimitive`, preserving multimodal blocks.
-fn extract_prompt(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else if all_blocks.len() == 1 {
-                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
-                    ContentInput::Text(text.clone())
-                } else {
-                    ContentInput::Blocks(all_blocks)
-                }
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
-        }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
-    }
-}
-
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
     async fn apply(
@@ -120,7 +76,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_prompt(&primitive);
+        let plan = primitive.runtime_apply_plan();
 
         // Create an event channel and forward events to the notification sink
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
@@ -138,7 +94,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 &self.session_id,
                 run_id,
                 &primitive,
-                prompt,
+                &plan,
                 event_tx,
                 primitive
                     .turn_metadata()
@@ -212,7 +168,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_prompt(&primitive);
+        let plan = primitive.runtime_apply_plan();
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
         let sid = self.session_id.clone();
@@ -222,36 +178,44 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             }
         });
 
-        let req = meerkat_core::service::StartTurnRequest {
-            prompt,
-            system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            event_tx: Some(event_tx),
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
+        let result = match plan.action {
+            RuntimeApplyAction::StartTurn { prompt } => {
+                self.session_service
+                    .apply_runtime_turn(
+                        &self.session_id,
+                        run_id,
+                        meerkat_core::service::StartTurnRequest {
+                            prompt,
+                            system_prompt: None,
+                            render_metadata: None,
+                            handling_mode: meerkat_core::types::HandlingMode::Queue,
+                            event_tx: Some(event_tx),
+                            skill_references: primitive
+                                .turn_metadata()
+                                .and_then(|meta| meta.skill_references.clone()),
+                            flow_tool_overlay: primitive
+                                .turn_metadata()
+                                .and_then(|meta| meta.flow_tool_overlay.clone()),
+                            additional_instructions: primitive
+                                .turn_metadata()
+                                .and_then(|meta| meta.additional_instructions.clone()),
+                        },
+                        plan.boundary,
+                        plan.contributing_input_ids.clone(),
+                    )
+                    .await
+            }
+            RuntimeApplyAction::ApplySystemContextOnly { appends } => {
+                self.session_service
+                    .apply_runtime_context_appends(
+                        &self.session_id,
+                        run_id,
+                        appends,
+                        plan.contributing_input_ids.clone(),
+                    )
+                    .await
+            }
         };
-
-        let result = self
-            .session_service
-            .apply_runtime_turn(
-                &self.session_id,
-                run_id,
-                req,
-                match &primitive {
-                    RunPrimitive::StagedInput(staged) => staged.boundary,
-                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-                },
-                primitive.contributing_input_ids().to_vec(),
-            )
-            .await;
 
         let _ = forwarder.await;
         result.map_err(|err| CoreExecutorError::ApplyFailed {

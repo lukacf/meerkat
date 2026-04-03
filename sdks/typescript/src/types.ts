@@ -185,6 +185,7 @@ export interface ScheduleOccurrenceRecord {
   readonly occurrence_ordinal: number;
   readonly due_at_utc: string;
   readonly phase: string;
+  readonly trigger_snapshot: Record<string, unknown>;
   readonly target_snapshot: Record<string, unknown>;
   readonly attempt_count: number;
   readonly overlap_policy: string;
@@ -192,11 +193,16 @@ export interface ScheduleOccurrenceRecord {
   readonly misfire_policy: string | Record<string, unknown>;
   readonly failure_class?: string | null;
   readonly failure_detail?: string | null;
+  readonly claimed_by?: string | null;
+  /** Deprecated alias for claimed_by kept for compatibility with older SDK callers. */
   readonly lease_owner?: string | null;
   readonly lease_expires_at_utc?: string | null;
+  readonly delivery_correlation_id?: string | null;
+  readonly created_at_utc: string;
   readonly claimed_at_utc?: string | null;
   readonly dispatched_at_utc?: string | null;
   readonly completed_at_utc?: string | null;
+  readonly superseded_by_revision?: number | null;
   readonly last_receipt?: Record<string, unknown> | null;
 }
 

@@ -202,6 +202,12 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     /// Parse errors are reported to the client and do not terminate the loop.
     /// EOF (reader returns `None`) triggers graceful shutdown.
     pub async fn run(&mut self) -> Result<(), ServerError> {
+        self.router
+            .runtime()
+            .ensure_schedule_host_started()
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+
         // Periodic sweep for timed-out callback entries. Fires even when
         // the connection is idle, preventing stale leaks.
         let mut callback_sweep = tokio::time::interval(tokio::time::Duration::from_secs(30));

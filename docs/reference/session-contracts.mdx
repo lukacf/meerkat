@@ -8,16 +8,22 @@ This page is the canonical settled-state 0.5 contract for session and runtime be
 
 ## Ownership model
 
-Meerkat has one canonical semantic path:
+Meerkat has one canonical ownership split:
 
-- **runtime-backed surfaces** own `keep_alive`, Queue/Steer routing, comms drain lifecycle, external-event admission, and request/turn commit semantics
-- **`SessionService`** is the substrate lifecycle seam used by those surfaces
+- **`SessionService`** owns session lifecycle, deferred-first-turn state, archiving, and canonical session reads
+- **runtime-backed surfaces** own `keep_alive`, Queue/Steer routing, comms drain lifecycle, external-event admission, callback-result admission, and request/turn commit semantics
 - **`EphemeralSessionService` / `build_ephemeral_service`** remain valid for testing, embedded use, and WASM internals, but they are not the primary product path and do not own runtime semantics
 
-The runtime-backed path is:
+The runtime-owned admission path is:
 
 ```text
 Surface -> RuntimeSessionAdapter -> SessionService -> AgentFactory::build_agent()
+```
+
+The direct session lifecycle path is:
+
+```text
+Surface -> SessionService -> AgentFactory::build_agent()
 ```
 
 Direct substrate usage is intentionally narrower:
@@ -26,6 +32,7 @@ Direct substrate usage is intentionally narrower:
 - no runtime-owned `keep_alive`
 - no Steer/render-metadata semantics
 - no runtime ingress/admission ownership
+- no surface-local transcript patching for callback/tool completion
 
 ## Agent construction contract
 

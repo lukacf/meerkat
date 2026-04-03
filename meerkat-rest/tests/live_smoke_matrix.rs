@@ -13,7 +13,8 @@ use meerkat::{LlmClient, encode_llm_client_override_for_service};
 use meerkat_client::AnthropicClient;
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::service::{
-    CreateSessionRequest as SvcCreateSessionRequest, InitialTurnPolicy, SessionBuildOptions,
+    CreateSessionRequest as SvcCreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy,
+    SessionBuildOptions,
 };
 use meerkat_core::{ContextConfig, RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_rest::{AppState, router};
@@ -138,6 +139,7 @@ async fn create_deferred_session(state: &AppState, prompt: &str) -> String {
         .create_session(SvcCreateSessionRequest {
             model: state.default_model.to_string(),
             prompt: prompt.to_string().into(),
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
             render_metadata: None,
             system_prompt: None,
             max_tokens: Some(state.max_tokens),

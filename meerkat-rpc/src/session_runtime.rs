@@ -9,6 +9,9 @@
 //! `SessionId`; the first `start_turn()` call for that ID materializes the
 //! session inside the service (which runs the first turn).
 
+#[path = "session_runtime/schedule_host.rs"]
+mod schedule_host;
+
 use std::collections::BTreeMap;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,10 +19,14 @@ use std::sync::{Arc, RwLock as StdRwLock};
 #[cfg(feature = "mcp")]
 use std::time::Duration;
 
-use indexmap::IndexMap;
+use meerkat::surface::{
+    RecoveredSessionBuild, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
+    SurfaceSessionRecoveryOverrides, bind_surface_session, build_recovered_session,
+    has_build_only_turn_overrides, prepare_surface_session,
+};
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, ScheduleService, encode_llm_client_override_for_service,
+    PersistentSessionService, ScheduleService,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -28,22 +35,19 @@ use meerkat_core::RunId;
 use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{RunPrimitive, RuntimeApplyAction, RuntimeApplyPlan};
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
+    DeferredPromptPolicy, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
     SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
-use meerkat_core::{
-    Config, ConfigStore, ContentInput, HookRunOverrides, Session, SessionLlmIdentity,
-    SessionSystemContextState,
-};
+use meerkat_core::{Config, ConfigStore, ContentInput, Session, SessionLlmIdentity};
 use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
@@ -105,51 +109,6 @@ pub struct SessionInfo {
     pub labels: BTreeMap<String, String>,
 }
 
-/// Staged session data: build config + metadata not yet materialized in the service.
-struct PendingSession {
-    phase: PendingSessionPhase,
-    effective_llm_identity: SessionLlmIdentity,
-    labels: Option<BTreeMap<String, String>>,
-    /// Prompt from `session/create` when `initial_turn` is deferred.
-    /// Prepended to the first `turn/start` prompt.
-    deferred_prompt: Option<ContentInput>,
-    /// Stable creation timestamp (Unix seconds), set when the pending session is staged.
-    created_at_secs: u64,
-    /// Last-modified timestamp (Unix seconds), updated on mutations like append_system_context.
-    updated_at_secs: u64,
-}
-
-fn now_unix_secs() -> u64 {
-    meerkat_core::time_compat::SystemTime::now()
-        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Merge a deferred prompt with a turn prompt, preserving multimodal content.
-/// If both are plain text, concatenates with `\n\n`. Otherwise, converts both
-/// to content blocks and concatenates (deferred blocks first, then turn blocks).
-fn merge_content_inputs(deferred: ContentInput, turn: ContentInput) -> ContentInput {
-    match (&deferred, &turn) {
-        (ContentInput::Text(d), ContentInput::Text(t)) => ContentInput::Text(format!("{d}\n\n{t}")),
-        _ => {
-            let mut blocks = deferred.into_blocks();
-            blocks.extend(turn.into_blocks());
-            ContentInput::Blocks(blocks)
-        }
-    }
-}
-
-enum PendingSessionPhase {
-    Staged {
-        build_config: Box<AgentBuildConfig>,
-    },
-    Promoting {
-        starting_system_context_state: SessionSystemContextState,
-        current_system_context_state: SessionSystemContextState,
-    },
-}
-
 // FactoryAgent and FactoryAgentBuilder are imported from meerkat::service_factory.
 
 // ---------------------------------------------------------------------------
@@ -163,9 +122,7 @@ enum PendingSessionPhase {
 pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
-    /// Sessions that have been "created" (ID returned to caller) but not yet
-    /// materialized in the service. The first `start_turn` call promotes them.
-    pending: RwLock<IndexMap<SessionId, PendingSession>>,
+    schedule_host: Mutex<Option<schedule_host::ScheduleHostHandle>>,
     max_sessions: usize,
     /// Factory for building LLM clients on model/provider hot-swap.
     factory: AgentFactory,
@@ -181,6 +138,8 @@ pub struct SessionRuntime {
     #[allow(dead_code)]
     notification_sink: crate::router::NotificationSink,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
+    #[cfg(feature = "mob")]
+    mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
     /// Channel for sending callback tool requests to the RPC server loop.
@@ -228,6 +187,198 @@ impl SessionRuntime {
                 && stored.messages().len() > live.messages().len()))
     }
 
+    fn recovery_overrides_from_turn(
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> Result<SurfaceSessionRecoveryOverrides, RpcError> {
+        let Some(overrides) = overrides else {
+            return Ok(SurfaceSessionRecoveryOverrides::default());
+        };
+        let output_schema = match overrides.output_schema.clone() {
+            Some(value) => Some(meerkat_core::OutputSchema::from_json_value(value).map_err(
+                |error| RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!("Invalid output_schema override: {error}"),
+                    data: None,
+                },
+            )?),
+            None => None,
+        };
+        Ok(SurfaceSessionRecoveryOverrides {
+            model: overrides.model.clone(),
+            provider: overrides
+                .provider
+                .as_ref()
+                .map(|name| meerkat_core::Provider::from_name(name)),
+            provider_params: overrides.provider_params.clone(),
+            max_tokens: overrides.max_tokens,
+            system_prompt: overrides.system_prompt.clone(),
+            output_schema,
+            structured_output_retries: overrides.structured_output_retries,
+            keep_alive: overrides.keep_alive,
+            ..Default::default()
+        })
+    }
+
+    async fn authoritative_session_for_recovery(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<(Session, bool)>, RpcError> {
+        let live = match self.service.export_live_session(session_id).await {
+            Ok(session) => Some(session),
+            Err(SessionError::NotFound { .. }) => None,
+            Err(err) => return Err(session_error_to_rpc(err)),
+        };
+        let stored = self.load_persisted_session(session_id).await?;
+        let live_present = live.is_some();
+        let chosen = match (live, stored) {
+            (Some(live), Some(stored)) => {
+                if stored.updated_at() > live.updated_at()
+                    || (stored.updated_at() == live.updated_at()
+                        && stored.messages().len() > live.messages().len())
+                {
+                    stored
+                } else {
+                    live
+                }
+            }
+            (Some(live), None) => live,
+            (None, Some(stored)) => stored,
+            (None, None) => return Ok(None),
+        };
+        Ok(Some((chosen, live_present)))
+    }
+
+    fn callback_dispatcher_for_recoverable_tools(
+        &self,
+        tool_defs: Vec<meerkat_core::ToolDef>,
+    ) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        let tx = self.callback_request_tx()?;
+        Some(Arc::new(
+            crate::callback_dispatcher::CallbackToolDispatcher::new(
+                self.registered_tools(),
+                tx,
+                self.callback_id_counter(),
+                tool_defs,
+            ),
+        ))
+    }
+
+    async fn recovered_session_build(
+        &self,
+        session_id: &SessionId,
+        overrides: &SurfaceSessionRecoveryOverrides,
+        require_runtime_ops: bool,
+    ) -> Result<Option<(RecoveredSessionBuild, bool)>, RpcError> {
+        let Some((session, had_live_session)) =
+            self.authoritative_session_for_recovery(session_id).await?
+        else {
+            return Ok(None);
+        };
+        let tool_defs = session
+            .build_state()
+            .unwrap_or_default()
+            .recoverable_tool_defs;
+        let external_tools = self.callback_dispatcher_for_recoverable_tools(tool_defs);
+        let ops_lifecycle_override = if require_runtime_ops {
+            Some(
+                bind_surface_session(self.runtime_adapter.as_ref(), session_id)
+                    .await
+                    .map_err(|message| RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message,
+                        data: None,
+                    })?,
+            )
+        } else {
+            None
+        };
+        let current_generation = match self.config_runtime.as_ref() {
+            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
+            None => None,
+        };
+        let build = build_recovered_session(
+            session,
+            overrides,
+            SurfaceSessionRecoveryContext {
+                llm_client_override: self
+                    .default_llm_client
+                    .clone()
+                    .map(meerkat::encode_llm_client_override_for_service),
+                external_tools,
+                ops_lifecycle_override,
+                realm_id: self.realm_id.clone(),
+                instance_id: self.instance_id.clone(),
+                backend: self.backend.clone(),
+                config_generation: current_generation,
+            },
+        )
+        .map_err(|error| match error {
+            SurfaceSessionRecoveryError::InvalidOverride(message) => RpcError {
+                code: error::INVALID_PARAMS,
+                message,
+                data: None,
+            },
+            other => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: other.to_string(),
+                data: None,
+            },
+        })?;
+        Ok(Some((build, had_live_session)))
+    }
+
+    async fn run_recovered_turn(
+        &self,
+        session_id: &SessionId,
+        recovered: RecoveredSessionBuild,
+        prompt: ContentInput,
+        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+    ) -> Result<RunResult, RpcError> {
+        self.service
+            .create_session(recovered.into_deferred_create_request())
+            .await
+            .map_err(session_error_to_rpc)?;
+        self.service
+            .start_turn(
+                session_id,
+                StartTurnRequest {
+                    prompt,
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: Some(event_tx),
+                    skill_references,
+                    flow_tool_overlay,
+                    additional_instructions,
+                },
+            )
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    async fn materialize_recovered_runtime_session(
+        &self,
+        session_id: &SessionId,
+        recovered: RecoveredSessionBuild,
+    ) -> Result<(), RpcError> {
+        let keep_alive = recovered.keep_alive;
+        self.service
+            .create_session(recovered.into_deferred_create_request())
+            .await
+            .map_err(session_error_to_rpc)?;
+        #[cfg(feature = "comms")]
+        {
+            let comms_rt = self.service.comms_runtime(session_id).await;
+            self.runtime_adapter
+                .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Create a new session runtime.
     pub fn new(
         factory: AgentFactory,
@@ -254,7 +405,7 @@ impl SessionRuntime {
         Self {
             service,
             schedule_service,
-            pending: RwLock::new(IndexMap::new()),
+            schedule_host: Mutex::new(None),
             max_sessions,
             factory: factory_clone,
             default_llm_client: None,
@@ -268,6 +419,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            #[cfg(feature = "mob")]
+            mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -307,7 +460,7 @@ impl SessionRuntime {
         Self {
             service,
             schedule_service,
-            pending: RwLock::new(IndexMap::new()),
+            schedule_host: Mutex::new(None),
             max_sessions,
             factory: factory_clone,
             default_llm_client: None,
@@ -321,6 +474,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            #[cfg(feature = "mob")]
+            mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -415,18 +570,6 @@ impl SessionRuntime {
         self.default_llm_client.clone()
     }
 
-    fn llm_identity_from_pending_build(build_config: &AgentBuildConfig) -> SessionLlmIdentity {
-        let provider = build_config
-            .provider
-            .or_else(|| meerkat_core::Provider::infer_from_model(&build_config.model))
-            .unwrap_or(meerkat_core::Provider::Other);
-        SessionLlmIdentity {
-            model: build_config.model.clone(),
-            provider,
-            provider_params: build_config.provider_params.clone(),
-        }
-    }
-
     fn resolve_target_llm_identity(
         current: &SessionLlmIdentity,
         ov: &crate::handlers::turn::TurnOverrides,
@@ -457,15 +600,6 @@ impl SessionRuntime {
             provider,
             provider_params,
         })
-    }
-
-    fn apply_llm_identity_to_build_config(
-        build_config: &mut AgentBuildConfig,
-        identity: &SessionLlmIdentity,
-    ) {
-        build_config.model = identity.model.clone();
-        build_config.provider = Some(identity.provider);
-        build_config.provider_params = identity.provider_params.clone();
     }
 
     async fn current_materialized_llm_identity(
@@ -733,6 +867,18 @@ impl SessionRuntime {
             .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
     }
 
+    #[cfg(feature = "mob")]
+    pub fn set_mob_state(&self, mob_state: Arc<meerkat_mob_mcp::MobMcpState>) {
+        if let Ok(mut slot) = self.mob_state.write() {
+            *slot = Some(mob_state);
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn mob_state(&self) -> Option<Arc<meerkat_mob_mcp::MobMcpState>> {
+        self.mob_state.read().ok().and_then(|slot| slot.clone())
+    }
+
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
         if let Ok(mut slot) = self.skill_identity_registry.write() {
             slot.registry = registry;
@@ -756,31 +902,28 @@ impl SessionRuntime {
         self: &Arc<Self>,
         session_id: &SessionId,
     ) -> Result<(), RpcError> {
-        if !self.runtime_adapter.contains_session(session_id).await {
-            let session_exists = self.pending.read().await.contains_key(session_id)
-                || self.service.read(session_id).await.is_ok()
-                || self
-                    .load_persisted_session(session_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
-            if !session_exists {
-                return Err(RpcError {
-                    code: error::SESSION_NOT_FOUND,
-                    message: format!("session not found: {session_id}"),
-                    data: None,
-                });
-            }
-            let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                Arc::clone(self),
-                session_id.clone(),
-                self.notification_sink.clone(),
-            ));
-            self.runtime_adapter
-                .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
+        let session_exists = self.service.read(session_id).await.is_ok()
+            || self
+                .load_persisted_session(session_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+        if !session_exists {
+            return Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("session not found: {session_id}"),
+                data: None,
+            });
         }
+        let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(self),
+            session_id.clone(),
+            self.notification_sink.clone(),
+        ));
+        self.runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
         Ok(())
     }
 
@@ -834,43 +977,57 @@ impl SessionRuntime {
             }
         }
 
-        // Reject build-only overrides that cannot be applied via runtime turn
-        // metadata. These fields only apply during pending→materialized
-        // promotion (handled by the legacy start_turn path). Silently
-        // dropping them would violate surface contract.
-        if let Some(ref ov) = overrides {
-            let rejected = [
-                ov.max_tokens.map(|_| "max_tokens"),
-                ov.system_prompt.as_ref().map(|_| "system_prompt"),
-                ov.output_schema.as_ref().map(|_| "output_schema"),
-                ov.structured_output_retries
-                    .map(|_| "structured_output_retries"),
-            ];
-            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
-            if !rejected.is_empty() {
+        let recovery_overrides = Self::recovery_overrides_from_turn(overrides.as_ref())?;
+        let build_only_overrides = has_build_only_turn_overrides(&recovery_overrides);
+        let mut applied_overrides_via_recovery = false;
+
+        if build_only_overrides {
+            let Some((recovered, had_live_session)) = self
+                .recovered_session_build(session_id, &recovery_overrides, true)
+                .await?
+            else {
                 return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!(
-                        "Cannot override {} on a runtime-routed turn; \
-                         set these at session/create time or use a deferred session",
-                        rejected.join(", ")
-                    ),
+                    code: error::SESSION_NOT_FOUND,
+                    message: format!("session not found: {session_id}"),
                     data: None,
                 });
+            };
+            if had_live_session {
+                let _ = self.service.discard_live_session(session_id).await;
+                self.runtime_adapter.unregister_session(session_id).await;
             }
+            let keep_alive = recovered.keep_alive;
+            self.service
+                .create_session(recovered.into_deferred_create_request())
+                .await
+                .map_err(session_error_to_rpc)?;
+            #[cfg(feature = "comms")]
+            {
+                let comms_rt = self.service.comms_runtime(session_id).await;
+                self.runtime_adapter
+                    .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
+                    .await;
+            }
+            applied_overrides_via_recovery = true;
         }
+
+        let runtime_overrides = if applied_overrides_via_recovery {
+            None
+        } else {
+            overrides.as_ref()
+        };
 
         // Build turn metadata from overrides
         let turn_metadata = Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 handling_mode: None,
-                keep_alive: overrides.as_ref().and_then(|ov| ov.keep_alive),
+                keep_alive: runtime_overrides.and_then(|ov| ov.keep_alive),
                 skill_references,
                 flow_tool_overlay,
                 additional_instructions,
-                model: overrides.as_ref().and_then(|ov| ov.model.clone()),
-                provider: overrides.as_ref().and_then(|ov| ov.provider.clone()),
-                provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
+                model: runtime_overrides.and_then(|ov| ov.model.clone()),
+                provider: runtime_overrides.and_then(|ov| ov.provider.clone()),
+                provider_params: runtime_overrides.and_then(|ov| ov.provider_params.clone()),
                 render_metadata: None,
             },
         );
@@ -882,7 +1039,7 @@ impl SessionRuntime {
         // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
         {
-            let keep_alive_override = overrides.as_ref().and_then(|ov| ov.keep_alive);
+            let keep_alive_override = runtime_overrides.and_then(|ov| ov.keep_alive);
             let keep_alive = match keep_alive_override {
                 Some(val) => val,
                 None => self
@@ -939,6 +1096,11 @@ impl SessionRuntime {
 
         match handle.wait().await {
             CompletionOutcome::Completed(result) => Ok(result),
+            CompletionOutcome::CallbackPending { tool_name, .. } => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("turn is waiting for external tool results: {tool_name}"),
+                data: None,
+            }),
             CompletionOutcome::CompletedWithoutResult => Err(RpcError {
                 code: error::INTERNAL_ERROR,
                 message: "turn completed without result".to_string(),
@@ -1010,93 +1172,39 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         run_id: RunId,
-        primitive: &RunPrimitive,
-        prompt: ContentInput,
+        _primitive: &RunPrimitive,
+        plan: &RuntimeApplyPlan,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
-        if let RunPrimitive::StagedInput(staged) = primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-            && staged.boundary == RunApplyBoundary::Immediate
-        {
+        if let RuntimeApplyAction::ApplySystemContextOnly { appends } = &plan.action {
             return self
                 .service
                 .apply_runtime_context_appends(
                     session_id,
                     run_id,
-                    staged.context_appends.clone(),
-                    staged.contributing_input_ids.clone(),
+                    appends.clone(),
+                    plan.contributing_input_ids.clone(),
                 )
                 .await
                 .map_err(session_error_to_rpc);
         }
-
-        let pending_session = {
-            let mut pending = self.pending.write().await;
-            match pending.get_mut(session_id) {
-                Some(pending_session) => {
-                    let starting_system_context_state = match &pending_session.phase {
-                        PendingSessionPhase::Staged { build_config } => build_config
-                            .resume_session
-                            .as_ref()
-                            .and_then(Session::system_context_state)
-                            .unwrap_or_default(),
-                        PendingSessionPhase::Promoting { .. } => {
-                            return Err(RpcError {
-                                code: error::SESSION_BUSY,
-                                message: format!(
-                                    "session {session_id} is already being materialized"
-                                ),
-                                data: None,
-                            });
-                        }
-                    };
-                    let phase = std::mem::replace(
-                        &mut pending_session.phase,
-                        PendingSessionPhase::Promoting {
-                            starting_system_context_state: starting_system_context_state.clone(),
-                            current_system_context_state: starting_system_context_state,
-                        },
-                    );
-                    let PendingSessionPhase::Staged { build_config } = phase else {
-                        unreachable!("phase was checked before replacement");
-                    };
-                    Some((
-                        *build_config,
-                        pending_session.labels.clone(),
-                        pending_session.deferred_prompt.clone(),
-                        pending_session.created_at_secs,
-                        pending_session.updated_at_secs,
-                    ))
-                }
-                None => None,
-            }
+        let recovery_overrides = Self::recovery_overrides_from_turn(overrides.as_ref())?;
+        let (prompt, boundary, contributing_input_ids) = match &plan.action {
+            RuntimeApplyAction::StartTurn { prompt } => (
+                prompt.clone(),
+                plan.boundary,
+                plan.contributing_input_ids.clone(),
+            ),
+            RuntimeApplyAction::ApplySystemContextOnly { .. } => unreachable!(),
         };
 
-        let persisted_keep_alive = if pending_session.is_none() {
-            self.load_persisted_session(session_id)
-                .await?
-                .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
-        } else {
-            None
-        };
-        let keep_alive = overrides
-            .as_ref()
-            .and_then(|ov| ov.keep_alive)
-            .or_else(|| {
-                pending_session
-                    .as_ref()
-                    .map(|(build_config, _, _, _, _)| build_config.keep_alive)
-            })
-            .or(persisted_keep_alive)
-            .unwrap_or(false);
-
-        if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
-            // Hot-swap LLM client if model/provider overrides are present.
+        if !has_build_only_turn_overrides(&recovery_overrides)
+            && !self.live_session_is_stale(session_id).await?
+        {
             if let Some(ref ov) = overrides
                 && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
             {
@@ -1109,7 +1217,6 @@ impl SessionRuntime {
                 render_metadata: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx.clone()),
-
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
                 additional_instructions: additional_instructions.clone(),
@@ -1121,11 +1228,8 @@ impl SessionRuntime {
                     session_id,
                     run_id.clone(),
                     req,
-                    match primitive {
-                        RunPrimitive::StagedInput(staged) => staged.boundary,
-                        _ => RunApplyBoundary::Immediate,
-                    },
-                    primitive.contributing_input_ids().to_vec(),
+                    boundary,
+                    contributing_input_ids.clone(),
                 )
                 .await
             {
@@ -1135,318 +1239,23 @@ impl SessionRuntime {
             }
         }
 
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
-            pending_session
-        {
-            let mut runtime_prompt: ContentInput = prompt.clone();
-            let saved_deferred_prompt = deferred_prompt.clone();
-            if let Some(deferred) = deferred_prompt {
-                runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
-            }
-
-            if let Some(ref ov) = overrides {
-                if ov.provider.is_some() && ov.model.is_none() {
-                    self.restore_pending_from_promoting(
-                        session_id,
-                        build_config,
-                        labels,
-                        saved_deferred_prompt,
-                        created_at_secs,
-                        updated_at_secs,
-                    )
-                    .await;
-                    return Err(RpcError {
-                        code: error::INVALID_PARAMS,
-                        message: "provider override requires model on a session turn".to_string(),
-                        data: None,
-                    });
-                }
-                let resolved_identity = Self::resolve_target_llm_identity(
-                    &Self::llm_identity_from_pending_build(&build_config),
-                    ov,
-                )?;
-                Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
-                if let Some(max_tokens) = ov.max_tokens {
-                    build_config.max_tokens = Some(max_tokens);
-                }
-                if let Some(ref system_prompt) = ov.system_prompt {
-                    build_config.system_prompt = Some(system_prompt.clone());
-                }
-                if let Some(ref output_schema) = ov.output_schema {
-                    match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
-                        Ok(os) => build_config.output_schema = Some(os),
-                        Err(e) => {
-                            self.restore_pending_from_promoting(
-                                session_id,
-                                build_config,
-                                labels,
-                                saved_deferred_prompt,
-                                created_at_secs,
-                                updated_at_secs,
-                            )
-                            .await;
-                            return Err(RpcError {
-                                code: error::INVALID_PARAMS,
-                                message: format!("Invalid output_schema override: {e}"),
-                                data: None,
-                            });
-                        }
-                    }
-                }
-                if let Some(retries) = ov.structured_output_retries {
-                    build_config.structured_output_retries = retries;
-                }
-                if let Some(keep_alive) = ov.keep_alive {
-                    build_config.keep_alive = keep_alive;
-                }
-            }
-
-            if build_config.llm_client_override.is_none()
-                && let Some(ref client) = self.default_llm_client
-            {
-                build_config.llm_client_override = Some(client.clone());
-            }
-            let runtime_generation = if build_config.config_generation.is_none() {
-                if let Some(runtime) = &self.config_runtime {
-                    runtime.get().await.ok().map(|snapshot| snapshot.generation)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let mut build = build_config.to_session_build_options();
-            build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
-            build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
-            build.backend = build.backend.or_else(|| self.backend.clone());
-            build.config_generation = build.config_generation.or(runtime_generation);
-
-            match self
-                .service
-                .create_session(CreateSessionRequest {
-                    model: build_config.model.clone(),
-                    prompt: runtime_prompt.clone(),
-                    render_metadata: None,
-                    system_prompt: build_config.system_prompt.clone(),
-                    max_tokens: build_config.max_tokens,
-                    event_tx: None,
-
-                    skill_references: skill_references.clone(),
-                    initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                    build: Some(build),
-                    labels: labels.clone(),
-                })
-                .await
-            {
-                Ok(_) => {
-                    if let Some((starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                        && let Err(err) = self
-                            .replay_promoted_system_context(
-                                session_id,
-                                &starting_system_context_state,
-                                &current_system_context_state,
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err.message,
-                            "failed to replay promoted system-context state after runtime materialization"
-                        );
-                    }
-                    #[cfg(feature = "comms")]
-                    {
-                        let comms_rt = self.service.comms_runtime(session_id).await;
-                        self.runtime_adapter
-                            .maybe_spawn_comms_drain(session_id, build_config.keep_alive, comms_rt)
-                            .await;
-                    }
-                }
-                Err(err) => {
-                    if let Some((_starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                    {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        session
-                            .set_system_context_state(current_system_context_state)
-                            .map_err(|serialize_err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!(
-                                    "failed to serialize system-context state: {serialize_err}"
-                                ),
-                                data: None,
-                            })?;
-                    }
-                    self.restore_pending_from_promoting(
-                        session_id,
-                        build_config,
-                        labels,
-                        saved_deferred_prompt,
-                        created_at_secs,
-                        updated_at_secs,
-                    )
-                    .await;
-                    return Err(session_error_to_rpc(err));
-                }
-            }
-
-            let (_, output) = self
-                .service
-                .apply_runtime_turn_with_result(
-                    session_id,
-                    run_id,
-                    StartTurnRequest {
-                        prompt: runtime_prompt,
-                        system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: meerkat_core::types::HandlingMode::Queue,
-                        event_tx: Some(event_tx),
-
-                        skill_references,
-                        flow_tool_overlay,
-                        additional_instructions,
-                    },
-                    match primitive {
-                        RunPrimitive::StagedInput(staged) => staged.boundary,
-                        _ => RunApplyBoundary::Immediate,
-                    },
-                    primitive.contributing_input_ids().to_vec(),
-                )
-                .await
-                .map_err(session_error_to_rpc)?;
-            return Ok(output);
-        }
-
-        let stored_session = self
-            .load_persisted_session(session_id)
+        let Some((recovered, had_live_session)) = self
+            .recovered_session_build(session_id, &recovery_overrides, true)
             .await?
-            .ok_or_else(|| RpcError {
+        else {
+            return Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
                 message: format!("session not found: {session_id}"),
                 data: None,
-            })?;
-        let stored_metadata = stored_session.session_metadata();
-        let tooling = stored_metadata
-            .as_ref()
-            .map(|meta| meta.tooling.clone())
-            .unwrap_or_default();
-        let current_generation = match self.config_runtime.as_ref() {
-            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
-            None => None,
+            });
         };
-        self.runtime_adapter
-            .register_session(session_id.clone())
-            .await;
-        let ops_lifecycle = self
-            .runtime_adapter
-            .ops_lifecycle_registry(session_id)
-            .await
-            .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-            .ok_or_else(|| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("failed to obtain runtime ops registry for session {session_id}"),
-                data: None,
-            })?;
-        let build = SessionBuildOptions {
-            provider: stored_metadata.as_ref().map(|meta| meta.provider),
-            output_schema: None,
-            structured_output_retries: 2,
-            hooks_override: HookRunOverrides::default(),
-            comms_name: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.comms_name.clone()),
-            peer_meta: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.peer_meta.clone()),
-            resume_session: Some(stored_session),
-            budget_limits: None,
-            provider_params: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.provider_params.clone()),
-            call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
-            external_tools: None,
-            llm_client_override: self
-                .default_llm_client
-                .clone()
-                .map(encode_llm_client_override_for_service),
-            ops_lifecycle_override: Some(ops_lifecycle),
-            override_builtins: tooling.builtins.to_override(),
-            override_shell: tooling.shell.to_override(),
-            override_memory: tooling.memory.to_override(),
-            override_mob: tooling.mob.to_override(),
-            preload_skills: tooling.active_skills.clone(),
-            realm_id: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.realm_id.clone())
-                .or_else(|| self.realm_id.clone()),
-            instance_id: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.instance_id.clone())
-                .or_else(|| self.instance_id.clone()),
-            backend: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.backend.clone())
-                .or_else(|| self.backend.clone()),
-            config_generation: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.config_generation)
-                .or(current_generation),
-            keep_alive: stored_metadata
-                .as_ref()
-                .map(|meta| meta.keep_alive)
-                .unwrap_or(false),
-            checkpointer: None,
-            silent_comms_intents: Vec::new(),
-            max_inline_peer_notifications: None,
-            app_context: None,
-            additional_instructions: None,
-            shell_env: None,
-            resume_override_mask: Default::default(),
-            blob_store_override: None,
-            mob_tools: None,
-        };
-        self.service
-            .create_session(CreateSessionRequest {
-                model: stored_metadata
-                    .as_ref()
-                    .map(|meta| meta.model.clone())
-                    .ok_or_else(|| RpcError {
-                        code: error::INTERNAL_ERROR,
-                        message: format!(
-                            "persisted session {session_id} is missing session metadata"
-                        ),
-                        data: None,
-                    })?,
-                prompt: prompt.clone(),
-                render_metadata: None,
-                system_prompt: overrides.as_ref().and_then(|ov| ov.system_prompt.clone()),
-                max_tokens: overrides
-                    .as_ref()
-                    .and_then(|ov| ov.max_tokens)
-                    .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens)),
-                event_tx: None,
-
-                skill_references: skill_references.clone(),
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: Some(build),
-                labels: None,
-            })
-            .await
-            .map_err(session_error_to_rpc)?;
-        #[cfg(feature = "comms")]
-        {
-            let comms_rt = self.service.comms_runtime(session_id).await;
-            self.runtime_adapter
-                .maybe_spawn_comms_drain(session_id, keep_alive, comms_rt)
-                .await;
+        if had_live_session {
+            let _ = self.service.discard_live_session(session_id).await;
         }
-        let (_, output) = self
-            .service
-            .apply_runtime_turn_with_result(
+        self.materialize_recovered_runtime_session(session_id, recovered)
+            .await?;
+        self.service
+            .apply_runtime_turn_outcome(
                 session_id,
                 run_id,
                 StartTurnRequest {
@@ -1455,20 +1264,15 @@ impl SessionRuntime {
                     render_metadata: None,
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
-
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
                 },
-                match primitive {
-                    RunPrimitive::StagedInput(staged) => staged.boundary,
-                    _ => RunApplyBoundary::Immediate,
-                },
-                primitive.contributing_input_ids().to_vec(),
+                boundary,
+                contributing_input_ids,
             )
             .await
-            .map_err(session_error_to_rpc)?;
-        Ok(output)
+            .map_err(session_error_to_rpc)
     }
 
     pub fn skill_identity_registry(&self) -> SourceIdentityRegistry {
@@ -1487,82 +1291,104 @@ impl SessionRuntime {
 
     /// Create a new session with the given build configuration.
     ///
-    /// Returns the session ID on success. The session is staged as "pending"
-    /// and will be materialized inside the service on the first `start_turn`.
+    /// Returns the session ID on success. Deferred sessions are created
+    /// immediately in the session service with their first-turn prompt staged
+    /// durably for later execution.
     pub async fn create_session(
         &self,
-        build_config: AgentBuildConfig,
+        mut build_config: AgentBuildConfig,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
     ) -> Result<SessionId, RpcError> {
-        // Check combined capacity (pending + active).
-        {
-            let pending = self.pending.read().await;
-            let active = self
-                .service
-                .list(Default::default())
-                .await
-                .map_err(session_error_to_rpc)?
-                .len();
-            let total = pending.len() + active;
-            if total >= self.max_sessions {
-                return Err(RpcError {
-                    code: error::INTERNAL_ERROR,
-                    message: format!("Max sessions reached ({}/{})", total, self.max_sessions),
-                    data: None,
-                });
-            }
+        let active = self
+            .service
+            .list(Default::default())
+            .await
+            .map_err(session_error_to_rpc)?
+            .len();
+        if active >= self.max_sessions {
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("Max sessions reached ({}/{})", active, self.max_sessions),
+                data: None,
+            });
         }
 
-        // Pre-create a session to claim a stable SessionId.
-        let session = Session::new();
-        let session_id = session.id().clone();
-
-        // Inject the pre-created session so the agent builder will reuse this ID.
-        self.runtime_adapter
-            .register_session(session_id.clone())
-            .await;
-        let ops_lifecycle = self
-            .runtime_adapter
-            .ops_lifecycle_registry(&session_id)
+        let prepared = prepare_surface_session(self.runtime_adapter.as_ref())
             .await
-            .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-            .ok_or_else(|| RpcError {
+            .map_err(|message| RpcError {
                 code: error::INTERNAL_ERROR,
-                message: format!("failed to obtain runtime ops registry for session {session_id}"),
+                message,
                 data: None,
             })?;
+        let session = prepared.session;
+        let session_id = prepared.session_id;
+        let ops_lifecycle = prepared.ops_lifecycle;
 
-        let build_config = AgentBuildConfig {
-            resume_session: Some(session),
-            ops_lifecycle_override: Some(ops_lifecycle),
-            ..build_config
-        };
+        build_config.resume_session = Some(session);
+        build_config.ops_lifecycle_override = Some(ops_lifecycle);
 
         #[cfg(feature = "mcp")]
-        let build_config = self
-            .attach_mcp_adapter_for_pending_session(session_id.clone(), build_config)
+        let mut build_config = self
+            .attach_mcp_adapter_for_session_build(session_id.clone(), build_config)
             .await?;
 
+        if build_config.llm_client_override.is_none()
+            && let Some(ref client) = self.default_llm_client
         {
-            let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
-            let mut pending = self.pending.write().await;
-            pending.insert(
-                session_id.clone(),
-                PendingSession {
-                    effective_llm_identity,
-                    phase: PendingSessionPhase::Staged {
-                        build_config: Box::new(build_config),
-                    },
-                    labels,
-                    deferred_prompt,
-                    created_at_secs: now_unix_secs(),
-                    updated_at_secs: now_unix_secs(),
-                },
-            );
+            build_config.llm_client_override = Some(client.clone());
         }
+        let runtime_generation = if build_config.config_generation.is_none() {
+            if let Some(runtime) = &self.config_runtime {
+                runtime.get().await.ok().map(|snapshot| snapshot.generation)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        Ok(session_id)
+        let mut build = build_config.to_session_build_options();
+        build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
+        build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
+        build.backend = build.backend.or_else(|| self.backend.clone());
+        build.config_generation = build.config_generation.or(runtime_generation);
+
+        let prompt = deferred_prompt.unwrap_or_else(|| ContentInput::Text(String::new()));
+        let deferred_prompt_policy =
+            if prompt.has_images() || !prompt.text_content().trim().is_empty() {
+                DeferredPromptPolicy::Stage
+            } else {
+                DeferredPromptPolicy::Discard
+            };
+        let request = CreateSessionRequest {
+            model: build_config.model.clone(),
+            prompt,
+            render_metadata: None,
+            system_prompt: build_config.system_prompt.clone(),
+            max_tokens: build_config.max_tokens,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy,
+            build: Some(build),
+            labels,
+        };
+
+        match self.service.create_session(request).await {
+            Ok(result) => {
+                debug_assert_eq!(result.session_id, session_id);
+                Ok(result.session_id)
+            }
+            Err(err) => {
+                #[cfg(feature = "mcp")]
+                if let Some(state) = self.mcp_sessions.write().await.remove(&session_id) {
+                    state.adapter.shutdown().await;
+                }
+                self.runtime_adapter.unregister_session(&session_id).await;
+                Err(session_error_to_rpc(err))
+            }
+        }
     }
 
     /// Start a turn on the given session.
@@ -1570,10 +1396,10 @@ impl SessionRuntime {
     /// Events are forwarded to `event_tx` during the turn. Returns the
     /// `RunResult` when the turn completes.
     ///
-    /// `overrides` may contain per-turn overrides. For pending (deferred)
-    /// sessions, all overrides are applied to the staged `AgentBuildConfig`.
-    /// For materialized sessions, only `keep_alive` is allowed; all other
-    /// overrides are rejected with an error.
+    /// `overrides` may contain per-turn overrides. Build-only overrides are
+    /// legal only while the canonical deferred first-turn phase is still
+    /// pending; once the first turn starts, only live-compatible overrides
+    /// such as `keep_alive` and hot-swappable model/provider changes remain.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_turn(
         &self,
@@ -1601,234 +1427,32 @@ impl SessionRuntime {
                 turn_prompt = ContentInput::Blocks(blocks);
             }
         }
-
-        // Check if this is a pending (not-yet-materialized) session.
-        let pending_session = {
-            let mut pending = self.pending.write().await;
-            match pending.get_mut(session_id) {
-                Some(pending_session) => {
-                    let starting_system_context_state = match &pending_session.phase {
-                        PendingSessionPhase::Staged { build_config } => build_config
-                            .resume_session
-                            .as_ref()
-                            .and_then(Session::system_context_state)
-                            .unwrap_or_default(),
-                        PendingSessionPhase::Promoting { .. } => {
-                            return Err(RpcError {
-                                code: error::SESSION_BUSY,
-                                message: format!(
-                                    "session {session_id} is already being materialized"
-                                ),
-                                data: None,
-                            });
-                        }
-                    };
-                    let phase = std::mem::replace(
-                        &mut pending_session.phase,
-                        PendingSessionPhase::Promoting {
-                            starting_system_context_state: starting_system_context_state.clone(),
-                            current_system_context_state: starting_system_context_state,
-                        },
-                    );
-                    let PendingSessionPhase::Staged { build_config } = phase else {
-                        unreachable!("phase was checked before replacement");
-                    };
-                    Some((
-                        *build_config,
-                        pending_session.labels.clone(),
-                        pending_session.deferred_prompt.clone(),
-                        pending_session.created_at_secs,
-                        pending_session.updated_at_secs,
-                    ))
-                }
-                None => None,
-            }
-        };
-
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
-            pending_session
-        {
-            // Prepend the deferred create-time prompt to the turn prompt.
-            // Keep copies for rollback paths that re-stage the pending session.
-            let saved_deferred_prompt = deferred_prompt.clone();
-            let saved_created_at_secs = created_at_secs;
-            let saved_updated_at_secs = updated_at_secs;
-            if let Some(deferred) = deferred_prompt {
-                turn_prompt = merge_content_inputs(deferred, turn_prompt);
-            }
-            // Apply per-turn overrides to the pending build config.
-            if let Some(ref ov) = overrides {
-                if ov.provider.is_some() && ov.model.is_none() {
-                    self.restore_pending_from_promoting(
-                        session_id,
-                        build_config,
-                        labels,
-                        saved_deferred_prompt,
-                        saved_created_at_secs,
-                        saved_updated_at_secs,
-                    )
-                    .await;
-                    return Err(RpcError {
-                        code: error::INVALID_PARAMS,
-                        message: "provider override requires model on a session turn".to_string(),
-                        data: None,
-                    });
-                }
-                let resolved_identity = Self::resolve_target_llm_identity(
-                    &Self::llm_identity_from_pending_build(&build_config),
-                    ov,
-                )?;
-                Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
-                if let Some(max_tokens) = ov.max_tokens {
-                    build_config.max_tokens = Some(max_tokens);
-                }
-                if let Some(ref system_prompt) = ov.system_prompt {
-                    build_config.system_prompt = Some(system_prompt.clone());
-                }
-                if let Some(ref output_schema) = ov.output_schema {
-                    match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
-                        Ok(os) => build_config.output_schema = Some(os),
-                        Err(e) => {
-                            // Restore pending state before returning error.
-                            self.restore_pending_from_promoting(
-                                session_id,
-                                build_config,
-                                labels,
-                                saved_deferred_prompt,
-                                saved_created_at_secs,
-                                saved_updated_at_secs,
-                            )
-                            .await;
-                            return Err(RpcError {
-                                code: error::INVALID_PARAMS,
-                                message: format!("Invalid output_schema override: {e}"),
-                                data: None,
-                            });
-                        }
-                    }
-                }
-                if let Some(retries) = ov.structured_output_retries {
-                    build_config.structured_output_retries = retries;
-                }
-                if let Some(keep_alive) = ov.keep_alive {
-                    build_config.keep_alive = keep_alive;
-                }
-            }
-            // Inject default LLM client if the caller didn't provide one.
-            if build_config.llm_client_override.is_none()
-                && let Some(ref client) = self.default_llm_client
-            {
-                build_config.llm_client_override = Some(client.clone());
-            }
-            let runtime_generation = if build_config.config_generation.is_none() {
-                if let Some(runtime) = &self.config_runtime {
-                    runtime.get().await.ok().map(|snapshot| snapshot.generation)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let mut build = build_config.to_session_build_options();
-            build.realm_id = build.realm_id.or_else(|| self.realm_id.clone());
-            build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
-            build.backend = build.backend.or_else(|| self.backend.clone());
-            build.config_generation = build.config_generation.or(runtime_generation);
-
-            let req = CreateSessionRequest {
-                model: build_config.model.clone(),
-                prompt: turn_prompt,
-                render_metadata: None,
-                system_prompt: build_config.system_prompt.clone(),
-                max_tokens: build_config.max_tokens,
-                event_tx: Some(event_tx),
-
-                skill_references: skill_references.clone(),
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
-                build: Some(build),
-                labels: labels.clone(),
-            };
-
-            match self.service.create_session(req).await {
-                Ok(result) => {
-                    if let Some((starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                        && let Err(err) = self
-                            .replay_promoted_system_context(
-                                session_id,
-                                &starting_system_context_state,
-                                &current_system_context_state,
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err.message,
-                            "failed to replay promoted system-context state after create_session; preserving completed turn result"
-                        );
-                    }
-                    return Ok(result);
-                }
-                Err(err) => {
-                    if let Some((_starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                    {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        session
-                            .set_system_context_state(current_system_context_state)
-                            .map_err(|serialize_err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!(
-                                    "failed to serialize system-context state: {serialize_err}"
-                                ),
-                                data: None,
-                            })?;
-                        let effective_llm_identity =
-                            Self::llm_identity_from_pending_build(&build_config);
-                        let mut pending = self.pending.write().await;
-                        pending.insert(
-                            session_id.clone(),
-                            PendingSession {
-                                effective_llm_identity,
-                                phase: PendingSessionPhase::Staged {
-                                    build_config: Box::new(build_config),
-                                },
-                                labels,
-                                deferred_prompt: saved_deferred_prompt.clone(),
-                                created_at_secs: saved_created_at_secs,
-                                updated_at_secs: saved_updated_at_secs,
-                            },
-                        );
-                    }
-                    return Err(session_error_to_rpc(err));
-                }
-            }
-        }
-
-        // Normal turn on an existing (materialized) session.
-        // Reject overrides that cannot be applied mid-session.
-        if let Some(ref ov) = overrides {
-            let rejected = [
-                ov.max_tokens.map(|_| "max_tokens"),
-                ov.system_prompt.as_ref().map(|_| "system_prompt"),
-                ov.output_schema.as_ref().map(|_| "output_schema"),
-                ov.structured_output_retries
-                    .map(|_| "structured_output_retries"),
-            ];
-            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
-            if !rejected.is_empty() {
+        let recovery_overrides = Self::recovery_overrides_from_turn(overrides.as_ref())?;
+        if has_build_only_turn_overrides(&recovery_overrides) {
+            let Some((recovered, had_live_session)) = self
+                .recovered_session_build(session_id, &recovery_overrides, false)
+                .await?
+            else {
                 return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!(
-                        "Cannot override {} on a materialized session; use deferred session/create",
-                        rejected.join(", ")
-                    ),
+                    code: error::SESSION_NOT_FOUND,
+                    message: format!("Session not found: {session_id}"),
                     data: None,
                 });
+            };
+            if had_live_session {
+                let _ = self.service.discard_live_session(session_id).await;
             }
+            return self
+                .run_recovered_turn(
+                    session_id,
+                    recovered,
+                    turn_prompt,
+                    event_tx,
+                    skill_references,
+                    flow_tool_overlay,
+                    additional_instructions,
+                )
+                .await;
         }
 
         let keep_alive = match overrides.as_ref().and_then(|ov| ov.keep_alive) {
@@ -1852,12 +1476,25 @@ impl SessionRuntime {
         };
 
         if self.live_session_is_stale(session_id).await? {
+            let Some((recovered, had_live_session)) = self
+                .recovered_session_build(session_id, &recovery_overrides, false)
+                .await?
+            else {
+                return Err(RpcError {
+                    code: error::SESSION_NOT_FOUND,
+                    message: format!("Session not found: {session_id}"),
+                    data: None,
+                });
+            };
+            if had_live_session {
+                let _ = self.service.discard_live_session(session_id).await;
+            }
             return self
-                .try_recover_persisted_session(
+                .run_recovered_turn(
                     session_id,
+                    recovered,
                     turn_prompt,
                     event_tx,
-                    keep_alive,
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
@@ -1900,13 +1537,24 @@ impl SessionRuntime {
         match self.service.start_turn(session_id, req).await {
             Ok(result) => Ok(result),
             Err(SessionError::NotFound { .. }) => {
-                // Attempt persisted session recovery: the session may exist in the
-                // store from a previous runtime lifetime.
-                self.try_recover_persisted_session(
+                let Some((recovered, had_live_session)) = self
+                    .recovered_session_build(session_id, &recovery_overrides, false)
+                    .await?
+                else {
+                    return Err(RpcError {
+                        code: error::SESSION_NOT_FOUND,
+                        message: format!("Session not found: {session_id}"),
+                        data: None,
+                    });
+                };
+                if had_live_session {
+                    let _ = self.service.discard_live_session(session_id).await;
+                }
+                self.run_recovered_turn(
                     session_id,
+                    recovered,
                     turn_prompt,
                     event_tx,
-                    keep_alive,
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
@@ -1917,228 +1565,10 @@ impl SessionRuntime {
         }
     }
 
-    /// Restore a pending session from `Promoting` state back to `Staged` after
-    /// an override validation failure. Prevents the session from being stuck in
-    /// the promoting state when the turn is aborted before `create_session`.
-    async fn restore_pending_from_promoting(
-        &self,
-        session_id: &SessionId,
-        build_config: AgentBuildConfig,
-        labels: Option<BTreeMap<String, String>>,
-        deferred_prompt: Option<ContentInput>,
-        created_at_secs: u64,
-        updated_at_secs: u64,
-    ) {
-        let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
-        let mut pending = self.pending.write().await;
-        pending.insert(
-            session_id.clone(),
-            PendingSession {
-                effective_llm_identity,
-                phase: PendingSessionPhase::Staged {
-                    build_config: Box::new(build_config),
-                },
-                labels,
-                deferred_prompt,
-                created_at_secs,
-                updated_at_secs,
-            },
-        );
-    }
-
-    /// Attempt to recover a persisted session that is no longer live.
-    ///
-    /// Mirrors the REST recovery path: load the session from the store, extract
-    /// stored metadata, build an `AgentBuildConfig`, stage as pending, and
-    /// fall through to the normal materialization path.
-    ///
-    /// Returns `SESSION_NOT_FOUND` if the session cannot be recovered.
-    #[allow(clippy::too_many_arguments)]
-    async fn try_recover_persisted_session(
-        &self,
-        session_id: &SessionId,
-        prompt: ContentInput,
-        event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        keep_alive: bool,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
-    ) -> Result<RunResult, RpcError> {
-        let loaded_session = self
-            .service
-            .load_persisted(session_id)
-            .await
-            .map_err(session_error_to_rpc)?;
-
-        let Some(session) = loaded_session else {
-            return Err(RpcError {
-                code: error::SESSION_NOT_FOUND,
-                message: format!("Session not found: {session_id}"),
-                data: None,
-            });
-        };
-        if session_metadata_marks_archived(&session) {
-            return Err(RpcError {
-                code: error::SESSION_NOT_FOUND,
-                message: format!("Session not found: {session_id}"),
-                data: None,
-            });
-        }
-
-        let stored_metadata = session.session_metadata();
-
-        // Build config from stored metadata.
-        let model = stored_metadata
-            .as_ref()
-            .map(|m| m.model.clone())
-            .unwrap_or_else(|| {
-                meerkat_models::default_model("anthropic")
-                    .unwrap_or("claude-sonnet-4-5")
-                    .to_string()
-            });
-        let mut build_config = AgentBuildConfig::new(model);
-        build_config.resume_session = Some(session);
-
-        if let Some(ref meta) = stored_metadata {
-            build_config.provider = Some(meta.provider);
-            build_config.provider_params = meta.provider_params.clone();
-            build_config.max_tokens = Some(meta.max_tokens);
-            build_config.keep_alive = meta.keep_alive;
-            build_config.comms_name = meta.comms_name.clone();
-            build_config.peer_meta = meta.peer_meta.clone();
-            build_config.override_builtins = meta.tooling.builtins.to_override();
-            build_config.override_shell = meta.tooling.shell.to_override();
-            build_config.override_mob = meta.tooling.mob.to_override();
-            build_config.override_memory = meta.tooling.memory.to_override();
-            build_config.preload_skills = meta.tooling.active_skills.clone();
-        }
-
-        // Apply caller-requested keep_alive override unconditionally.
-        // This allows an explicit keep_alive=false to clear a persisted true.
-        build_config.keep_alive = keep_alive;
-
-        // Inject default LLM client if available.
-        if let Some(ref client) = self.default_llm_client {
-            build_config.llm_client_override = Some(client.clone());
-        }
-
-        // Restore callback tools backed by the live registered_tools list.
-        // The dynamic dispatcher picks up tools registered later via
-        // tools/register at each turn boundary (poll_external_updates).
-        if let Some(tx) = self.callback_request_tx() {
-            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                    self.registered_tools(),
-                    tx,
-                    self.callback_id_counter(),
-                    vec![],
-                ));
-            build_config.external_tools = Some(dispatcher);
-        }
-
-        // Stage as pending and re-enter the materialization path.
-        // Labels are managed by the session service — pass None so
-        // CreateSessionRequest.labels is empty and the service preserves
-        // whatever labels were stored with the original session.
-        let labels: Option<BTreeMap<String, String>> = None;
-
-        {
-            let effective_llm_identity = Self::llm_identity_from_pending_build(&build_config);
-            let mut pending = self.pending.write().await;
-            pending.insert(
-                session_id.clone(),
-                PendingSession {
-                    effective_llm_identity,
-                    phase: PendingSessionPhase::Staged {
-                        build_config: Box::new(build_config),
-                    },
-                    labels,
-                    deferred_prompt: None,
-                    created_at_secs: now_unix_secs(),
-                    updated_at_secs: now_unix_secs(),
-                },
-            );
-        }
-
-        // Recursively call start_turn which will now find the pending session.
-        // Use Box::pin to avoid infinite recursion concerns in async.
-        Box::pin(self.start_turn(
-            session_id,
-            prompt,
-            event_tx,
-            skill_references,
-            flow_tool_overlay,
-            additional_instructions,
-            None,
-        ))
-        .await
-    }
-
-    async fn take_promoting_system_context_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
-        let mut pending = self.pending.write().await;
-        let pending_session = pending.swap_remove(session_id)?;
-        match pending_session.phase {
-            PendingSessionPhase::Promoting {
-                starting_system_context_state,
-                current_system_context_state,
-            } => Some((starting_system_context_state, current_system_context_state)),
-            PendingSessionPhase::Staged { build_config } => {
-                pending.insert(
-                    session_id.clone(),
-                    PendingSession {
-                        phase: PendingSessionPhase::Staged { build_config },
-                        effective_llm_identity: pending_session.effective_llm_identity,
-                        labels: pending_session.labels,
-                        deferred_prompt: None,
-                        created_at_secs: pending_session.created_at_secs,
-                        updated_at_secs: pending_session.updated_at_secs,
-                    },
-                );
-                None
-            }
-        }
-    }
-
-    async fn replay_promoted_system_context(
-        &self,
-        session_id: &SessionId,
-        starting_state: &SessionSystemContextState,
-        current_state: &SessionSystemContextState,
-    ) -> Result<(), RpcError> {
-        for pending in &current_state.pending {
-            if starting_state.pending.contains(pending) {
-                continue;
-            }
-            self.service
-                .append_system_context(
-                    session_id,
-                    AppendSystemContextRequest {
-                        text: pending.text.clone(),
-                        source: pending.source.clone(),
-                        idempotency_key: pending.idempotency_key.clone(),
-                    },
-                )
-                .await
-                .map_err(system_context_error_to_rpc)?;
-        }
-        Ok(())
-    }
-
     /// Interrupt a running turn on the given session.
     ///
     /// If the session is idle, this is a no-op.
     pub async fn interrupt(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        // Pending sessions have no running turn.
-        {
-            let pending = self.pending.read().await;
-            if pending.contains_key(session_id) {
-                return Ok(());
-            }
-        }
-
         match self.service.interrupt(session_id).await {
             Ok(()) => Ok(()),
             // The service returns NotRunning when no turn is active — map to no-op.
@@ -2147,50 +1577,12 @@ impl SessionRuntime {
         }
     }
 
-    /// Append runtime system context to a pending, live, or persisted session.
+    /// Append runtime system context to the authoritative session state.
     pub async fn append_system_context(
         &self,
         session_id: &SessionId,
         req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, RpcError> {
-        {
-            let mut pending = self.pending.write().await;
-            if let Some(pending_session) = pending.get_mut(session_id) {
-                let status = match &mut pending_session.phase {
-                    PendingSessionPhase::Staged { build_config } => {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        let mut state = session.system_context_state().unwrap_or_default();
-                        let status = state
-                            .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
-                            .map_err(|err| {
-                                system_context_error_to_rpc(err.into_control_error(session_id))
-                            })?;
-                        session
-                            .set_system_context_state(state)
-                            .map_err(|err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!("failed to serialize system-context state: {err}"),
-                                data: None,
-                            })?;
-                        status
-                    }
-                    PendingSessionPhase::Promoting {
-                        current_system_context_state,
-                        ..
-                    } => current_system_context_state
-                        .stage_append(&req, meerkat_core::time_compat::SystemTime::now())
-                        .map_err(|err| {
-                            system_context_error_to_rpc(err.into_control_error(session_id))
-                        })?,
-                };
-                // Bump updated_at on successful mutation.
-                pending_session.updated_at_secs = now_unix_secs();
-                return Ok(AppendSystemContextResult { status });
-            }
-        }
-
         self.service
             .append_system_context(session_id, req)
             .await
@@ -2199,24 +1591,6 @@ impl SessionRuntime {
 
     /// Get the current state of a session, or `None` if the session does not exist.
     pub async fn session_state(&self, session_id: &SessionId) -> Option<SessionInfo> {
-        // Check pending sessions first.
-        {
-            let pending = self.pending.read().await;
-            if let Some(ps) = pending.get(session_id) {
-                return Some(SessionInfo {
-                    session_id: session_id.clone(),
-                    state: match &ps.phase {
-                        PendingSessionPhase::Staged { .. } => SessionState::Idle,
-                        PendingSessionPhase::Promoting { .. } => SessionState::Running,
-                    },
-                    labels: ps.labels.clone().unwrap_or_default(),
-                });
-            }
-        }
-
-        // Use `list()` instead of `read()` to avoid blocking on a
-        // `ReadSnapshot` command while a turn is in progress. `list()`
-        // reads state from non-blocking watch receivers.
         if let Ok(summaries) = self.service.list(Default::default()).await {
             for summary in summaries {
                 if summary.session_id == *session_id {
@@ -2234,10 +1608,6 @@ impl SessionRuntime {
         }
 
         None
-    }
-
-    pub async fn pending_session_exists(&self, session_id: &SessionId) -> bool {
-        self.pending.read().await.contains_key(session_id)
     }
 
     /// Read the authoritative session view from the owning session service.
@@ -2264,18 +1634,6 @@ impl SessionRuntime {
 
     /// Archive (remove) a session.
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        // Check pending sessions first.
-        {
-            let mut pending = self.pending.write().await;
-            if pending.swap_remove(session_id).is_some() {
-                #[cfg(feature = "mcp")]
-                if let Some(state) = self.mcp_sessions.write().await.remove(session_id) {
-                    state.adapter.shutdown().await;
-                }
-                return Ok(());
-            }
-        }
-
         let result = self
             .service
             .archive(session_id)
@@ -2297,29 +1655,6 @@ impl SessionRuntime {
     pub async fn list_sessions(&self, query: SessionQuery) -> Vec<SessionInfo> {
         let mut result = Vec::new();
 
-        // Include pending sessions as Idle, filtered by labels if requested.
-        {
-            let pending = self.pending.read().await;
-            for (session_id, ps) in pending.iter() {
-                let pending_labels = ps.labels.as_ref();
-                if let Some(ref filter) = query.labels {
-                    let matches = pending_labels
-                        .is_some_and(|pl| filter.iter().all(|(k, v)| pl.get(k) == Some(v)));
-                    if !matches {
-                        continue;
-                    }
-                }
-                result.push(SessionInfo {
-                    session_id: session_id.clone(),
-                    state: match &ps.phase {
-                        PendingSessionPhase::Staged { .. } => SessionState::Idle,
-                        PendingSessionPhase::Promoting { .. } => SessionState::Running,
-                    },
-                    labels: pending_labels.cloned().unwrap_or_default(),
-                });
-            }
-        }
-
         // Include active sessions from the service. The service's `list()`
         // already handles label filtering on materialized sessions.
         if let Ok(summaries) = self.service.list(query).await {
@@ -2340,37 +1675,12 @@ impl SessionRuntime {
         result
     }
 
-    /// List all active sessions as canonical wire summaries, including pending sessions.
+    /// List all active sessions as canonical wire summaries.
     pub async fn list_sessions_rich(
         &self,
         query: SessionQuery,
     ) -> Vec<meerkat_contracts::WireSessionSummary> {
         let mut result = Vec::new();
-
-        // Include pending sessions as synthetic entries.
-        {
-            let pending = self.pending.read().await;
-            for (session_id, ps) in pending.iter() {
-                let pending_labels = ps.labels.as_ref();
-                if let Some(ref filter) = query.labels {
-                    let matches = pending_labels
-                        .is_some_and(|pl| filter.iter().all(|(k, v)| pl.get(k) == Some(v)));
-                    if !matches {
-                        continue;
-                    }
-                }
-                result.push(meerkat_contracts::WireSessionSummary {
-                    session_id: session_id.clone(),
-                    session_ref: None,
-                    created_at: ps.created_at_secs,
-                    updated_at: ps.updated_at_secs,
-                    message_count: 0,
-                    total_tokens: 0,
-                    is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
-                    labels: pending_labels.cloned().unwrap_or_default(),
-                });
-            }
-        }
 
         // Include materialized sessions from the service.
         if let Ok(summaries) = self.service.list(query).await {
@@ -2382,30 +1692,11 @@ impl SessionRuntime {
         result
     }
 
-    /// Read a session as a canonical wire info object, checking pending and materialized.
+    /// Read a session as a canonical wire info object.
     pub async fn read_session_rich(
         &self,
         session_id: &SessionId,
     ) -> Option<meerkat_contracts::WireSessionInfo> {
-        // Check pending sessions first.
-        {
-            let pending = self.pending.read().await;
-            if let Some(ps) = pending.get(session_id) {
-                return Some(meerkat_contracts::WireSessionInfo {
-                    session_id: session_id.clone(),
-                    session_ref: None,
-                    created_at: ps.created_at_secs,
-                    updated_at: ps.updated_at_secs,
-                    message_count: 0,
-                    is_active: matches!(&ps.phase, PendingSessionPhase::Promoting { .. }),
-                    model: ps.effective_llm_identity.model.clone(),
-                    provider: ps.effective_llm_identity.provider.as_str().to_string(),
-                    last_assistant_text: None,
-                    labels: ps.labels.clone().unwrap_or_default(),
-                });
-            }
-        }
-
         // Try list() first — non-blocking (uses watch receivers).
         if let Ok(summaries) = self.service.list(Default::default()).await {
             for summary in summaries {
@@ -2449,27 +1740,12 @@ impl SessionRuntime {
         None
     }
 
-    /// Read a session transcript as canonical wire history, including pending sessions.
+    /// Read a session transcript as canonical wire history.
     pub async fn read_session_history_rich(
         &self,
         session_id: &SessionId,
         query: SessionHistoryQuery,
     ) -> Option<meerkat_contracts::WireSessionHistory> {
-        {
-            let pending = self.pending.read().await;
-            if pending.contains_key(session_id) {
-                return Some(meerkat_contracts::WireSessionHistory {
-                    session_id: session_id.clone(),
-                    session_ref: None,
-                    message_count: 0,
-                    offset: query.offset,
-                    limit: query.limit,
-                    has_more: false,
-                    messages: Vec::new(),
-                });
-            }
-        }
-
         self.service
             .read_history(session_id, query)
             .await
@@ -2503,11 +1779,7 @@ impl SessionRuntime {
 
     /// Shut down the runtime, closing all sessions.
     pub async fn shutdown(&self) {
-        // Clear pending sessions.
-        {
-            let mut pending = self.pending.write().await;
-            pending.clear();
-        }
+        self.shutdown_schedule_host().await;
 
         // Shut down the service.
         self.service.shutdown().await;
@@ -2652,7 +1924,7 @@ impl SessionRuntime {
     }
 
     #[cfg(feature = "mcp")]
-    async fn attach_mcp_adapter_for_pending_session(
+    async fn attach_mcp_adapter_for_session_build(
         &self,
         session_id: SessionId,
         mut build_config: AgentBuildConfig,
@@ -2685,11 +1957,6 @@ impl SessionRuntime {
 
     #[cfg(feature = "mcp")]
     async fn ensure_session_exists(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let pending = self.pending.read().await;
-        if pending.contains_key(session_id) {
-            return Ok(());
-        }
-        drop(pending);
         if self.session_state(session_id).await.is_none() {
             return Err(RpcError {
                 code: error::SESSION_NOT_FOUND,
@@ -2984,6 +2251,78 @@ mod tests {
         }
     }
 
+    /// A controllable mock LLM client that blocks until the test explicitly
+    /// releases the in-flight turn. This makes busy-session assertions
+    /// deterministic instead of time-based.
+    struct BlockingMockLlmClient {
+        started: Arc<std::sync::atomic::AtomicBool>,
+        started_notify: Arc<tokio::sync::Notify>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+        release_notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl BlockingMockLlmClient {
+        fn new() -> Self {
+            Self {
+                started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started_notify: Arc::new(tokio::sync::Notify::new()),
+                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                release_notify: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+
+        async fn wait_started(&self) {
+            while !self.started.load(std::sync::atomic::Ordering::Acquire) {
+                self.started_notify.notified().await;
+            }
+        }
+
+        fn release(&self) {
+            self.released
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.release_notify.notify_waiters();
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for BlockingMockLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let started = Arc::clone(&self.started);
+            let started_notify = Arc::clone(&self.started_notify);
+            let released = Arc::clone(&self.released);
+            let release_notify = Arc::clone(&self.release_notify);
+            Box::pin(async_stream::stream! {
+                started.store(true, std::sync::atomic::Ordering::Release);
+                started_notify.notify_waiters();
+                while !released.load(std::sync::atomic::Ordering::Acquire) {
+                    release_notify.notified().await;
+                }
+                yield Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "Blocked response".to_string(),
+                    meta: None,
+                });
+                yield Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                });
+            })
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -3002,6 +2341,13 @@ mod tests {
     fn slow_build_config(delay_ms: u64) -> AgentBuildConfig {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(SlowMockLlmClient::new(delay_ms))),
+            ..AgentBuildConfig::new("claude-sonnet-4-5")
+        }
+    }
+
+    fn blocking_build_config(client: Arc<BlockingMockLlmClient>) -> AgentBuildConfig {
+        AgentBuildConfig {
+            llm_client_override: Some(client),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
         }
     }
@@ -3114,7 +2460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_system_context_survives_pending_session_promotion() {
+    async fn append_system_context_survives_concurrent_first_turn_materialization() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
@@ -3132,24 +2478,7 @@ mod tests {
                 .await
         });
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            let is_promoting = {
-                let pending = runtime.pending.read().await;
-                matches!(
-                    pending.get(&session_id).map(|ps| &ps.phase),
-                    Some(PendingSessionPhase::Promoting { .. })
-                )
-            };
-            if is_promoting {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "session did not enter the promoting state before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let append_req = AppendSystemContextRequest {
             text: "Coordinate with the orchestrator.".to_string(),
@@ -3176,6 +2505,17 @@ mod tests {
             duplicate.status,
             meerkat_core::AppendSystemContextStatus::Duplicate
         );
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session after concurrent append")
+            .expect("stored session should exist");
+        let state = stored
+            .system_context_state()
+            .expect("concurrent append should persist pending system context");
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].text, "Coordinate with the orchestrator.");
     }
 
     /// 3. Verify state transitions: Idle -> Running -> Idle during a turn.
@@ -3239,9 +2579,14 @@ mod tests {
     async fn start_turn_on_busy_session_fails() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let blocking_client = Arc::new(BlockingMockLlmClient::new());
 
         let session_id = runtime
-            .create_session(slow_build_config(200), None, None)
+            .create_session(
+                blocking_build_config(Arc::clone(&blocking_client)),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -3249,7 +2594,7 @@ mod tests {
         let (event_tx1, _rx1) = mpsc::channel(100);
         let runtime_clone = runtime.clone();
         let sid_clone = session_id.clone();
-        let _turn_handle = tokio::spawn(async move {
+        let turn_handle = tokio::spawn(async move {
             runtime_clone
                 .start_turn(
                     &sid_clone,
@@ -3263,20 +2608,7 @@ mod tests {
                 .await
         });
 
-        // Wait until the first turn is definitely running.
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
-        loop {
-            if runtime.session_state(&session_id).await.map(|i| i.state)
-                == Some(SessionState::Running)
-            {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "session did not enter running state before deadline"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
+        blocking_client.wait_started().await;
 
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);
@@ -3299,6 +2631,13 @@ mod tests {
             error::SESSION_BUSY,
             "Error code should be SESSION_BUSY, got: {}",
             err.code
+        );
+
+        blocking_client.release();
+        let first = turn_handle.await.unwrap().unwrap();
+        assert!(
+            first.text.contains("Blocked response"),
+            "first turn should still complete successfully"
         );
     }
 
@@ -3391,7 +2730,8 @@ mod tests {
             "Archived session should no longer exist"
         );
 
-        // Archiving again should fail
+        // Archiving again should fail because only the durable archived
+        // snapshot remains; the live session authority is gone.
         let result = runtime.archive_session(&session_id).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
@@ -3496,11 +2836,29 @@ mod tests {
         // Shutdown
         runtime.shutdown().await;
 
-        // Both should be gone from the sessions map
-        let sessions = runtime.list_sessions(Default::default()).await;
+        // Live runtime handles should be gone, but durable sessions remain
+        // listable and readable as idle persisted snapshots.
         assert!(
-            sessions.is_empty(),
-            "All sessions should be removed after shutdown"
+            !runtime.service.has_live_session(&s1).await.unwrap(),
+            "shutdown should remove the first live session handle"
+        );
+        assert!(
+            !runtime.service.has_live_session(&s2).await.unwrap(),
+            "shutdown should remove the second live session handle"
+        );
+
+        let sessions = runtime.list_sessions_rich(Default::default()).await;
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.session_id == s1 && !session.is_active),
+            "first session should remain readable as an idle persisted snapshot after shutdown"
+        );
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.session_id == s2 && !session.is_active),
+            "second session should remain readable as an idle persisted snapshot after shutdown"
         );
     }
 
@@ -4201,9 +3559,9 @@ mod tests {
         );
     }
 
-    /// turn/start on a pending session with model override applies it.
+    /// turn/start on a deferred session with model override applies it.
     #[tokio::test]
-    async fn turn_start_on_pending_session_with_model_override() {
+    async fn turn_start_on_deferred_session_with_model_override() {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
@@ -4214,7 +3572,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Start turn with model override on pending session.
+        // Start turn with model override on a deferred first turn.
         let (event_tx, _rx) = mpsc::channel(100);
         let overrides = TurnOverrides {
             model: Some("claude-opus-4-6".to_string()),
@@ -4233,12 +3591,12 @@ mod tests {
             .await;
         assert!(
             result.is_ok(),
-            "model override should succeed on pending session"
+            "model override should succeed on deferred first turn"
         );
     }
 
     #[tokio::test]
-    async fn pending_session_read_reports_effective_llm_identity() {
+    async fn deferred_session_read_reports_effective_llm_identity() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -4250,13 +3608,13 @@ mod tests {
         let info = runtime
             .read_session_rich(&session_id)
             .await
-            .expect("pending session should be readable");
+            .expect("deferred session should be readable");
         assert_eq!(info.model, "claude-sonnet-4-5");
         assert_eq!(info.provider, "anthropic");
     }
 
     #[tokio::test]
-    async fn turn_start_on_pending_session_rejects_provider_only_override() {
+    async fn turn_start_on_deferred_session_rejects_provider_only_override() {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
@@ -4283,7 +3641,7 @@ mod tests {
                 Some(overrides),
             )
             .await
-            .expect_err("provider-only override should be rejected on pending sessions too");
+            .expect_err("provider-only override should be rejected on deferred sessions too");
         assert_eq!(err.code, error::INVALID_PARAMS);
         assert!(
             err.message.contains("provider override requires model"),
@@ -4406,9 +3764,9 @@ mod tests {
         assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
     }
 
-    /// Pending session timestamps are stable across list calls.
+    /// Deferred session timestamps are stable across list calls.
     #[tokio::test]
-    async fn pending_session_timestamps_are_stable() {
+    async fn deferred_session_timestamps_are_stable() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -4435,9 +3793,9 @@ mod tests {
         );
     }
 
-    /// append_system_context on a pending session bumps updated_at.
+    /// append_system_context on a deferred session bumps updated_at.
     #[tokio::test]
-    async fn pending_session_updated_at_advances_on_mutation() {
+    async fn deferred_session_updated_at_advances_on_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -5001,11 +4359,11 @@ mod tests {
 
         let (event_tx, _rx) = mpsc::channel(100);
         let recovered = runtime
-            .try_recover_persisted_session(
+            .start_turn(
                 &session_id,
                 "recover".into(),
                 event_tx,
-                false,
+                None,
                 None,
                 None,
                 None,
@@ -5017,9 +4375,8 @@ mod tests {
             recovered.err()
         );
 
-        // After recovery the session has been promoted out of pending into a
-        // live session.  Verify the recovered run completed with the preserved
-        // hot-swapped identity by reading back the live session metadata.
+        // Verify the recovered run completed with the preserved hot-swapped
+        // identity by reading back the live session metadata.
         let info = runtime
             .read_session_rich(&session_id)
             .await
@@ -5031,12 +4388,96 @@ mod tests {
         );
     }
 
-    /// Regression: start_turn_via_runtime must reject build-only overrides
-    /// (max_tokens, system_prompt, output_schema, structured_output_retries)
-    /// that cannot be applied via RuntimeTurnMetadata. Before the fix these
-    /// were silently dropped.
+    /// Regression: start_turn_via_runtime must rebuild the canonical deferred
+    /// first turn when build-only overrides are supplied, rather than silently
+    /// dropping them.
     #[tokio::test]
-    async fn runtime_turn_rejects_build_only_overrides() {
+    async fn runtime_turn_applies_build_only_overrides_on_deferred_first_turn() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+
+        for (field, overrides) in [
+            (
+                "max_tokens",
+                TurnOverrides {
+                    max_tokens: Some(1024),
+                    ..Default::default()
+                },
+            ),
+            (
+                "system_prompt",
+                TurnOverrides {
+                    system_prompt: Some("override".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "output_schema",
+                TurnOverrides {
+                    output_schema: Some(serde_json::json!({"type": "object"})),
+                    ..Default::default()
+                },
+            ),
+            (
+                "structured_output_retries",
+                TurnOverrides {
+                    structured_output_retries: Some(5),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let session_id = runtime
+                .create_session(mock_build_config(), None, None)
+                .await
+                .unwrap();
+            let (tx, _rx) = mpsc::channel(100);
+            let result = runtime
+                .start_turn_via_runtime(
+                    &session_id,
+                    "test".into(),
+                    tx,
+                    None,
+                    None,
+                    None,
+                    Some(overrides),
+                )
+                .await;
+            assert!(
+                result.is_ok(),
+                "build-only override '{field}' should be honored on the deferred first turn"
+            );
+
+            let stored = runtime
+                .load_persisted_session(&session_id)
+                .await
+                .expect("load persisted session after runtime-routed first turn")
+                .expect("stored session should exist");
+            let metadata = stored
+                .session_metadata()
+                .expect("runtime-routed first turn should persist session metadata");
+            let build_state = stored.build_state().unwrap_or_default();
+
+            match field {
+                "max_tokens" => assert_eq!(metadata.max_tokens, 1024),
+                "system_prompt" => {
+                    assert_eq!(build_state.system_prompt.as_deref(), Some("override"))
+                }
+                "output_schema" => assert!(build_state.output_schema.is_some()),
+                "structured_output_retries" => {
+                    assert_eq!(metadata.structured_output_retries, 5)
+                }
+                _ => unreachable!("unexpected field"),
+            }
+        }
+    }
+
+    /// Once the first deferred turn has started, runtime-routed build-only
+    /// overrides must be rejected because they require a rebuild path that is
+    /// only legal before first-turn consumption.
+    #[tokio::test]
+    async fn runtime_turn_rejects_build_only_overrides_after_first_turn_started() {
         use crate::handlers::turn::TurnOverrides;
 
         let temp = tempfile::tempdir().unwrap();
@@ -5046,6 +4487,20 @@ mod tests {
             .create_session(mock_build_config(), None, None)
             .await
             .unwrap();
+
+        let (first_tx, _first_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "first".into(),
+                first_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("first runtime-routed turn should succeed");
 
         for (field, overrides) in [
             (
@@ -5091,7 +4546,7 @@ mod tests {
                 .await;
             assert!(
                 result.is_err(),
-                "build-only override '{field}' must be rejected on runtime-routed turn"
+                "build-only override '{field}' must be rejected after first-turn consumption"
             );
             let err = result.unwrap_err();
             assert_eq!(
@@ -5100,8 +4555,8 @@ mod tests {
                 "'{field}' rejection must use INVALID_PARAMS"
             );
             assert!(
-                err.message.contains(field),
-                "error message must mention '{field}': {}",
+                err.message.contains("Cannot override"),
+                "error message should explain the deferred first-turn restriction: {}",
                 err.message
             );
         }

@@ -27,6 +27,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -280,13 +281,12 @@ export class MeerkatClient {
   }
 
   async close(): Promise<void> {
+    const child = this.process;
+    this.process = null;
+
     if (this.rl) {
       this.rl.close();
       this.rl = null;
-    }
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
     }
     for (const [, pending] of this.pendingRequests) {
       pending.reject(new MeerkatError("CLIENT_CLOSED", "Client closed"));
@@ -307,6 +307,30 @@ export class MeerkatClient {
       this.pendingStreamRequestId = null;
       this.unmatchedStreamBuffer.clear();
     }
+    this.unmatchedStandaloneStreamBuffer.clear();
+    this.unmatchedStandaloneStreamEnd.clear();
+
+    if (!child) {
+      return;
+    }
+
+    const closePromise = once(child, "close").catch(() => undefined);
+    child.unref();
+    (child.stdin as { unref?: () => void } | null)?.unref?.();
+    (child.stdout as { unref?: () => void } | null)?.unref?.();
+    (child.stderr as { unref?: () => void } | null)?.unref?.();
+    child.stdin?.end();
+    if (!child.killed) {
+      child.kill();
+    }
+    await Promise.race([
+      closePromise,
+      new Promise((resolve) => setTimeout(resolve, 1000)),
+    ]);
+    child.stdin?.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.removeAllListeners();
   }
 
   // -- Session lifecycle --------------------------------------------------
@@ -446,43 +470,62 @@ export class MeerkatClient {
   }
 
   async createSchedule(request: Record<string, unknown>): Promise<ScheduleRecord> {
-    return this.request("schedule/create", request) as Promise<ScheduleRecord>;
+    return (await this.request("schedule/create", request)) as unknown as ScheduleRecord;
   }
 
   async getSchedule(scheduleId: string): Promise<ScheduleRecord> {
-    return this.request("schedule/get", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+    return (await this.request("schedule/get", {
+      schedule_id: scheduleId,
+    })) as unknown as ScheduleRecord;
   }
 
   async listSchedules(): Promise<ScheduleRecord[]> {
     const result = await this.request("schedule/list", {});
-    return ((result.schedules as Array<Record<string, unknown>>) ?? []) as ScheduleRecord[];
+    return (((result.schedules as Array<Record<string, unknown>>) ?? []).map(
+      (schedule) => schedule as unknown as ScheduleRecord,
+    ));
   }
 
   async updateSchedule(
     scheduleId: string,
     update: Record<string, unknown>,
   ): Promise<ScheduleRecord> {
-    return this.request("schedule/update", {
+    return (await this.request("schedule/update", {
       schedule_id: scheduleId,
       ...update,
-    }) as Promise<ScheduleRecord>;
+    })) as unknown as ScheduleRecord;
   }
 
   async pauseSchedule(scheduleId: string): Promise<ScheduleRecord> {
-    return this.request("schedule/pause", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+    return (await this.request("schedule/pause", {
+      schedule_id: scheduleId,
+    })) as unknown as ScheduleRecord;
   }
 
   async resumeSchedule(scheduleId: string): Promise<ScheduleRecord> {
-    return this.request("schedule/resume", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+    return (await this.request("schedule/resume", {
+      schedule_id: scheduleId,
+    })) as unknown as ScheduleRecord;
   }
 
   async deleteSchedule(scheduleId: string): Promise<ScheduleRecord> {
-    return this.request("schedule/delete", { schedule_id: scheduleId }) as Promise<ScheduleRecord>;
+    return (await this.request("schedule/delete", {
+      schedule_id: scheduleId,
+    })) as unknown as ScheduleRecord;
   }
 
   async listScheduleOccurrences(scheduleId: string): Promise<ScheduleOccurrenceRecord[]> {
     const result = await this.request("schedule/occurrences", { schedule_id: scheduleId });
-    return ((result.occurrences as Array<Record<string, unknown>>) ?? []) as ScheduleOccurrenceRecord[];
+    return (((result.occurrences as Array<Record<string, unknown>>) ?? []).map((occurrence) => {
+      const claimedBy = occurrence.claimed_by;
+      if (claimedBy != null && occurrence.lease_owner == null) {
+        return {
+          ...occurrence,
+          lease_owner: claimedBy,
+        } as unknown as ScheduleOccurrenceRecord;
+      }
+      return occurrence as unknown as ScheduleOccurrenceRecord;
+    }));
   }
 
   // -- Capabilities -------------------------------------------------------

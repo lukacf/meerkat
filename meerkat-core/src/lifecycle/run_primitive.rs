@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
 use crate::service::TurnToolOverlay;
+use crate::session::PendingSystemContextAppend;
 use crate::skills::SkillKey;
-use crate::types::{HandlingMode, RenderMetadata};
+use crate::time_compat::SystemTime;
+use crate::types::{ContentBlock, ContentInput, HandlingMode, RenderMetadata, text_content};
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -42,6 +44,44 @@ pub enum CoreRenderable {
     Reference { uri: String, label: Option<String> },
 }
 
+impl CoreRenderable {
+    /// Canonical text projection when a richer renderable crosses a text-only seam.
+    pub fn text_projection(&self) -> String {
+        match self {
+            Self::Text { text } => text.clone(),
+            Self::Blocks { blocks } => text_content(blocks),
+            Self::Json { value } => {
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            }
+            Self::Reference { uri, label } => match label {
+                Some(label) if !label.trim().is_empty() => {
+                    format!("[Reference] {label} ({uri})")
+                }
+                _ => format!("[Reference] {uri}"),
+            },
+        }
+    }
+
+    /// Canonical runtime-backed projection into content blocks.
+    pub fn append_content_blocks(&self, blocks: &mut Vec<ContentBlock>) {
+        match self {
+            Self::Text { text } => blocks.push(ContentBlock::Text { text: text.clone() }),
+            Self::Blocks {
+                blocks: render_blocks,
+            } => blocks.extend(render_blocks.iter().cloned()),
+            Self::Json { .. } | Self::Reference { .. } => blocks.push(ContentBlock::Text {
+                text: self.text_projection(),
+            }),
+        }
+    }
+
+    pub fn to_content_input(&self) -> ContentInput {
+        let mut blocks = Vec::new();
+        self.append_content_blocks(&mut blocks);
+        content_blocks_to_input(blocks)
+    }
+}
+
 /// Which role to append to in the conversation.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,8 +111,19 @@ pub struct ConversationAppend {
 pub struct ConversationContextAppend {
     /// Key for deduplication/replacement.
     pub key: String,
-    /// The context content.
-    pub content: CoreRenderable,
+    /// Canonical text content for runtime system context.
+    pub text: String,
+}
+
+impl ConversationContextAppend {
+    pub fn into_pending_system_context_append(self) -> PendingSystemContextAppend {
+        PendingSystemContextAppend {
+            text: self.text,
+            source: Some(self.key),
+            idempotency_key: None,
+            accepted_at: SystemTime::now(),
+        }
+    }
 }
 
 /// An input staged for application at a run boundary.
@@ -140,6 +191,23 @@ pub enum RunPrimitive {
     ImmediateContextAppend(ConversationContextAppend),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeApplyAction {
+    StartTurn {
+        prompt: ContentInput,
+    },
+    ApplySystemContextOnly {
+        appends: Vec<PendingSystemContextAppend>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeApplyPlan {
+    pub boundary: RunApplyBoundary,
+    pub contributing_input_ids: Vec<InputId>,
+    pub action: RuntimeApplyAction,
+}
+
 impl RunPrimitive {
     /// Get all contributing input IDs (if any).
     pub fn contributing_input_ids(&self) -> &[InputId] {
@@ -154,6 +222,78 @@ impl RunPrimitive {
             RunPrimitive::StagedInput(staged) => staged.turn_metadata.as_ref(),
             RunPrimitive::ImmediateAppend(_) | RunPrimitive::ImmediateContextAppend(_) => None,
         }
+    }
+
+    /// Canonical runtime/session apply seam shared by all transport surfaces.
+    pub fn runtime_apply_plan(&self) -> RuntimeApplyPlan {
+        match self {
+            RunPrimitive::StagedInput(staged) => {
+                let boundary = staged.boundary;
+                let contributing_input_ids = staged.contributing_input_ids.clone();
+                let context_appends = staged
+                    .context_appends
+                    .clone()
+                    .into_iter()
+                    .map(ConversationContextAppend::into_pending_system_context_append)
+                    .collect::<Vec<_>>();
+
+                if staged.appends.is_empty()
+                    && !context_appends.is_empty()
+                    && boundary == RunApplyBoundary::Immediate
+                {
+                    return RuntimeApplyPlan {
+                        boundary,
+                        contributing_input_ids,
+                        action: RuntimeApplyAction::ApplySystemContextOnly {
+                            appends: context_appends,
+                        },
+                    };
+                }
+
+                RuntimeApplyPlan {
+                    boundary,
+                    contributing_input_ids,
+                    action: RuntimeApplyAction::StartTurn {
+                        prompt: conversation_appends_to_content_input(&staged.appends),
+                    },
+                }
+            }
+            RunPrimitive::ImmediateAppend(append) => RuntimeApplyPlan {
+                boundary: RunApplyBoundary::Immediate,
+                contributing_input_ids: Vec::new(),
+                action: RuntimeApplyAction::StartTurn {
+                    prompt: append.content.to_content_input(),
+                },
+            },
+            RunPrimitive::ImmediateContextAppend(append) => RuntimeApplyPlan {
+                boundary: RunApplyBoundary::Immediate,
+                contributing_input_ids: Vec::new(),
+                action: RuntimeApplyAction::ApplySystemContextOnly {
+                    appends: vec![append.clone().into_pending_system_context_append()],
+                },
+            },
+        }
+    }
+}
+
+fn conversation_appends_to_content_input(appends: &[ConversationAppend]) -> ContentInput {
+    let mut blocks = Vec::new();
+    for append in appends {
+        append.content.append_content_blocks(&mut blocks);
+    }
+    content_blocks_to_input(blocks)
+}
+
+fn content_blocks_to_input(blocks: Vec<ContentBlock>) -> ContentInput {
+    if blocks.len() == 1
+        && let ContentBlock::Text { text } = &blocks[0]
+    {
+        return ContentInput::Text(text.clone());
+    }
+    if blocks.is_empty() {
+        ContentInput::Text(String::new())
+    } else {
+        ContentInput::Blocks(blocks)
     }
 }
 
@@ -208,6 +348,17 @@ mod tests {
         assert_eq!(json["type"], "reference");
         let parsed: CoreRenderable = serde_json::from_value(json).unwrap();
         assert_eq!(r, parsed);
+    }
+
+    #[test]
+    fn core_renderable_to_content_input_projects_json_to_text() {
+        let renderable = CoreRenderable::Json {
+            value: serde_json::json!({"hello": "world"}),
+        };
+        match renderable.to_content_input() {
+            ContentInput::Text(text) => assert!(text.contains("\"hello\"")),
+            other => panic!("expected text projection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -311,12 +462,74 @@ mod tests {
     fn conversation_context_append_serde() {
         let ctx = ConversationContextAppend {
             key: "peers".into(),
-            content: CoreRenderable::Json {
-                value: serde_json::json!(["peer1", "peer2"]),
-            },
+            text: "peer1\npeer2".into(),
         };
         let json = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(json["text"], "peer1\npeer2");
         let parsed: ConversationContextAppend = serde_json::from_value(json).unwrap();
         assert_eq!(ctx, parsed);
+    }
+
+    #[test]
+    fn runtime_apply_plan_uses_context_only_action_for_immediate_context_primitive() {
+        let primitive = RunPrimitive::ImmediateContextAppend(ConversationContextAppend {
+            key: "env".into(),
+            text: "linux".into(),
+        });
+        let plan = primitive.runtime_apply_plan();
+        match plan.action {
+            RuntimeApplyAction::ApplySystemContextOnly { appends } => {
+                assert_eq!(appends.len(), 1);
+                assert_eq!(appends[0].text, "linux");
+                assert_eq!(appends[0].source.as_deref(), Some("env"));
+            }
+            other => panic!("expected context-only action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_apply_plan_projects_json_and_reference_prompt_content() {
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: vec![
+                ConversationAppend {
+                    role: ConversationAppendRole::User,
+                    content: CoreRenderable::Json {
+                        value: serde_json::json!({"hello": "world"}),
+                    },
+                },
+                ConversationAppend {
+                    role: ConversationAppendRole::User,
+                    content: CoreRenderable::Reference {
+                        uri: "file:///tmp/a.txt".into(),
+                        label: Some("artifact".into()),
+                    },
+                },
+            ],
+            context_appends: vec![],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: None,
+        });
+
+        let plan = primitive.runtime_apply_plan();
+        match plan.action {
+            RuntimeApplyAction::StartTurn {
+                prompt: ContentInput::Blocks(blocks),
+            } => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[0] {
+                    ContentBlock::Text { text } => assert!(text.contains("\"hello\"")),
+                    other => panic!("expected text block, got {other:?}"),
+                }
+                match &blocks[1] {
+                    ContentBlock::Text { text } => {
+                        assert!(text.contains("artifact"));
+                        assert!(text.contains("file:///tmp/a.txt"));
+                    }
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected start-turn action, got {other:?}"),
+        }
     }
 }

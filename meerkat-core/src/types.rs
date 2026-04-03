@@ -790,7 +790,7 @@ pub struct AssistantMessage {
 }
 
 /// A tool call requested by the model
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolCall {
     /// Unique ID for this tool use (from the model)
@@ -809,7 +809,7 @@ impl ToolCall {
 }
 
 /// Result of executing a tool
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolResult {
     /// Matches the tool_call.id

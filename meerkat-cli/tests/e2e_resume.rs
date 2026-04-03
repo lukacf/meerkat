@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-use meerkat::{Config, SessionId};
-use meerkat_store::{JsonlStore, SessionStore};
+use meerkat::{Config, SessionId, open_realm_persistence_in};
+use meerkat_core::runtime_bootstrap::{default_state_root, derive_workspace_realm_id};
 use tempfile::TempDir;
 
 fn rkat_binary_path() -> Option<PathBuf> {
@@ -91,9 +91,7 @@ async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::E
 
 async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = std::env::var("TEST_PROJECT_DIR")?;
-    let data_dir = std::env::var("TEST_DATA_DIR")?;
     let project_dir = std::path::PathBuf::from(project_dir);
-    let data_dir = std::path::PathBuf::from(data_dir);
 
     // Change to project dir so .rkat is found
     std::env::set_current_dir(&project_dir)?;
@@ -136,26 +134,11 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .ok_or("session_id missing in response")?
         .to_string();
 
-    let output_find = Command::new("find")
-        .arg(&std::env::var("HOME")?)
-        .arg("-name")
-        .arg("*.jsonl")
-        .output()
-        .await?;
-    let find_stdout = String::from_utf8_lossy(&output_find.stdout);
-
-    // Heuristic: pick the directory of the first found session file
-    let store_dir = if let Some(first_file) = find_stdout.lines().next() {
-        std::path::Path::new(first_file)
-            .parent()
-            .ok_or("no parent dir")?
-            .to_path_buf()
-    } else {
-        data_dir.join("meerkat").join("sessions")
-    };
-
-    let store = JsonlStore::new(store_dir);
-    store.init().await?;
+    let state_root = default_state_root();
+    let realm_id = derive_workspace_realm_id(&project_dir);
+    let (_manifest, persistence) =
+        open_realm_persistence_in(&state_root, &realm_id, None, None).await?;
+    let store = persistence.session_store();
     let session = store
         .load(&SessionId::parse(&session_id)?)
         .await?

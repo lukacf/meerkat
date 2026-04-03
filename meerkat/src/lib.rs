@@ -204,14 +204,17 @@ pub use meerkat_client::GeminiClient;
 // Re-export store types (trait + filter + error from core, backend error from meerkat-store)
 pub use meerkat_schedule::{
     CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
-    DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
-    DisabledScheduleStore, IntervalTriggerSpec, MemoryScheduleStore, MisfirePolicy,
-    MissingTargetPolicy, Occurrence, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, Schedule, ScheduleDomainError,
-    ScheduleDriver, ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase,
-    ScheduleRevision, ScheduleService, ScheduleStore as RealmScheduleStore, ScheduleStoreError,
-    ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
-    SessionTargetBinding, TargetBinding, TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest,
+    DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
+    DisabledScheduleStore, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec,
+    MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, MobActionSpec, MobTargetBinding,
+    Occurrence, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceOrdinal,
+    OccurrencePhase, OverlapPolicy, Schedule, ScheduleDomainError, ScheduleDriver,
+    ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision,
+    ScheduleService, ScheduleStore as RealmScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolError, ScheduledMobAction,
+    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
+    TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call, schedule_tools_list,
 };
 pub use meerkat_store::{SessionFilter, SessionStore, SessionStoreError, StoreError};
 

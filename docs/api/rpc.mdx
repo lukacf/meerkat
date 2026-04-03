@@ -6,11 +6,12 @@ icon: "terminal"
 
 Meerkat exposes a JSON-RPC 2.0 stdio interface for IDE integration, desktop apps, and automation tools. Unlike REST and MCP, the RPC server keeps agents alive between turns for fast multi-turn conversations.
 
-The RPC surface is fully runtime-backed:
+The RPC surface uses the canonical split between session lifecycle and
+runtime-owned admission:
 
-- `keep_alive` is runtime/session behavior
-- `session/external_event` queues runtime-backed external work
-- committed success is not rewritten to cancellation
+- `session/create`, `turn/start`, `session/read`, `session/list`, and `session/archive` route through the shared `SessionService`
+- `keep_alive`, `session/external_event`, and `runtime/*` methods use the runtime-backed ingress/control plane
+- deferred first-turn rebuilds come from canonical persisted session state, not surface-local staging
 
 ## Getting started
 

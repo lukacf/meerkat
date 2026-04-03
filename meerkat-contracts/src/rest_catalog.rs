@@ -105,6 +105,20 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             ],
         ),
         RestPathDescriptor::new(
+            "/schedule/tools",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "List MCP-style schedule tools",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/schedule/call",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Invoke an MCP-style schedule tool call",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/schedules/{id}",
             vec![
                 RestOperationDescriptor::new("get", "Get schedule details"),

@@ -70,6 +70,7 @@ fn build_state(
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::new(),
         )),
+        schedule_host: Arc::new(meerkat_rest::ScheduleHostState::default()),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm_id: "test-realm".to_string(),
         instance_id: None,

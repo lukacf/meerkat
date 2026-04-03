@@ -424,9 +424,30 @@ pub struct ExternalEventInput {
 /// Explicit continuation request that asks the runtime to keep draining
 /// ordinary work after a boundary-local event (for example, terminal peer
 /// responses injected into session state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ContinuationKind {
+    /// Compatibility fallback for older serialized continuations without an explicit kind.
+    #[default]
+    LegacyUnspecified,
+    /// Wake after a detached background operation reaches terminal state.
+    DetachedBackgroundOpCompleted,
+    /// Wake after terminal peer-response content has been injected.
+    TerminalPeerResponse,
+    /// Wake after callback tool results have been durably staged for admission.
+    CallbackToolResultsStaged,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuationInput {
     pub header: InputHeader,
+    /// Typed continuation class owned by the runtime layer.
+    #[serde(
+        default,
+        skip_serializing_if = "ContinuationKind::is_legacy_unspecified"
+    )]
+    pub kind: ContinuationKind,
     /// Stable reason for the continuation request.
     pub reason: String,
     /// Ordinary-work handling mode for the continuation.
@@ -438,6 +459,19 @@ pub struct ContinuationInput {
 }
 
 impl ContinuationInput {
+    pub fn canonical_kind(&self) -> ContinuationKind {
+        match self.kind {
+            ContinuationKind::LegacyUnspecified => match self.reason.as_str() {
+                "detached_background_op_completed" => {
+                    ContinuationKind::DetachedBackgroundOpCompleted
+                }
+                "mcp_callback_tool_results" => ContinuationKind::CallbackToolResultsStaged,
+                _ => ContinuationKind::LegacyUnspecified,
+            },
+            kind => kind,
+        }
+    }
+
     /// Build a continuation for waking an idle session after a detached
     /// background operation reaches terminal state.
     ///
@@ -458,6 +492,7 @@ impl ContinuationInput {
                 supersession_key: None,
                 correlation_id: None,
             },
+            kind: ContinuationKind::DetachedBackgroundOpCompleted,
             reason: "detached_background_op_completed".to_string(),
             handling_mode: HandlingMode::Steer,
             request_id: None,
@@ -490,10 +525,41 @@ impl ContinuationInput {
                 supersession_key: None,
                 correlation_id: None,
             },
+            kind: ContinuationKind::TerminalPeerResponse,
             reason: reason.into(),
             handling_mode: HandlingMode::Steer,
             request_id,
         }
+    }
+
+    /// Build the common runtime-owned continuation used after callback tool
+    /// results are durably staged for the next turn seam.
+    pub fn callback_tool_results_staged(reason: impl Into<String>) -> Self {
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Ephemeral,
+                visibility: InputVisibility {
+                    transcript_eligible: false,
+                    operator_eligible: false,
+                },
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            kind: ContinuationKind::CallbackToolResultsStaged,
+            reason: reason.into(),
+            handling_mode: HandlingMode::Steer,
+            request_id: None,
+        }
+    }
+}
+
+impl ContinuationKind {
+    fn is_legacy_unspecified(&self) -> bool {
+        matches!(self, Self::LegacyUnspecified)
     }
 }
 
@@ -704,6 +770,10 @@ mod tests {
             Input::Continuation(continuation) => {
                 assert_eq!(continuation.request_id.as_deref(), Some("req-1"));
                 assert_eq!(continuation.handling_mode, HandlingMode::Steer);
+                assert_eq!(
+                    continuation.canonical_kind(),
+                    ContinuationKind::TerminalPeerResponse
+                );
             }
             other => panic!("Expected Continuation, got {other:?}"),
         }
@@ -721,6 +791,26 @@ mod tests {
         match parsed {
             Input::Continuation(continuation) => {
                 assert_eq!(continuation.request_id.as_deref(), Some("req-legacy"));
+                assert_eq!(
+                    continuation.canonical_kind(),
+                    ContinuationKind::TerminalPeerResponse
+                );
+            }
+            other => panic!("Expected Continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn callback_tool_results_continuation_uses_typed_kind() {
+        let input = Input::Continuation(ContinuationInput::callback_tool_results_staged(
+            "mcp_callback_tool_results",
+        ));
+        match input {
+            Input::Continuation(continuation) => {
+                assert_eq!(
+                    continuation.canonical_kind(),
+                    ContinuationKind::CallbackToolResultsStaged
+                );
             }
             other => panic!("Expected Continuation, got {other:?}"),
         }
@@ -795,6 +885,7 @@ mod tests {
 
         let continuation = Input::Continuation(ContinuationInput {
             header: make_header(),
+            kind: ContinuationKind::LegacyUnspecified,
             reason: "continue".into(),
             handling_mode: HandlingMode::Steer,
             request_id: None,

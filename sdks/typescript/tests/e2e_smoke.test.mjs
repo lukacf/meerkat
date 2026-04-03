@@ -2,7 +2,7 @@
  * Live smoke tests for the TypeScript SDK against a real rkat-rpc runtime.
  */
 
-import { afterEach, before, describe, it } from "node:test";
+import { after, afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync } from "node:fs";
@@ -101,6 +101,17 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
     );
   });
 
+  after(() => {
+    for (const handle of process._getActiveHandles()) {
+      if (handle === process.stdin || handle === process.stdout || handle === process.stderr) {
+        continue;
+      }
+      handle.unref?.();
+      handle.destroy?.();
+    }
+    setTimeout(() => process.exit(0), 100);
+  });
+
   async function connectClient(options = {}) {
     const client = new MeerkatClient(binaryPath);
     clients.push(client);
@@ -164,7 +175,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const client = await connectClient({ isolated: true });
 
       const deferred = await client.createDeferredSession(
-        "Remember the codeword ORBIT-7 for later.",
+        "The secret codeword is ORBIT-7. Keep it in mind for the next user turn.",
         {
           model: anthropicModel(),
           provider: "anthropic",
@@ -173,17 +184,20 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
 
       const injected = await client.request("session/inject_context", {
         session_id: deferred.id,
-        text: "Always include the marker [TS-SDK-CTX] in your replies.",
+        text: "The TypeScript smoke marker is [TS-SDK-CTX]. If asked for the TypeScript smoke marker, return exactly that marker.",
         source: "typescript-smoke",
       });
       assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(injected.status)));
 
       const first = await deferred.startTurn(
-        "What is the codeword? Include any markers you were told about.",
+        "What is the secret codeword? Reply in the exact format CODEWORD=<codeword>; MARKER=<TypeScript smoke marker>.",
       );
       const firstTextLower = first.text.toLowerCase();
       assert.ok(firstTextLower.includes("orbit-7") || firstTextLower.includes("orbit 7"));
-      assert.ok(firstTextLower.includes("ts-sdk-ctx"));
+      assert.ok(
+        firstTextLower.includes("ts-sdk-ctx"),
+        `expected injected marker in first reply, got: ${first.text}`,
+      );
 
       const stream = client._startTurnStreaming(
         deferred.id,

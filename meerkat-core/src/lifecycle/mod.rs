@@ -26,6 +26,6 @@ pub use run_control::RunControlCommand;
 pub use run_event::RunEvent;
 pub use run_primitive::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
-    RunApplyBoundary, RunPrimitive, StagedRunInput,
+    RunApplyBoundary, RunPrimitive, RuntimeApplyAction, RuntimeApplyPlan, StagedRunInput,
 };
 pub use run_receipt::RunBoundaryReceipt;

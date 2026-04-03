@@ -3,21 +3,32 @@
 #[path = "../../test-fixtures/live_smoke/support.rs"]
 mod live_smoke;
 
+use chrono::{Duration as ChronoDuration, Utc};
+use meerkat::{
+    CreateScheduleRequest, IntervalTriggerSpec, MisfirePolicy, MissingTargetPolicy, OverlapPolicy,
+    Schedule, ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding,
+    TargetBinding, TriggerSpec,
+};
+#[cfg(feature = "mob")]
+use meerkat::{HelperOptionsSpec, MobTargetBinding};
 use meerkat_client::AnthropicClient;
 use meerkat_client::LlmClient;
 use meerkat_core::{ContextConfig, McpServerConfig, RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_mcp::McpConnection;
 use meerkat_mcp_server::{MeerkatMcpState, handle_tools_call, tools_list};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, sleep};
 
 const MCP_REALM_ID: &str = "mcp-live-smoke";
 
@@ -95,6 +106,188 @@ fn run_text(payload: &Value) -> String {
         .to_string()
 }
 
+async fn tool_call_payload(
+    host: &StreamableHttpHost,
+    id: u64,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let response = host
+        .json_rpc_request(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+            }
+        }))
+        .await;
+    normalize_http_tool_result(&response["result"])
+}
+
+async fn wait_for_occurrences(
+    host: &StreamableHttpHost,
+    schedule_id: &str,
+    completed_count: usize,
+    next_id: &mut u64,
+) -> Vec<meerkat::Occurrence> {
+    let mut last_seen = Vec::new();
+    for _ in 0..80 {
+        let payload = tool_call_payload(
+            host,
+            *next_id,
+            "meerkat_schedule_occurrences",
+            json!({ "schedule_id": schedule_id }),
+        )
+        .await;
+        *next_id += 1;
+        let occurrences: Vec<meerkat::Occurrence> =
+            serde_json::from_value(payload["occurrences"].clone())
+                .expect("occurrences should decode");
+        last_seen = occurrences.clone();
+        if occurrences
+            .iter()
+            .filter(|occurrence| occurrence.phase == meerkat::OccurrencePhase::Completed)
+            .count()
+            >= completed_count
+        {
+            return occurrences;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    panic!(
+        "timed out waiting for schedule {schedule_id} to complete {completed_count} occurrences; last seen: {last_seen:?}"
+    );
+}
+
+async fn wait_for_terminal_failure(
+    host: &StreamableHttpHost,
+    schedule_id: &str,
+    next_id: &mut u64,
+    expected_failure: meerkat::OccurrenceFailureClass,
+) -> Vec<meerkat::Occurrence> {
+    let mut last_seen = Vec::new();
+    for _ in 0..80 {
+        let payload = tool_call_payload(
+            host,
+            *next_id,
+            "meerkat_schedule_occurrences",
+            json!({ "schedule_id": schedule_id }),
+        )
+        .await;
+        *next_id += 1;
+        let occurrences: Vec<meerkat::Occurrence> =
+            serde_json::from_value(payload["occurrences"].clone())
+                .expect("occurrences should decode");
+        last_seen = occurrences.clone();
+        if occurrences.iter().any(|occurrence| {
+            occurrence.phase == meerkat::OccurrencePhase::DeliveryFailed
+                && occurrence.failure_class == Some(expected_failure)
+        }) {
+            return occurrences;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    panic!(
+        "timed out waiting for schedule {schedule_id} to fail as {expected_failure:?}; last seen: {last_seen:?}"
+    );
+}
+
+fn exact_session_prompt_target(session_id: &str, marker: &str) -> TargetBinding {
+    TargetBinding::Session(SessionTargetBinding::ExactSession {
+        session_id: meerkat::SessionId::parse(session_id).expect("session id should parse"),
+        action: ScheduledSessionAction::Prompt {
+            prompt: format!("Remember the scheduled marker {marker}.").into(),
+            system_prompt: None,
+            render_metadata: None,
+            skill_references: Vec::new(),
+            additional_instructions: Vec::new(),
+        },
+    })
+}
+
+fn materialize_prompt_target(model: &str, marker: &str) -> TargetBinding {
+    TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
+        create: SessionMaterializationSpec {
+            model: model.to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema_json: None,
+            structured_output_retries: 0,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: BTreeMap::new(),
+            preload_skills: Vec::new(),
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            keep_alive: false,
+            app_context: None,
+        },
+        action: ScheduledSessionAction::Prompt {
+            prompt: format!("Remember the scheduled marker {marker}.").into(),
+            system_prompt: None,
+            render_metadata: None,
+            skill_references: Vec::new(),
+            additional_instructions: Vec::new(),
+        },
+        bound_session_id: None,
+    })
+}
+
+fn invalid_materialize_target(model: &str) -> TargetBinding {
+    TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
+        create: SessionMaterializationSpec {
+            model: model.to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema_json: None,
+            structured_output_retries: 0,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: BTreeMap::new(),
+            preload_skills: Vec::new(),
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            // Force a build-time materialization failure at the canonical
+            // session build seam instead of relying on model/provider inference.
+            keep_alive: true,
+            app_context: None,
+        },
+        action: ScheduledSessionAction::Prompt {
+            prompt: "Trigger a materialization failure.".into(),
+            system_prompt: None,
+            render_metadata: None,
+            skill_references: Vec::new(),
+            additional_instructions: Vec::new(),
+        },
+        bound_session_id: None,
+    })
+}
+
+#[cfg(feature = "mob")]
+fn mob_helper_target(mob_id: &str, member_id: &str, marker: &str) -> TargetBinding {
+    TargetBinding::Mob(MobTargetBinding::SpawnHelper {
+        mob_id: mob_id.to_string(),
+        member_id: member_id.to_string(),
+        prompt: format!("Say the marker {marker} and stop."),
+        options: HelperOptionsSpec {
+            profile_name: Some("worker".into()),
+            ..Default::default()
+        },
+    })
+}
+
 struct StreamableHttpHost {
     addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -108,6 +301,22 @@ impl StreamableHttpHost {
                 .await
                 .expect("mcp state should initialize"),
         );
+        Self::spawn_with_state(state).await
+    }
+
+    async fn spawn_test_client(root: &Path, instance_id: &str) -> Self {
+        let state = Arc::new(
+            MeerkatMcpState::new_with_bootstrap_and_test_client(
+                mcp_bootstrap(root, instance_id),
+                true,
+            )
+            .await
+            .expect("mcp state with test client should initialize"),
+        );
+        Self::spawn_with_state(state).await
+    }
+
+    async fn spawn_with_state(state: Arc<MeerkatMcpState>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
@@ -444,6 +653,451 @@ async fn read_http_response(socket: &mut TcpStream) -> io::Result<(u16, Vec<u8>)
         status,
         buffer[body_start..body_start + content_length].to_vec(),
     ))
+}
+
+#[tokio::test]
+async fn mcp_schedule_tools_cover_full_schedule_lifecycle_over_http() {
+    let root = TempDir::new().expect("tempdir should create");
+    let host = StreamableHttpHost::spawn_test_client(root.path(), "mcp-schedule-tools").await;
+    let _ = host.initialize_handshake().await;
+
+    let tools = host
+        .json_rpc_request(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .await;
+    assert!(
+        tools["result"]["tools"].as_array().is_some_and(|rows| rows
+            .iter()
+            .any(|row| row["name"] == "meerkat_schedule_create")),
+        "tools/list should advertise schedule create"
+    );
+
+    let create_request = CreateScheduleRequest {
+        name: Some("mcp-tool-schedule".into()),
+        description: Some("mcp schedule tool smoke".into()),
+        trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+            start_at_utc: Utc::now() + ChronoDuration::minutes(5),
+            every_seconds: 300,
+            end_at_utc: None,
+        }),
+        target: exact_session_prompt_target(&meerkat::SessionId::new().to_string(), "MCP-TOOLS"),
+        misfire_policy: MisfirePolicy::Skip,
+        overlap_policy: OverlapPolicy::SkipIfRunning,
+        missing_target_policy: MissingTargetPolicy::MarkMisfired,
+        labels: BTreeMap::new(),
+        planning_horizon_days: Some(1),
+        planning_horizon_occurrences: Some(2),
+    };
+
+    let created: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            3,
+            "meerkat_schedule_create",
+            serde_json::to_value(create_request).expect("request should serialize"),
+        )
+        .await,
+    )
+    .expect("schedule create should decode");
+
+    let fetched: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            4,
+            "meerkat_schedule_get",
+            json!({ "schedule_id": created.schedule_id }),
+        )
+        .await,
+    )
+    .expect("schedule get should decode");
+    assert_eq!(fetched.schedule_id, created.schedule_id);
+
+    let listed = tool_call_payload(&host, 5, "meerkat_schedule_list", json!({})).await;
+    assert!(
+        listed["schedules"].as_array().is_some_and(|rows| rows
+            .iter()
+            .any(|row| row["schedule_id"] == created.schedule_id.to_string())),
+        "schedule list should include created schedule"
+    );
+
+    let occurrences = tool_call_payload(
+        &host,
+        6,
+        "meerkat_schedule_occurrences",
+        json!({ "schedule_id": created.schedule_id }),
+    )
+    .await;
+    assert!(
+        occurrences["occurrences"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "schedule occurrences should return planned rows"
+    );
+
+    let updated: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            7,
+            "meerkat_schedule_update",
+            json!({
+                "schedule_id": created.schedule_id,
+                "name": "mcp-tool-schedule-updated",
+                "planning_horizon_occurrences": 3
+            }),
+        )
+        .await,
+    )
+    .expect("schedule update should decode");
+    assert_eq!(updated.name.as_deref(), Some("mcp-tool-schedule-updated"));
+    assert_eq!(updated.planning_horizon_occurrences, 3);
+
+    let paused: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            8,
+            "meerkat_schedule_pause",
+            json!({ "schedule_id": created.schedule_id }),
+        )
+        .await,
+    )
+    .expect("schedule pause should decode");
+    assert_eq!(paused.phase, meerkat::SchedulePhase::Paused);
+
+    let resumed: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            9,
+            "meerkat_schedule_resume",
+            json!({ "schedule_id": created.schedule_id }),
+        )
+        .await,
+    )
+    .expect("schedule resume should decode");
+    assert_eq!(resumed.phase, meerkat::SchedulePhase::Active);
+
+    let deleted: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            10,
+            "meerkat_schedule_delete",
+            json!({ "schedule_id": created.schedule_id }),
+        )
+        .await,
+    )
+    .expect("schedule delete should decode");
+    assert_eq!(deleted.phase, meerkat::SchedulePhase::Deleted);
+
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_schedule_exact_session_prompt_is_delivered_end_to_end_over_http() {
+    let root = TempDir::new().expect("tempdir should create");
+    let host = StreamableHttpHost::spawn_test_client(root.path(), "mcp-schedule-exact").await;
+    let _ = host.initialize_handshake().await;
+
+    let created = tool_call_payload(
+        &host,
+        2,
+        "meerkat_run",
+        json!({
+            "prompt": "Seed a session for MCP schedule delivery.",
+            "model": "claude-sonnet-4-6"
+        }),
+    )
+    .await;
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("meerkat_run should return session_id")
+        .to_string();
+
+    let marker = "MCP-SCHEDULE-EXACT";
+    let schedule: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            3,
+            "meerkat_schedule_create",
+            serde_json::to_value(CreateScheduleRequest {
+                name: Some("mcp-exact".into()),
+                description: Some("mcp exact-session delivery smoke".into()),
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: exact_session_prompt_target(&session_id, marker),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .expect("schedule request should serialize"),
+        )
+        .await,
+    )
+    .expect("schedule create should decode");
+
+    let mut next_id = 4;
+    let occurrences =
+        wait_for_occurrences(&host, &schedule.schedule_id.to_string(), 1, &mut next_id).await;
+    let completed: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.phase == meerkat::OccurrencePhase::Completed)
+        .collect();
+    assert_eq!(completed.len(), 1, "expected one completed occurrence");
+
+    let history = tool_call_payload(
+        &host,
+        next_id,
+        "meerkat_history",
+        json!({ "session_id": session_id }),
+    )
+    .await;
+    let history_text = serde_json::to_string(&history).expect("history should serialize");
+    assert!(
+        history_text.contains(marker),
+        "scheduled prompt marker should appear in session history: {history_text}"
+    );
+    assert!(
+        history["message_count"].as_u64().unwrap_or_default() >= 4,
+        "scheduled prompt should append a prompt/response pair: {history}"
+    );
+
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_schedule_materialized_session_binds_and_reuses_over_http() {
+    let root = TempDir::new().expect("tempdir should create");
+    let host = StreamableHttpHost::spawn_test_client(root.path(), "mcp-schedule-materialize").await;
+    let _ = host.initialize_handshake().await;
+
+    let marker = "MCP-SCHEDULE-MATERIALIZE";
+    let interval_start = Utc::now() + ChronoDuration::seconds(1);
+    let schedule: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            2,
+            "meerkat_schedule_create",
+            serde_json::to_value(CreateScheduleRequest {
+                name: Some("mcp-materialize".into()),
+                description: Some("mcp materialize-on-demand delivery smoke".into()),
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: interval_start,
+                    every_seconds: 1,
+                    end_at_utc: Some(interval_start + ChronoDuration::seconds(1)),
+                }),
+                target: materialize_prompt_target("claude-sonnet-4-6", marker),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(2),
+            })
+            .expect("schedule request should serialize"),
+        )
+        .await,
+    )
+    .expect("schedule create should decode");
+
+    let mut next_id = 3;
+    let occurrences =
+        wait_for_occurrences(&host, &schedule.schedule_id.to_string(), 2, &mut next_id).await;
+    let completed: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.phase == meerkat::OccurrencePhase::Completed)
+        .collect();
+    assert_eq!(completed.len(), 2, "expected two completed occurrences");
+
+    let bound_schedule: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            next_id,
+            "meerkat_schedule_get",
+            json!({ "schedule_id": schedule.schedule_id }),
+        )
+        .await,
+    )
+    .expect("schedule get should decode");
+    let bound_session_id = match bound_schedule.target {
+        TargetBinding::Session(SessionTargetBinding::MaterializeOnDemandSession {
+            bound_session_id: Some(session_id),
+            ..
+        }) => session_id,
+        other => panic!("expected bound materialized session target, got {other:?}"),
+    };
+    next_id += 1;
+
+    for occurrence in &completed {
+        let materialized = occurrence
+            .last_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.materialized_session_id.as_ref());
+        assert_eq!(
+            materialized,
+            Some(&bound_session_id),
+            "completed occurrence should record the bound session id"
+        );
+    }
+
+    let history = tool_call_payload(
+        &host,
+        next_id,
+        "meerkat_history",
+        json!({ "session_id": bound_session_id }),
+    )
+    .await;
+    let history_text = serde_json::to_string(&history).expect("history should serialize");
+    assert!(
+        history_text.contains(marker),
+        "materialized session history should include scheduled marker: {history_text}"
+    );
+    assert!(
+        history["message_count"].as_u64().unwrap_or_default() >= 4,
+        "two scheduled prompts should reuse one materialized session: {history}"
+    );
+
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_schedule_materialization_failure_is_classified_over_http() {
+    let root = TempDir::new().expect("tempdir should create");
+    let host = StreamableHttpHost::spawn_test_client(root.path(), "mcp-schedule-failure").await;
+    let _ = host.initialize_handshake().await;
+
+    let schedule: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            2,
+            "meerkat_schedule_create",
+            serde_json::to_value(CreateScheduleRequest {
+                name: Some("mcp-materialize-failure".into()),
+                description: Some("mcp target materialization failure smoke".into()),
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: invalid_materialize_target("claude-sonnet-4-6"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .expect("schedule request should serialize"),
+        )
+        .await,
+    )
+    .expect("schedule create should decode");
+
+    let mut next_id = 3;
+    let occurrences = wait_for_terminal_failure(
+        &host,
+        &schedule.schedule_id.to_string(),
+        &mut next_id,
+        meerkat::OccurrenceFailureClass::TargetMaterializationFailed,
+    )
+    .await;
+    assert!(
+        occurrences.iter().any(|occurrence| {
+            occurrence.phase == meerkat::OccurrencePhase::DeliveryFailed
+                && occurrence.failure_class
+                    == Some(meerkat::OccurrenceFailureClass::TargetMaterializationFailed)
+        }),
+        "one occurrence should be terminalized as TargetMaterializationFailed"
+    );
+
+    host.shutdown().await;
+}
+
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mcp_schedule_mob_helper_action_is_delivered_end_to_end_over_http() {
+    let root = TempDir::new().expect("tempdir should create");
+    let host = StreamableHttpHost::spawn_test_client(root.path(), "mcp-schedule-mob").await;
+    let _ = host.initialize_handshake().await;
+
+    let created_mob = tool_call_payload(
+        &host,
+        2,
+        "mob_create",
+        json!({
+            "definition": {
+                "id": "scheduled_mcp_mob",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": { "comms": true }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let mob_id = created_mob["mob_id"]
+        .as_str()
+        .expect("mob_create should return mob_id")
+        .to_string();
+
+    let marker = "MCP-SCHEDULE-MOB-HELPER";
+    let schedule: Schedule = serde_json::from_value(
+        tool_call_payload(
+            &host,
+            3,
+            "meerkat_schedule_create",
+            serde_json::to_value(CreateScheduleRequest {
+                name: Some("mcp-mob-helper".into()),
+                description: Some("mcp scheduled mob helper delivery smoke".into()),
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - ChronoDuration::seconds(1),
+                },
+                target: mob_helper_target(&mob_id, "helper-1", marker),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .expect("schedule request should serialize"),
+        )
+        .await,
+    )
+    .expect("schedule create should decode");
+
+    let mut next_id = 4;
+    let occurrences =
+        wait_for_occurrences(&host, &schedule.schedule_id.to_string(), 1, &mut next_id).await;
+    let completed: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.phase == meerkat::OccurrencePhase::Completed)
+        .collect();
+    assert_eq!(completed.len(), 1, "expected one completed occurrence");
+
+    let events = tool_call_payload(
+        &host,
+        next_id,
+        "mob_events",
+        json!({
+            "mob_id": mob_id,
+            "after_cursor": 0,
+            "limit": 100,
+        }),
+    )
+    .await;
+    let history_text = serde_json::to_string(&events).expect("mob events should serialize");
+    assert!(
+        history_text.contains("helper-1"),
+        "scheduled mob helper action should appear in mob events: {history_text}"
+    );
+
+    host.shutdown().await;
 }
 
 #[tokio::test]

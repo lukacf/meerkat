@@ -213,6 +213,9 @@ pub struct AgentBuildConfig {
     pub provider_params: Option<serde_json::Value>,
     /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Serializable tool definitions that can rebuild recoverable
+    /// surface-owned dispatchers after persistence or runtime restart.
+    pub recoverable_tool_defs: Option<Vec<meerkat_core::ToolDef>>,
     /// Optional blob store override used for image externalization/hydration.
     pub blob_store_override: Option<Arc<dyn BlobStore>>,
     /// Canonical async-op registry for the owning session.
@@ -329,6 +332,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("llm_client_override", &self.llm_client_override.is_some())
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
+            .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field(
                 "ops_lifecycle_override",
@@ -387,6 +391,7 @@ impl AgentBuildConfig {
             llm_client_override: None,
             provider_params: None,
             external_tools: None,
+            recoverable_tool_defs: None,
             blob_store_override: None,
             ops_lifecycle_override: None,
             override_builtins: None,
@@ -442,6 +447,7 @@ impl AgentBuildConfig {
         self.budget_limits = build.budget_limits.clone();
         self.provider_params = build.provider_params.clone();
         self.external_tools = build.external_tools.clone();
+        self.recoverable_tool_defs = build.recoverable_tool_defs.clone();
         self.blob_store_override = build.blob_store_override.clone();
         self.llm_client_override = build
             .llm_client_override
@@ -458,6 +464,7 @@ impl AgentBuildConfig {
         self.instance_id = build.instance_id.clone();
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
+        self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
@@ -482,6 +489,7 @@ impl AgentBuildConfig {
             budget_limits: self.budget_limits.clone(),
             provider_params: self.provider_params.clone(),
             external_tools: self.external_tools.clone(),
+            recoverable_tool_defs: self.recoverable_tool_defs.clone(),
             blob_store_override: self.blob_store_override.clone(),
             llm_client_override: self
                 .llm_client_override
@@ -1167,13 +1175,21 @@ impl AgentFactory {
         let provider = match build_config.provider {
             Some(p) => p,
             None => {
-                let inferred = ProviderResolver::infer_from_model(&build_config.model);
-                if inferred == Provider::Other {
-                    return Err(BuildAgentError::UnknownProvider {
-                        model: build_config.model.clone(),
-                    });
+                if let Some(client) = build_config.llm_client_override.as_ref() {
+                    // An explicit override is the authoritative execution transport.
+                    // When the model string is synthetic (for example tests or
+                    // surface-owned mock clients), carry provider metadata from
+                    // the bound client instead of rejecting the build.
+                    Provider::from_name(client.provider())
+                } else {
+                    let inferred = ProviderResolver::infer_from_model(&build_config.model);
+                    if inferred == Provider::Other {
+                        return Err(BuildAgentError::UnknownProvider {
+                            model: build_config.model.clone(),
+                        });
+                    }
+                    inferred
                 }
-                inferred
             }
         };
 
@@ -1265,6 +1281,7 @@ impl AgentFactory {
         let skill_engine: Option<Arc<meerkat_core::skills::SkillRuntime>> = None;
 
         // 6b. Build tool dispatcher (with optional external tools, per-build overrides, skill tools)
+        let persisted_system_prompt = build_config.system_prompt.clone();
         let per_request_prompt = build_config.system_prompt.take();
         let effective_builtins = build_config
             .override_builtins
@@ -1802,6 +1819,23 @@ impl AgentFactory {
             }
         }
 
+        let persisted_build_state = meerkat_core::SessionBuildState {
+            system_prompt: persisted_system_prompt,
+            output_schema: build_config.output_schema.clone(),
+            hooks_override: build_config.hooks_override.clone(),
+            budget_limits: build_config.budget_limits.clone(),
+            recoverable_tool_defs: build_config
+                .recoverable_tool_defs
+                .clone()
+                .unwrap_or_default(),
+            silent_comms_intents: build_config.silent_comms_intents.clone(),
+            max_inline_peer_notifications: build_config.max_inline_peer_notifications,
+            app_context: build_config.app_context.clone(),
+            additional_instructions: build_config.additional_instructions.clone(),
+            shell_env: build_config.shell_env.clone(),
+            call_timeout_override: build_config.call_timeout_override.clone(),
+        };
+
         // 12. Build AgentBuilder
         let budget_limits = build_config
             .budget_limits
@@ -1959,6 +1993,7 @@ impl AgentFactory {
             metadata.tooling.mob = ToolCategoryOverride::from_override(build_config.override_mob);
             metadata.tooling.memory =
                 ToolCategoryOverride::from_override(build_config.override_memory);
+            metadata.tooling.active_skills = active_skill_ids;
             metadata.keep_alive = build_config.keep_alive;
             metadata.comms_name = build_config.comms_name;
             metadata.peer_meta = build_config.peer_meta;
@@ -1993,6 +2028,9 @@ impl AgentFactory {
         };
         if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
             tracing::warn!("Failed to store session metadata: {}", err);
+        }
+        if let Err(err) = agent.session_mut().set_build_state(persisted_build_state) {
+            tracing::warn!("Failed to store session build state: {}", err);
         }
 
         Ok(agent)

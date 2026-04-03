@@ -604,6 +604,7 @@ fn keep_alive_req(comms_name: &str) -> CreateSessionRequest {
         event_tx: None,
         skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(SessionBuildOptions {
             comms_name: Some(comms_name.to_string()),
             ..Default::default()

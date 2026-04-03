@@ -32,7 +32,9 @@ The `meerkat-mcp-server` crate exposes Meerkat as MCP tools that other clients c
 their execution path is runtime-backed: `meerkat_run` allocates a session
 through the shared session service and waits for that admitted turn to finish,
 and `meerkat_resume` re-enters the same `session_id` instead of starting a
-second surface-local execution loop.
+second surface-local execution loop. Callback tool results are staged through
+the canonical session/runtime seam before resume admission; MCP does not patch
+the transcript directly.
 
 | Tool | Description |
 |------|-------------|

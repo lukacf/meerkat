@@ -244,6 +244,9 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     );
     assert_eq!(turn["status"], "completed");
     assert_eq!(turn["session_id"], session_id);
+    assert!(turn["run_id"].is_string());
+    assert!(turn["input_id"].is_string());
+    assert_eq!(turn["deduplicated"], false);
     assert!(turn["tool_calls"].as_u64().unwrap_or_default() >= 1);
     assert_eq!(turn["text"], "browser tool contract ok");
 

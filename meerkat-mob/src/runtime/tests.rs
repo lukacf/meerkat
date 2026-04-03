@@ -1358,6 +1358,7 @@ impl MobSessionService for MockSessionService {
             },
             session_snapshot: None,
             run_result: None,
+            terminal: None,
         })
     }
 
@@ -4971,6 +4972,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
             }),
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
         })
         .await
@@ -5822,6 +5824,7 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
             }),
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
         })
         .await
@@ -5945,6 +5948,7 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
             }),
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
         })
         .await
@@ -13217,6 +13221,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             },
             session_snapshot: None,
             run_result: None,
+            terminal: None,
         })
     }
 

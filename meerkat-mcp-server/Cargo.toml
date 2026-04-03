@@ -38,11 +38,15 @@ tracing = { workspace = true }
 schemars = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
 
 [features]
 default = ["comms"]
 comms = ["meerkat/comms", "dep:meerkat-comms"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "meerkat-runtime", "rmcp"]  # feature-gated / optional

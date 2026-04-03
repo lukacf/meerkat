@@ -201,6 +201,11 @@ impl ScheduleDriver {
         occurrence: Occurrence,
         store_now_utc: chrono::DateTime<Utc>,
     ) -> Result<bool, ScheduleDomainError> {
+        let mut occurrence = self
+            .service
+            .sync_occurrence_target_with_schedule(occurrence)
+            .await?;
+
         match self.probe.probe_target(&occurrence).await? {
             TargetProbeOutcome::Ready => {}
             TargetProbeOutcome::Busy { detail } => {
@@ -215,6 +220,7 @@ impl ScheduleDriver {
                             at_utc: store_now_utc,
                         },
                         DeliveryReceiptStage::Skipped,
+                        None,
                     )
                     .await?;
                     return Ok(true);
@@ -241,7 +247,7 @@ impl ScheduleDriver {
                     OccurrenceLifecycleInput::Skip { .. } => DeliveryReceiptStage::Skipped,
                     _ => DeliveryReceiptStage::Misfired,
                 };
-                self.terminalize_occurrence(occurrence, lifecycle, stage)
+                self.terminalize_occurrence(occurrence, lifecycle, stage, None)
                     .await?;
                 return Ok(true);
             }
@@ -260,11 +266,22 @@ impl ScheduleDriver {
                         at_utc: store_now_utc,
                     },
                     DeliveryReceiptStage::DeliveryFailed,
+                    None,
                 )
                 .await?;
                 return Ok(true);
             }
         };
+
+        if let Some(materialized_session_id) = dispatch.materialized_session_id.clone() {
+            self.service
+                .bind_materialized_session_for_occurrence(&occurrence, &materialized_session_id)
+                .await?;
+            occurrence = self
+                .service
+                .sync_occurrence_target_with_schedule(occurrence)
+                .await?;
+        }
 
         let mut dispatching = self
             .occurrence_authority
@@ -292,52 +309,8 @@ impl ScheduleDriver {
             .into_occurrence();
         self.store.put_occurrence(dispatching.clone()).await?;
 
-        let terminal = dispatch.completion.await?;
-        let lifecycle = match terminal.phase {
-            OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
-                receipt: terminal.receipt.unwrap_or_else(|| {
-                    DeliveryReceipt::new(
-                        dispatching.occurrence_id.clone(),
-                        dispatching.attempt_count,
-                        DeliveryReceiptStage::Completed,
-                    )
-                }),
-                at_utc: store_now_utc,
-            },
-            OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
-                detail: terminal.detail,
-                failure_class: terminal.failure_class,
-                at_utc: store_now_utc,
-            },
-            OccurrencePhase::Misfired => OccurrenceLifecycleInput::Misfire {
-                detail: terminal.detail,
-                failure_class: terminal.failure_class,
-                at_utc: store_now_utc,
-            },
-            OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::DeliveryFailed {
-                receipt: terminal.receipt,
-                failure_class: terminal
-                    .failure_class
-                    .unwrap_or(OccurrenceFailureClass::InternalError),
-                detail: terminal.detail,
-                at_utc: store_now_utc,
-            },
-            other => {
-                return Err(ScheduleDomainError::Internal(format!(
-                    "delivery terminal returned non-terminal occurrence phase: {other:?}"
-                )));
-            }
-        };
-        let receipt_stage = match terminal.phase {
-            OccurrencePhase::Completed => DeliveryReceiptStage::Completed,
-            OccurrencePhase::Skipped => DeliveryReceiptStage::Skipped,
-            OccurrencePhase::Misfired => DeliveryReceiptStage::Misfired,
-            OccurrencePhase::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
-            _ => DeliveryReceiptStage::DeliveryFailed,
-        };
-        self.terminalize_occurrence(dispatching, lifecycle, receipt_stage)
-            .await?;
-        Ok(true)
+        self.spawn_completion_waiter(dispatching, dispatch.completion);
+        Ok(false)
     }
 
     async fn terminalize_occurrence(
@@ -345,22 +318,167 @@ impl ScheduleDriver {
         occurrence: Occurrence,
         lifecycle: OccurrenceLifecycleInput,
         stage: DeliveryReceiptStage,
+        receipt: Option<DeliveryReceipt>,
     ) -> Result<(), ScheduleDomainError> {
-        let updated = self
-            .occurrence_authority
-            .apply(occurrence.clone(), lifecycle)
-            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
-            .into_occurrence();
-        self.store.put_occurrence(updated.clone()).await?;
-        let mut receipt = updated.last_receipt.clone().unwrap_or_else(|| {
-            DeliveryReceipt::new(updated.occurrence_id.clone(), updated.attempt_count, stage)
-        });
-        receipt.stage = stage;
-        receipt.failure_class = updated.failure_class.clone();
-        receipt.detail = updated.failure_detail.clone();
-        self.store.append_receipt(receipt).await?;
-        Ok(())
+        terminalize_occurrence_inner(
+            self.store.clone(),
+            self.occurrence_authority.clone(),
+            occurrence,
+            lifecycle,
+            stage,
+            receipt,
+            None,
+        )
+        .await
     }
+
+    fn spawn_completion_waiter(&self, occurrence: Occurrence, completion: DeliveryCompletion) {
+        let store = self.store.clone();
+        let occurrence_authority = self.occurrence_authority.clone();
+        crate::tokio::spawn(async move {
+            let terminal = match completion.await {
+                Ok(terminal) => terminal,
+                Err(error) => DeliveryTerminal::delivery_failed(
+                    error.to_string(),
+                    OccurrenceFailureClass::TransportError,
+                ),
+            };
+            let _ =
+                complete_dispatched_occurrence(store, occurrence_authority, occurrence, terminal)
+                    .await;
+        });
+    }
+}
+
+async fn complete_dispatched_occurrence(
+    store: Arc<dyn ScheduleStore>,
+    occurrence_authority: Arc<OccurrenceLifecycleAuthority>,
+    occurrence: Occurrence,
+    terminal: DeliveryTerminal,
+) -> Result<(), ScheduleDomainError> {
+    let store_now_utc = store.get_store_time_utc().await?;
+    let completed_receipt = matches!(terminal.phase, OccurrencePhase::Completed).then(|| {
+        build_terminal_receipt(
+            &occurrence,
+            DeliveryReceiptStage::Completed,
+            terminal.receipt.clone(),
+            terminal.failure_class,
+            terminal.detail.clone(),
+            terminal.materialized_session_id.clone(),
+        )
+    });
+    let lifecycle = match terminal.phase {
+        OccurrencePhase::Completed => OccurrenceLifecycleInput::Complete {
+            receipt: completed_receipt
+                .clone()
+                .expect("completed receipt must be present for completed terminal"),
+            at_utc: store_now_utc,
+        },
+        OccurrencePhase::Skipped => OccurrenceLifecycleInput::Skip {
+            detail: terminal.detail.clone(),
+            failure_class: terminal.failure_class,
+            at_utc: store_now_utc,
+        },
+        OccurrencePhase::Misfired => OccurrenceLifecycleInput::Misfire {
+            detail: terminal.detail.clone(),
+            failure_class: terminal.failure_class,
+            at_utc: store_now_utc,
+        },
+        OccurrencePhase::DeliveryFailed => OccurrenceLifecycleInput::DeliveryFailed {
+            receipt: terminal.receipt.clone(),
+            failure_class: terminal
+                .failure_class
+                .unwrap_or(OccurrenceFailureClass::InternalError),
+            detail: terminal.detail.clone(),
+            at_utc: store_now_utc,
+        },
+        other => {
+            return Err(ScheduleDomainError::Internal(format!(
+                "delivery terminal returned non-terminal occurrence phase: {other:?}"
+            )));
+        }
+    };
+    let receipt_stage = match terminal.phase {
+        OccurrencePhase::Completed => DeliveryReceiptStage::Completed,
+        OccurrencePhase::Skipped => DeliveryReceiptStage::Skipped,
+        OccurrencePhase::Misfired => DeliveryReceiptStage::Misfired,
+        OccurrencePhase::DeliveryFailed => DeliveryReceiptStage::DeliveryFailed,
+        _ => DeliveryReceiptStage::DeliveryFailed,
+    };
+
+    terminalize_occurrence_inner(
+        store,
+        occurrence_authority,
+        occurrence,
+        lifecycle,
+        receipt_stage,
+        completed_receipt.or(terminal.receipt),
+        terminal.materialized_session_id,
+    )
+    .await
+}
+
+async fn terminalize_occurrence_inner(
+    store: Arc<dyn ScheduleStore>,
+    occurrence_authority: Arc<OccurrenceLifecycleAuthority>,
+    occurrence: Occurrence,
+    lifecycle: OccurrenceLifecycleInput,
+    stage: DeliveryReceiptStage,
+    receipt: Option<DeliveryReceipt>,
+    materialized_session_id: Option<SessionId>,
+) -> Result<(), ScheduleDomainError> {
+    let mut updated = occurrence_authority
+        .apply(occurrence.clone(), lifecycle)
+        .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
+        .into_occurrence();
+    let final_receipt = build_terminal_receipt(
+        &updated,
+        stage,
+        receipt,
+        updated.failure_class,
+        updated.failure_detail.clone(),
+        materialized_session_id,
+    );
+    updated.last_receipt = Some(final_receipt.clone());
+    store.put_occurrence(updated).await?;
+    store.append_receipt(final_receipt).await?;
+    Ok(())
+}
+
+fn build_terminal_receipt(
+    occurrence: &Occurrence,
+    stage: DeliveryReceiptStage,
+    receipt: Option<DeliveryReceipt>,
+    failure_class: Option<OccurrenceFailureClass>,
+    detail: Option<String>,
+    materialized_session_id: Option<SessionId>,
+) -> DeliveryReceipt {
+    let mut receipt = receipt.unwrap_or_else(|| {
+        DeliveryReceipt::new(
+            occurrence.occurrence_id.clone(),
+            occurrence.attempt_count,
+            stage,
+        )
+    });
+    receipt.stage = stage;
+    if receipt.correlation_id.is_none() {
+        receipt.correlation_id = occurrence.delivery_correlation_id.clone();
+    }
+    if receipt.failure_class.is_none() {
+        receipt.failure_class = failure_class;
+    }
+    if receipt.detail.is_none() {
+        receipt.detail = detail;
+    }
+    if receipt.materialized_session_id.is_none() {
+        receipt.materialized_session_id = materialized_session_id.or_else(|| {
+            occurrence
+                .last_receipt
+                .as_ref()
+                .and_then(|last_receipt| last_receipt.materialized_session_id.clone())
+        });
+    }
+    receipt
 }
 
 #[cfg(test)]
@@ -374,6 +492,7 @@ mod tests {
     use chrono::Duration;
     use meerkat_core::ContentInput;
     use std::collections::BTreeMap;
+    use tokio::time::sleep;
 
     struct ReadyProbe;
 
@@ -453,16 +572,21 @@ mod tests {
 
         let report = driver.tick_once().await.expect("tick should succeed");
         assert_eq!(report.claimed_occurrences, 1);
-        assert_eq!(report.terminalized_occurrences, 1);
+        assert_eq!(report.terminalized_occurrences, 0);
 
-        let occurrences = service
-            .list_occurrences(&schedule.schedule_id)
-            .await
-            .expect("occurrences should list");
-        let occurrence = occurrences
-            .iter()
-            .find(|occurrence| occurrence.phase == OccurrencePhase::DeliveryFailed)
-            .expect("occurrence should terminalize as delivery_failed");
+        let occurrence = loop {
+            let occurrences = service
+                .list_occurrences(&schedule.schedule_id)
+                .await
+                .expect("occurrences should list");
+            if let Some(occurrence) = occurrences
+                .into_iter()
+                .find(|occurrence| occurrence.phase == OccurrencePhase::DeliveryFailed)
+            {
+                break occurrence;
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        };
 
         assert_eq!(
             occurrence.failure_class,

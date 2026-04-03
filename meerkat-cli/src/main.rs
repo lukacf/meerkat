@@ -7,15 +7,21 @@ mod stream_renderer;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use meerkat::surface::{
+    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, bind_surface_session,
+    build_recovered_session, prepare_surface_session,
+};
 use meerkat::{AgentFactory, EphemeralSessionService, FactoryAgentBuilder, PersistenceBundle};
 use meerkat_contracts::{SessionLocator, SessionLocatorError, SkillsParams, format_session_ref};
 use meerkat_core::AgentToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_core::CommsRuntimeMode;
+#[cfg(test)]
+use meerkat_core::Session;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, ResumeOverrideMask, SessionBuildOptions, SessionError, SessionQuery,
-    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, SessionBuildOptions, SessionError, SessionQuery, SessionService,
+    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, BlobId, EventEnvelope, RealmConfig, RealmLocator, RealmSelection, ScopedAgentEvent,
@@ -23,7 +29,6 @@ use meerkat_core::{
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
-    Session,
 };
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouterAdapter;
@@ -254,6 +259,9 @@ fn completion_outcome_to_result(
 ) -> anyhow::Result<meerkat_core::types::RunResult> {
     match outcome {
         meerkat_runtime::completion::CompletionOutcome::Completed(result) => Ok(result),
+        meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, .. } => Err(
+            anyhow::anyhow!("turn is waiting for external tool results: {tool_name}"),
+        ),
         meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
             Err(anyhow::anyhow!("turn completed without result"))
         }
@@ -2463,6 +2471,25 @@ fn resolve_keep_alive(requested: bool) -> anyhow::Result<bool> {
     meerkat::surface::resolve_keep_alive(requested).map_err(|e| anyhow::anyhow!(e))
 }
 
+fn default_cli_comms_name(session_id: &SessionId) -> String {
+    format!("cli/{session_id}")
+}
+
+fn resolve_cli_comms_name(
+    session_id: &SessionId,
+    keep_alive: bool,
+    comms_overrides: &CommsOverrides,
+) -> Option<String> {
+    if !cfg!(feature = "comms") || comms_overrides.disabled {
+        return None;
+    }
+
+    comms_overrides
+        .name
+        .clone()
+        .or_else(|| keep_alive.then(|| default_cli_comms_name(session_id)))
+}
+
 /// Load MCP tools as an external tool dispatcher for session build options.
 async fn load_mcp_external_tools(
     scope: &RuntimeScope,
@@ -2504,57 +2531,141 @@ async fn shutdown_mcp(_adapter: &Option<Arc<McpRouterAdapter>>) {
     }
 }
 
-/// CLI runtime executor — delegates to SessionService::start_turn() and synthesizes
-/// a structural receipt for the ephemeral runtime driver contract.
-/// CLI-side executor that bridges the runtime loop to the session service.
-///
-/// For ephemeral sessions: delegates to `SessionService::start_turn()` and fabricates
-/// a placeholder receipt (no snapshot, no digest).
-///
-/// For persistent sessions: delegates to `PersistentSessionService::apply_runtime_turn_with_result()`
-/// which exports the committed session snapshot and real receipt.
+/// CLI-side executor that bridges the runtime loop to the canonical
+/// session-service runtime apply seam.
+#[async_trait::async_trait]
+trait CliRuntimeApplyService: meerkat_core::service::SessionService {
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    >;
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    >;
+
+    async fn discard_live_session(&self, _session_id: &SessionId) -> Result<(), SessionError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl CliRuntimeApplyService for EphemeralSessionService<FactoryAgentBuilder> {
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        Self::apply_runtime_turn(
+            self,
+            session_id,
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        Self::apply_runtime_context_appends(
+            self,
+            session_id,
+            run_id,
+            appends,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        Self::discard_live_session(self, session_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl CliRuntimeApplyService for meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder> {
+    async fn apply_runtime_turn(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        req: StartTurnRequest,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        Self::apply_runtime_turn(
+            self,
+            session_id,
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        Self::apply_runtime_context_appends(
+            self,
+            session_id,
+            run_id,
+            appends,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        Self::discard_live_session(self, session_id).await
+    }
+}
+
 struct CliRuntimeExecutor {
-    service: Arc<dyn meerkat_core::service::SessionService>,
-    /// Persistent service reference for durable boundary commits.
-    /// When `Some`, `apply()` uses `apply_runtime_turn_with_result()`.
-    persistent_service:
-        Option<Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>>,
+    session_service: Arc<dyn CliRuntimeApplyService>,
     session_id: meerkat_core::types::SessionId,
     runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-}
-
-fn extract_cli_prompt(primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive) -> String {
-    match primitive {
-        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => staged
-            .appends
-            .iter()
-            .filter_map(|a| match &a.content {
-                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                    Some(text.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateAppend(append) => {
-            match &append.content {
-                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                    text.clone()
-                }
-                _ => String::new(),
-            }
-        }
-        meerkat_core::lifecycle::run_primitive::RunPrimitive::ImmediateContextAppend(ctx) => {
-            match &ctx.content {
-                meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } => {
-                    text.clone()
-                }
-                _ => String::new(),
-            }
-        }
-        _ => String::new(),
-    }
 }
 
 #[async_trait::async_trait]
@@ -2567,76 +2678,54 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
-        let prompt = extract_cli_prompt(&primitive);
-        let turn_req = StartTurnRequest {
-            prompt: prompt.into(),
-            system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            event_tx: self.event_tx.clone(),
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
-            additional_instructions: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.additional_instructions.clone()),
-        };
+        let plan = primitive.runtime_apply_plan();
+        let boundary = plan.boundary;
+        let contributing_input_ids = plan.contributing_input_ids.clone();
 
-        // Persistent path: use apply_runtime_turn_with_result for real receipt + snapshot.
-        if let Some(ref persistent) = self.persistent_service {
-            let boundary = match &primitive {
-                meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
-                    staged.boundary
-                }
-                _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-            };
-            let (_run_result, output) = persistent
-                .apply_runtime_turn_with_result(
-                    &self.session_id,
-                    run_id,
-                    turn_req,
-                    boundary,
-                    primitive.contributing_input_ids().to_vec(),
-                )
-                .await
-                .map_err(|e| {
-                    meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
-                        reason: e.to_string(),
-                    }
-                })?;
-            return Ok(output);
+        match plan.action {
+            meerkat_core::RuntimeApplyAction::StartTurn { prompt } => {
+                let turn_req = StartTurnRequest {
+                    prompt,
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: self.event_tx.clone(),
+                    skill_references: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.skill_references.clone()),
+                    flow_tool_overlay: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.flow_tool_overlay.clone()),
+                    additional_instructions: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.additional_instructions.clone()),
+                };
+
+                self.session_service
+                    .apply_runtime_turn(
+                        &self.session_id,
+                        run_id,
+                        turn_req,
+                        boundary,
+                        contributing_input_ids,
+                    )
+                    .await
+            }
+            meerkat_core::RuntimeApplyAction::ApplySystemContextOnly { appends } => {
+                self.session_service
+                    .apply_runtime_context_appends(
+                        &self.session_id,
+                        run_id,
+                        appends,
+                        contributing_input_ids,
+                    )
+                    .await
+            }
         }
-
-        // Ephemeral path: start_turn + placeholder receipt.
-        let result = self
-            .service
-            .start_turn(&self.session_id, turn_req)
-            .await
-            .map_err(|e| {
-                meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
-                    reason: e.to_string(),
-                }
-            })?;
-
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                run_id,
-                boundary: match &primitive {
-                    meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(staged) => {
-                        staged.boundary
-                    }
-                    _ => meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
-                },
-                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 0,
-            },
-            session_snapshot: None,
-            run_result: Some(result),
+        .map_err(|e| {
+            meerkat_core::lifecycle::core_executor::CoreExecutorError::ApplyFailed {
+                reason: e.to_string(),
+            }
         })
     }
 
@@ -2648,16 +2737,16 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun {
                 ..
             } => {
-                let _ = self.service.interrupt(&self.session_id).await;
+                let _ = self.session_service.interrupt(&self.session_id).await;
                 Ok(())
             }
             meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
                 ..
             } => {
-                // Discard live session state via concrete type (not on SessionService trait).
-                if let Some(ref persistent) = self.persistent_service {
-                    let _ = persistent.discard_live_session(&self.session_id).await;
-                }
+                let _ = self
+                    .session_service
+                    .discard_live_session(&self.session_id)
+                    .await;
                 self.runtime_adapter
                     .unregister_session(&self.session_id)
                     .await;
@@ -3216,18 +3305,18 @@ async fn run_agent(
                 .collect(),
         )
     };
-    let session = Session::new();
-    let session_id = session.id().clone();
+    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
+    let prepared_session = prepare_surface_session(runtime_adapter.as_ref())
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to prepare runtime-backed session: {error}"))?;
+    let session = prepared_session.session;
+    let session_id = prepared_session.session_id.clone();
     let primary_scope_path = vec![StreamScopeFrame::Primary {
         session_id: session_id.to_string(),
     }];
 
     // Resolve comms_name for the factory
-    let comms_name = if cfg!(feature = "comms") && !comms_overrides.disabled {
-        comms_overrides.name.clone()
-    } else {
-        None
-    };
+    let comms_name = resolve_cli_comms_name(&session_id, keep_alive, &comms_overrides);
 
     // Build factory with appropriate flags
     let project_root = scope.context_root.clone().unwrap_or_else(|| {
@@ -3309,17 +3398,7 @@ async fn run_agent(
     let output_pipeline =
         CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
-    // Create ephemeral runtime adapter for single-authority execution.
-    let runtime_adapter = std::sync::Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-    // Pre-register session so we can obtain the canonical ops lifecycle registry
-    // for the build options. This mirrors the RPC path (session_runtime.rs:1311).
-    runtime_adapter.register_session(session_id.clone()).await;
-    let ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = runtime_adapter
-        .ops_lifecycle_registry(&session_id)
-        .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
+    let ops_lifecycle = Some(prepared_session.ops_lifecycle);
 
     let build = SessionBuildOptions {
         provider: Some(provider.as_core()),
@@ -3332,6 +3411,7 @@ async fn run_agent(
         budget_limits: Some(limits),
         provider_params,
         external_tools,
+        recoverable_tool_defs: None,
         llm_client_override: None,
         override_builtins: Some(enable_builtins),
         override_shell: Some(enable_shell),
@@ -3386,6 +3466,7 @@ async fn run_agent(
         },
         // Always defer — the runtime adapter handles execution.
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build),
         labels: parsed_labels,
     };
@@ -3421,8 +3502,7 @@ async fn run_agent(
         // Register executor and route turn through runtime adapter.
         let session_id = create_result.session_id.clone();
         let executor = Box::new(CliRuntimeExecutor {
-            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-            persistent_service: None,
+            session_service: service.clone() as Arc<dyn CliRuntimeApplyService>,
             session_id: session_id.clone(),
             runtime_adapter: runtime_adapter.clone(),
             event_tx: output_pipeline.event_sender(),
@@ -3608,7 +3688,7 @@ async fn resume_session(
         session_id,
         &prompt,
         system_prompt,
-        HookRunOverrides::default(),
+        None,
         skill_refs,
         skill_references,
         allow_tools,
@@ -3633,7 +3713,7 @@ async fn resume_session_with_llm_override(
     session_id: &str,
     prompt: &str,
     system_prompt: Option<String>,
-    hooks_override: HookRunOverrides,
+    hooks_override: Option<HookRunOverrides>,
     skill_refs: Vec<SkillRef>,
     skill_references: Vec<String>,
     allow_tools: Vec<String>,
@@ -3670,7 +3750,6 @@ async fn resume_session_with_llm_override(
     let parsed_params = parse_provider_params(&params)?;
     let parsed_params_json = parse_provider_params_json(provider_params_json)?;
     let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
-    let provider_params_override = merged_provider_params.is_some();
     let mut limits = config.budget_limits();
     if let Some(dur) = duration {
         limits.max_duration = Some(dur);
@@ -3689,7 +3768,6 @@ async fn resume_session_with_llm_override(
     let session_id = resolve_flexible_session_id(session_id, scope, &config).await?;
     let canonical_skill_refs = canonical_skill_keys(&config, skill_refs, skill_references)?;
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
-    let run_initial_turn_during_create = flow_tool_overlay.is_none();
     log_stage("create_session_store");
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let store = persistence.session_store();
@@ -3706,16 +3784,9 @@ async fn resume_session_with_llm_override(
         .unwrap_or_default();
     let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
     let keep_alive = resolve_keep_alive(keep_alive_requested)?;
-    let comms_name = stored_metadata
-        .as_ref()
-        .and_then(|meta| meta.comms_name.clone());
-
     let model = stored_metadata
         .as_ref()
         .map_or_else(|| config.agent.model.clone(), |meta| meta.model.clone());
-    let max_tokens = stored_metadata
-        .as_ref()
-        .map_or(config.agent.max_tokens_per_turn, |meta| meta.max_tokens);
 
     let provider_core = stored_metadata
         .as_ref()
@@ -3813,62 +3884,37 @@ async fn resume_session_with_llm_override(
         }],
     )?;
 
-    // Pre-register session on the adapter so we can obtain the canonical ops
-    // lifecycle registry for the build options.
-    resume_adapter.register_session(session_id.clone()).await;
-    let resume_ops_lifecycle: Option<
-        std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    > = resume_adapter
-        .ops_lifecycle_registry(&session_id)
-        .await
-        .map(|r| r as std::sync::Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>);
-
-    let build = SessionBuildOptions {
-        provider: Some(provider_core),
-        output_schema: None,
-        structured_output_retries: 2,
-        hooks_override,
-        comms_name: comms_name.clone(),
-        resume_session: Some(session),
-        budget_limits: budget_override,
-        provider_params: merged_provider_params,
-        external_tools,
-        llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-        override_builtins: tooling.builtins.to_override(),
-        override_shell: tooling.shell.to_override(),
-        override_memory: tooling.memory.to_override(),
-        override_mob: tooling.mob.to_override(),
-        preload_skills: None,
-        peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
-        realm_id: stored_metadata
-            .as_ref()
-            .and_then(|m| m.realm_id.clone())
-            .or_else(|| Some(scope.locator.realm_id.clone())),
-        instance_id: stored_metadata
-            .as_ref()
-            .and_then(|m| m.instance_id.clone())
-            .or_else(|| scope.instance_id.clone()),
-        backend: stored_metadata
-            .as_ref()
-            .and_then(|m| m.backend.clone())
-            .or_else(|| Some(manifest.backend.as_str().to_string())),
-        config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
-        keep_alive,
-        checkpointer: None,
-        silent_comms_intents: Vec::new(),
-        max_inline_peer_notifications: None,
-        app_context: None,
-        additional_instructions: None,
-        shell_env: None,
-        ops_lifecycle_override: resume_ops_lifecycle,
-        resume_override_mask: ResumeOverrideMask {
-            provider_params: provider_params_override,
+    let resume_ops_lifecycle = Some(
+        bind_surface_session(resume_adapter.as_ref(), &session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to prepare runtime ops registry: {error}"))?,
+    );
+    let mut recovered = build_recovered_session(
+        session,
+        &SurfaceSessionRecoveryOverrides {
+            provider_params: merged_provider_params,
+            system_prompt,
+            hooks_override,
+            budget_limits: budget_override,
             ..Default::default()
         },
-        call_timeout_override: Default::default(),
-        blob_store_override: None,
-        mob_tools: mob_tools_factory,
-    };
+        SurfaceSessionRecoveryContext {
+            llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
+            external_tools,
+            ops_lifecycle_override: resume_ops_lifecycle,
+            realm_id: Some(scope.locator.realm_id.clone()),
+            instance_id: scope.instance_id.clone(),
+            backend: Some(manifest.backend.as_str().to_string()),
+            config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("Failed to recover session: {error}"))?;
+    recovered.build.mob_tools = mob_tools_factory;
+    if recovered.keep_alive && recovered.build.comms_name.is_none() {
+        recovered.build.comms_name = Some(default_cli_comms_name(&session_id));
+    }
+    let keep_alive = recovered.keep_alive;
+    let create_req = recovered.into_deferred_create_request();
 
     let turn_result = async {
         // Route through SessionService::create_session() with the resumed session
@@ -3876,24 +3922,7 @@ async fn resume_session_with_llm_override(
         // the resume_session), runs the first turn, and returns RunResult.
         log_stage("service.create_session(start)");
         let create_result = service
-            .create_session(CreateSessionRequest {
-                model,
-                prompt: prompt.to_string().into(),
-                render_metadata: None,
-                system_prompt,
-                max_tokens: Some(max_tokens),
-                event_tx: output_pipeline.event_sender(),
-
-                skill_references: if run_initial_turn_during_create {
-                    canonical_skill_refs.clone()
-                } else {
-                    None
-                },
-                // Always defer — runtime adapter handles execution.
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                build: Some(build),
-                labels: None,
-            })
+            .create_session(create_req)
             .await
             .map_err(session_err_to_anyhow)?;
 
@@ -3906,8 +3935,7 @@ async fn resume_session_with_llm_override(
         // Route through runtime adapter (same pattern as run command)
         let session_id = create_result.session_id.clone();
         let executor = Box::new(CliRuntimeExecutor {
-            service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
-            persistent_service: Some(service.clone()),
+            session_service: service.clone() as Arc<dyn CliRuntimeApplyService>,
             session_id: session_id.clone(),
             runtime_adapter: resume_adapter.clone(),
             event_tx: output_pipeline.event_sender(),
@@ -6744,11 +6772,10 @@ mod tests {
         )
         .expect("stream pipeline should build");
         let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-        let service: Arc<dyn meerkat_core::service::SessionService> =
+        let service: Arc<dyn CliRuntimeApplyService> =
             Arc::new(CapturingEventTurnService::new(session_id.clone()));
         let executor = Box::new(CliRuntimeExecutor {
-            service,
-            persistent_service: None,
+            session_service: service,
             session_id: session_id.clone(),
             runtime_adapter: runtime_adapter.clone(),
             event_tx: pipeline.event_sender(),
@@ -6808,11 +6835,10 @@ mod tests {
         )
         .expect("stream pipeline should build");
         let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
-        let service: Arc<dyn meerkat_core::service::SessionService> =
+        let service: Arc<dyn CliRuntimeApplyService> =
             Arc::new(CapturingEventTurnService::new(session_id.clone()));
         let executor = Box::new(CliRuntimeExecutor {
-            service,
-            persistent_service: None,
+            session_service: service,
             session_id: session_id.clone(),
             runtime_adapter: runtime_adapter.clone(),
             event_tx: pipeline.event_sender(),
@@ -7321,10 +7347,74 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl CliRuntimeApplyService for CapturingEventTurnService {
+        async fn apply_runtime_turn(
+            &self,
+            session_id: &SessionId,
+            run_id: meerkat_core::lifecycle::RunId,
+            req: StartTurnRequest,
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+            contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::service::SessionError,
+        > {
+            let result = self.start_turn(session_id, req).await?;
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    None,
+                    result,
+                ),
+            )
+        }
+
+        async fn apply_runtime_context_appends(
+            &self,
+            _session_id: &SessionId,
+            _run_id: meerkat_core::lifecycle::RunId,
+            _appends: Vec<meerkat_core::PendingSystemContextAppend>,
+            _contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::service::SessionError,
+        > {
+            Err(SessionError::Unsupported(
+                "capturing test service does not support context append runtime apply".to_string(),
+            ))
+        }
+    }
+
     #[test]
     fn test_resolve_keep_alive_roundtrip() {
         assert!(resolve_keep_alive(true).expect("keep_alive should be enabled"));
         assert!(!resolve_keep_alive(false).expect("keep_alive should be disabled"));
+    }
+
+    #[test]
+    fn test_resolve_cli_comms_name_derives_keep_alive_session_name() {
+        let session_id = SessionId::new();
+        let derived = resolve_cli_comms_name(&session_id, true, &CommsOverrides::default());
+        assert_eq!(derived, Some(format!("cli/{session_id}")));
+    }
+
+    #[test]
+    fn test_resolve_cli_comms_name_preserves_explicit_name() {
+        let session_id = SessionId::new();
+        let overrides = CommsOverrides {
+            name: Some("explicit-peer".into()),
+            ..CommsOverrides::default()
+        };
+        let resolved = resolve_cli_comms_name(&session_id, true, &overrides);
+        assert_eq!(resolved.as_deref(), Some("explicit-peer"));
     }
 
     #[test]
@@ -7355,8 +7445,7 @@ mod tests {
         let runtime_adapter = Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral());
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(8);
         let mut executor = CliRuntimeExecutor {
-            service: service.clone(),
-            persistent_service: None,
+            session_service: service.clone(),
             session_id: session_id.clone(),
             runtime_adapter,
             event_tx: Some(event_tx),
@@ -9323,6 +9412,7 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
 
             skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
         };

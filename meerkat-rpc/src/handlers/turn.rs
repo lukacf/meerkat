@@ -43,27 +43,29 @@ pub struct StartTurnParams {
     /// Additional instruction sections prepended as system notices for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
-    /// Override keep-alive mode for this turn. Only applies to pending (deferred) sessions.
+    /// Override keep-alive intent for this session turn. Persisted so later
+    /// inheriting calls observe the updated setting.
     #[serde(default)]
     pub keep_alive: Option<bool>,
     // -- Per-turn overrides ---------------------------------------------------
-    /// Override model. On pending sessions, sets the model before materialization.
-    /// On materialized sessions, hot-swaps the LLM client for the remainder of the session.
+    /// Override model. On a deferred first turn, rebuilds the canonical
+    /// session before materialization. On a materialized session, hot-swaps
+    /// the LLM client for the remainder of the session.
     #[serde(default)]
     pub model: Option<String>,
     /// Override provider. Typically inferred from model.
     #[serde(default)]
     pub provider: Option<String>,
-    /// Override max_tokens. On pending sessions only.
+    /// Override max_tokens. Only legal while the deferred first turn is still pending.
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Override system prompt. On pending sessions only.
+    /// Override system prompt. Only legal while the deferred first turn is still pending.
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Override output schema. On pending sessions only.
+    /// Override output schema. Only legal while the deferred first turn is still pending.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
-    /// Override structured output retries. On pending sessions only.
+    /// Override structured output retries. Only legal while the deferred first turn is still pending.
     #[serde(default)]
     pub structured_output_retries: Option<u32>,
     /// Override provider-specific parameters. Applied alongside model/provider override.

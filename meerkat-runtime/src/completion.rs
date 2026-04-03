@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::RunResult;
+use serde_json::Value;
 
 use crate::tokio::sync::oneshot;
 
@@ -21,6 +22,9 @@ use crate::tokio::sync::oneshot;
 pub enum CompletionOutcome {
     /// The input was successfully consumed and produced a result.
     Completed(RunResult),
+    /// The input committed a continuation boundary and is waiting for
+    /// externally supplied tool results.
+    CallbackPending { tool_name: String, args: Value },
     /// The input was consumed but produced no RunResult (e.g. context-append ops).
     CompletedWithoutResult,
     /// The input was abandoned before completing.
@@ -93,6 +97,23 @@ impl CompletionRegistry {
         if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::Completed(result.clone()));
+            }
+        }
+    }
+
+    /// Resolve all waiters for an input that yielded a callback continuation.
+    pub(crate) fn resolve_callback_pending(
+        &mut self,
+        input_id: &InputId,
+        tool_name: String,
+        args: Value,
+    ) {
+        if let Some(senders) = self.take_waiters(input_id) {
+            for tx in senders {
+                let _ = tx.send(CompletionOutcome::CallbackPending {
+                    tool_name: tool_name.clone(),
+                    args: args.clone(),
+                });
             }
         }
     }

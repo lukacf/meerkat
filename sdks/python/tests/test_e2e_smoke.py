@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -68,6 +69,12 @@ async def collect_stream_text(stream) -> tuple[str, object]:
 async def next_subscription_event(subscription, *, timeout_secs: float = 60.0):
     iterator = subscription.__aiter__()
     return await asyncio.wait_for(iterator.__anext__(), timeout=timeout_secs)
+
+
+def future_iso(minutes: int = 5) -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    ).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -443,3 +450,67 @@ if include_scenario(40):
             with pytest.raises(MeerkatError) as exc_info:
                 await client.read_session("00000000-0000-0000-0000-000000000000")
             assert exc_info.value.code in {"SESSION_NOT_FOUND", "INVALID_PARAMS", "-32001"}
+
+
+# ---------------------------------------------------------------------------
+# Scenario 41: Schedule CRUD without live LLM keys
+# ---------------------------------------------------------------------------
+
+
+if include_scenario(41):
+    @pytest.mark.asyncio
+    async def test_smoke_scenario_41_schedule_crud_without_llm(tmp_path: Path):
+        realm = persistent_realm_kwargs(tmp_path)
+
+        async with live_client(**realm) as client:
+            request = {
+                "name": "python-sdk-schedule",
+                "description": "python sdk schedule smoke",
+                "trigger": {
+                    "type": "interval",
+                    "start_at_utc": future_iso(),
+                    "every_seconds": 300,
+                    "end_at_utc": None,
+                },
+                "target": {
+                    "target_kind": "session",
+                    "type": "exact_session",
+                    "session_id": "00000000-0000-0000-0000-000000000041",
+                    "action": {
+                        "type": "prompt",
+                        "prompt": "python sdk schedule smoke",
+                        "system_prompt": None,
+                        "render_metadata": None,
+                        "skill_references": [],
+                        "additional_instructions": [],
+                    },
+                },
+                "misfire_policy": {"type": "skip"},
+                "overlap_policy": "skip_if_running",
+                "missing_target_policy": "mark_misfired",
+                "labels": {},
+                "planning_horizon_days": 1,
+                "planning_horizon_occurrences": 2,
+            }
+
+            created = await client.create_schedule(request)
+            assert created.schedule_id
+            assert created.phase == "active"
+
+            fetched = await client.get_schedule(created.schedule_id)
+            assert fetched.schedule_id == created.schedule_id
+
+            listed = await client.list_schedules()
+            assert any(item.schedule_id == created.schedule_id for item in listed)
+
+            occurrences = await client.list_schedule_occurrences(created.schedule_id)
+            assert occurrences
+
+            paused = await client.pause_schedule(created.schedule_id)
+            assert paused.phase == "paused"
+
+            resumed = await client.resume_schedule(created.schedule_id)
+            assert resumed.phase == "active"
+
+            deleted = await client.delete_schedule(created.schedule_id)
+            assert deleted.phase == "deleted"

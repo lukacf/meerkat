@@ -334,7 +334,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn tool_call_commits_state_on_success(tool_name: &str) -> bool {
-    matches!(tool_name, "meerkat_run" | "meerkat_resume")
+    matches!(
+        tool_name,
+        "meerkat_run"
+            | "meerkat_resume"
+            | "meerkat_schedule_create"
+            | "meerkat_schedule_update"
+            | "meerkat_schedule_pause"
+            | "meerkat_schedule_resume"
+            | "meerkat_schedule_delete"
+    )
 }
 
 fn request_key(id: &Value) -> String {
@@ -374,6 +383,22 @@ mod tests {
     fn meerkat_run_and_resume_publish_on_success() {
         assert!(tool_call_commits_state_on_success("meerkat_run"));
         assert!(tool_call_commits_state_on_success("meerkat_resume"));
+        assert!(tool_call_commits_state_on_success(
+            "meerkat_schedule_create"
+        ));
+        assert!(tool_call_commits_state_on_success(
+            "meerkat_schedule_update"
+        ));
+        assert!(tool_call_commits_state_on_success("meerkat_schedule_pause"));
+        assert!(tool_call_commits_state_on_success(
+            "meerkat_schedule_resume"
+        ));
+        assert!(tool_call_commits_state_on_success(
+            "meerkat_schedule_delete"
+        ));
         assert!(!tool_call_commits_state_on_success("meerkat_sessions"));
+        assert!(!tool_call_commits_state_on_success(
+            "meerkat_schedule_occurrences"
+        ));
     }
 }

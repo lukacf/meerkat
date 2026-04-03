@@ -131,6 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid host:port combination: {e}"))?;
 
+    state.ensure_schedule_host_started().await?;
+
     // Build router with middleware. Keep a clone for shutdown cleanup.
     let shutdown_state = state.clone();
     let app = router(state)
@@ -154,6 +156,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shut down all live MCP adapters to close connections cleanly.
     #[cfg(feature = "mcp")]
     meerkat_rest::shutdown_all_mcp_sessions(&shutdown_state).await;
+
+    shutdown_state.shutdown_schedule_host().await;
 
     tracing::info!("Server shutdown complete");
     Ok(())

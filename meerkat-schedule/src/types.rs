@@ -256,6 +256,13 @@ impl TargetBinding {
             Self::Mob(binding) => binding.stable_key(),
         }
     }
+
+    pub fn bind_materialized_session(&mut self, session_id: &SessionId) -> bool {
+        match self {
+            Self::Session(binding) => binding.bind_materialized_session(session_id),
+            Self::Mob(_) => false,
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -318,6 +325,22 @@ impl SessionTargetBinding {
             Self::MaterializeOnDemandSession {
                 bound_session_id, ..
             } => bound_session_id.as_ref(),
+        }
+    }
+
+    pub fn bind_materialized_session(&mut self, session_id: &SessionId) -> bool {
+        match self {
+            Self::MaterializeOnDemandSession {
+                bound_session_id, ..
+            } => match bound_session_id {
+                Some(existing) if existing != session_id => false,
+                Some(_) => false,
+                None => {
+                    *bound_session_id = Some(session_id.clone());
+                    true
+                }
+            },
+            Self::ExactSession { .. } | Self::ResumableSession { .. } => false,
         }
     }
 }

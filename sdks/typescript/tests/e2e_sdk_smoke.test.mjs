@@ -1,11 +1,19 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const binaryPath = (() => {
+  const debugBinary = fileURLToPath(
+    new URL("../../../target/debug/rkat-rpc", import.meta.url),
+  );
+  if (existsSync(debugBinary)) {
+    return debugBinary;
+  }
   const workspaceBinary = fileURLToPath(
     new URL("../../../target-codex/debug/rkat-rpc", import.meta.url),
   );
@@ -76,6 +84,74 @@ describe("E2E Smoke: TypeScript SDK package", { skip: !binaryPath }, () => {
     }
 
     assert.equal(sub.terminalOutcome?.outcome, "explicit_close");
+  });
+
+  it("manages schedules through the packaged SDK", async () => {
+    const stateRoot = mkdtempSync(path.join(os.tmpdir(), "meerkat-schedule-sdk-"));
+    const scheduleClient = new MeerkatClient(binaryPath);
+    await scheduleClient.connect({
+      realmId: `ts-schedule-${Date.now()}`,
+      realmBackend: "redb",
+      stateRoot,
+    });
+
+    try {
+      const created = await scheduleClient.createSchedule({
+        name: "typescript-sdk-schedule",
+        description: "typescript sdk schedule smoke",
+        trigger: {
+          type: "interval",
+          start_at_utc: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          every_seconds: 300,
+          end_at_utc: null,
+        },
+        target: {
+          target_kind: "session",
+          type: "exact_session",
+          session_id: "00000000-0000-0000-0000-000000000041",
+          action: {
+            type: "prompt",
+            prompt: "typescript sdk schedule smoke",
+            system_prompt: null,
+            render_metadata: null,
+            skill_references: [],
+            additional_instructions: [],
+          },
+        },
+        misfire_policy: { type: "skip" },
+        overlap_policy: "skip_if_running",
+        missing_target_policy: "mark_misfired",
+        labels: {},
+        planning_horizon_days: 1,
+        planning_horizon_occurrences: 2,
+      });
+
+      assert.ok(created.schedule_id, "createSchedule should return schedule_id");
+      assert.equal(created.phase, "active");
+
+      const fetched = await scheduleClient.getSchedule(created.schedule_id);
+      assert.equal(fetched.schedule_id, created.schedule_id);
+
+      const listed = await scheduleClient.listSchedules();
+      assert.ok(
+        listed.some((schedule) => schedule.schedule_id === created.schedule_id),
+        "listSchedules should include the created schedule",
+      );
+
+      const occurrences = await scheduleClient.listScheduleOccurrences(created.schedule_id);
+      assert.ok(occurrences.length > 0, "listScheduleOccurrences should return planned rows");
+
+      const paused = await scheduleClient.pauseSchedule(created.schedule_id);
+      assert.equal(paused.phase, "paused");
+
+      const resumed = await scheduleClient.resumeSchedule(created.schedule_id);
+      assert.equal(resumed.phase, "active");
+
+      const deleted = await scheduleClient.deleteSchedule(created.schedule_id);
+      assert.equal(deleted.phase, "deleted");
+    } finally {
+      await scheduleClient.close();
+    }
   });
 });
 

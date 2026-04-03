@@ -79,17 +79,17 @@ impl CoreExecutor for RecordingExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
-                run_id,
-                boundary: RunApplyBoundary::RunStart,
-                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 0,
-            },
-            session_snapshot: None,
-            run_result: self.run_result.clone(),
+        let receipt = RunBoundaryReceipt {
+            run_id,
+            boundary: RunApplyBoundary::RunStart,
+            contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+            conversation_digest: None,
+            message_count: 0,
+            sequence: 0,
+        };
+        Ok(match self.run_result.clone() {
+            Some(run_result) => CoreApplyOutput::with_run_result(receipt, None, run_result),
+            None => CoreApplyOutput::without_terminal(receipt, None),
         })
     }
 

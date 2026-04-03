@@ -6,6 +6,7 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
+use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
     StagedRunInput,
@@ -496,8 +497,10 @@ async fn process_queue(
                 let mut d = driver.lock().await;
                 match result {
                     Ok(output) => {
-                        // Capture run_result before moving output fields
-                        let run_result = output.run_result;
+                        // Capture the terminal outcome before moving output fields.
+                        let terminal = output.terminal.clone().or_else(|| {
+                            output.run_result.clone().map(CoreApplyTerminal::RunResult)
+                        });
 
                         // BoundaryApplied transitions Staged → Applied → APC
                         // and triggers atomic persistence in PersistentRuntimeDriver
@@ -557,10 +560,19 @@ async fn process_queue(
                         // Resolve completion waiters unconditionally
                         if let Some(completions) = completions.as_ref() {
                             let mut reg = completions.lock().await;
-                            match run_result {
-                                Some(result) => {
+                            match terminal {
+                                Some(CoreApplyTerminal::RunResult(result)) => {
                                     for input_id in &input_ids {
                                         reg.resolve_completed(input_id, result.clone());
+                                    }
+                                }
+                                Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
+                                    for input_id in &input_ids {
+                                        reg.resolve_callback_pending(
+                                            input_id,
+                                            tool_name.clone(),
+                                            args.clone(),
+                                        );
                                     }
                                 }
                                 None => {

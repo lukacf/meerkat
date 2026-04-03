@@ -339,6 +339,8 @@ impl MethodRouter {
             .with_default_llm_client_provider(Some(llm_provider))
             .with_external_tools_provider(Some(tools_provider))
         });
+        #[cfg(feature = "mob")]
+        runtime.set_mob_state(Arc::clone(&mob_state));
         Self {
             runtime,
             config_store,
@@ -359,6 +361,10 @@ impl MethodRouter {
     /// Get a reference to the runtime adapter for session registration.
     pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::RuntimeSessionAdapter> {
         &self.runtime_adapter
+    }
+
+    pub fn runtime(&self) -> &Arc<SessionRuntime> {
+        &self.runtime
     }
 
     /// Get a reference to the mob state for authoritative inspection (testing).
@@ -485,6 +491,7 @@ impl MethodRouter {
         mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
+        runtime.set_mob_state(Arc::clone(&mob_state));
         Self {
             runtime,
             config_store,
@@ -532,8 +539,7 @@ impl MethodRouter {
             return Some(SessionOwner::Mob);
         }
 
-        if self.runtime.pending_session_exists(session_id).await
-            || self.runtime.session_state(session_id).await.is_some()
+        if self.runtime.session_state(session_id).await.is_some()
             || self.runtime.read_session(session_id).await.is_ok()
             || self
                 .runtime
@@ -661,6 +667,10 @@ impl MethodRouter {
             }
             "schedule/occurrences" => {
                 handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
+            }
+            "schedule/tools" => handlers::schedule::handle_tools(id).await,
+            "schedule/call" => {
+                handlers::schedule::handle_call(id, params, self.runtime.clone()).await
             }
             "turn/start" => {
                 handlers::turn::handle_start(
@@ -942,11 +952,6 @@ impl MethodRouter {
         };
 
         Some(response)
-    }
-
-    /// Access the underlying session runtime.
-    pub fn runtime(&self) -> &SessionRuntime {
-        &self.runtime
     }
 
     async fn handle_session_read(
@@ -2477,6 +2482,8 @@ mod tests {
         assert!(method_names.contains(&"schedule/resume"));
         assert!(method_names.contains(&"schedule/delete"));
         assert!(method_names.contains(&"schedule/occurrences"));
+        assert!(method_names.contains(&"schedule/tools"));
+        assert!(method_names.contains(&"schedule/call"));
         assert!(method_names.contains(&"turn/start"));
         assert!(
             !method_names.contains(&"session/destroy"),
@@ -2583,6 +2590,86 @@ mod tests {
             .expect("schedule/pause response");
         let paused = result_value(&pause_resp);
         assert_eq!(paused["phase"], "paused");
+    }
+
+    #[tokio::test]
+    async fn schedule_tools_and_call_flow_work() {
+        let (router, _notif_rx) = test_router_with_schedule_store().await;
+
+        let tools_resp = router
+            .dispatch(make_request_no_params("schedule/tools"))
+            .await
+            .expect("schedule/tools response");
+        let tools_binding = result_value(&tools_resp);
+        let tools = tools_binding["tools"]
+            .as_array()
+            .expect("tools should be array");
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "meerkat_schedule_create"),
+            "schedule tool list should include create"
+        );
+
+        let request = meerkat::CreateScheduleRequest {
+            name: Some("tool-heartbeat".into()),
+            description: Some("tool-created schedule".into()),
+            trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now() + chrono::Duration::minutes(5),
+                every_seconds: 300,
+                end_at_utc: None,
+            }),
+            target: meerkat::TargetBinding::Session(meerkat::SessionTargetBinding::ExactSession {
+                session_id: meerkat::SessionId::new(),
+                action: meerkat::ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::from("hello from schedule tools"),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_references: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::Skip,
+            overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat::MissingTargetPolicy::MarkMisfired,
+            labels: std::collections::BTreeMap::new(),
+            planning_horizon_days: Some(1),
+            planning_horizon_occurrences: Some(2),
+        };
+
+        let create_resp = router
+            .dispatch(make_request(
+                "schedule/call",
+                serde_json::json!({
+                    "name": "meerkat_schedule_create",
+                    "arguments": serde_json::to_value(request)
+                        .expect("schedule tool request should serialize")
+                }),
+            ))
+            .await
+            .expect("schedule/call create response");
+        let created = result_value(&create_resp);
+        let schedule_id = created["schedule_id"]
+            .as_str()
+            .expect("tool create should return schedule_id");
+
+        let occurrences_resp = router
+            .dispatch(make_request(
+                "schedule/call",
+                serde_json::json!({
+                    "name": "meerkat_schedule_occurrences",
+                    "arguments": { "schedule_id": schedule_id }
+                }),
+            ))
+            .await
+            .expect("schedule/call occurrences response");
+        let occurrences = result_value(&occurrences_resp);
+        assert!(
+            occurrences["occurrences"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty()),
+            "tool-created schedule should plan persisted occurrences"
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -4214,7 +4301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_session_runtime_endpoints_register_pending_session() {
+    async fn deferred_session_runtime_endpoints_register_runtime_handle() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
         let create_resp = router
             .dispatch(make_request(

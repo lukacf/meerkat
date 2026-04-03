@@ -60,6 +60,7 @@ pub mod tokio {
 #[cfg(not(target_arch = "wasm32"))]
 pub use ::tokio;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -68,10 +69,18 @@ use std::sync::Arc;
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
+use meerkat::surface::prepare_surface_session;
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
+use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
+use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::run_primitive::{RunPrimitive, RuntimeApplyAction};
 use meerkat_core::{Config, SessionService};
 use meerkat_mob::{FlowId, MeerkatId, MobDefinition, MobId, RunId};
 use meerkat_mob_mcp::MobMcpState;
+use meerkat_runtime::SessionServiceRuntimeExt as _;
+use meerkat_runtime::{
+    AcceptOutcome, CompletionOutcome, Input, PromptInput, RuntimeSessionAdapter,
+};
 
 // ═══════════════════════════════════════════════════════════
 // Tracing → browser console (wasm32 only)
@@ -300,7 +309,6 @@ struct RuntimeHandleSession {
     session_id: meerkat_core::SessionId,
     mob_id: String,
     model: String,
-    keep_alive: bool,
     run_counter: u64,
     event_rx: WasmSessionEventReceiver,
 }
@@ -315,6 +323,8 @@ struct RuntimeState {
     mob_state: Arc<MobMcpState>,
     /// Concrete session service — needed for subscribe_session_events_raw.
     session_service: Arc<WasmSessionService>,
+    /// Canonical runtime adapter for browser session handles.
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
     /// Opaque browser-local handles mapped to runtime-owned sessions.
     sessions: BTreeMap<u32, RuntimeHandleSession>,
     next_handle: u32,
@@ -322,6 +332,110 @@ struct RuntimeState {
     model: String,
     #[cfg(target_arch = "wasm32")]
     js_tools: Vec<JsToolEntry>,
+}
+
+struct WasmSessionRuntimeExecutor {
+    session_service: Arc<WasmSessionService>,
+    runtime_adapter: Arc<RuntimeSessionAdapter>,
+    session_id: meerkat_core::SessionId,
+}
+
+impl WasmSessionRuntimeExecutor {
+    fn new(
+        session_service: Arc<WasmSessionService>,
+        runtime_adapter: Arc<RuntimeSessionAdapter>,
+        session_id: meerkat_core::SessionId,
+    ) -> Self {
+        Self {
+            session_service,
+            runtime_adapter,
+            session_id,
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl meerkat_core::lifecycle::CoreExecutor for WasmSessionRuntimeExecutor {
+    async fn apply(
+        &mut self,
+        run_id: meerkat_core::lifecycle::RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let plan = primitive.runtime_apply_plan();
+        let contributing_input_ids = plan.contributing_input_ids.clone();
+
+        match plan.action {
+            RuntimeApplyAction::StartTurn { prompt } => self
+                .session_service
+                .apply_runtime_turn(
+                    &self.session_id,
+                    run_id,
+                    meerkat_core::service::StartTurnRequest {
+                        prompt,
+                        system_prompt: None,
+                        render_metadata: None,
+                        handling_mode: meerkat_core::types::HandlingMode::Queue,
+                        event_tx: None,
+                        skill_references: primitive
+                            .turn_metadata()
+                            .and_then(|meta| meta.skill_references.clone()),
+                        flow_tool_overlay: primitive
+                            .turn_metadata()
+                            .and_then(|meta| meta.flow_tool_overlay.clone()),
+                        additional_instructions: primitive
+                            .turn_metadata()
+                            .and_then(|meta| meta.additional_instructions.clone()),
+                    },
+                    plan.boundary,
+                    contributing_input_ids,
+                )
+                .await
+                .map_err(|error| CoreExecutorError::ApplyFailed {
+                    reason: error.to_string(),
+                }),
+            RuntimeApplyAction::ApplySystemContextOnly { appends } => self
+                .session_service
+                .apply_runtime_context_appends(
+                    &self.session_id,
+                    run_id,
+                    appends,
+                    contributing_input_ids,
+                )
+                .await
+                .map_err(|error| CoreExecutorError::ApplyFailed {
+                    reason: error.to_string(),
+                }),
+        }
+    }
+
+    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } => self
+                .session_service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|error| CoreExecutorError::ControlFailed {
+                    reason: error.to_string(),
+                }),
+            RunControlCommand::StopRuntimeExecutor { .. } => {
+                let discard_result = self
+                    .session_service
+                    .discard_live_session(&self.session_id)
+                    .await;
+                self.runtime_adapter
+                    .unregister_session(&self.session_id)
+                    .await;
+                match discard_result {
+                    Ok(()) | Err(meerkat_core::SessionError::NotFound { .. }) => Ok(()),
+                    Err(error) => Err(CoreExecutorError::ControlFailed {
+                        reason: error.to_string(),
+                    }),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Resolve per-provider API keys into a `Config.providers.api_keys` map.
@@ -442,7 +556,14 @@ fn infer_provider_name(model: &str) -> Option<&'static str> {
 fn build_service_infrastructure(
     config: Config,
     max_sessions: usize,
-) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
+) -> Result<
+    (
+        Arc<WasmSessionService>,
+        Arc<RuntimeSessionAdapter>,
+        Arc<MobMcpState>,
+    ),
+    JsValue,
+> {
     let factory = meerkat::AgentFactory::minimal();
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
 
@@ -457,12 +578,14 @@ fn build_service_infrastructure(
     );
     builder.default_session_store = Some(store);
 
+    let runtime_adapter = Arc::new(RuntimeSessionAdapter::ephemeral());
     let service = Arc::new(meerkat::EphemeralSessionService::new(builder, max_sessions));
     let session_service = service.clone();
-    let mob_state = Arc::new(MobMcpState::new(
+    let mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
         service as Arc<dyn meerkat_mob::MobSessionService>,
+        Some(Arc::clone(&runtime_adapter)),
     ));
-    Ok((session_service, mob_state))
+    Ok((session_service, runtime_adapter, mob_state))
 }
 
 thread_local! {
@@ -1138,11 +1261,13 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         &model,
     );
 
-    let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
+    let (session_service, runtime_adapter, mob_state) =
+        build_service_infrastructure(config, MAX_SESSIONS)?;
 
     install_runtime_state(RuntimeState {
         mob_state,
         session_service,
+        runtime_adapter,
         sessions: BTreeMap::new(),
         next_handle: 1,
         model: model.clone(),
@@ -1198,11 +1323,13 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         &model,
     );
 
-    let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
+    let (session_service, runtime_adapter, mob_state) =
+        build_service_infrastructure(config, max_sessions)?;
 
     install_runtime_state(RuntimeState {
         mob_state,
         session_service,
+        runtime_adapter,
         sessions: BTreeMap::new(),
         next_handle: 1,
         model: model.clone(),
@@ -1280,9 +1407,46 @@ fn build_direct_session_request(
 
         skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+        deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_config.to_session_build_options()),
         labels: config.labels.clone(),
     })
+}
+
+fn canonical_input_id_from_outcome(outcome: &AcceptOutcome) -> Option<meerkat_core::InputId> {
+    match outcome {
+        AcceptOutcome::Accepted { input_id, .. } => Some(input_id.clone()),
+        AcceptOutcome::Deduplicated { existing_id, .. } => Some(existing_id.clone()),
+        AcceptOutcome::Rejected { .. } => None,
+        _ => None,
+    }
+}
+
+async fn canonical_run_id_for_input(
+    runtime_adapter: &RuntimeSessionAdapter,
+    session_id: &meerkat_core::SessionId,
+    input_id: &meerkat_core::InputId,
+) -> Option<String> {
+    let input_state: Option<meerkat_runtime::InputState> = runtime_adapter
+        .input_state(session_id, input_id)
+        .await
+        .ok()
+        .flatten();
+    input_state
+        .and_then(|state| state.last_run_id().cloned())
+        .map(|run_id| run_id.to_string())
+}
+
+async fn canonical_input_and_run_ids(
+    runtime_adapter: &RuntimeSessionAdapter,
+    session_id: &meerkat_core::SessionId,
+    outcome: &AcceptOutcome,
+) -> (Option<String>, Option<String>) {
+    let Some(input_id) = canonical_input_id_from_outcome(outcome) else {
+        return (None, None);
+    };
+    let run_id = canonical_run_id_for_input(runtime_adapter, session_id, &input_id).await;
+    (Some(input_id.to_string()), run_id)
 }
 
 fn create_runtime_backed_session(
@@ -1290,19 +1454,32 @@ fn create_runtime_backed_session(
     system_prompt: Option<String>,
     mob_id: String,
 ) -> Result<u32, JsValue> {
-    let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
-    let keep_alive = config.comms_name.is_some() && config.keep_alive;
-    let request = build_direct_session_request(&config, system_prompt)?;
+    let (session_service, runtime_adapter): (Arc<WasmSessionService>, Arc<RuntimeSessionAdapter>) =
+        with_runtime_state(|state| {
+            Ok((state.session_service.clone(), state.runtime_adapter.clone()))
+        })?;
+    let prepared = futures::executor::block_on(prepare_surface_session(runtime_adapter.as_ref()))
+        .map_err(|error| err_str("runtime_prepare_failed", error))?;
+    let session_id = prepared.session_id.clone();
+    let mut request = build_direct_session_request(&config, system_prompt)?;
+    let build = request.build.get_or_insert_with(Default::default);
+    build.resume_session = Some(prepared.session);
+    build.ops_lifecycle_override = Some(prepared.ops_lifecycle);
 
-    let created = futures::executor::block_on(session_service.create_session(request))
-        .map_err(err_session)?;
-    let session_id = created.session_id;
+    let _created = match futures::executor::block_on(session_service.create_session(request)) {
+        Ok(created) => created,
+        Err(error) => {
+            futures::executor::block_on(runtime_adapter.unregister_session(&session_id));
+            return Err(err_session(error));
+        }
+    };
     let event_rx = match futures::executor::block_on(
         session_service.subscribe_session_events_raw(&session_id),
     ) {
         Ok(rx) => rx,
         Err(err) => {
             let _ = futures::executor::block_on(session_service.archive(&session_id));
+            futures::executor::block_on(runtime_adapter.unregister_session(&session_id));
             return Err(err_str("session_event_stream_error", err));
         }
     };
@@ -1315,7 +1492,6 @@ fn create_runtime_backed_session(
                 session_id,
                 mob_id,
                 model: config.model,
-                keep_alive,
                 run_counter: 0,
                 event_rx,
             },
@@ -1425,7 +1601,7 @@ pub fn append_system_context(handle: u32, request_json: &str) -> Result<JsValue,
 
 /// Run a turn through the runtime-backed session service.
 ///
-/// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
+/// Returns JSON: `{ "text", "usage", "status", "session_id", "input_id", "run_id", "turns", "tool_calls" }`
 ///
 /// Convention: always resolves (Ok). Check `status` field for "completed" vs "failed".
 /// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
@@ -1437,19 +1613,32 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     } else {
         serde_json::from_str(options_json).map_err(|e| err_str("invalid_options", e))?
     };
-    let (session_service, session_id, run_id, _keep_alive) = with_runtime_state_mut(|state| {
+    let (session_service, runtime_adapter, session_id): (
+        Arc<WasmSessionService>,
+        Arc<RuntimeSessionAdapter>,
+        meerkat_core::SessionId,
+    ) = with_runtime_state(|state| {
         let session = state
             .sessions
-            .get_mut(&handle)
+            .get(&handle)
             .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
-        session.run_counter = session.run_counter.saturating_add(1);
         Ok((
             state.session_service.clone(),
+            state.runtime_adapter.clone(),
             session.session_id.clone(),
-            session.run_counter,
-            session.keep_alive,
         ))
     })?;
+
+    runtime_adapter
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(WasmSessionRuntimeExecutor::new(
+                session_service.clone(),
+                runtime_adapter.clone(),
+                session_id.clone(),
+            )),
+        )
+        .await;
 
     // Parse the prompt as structured ContentInput (supports both plain strings
     // and JSON-serialized content blocks from the Web SDK). Falls back to plain
@@ -1457,52 +1646,124 @@ pub async fn start_turn(handle: u32, prompt: &str, options_json: &str) -> Result
     let content_input: meerkat_core::types::ContentInput =
         serde_json::from_str(prompt).unwrap_or_else(|_| prompt.into());
 
-    let run_result = session_service
-        .start_turn(
-            &session_id,
-            meerkat_core::service::StartTurnRequest {
-                prompt: content_input,
-                system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
-                event_tx: None,
-
-                skill_references: None,
-                flow_tool_overlay: None,
+    let runtime_input = Input::Prompt(PromptInput::from_content_input(
+        content_input,
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
                 additional_instructions: options.additional_instructions,
+                ..Default::default()
             },
-        )
-        .await;
+        ),
+    ));
 
-    match run_result {
-        Ok(result) => {
+    let (outcome, completion_handle) = runtime_adapter
+        .accept_input_with_completion(&session_id, runtime_input)
+        .await
+        .map_err(|error| err_str("runtime_error", error))?;
+
+    let (input_id, run_id) =
+        canonical_input_and_run_ids(runtime_adapter.as_ref(), &session_id, &outcome).await;
+
+    with_runtime_state_mut(|state| {
+        let session = state
+            .sessions
+            .get_mut(&handle)
+            .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
+        session.run_counter = session.run_counter.saturating_add(1);
+        Ok(())
+    })?;
+
+    let deduplicated = matches!(outcome, AcceptOutcome::Deduplicated { .. });
+    match completion_handle {
+        Some(handle) => match handle.wait().await {
+            CompletionOutcome::Completed(result) => {
+                let result_json = serde_json::json!({
+                    "run_id": run_id,
+                    "input_id": input_id,
+                    "deduplicated": deduplicated,
+                    "text": result.text,
+                    "usage": {
+                        "input_tokens": result.usage.input_tokens,
+                        "output_tokens": result.usage.output_tokens,
+                    },
+                    "session_id": result.session_id.to_string(),
+                    "status": "completed",
+                    "turns": result.turns,
+                    "tool_calls": result.tool_calls,
+                    "structured_output": result.structured_output,
+                });
+                Ok(JsValue::from_str(&result_json.to_string()))
+            }
+            CompletionOutcome::CallbackPending { tool_name, args } => {
+                let result_json = serde_json::json!({
+                    "run_id": run_id,
+                    "input_id": input_id,
+                    "deduplicated": deduplicated,
+                    "text": "",
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    "session_id": session_id.to_string(),
+                    "status": "callback_pending",
+                    "tool_name": tool_name,
+                    "args": args,
+                });
+                Ok(JsValue::from_str(&result_json.to_string()))
+            }
+            CompletionOutcome::CompletedWithoutResult => {
+                let result_json = serde_json::json!({
+                    "run_id": run_id,
+                    "input_id": input_id,
+                    "deduplicated": deduplicated,
+                    "text": "",
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    "session_id": session_id.to_string(),
+                    "status": "completed_without_result",
+                    "turns": 0,
+                    "tool_calls": 0,
+                });
+                Ok(JsValue::from_str(&result_json.to_string()))
+            }
+            CompletionOutcome::Abandoned(reason) => {
+                let result_json = serde_json::json!({
+                    "run_id": run_id,
+                    "input_id": input_id,
+                    "deduplicated": deduplicated,
+                    "text": "",
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    "session_id": session_id.to_string(),
+                    "status": "abandoned",
+                    "reason": reason,
+                });
+                Ok(JsValue::from_str(&result_json.to_string()))
+            }
+            CompletionOutcome::RuntimeTerminated(reason) => {
+                let result_json = serde_json::json!({
+                    "run_id": run_id,
+                    "input_id": input_id,
+                    "deduplicated": deduplicated,
+                    "text": "",
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    "session_id": session_id.to_string(),
+                    "status": "runtime_terminated",
+                    "reason": reason,
+                });
+                Ok(JsValue::from_str(&result_json.to_string()))
+            }
+        },
+        None => {
             let result_json = serde_json::json!({
                 "run_id": run_id,
-                "text": result.text,
-                "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
-                },
-                "session_id": result.session_id.to_string(),
-                "status": "completed",
-                "turns": result.turns,
-                "tool_calls": result.tool_calls,
-            });
-            Ok(JsValue::from_str(&result_json.to_string()))
-        }
-        Err(meerkat_core::SessionError::Agent(err)) => {
-            let error_msg = format!("{err}");
-            let result_json = serde_json::json!({
-                "run_id": run_id,
+                "input_id": input_id,
+                "deduplicated": deduplicated,
                 "text": "",
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
                 "session_id": session_id.to_string(),
-                "status": "failed",
-                "error": error_msg,
+                "status": if deduplicated { "duplicate" } else { "accepted_terminal" },
+                "turns": 0,
+                "tool_calls": 0,
             });
             Ok(JsValue::from_str(&result_json.to_string()))
         }
-        Err(err) => Err(err_session(err)),
     }
 }
 
@@ -1568,14 +1829,23 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 /// Remove a session.
 #[wasm_bindgen]
 pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
-    let (session_service, session_id) = with_runtime_state(|state| {
+    let (session_service, runtime_adapter, session_id): (
+        Arc<WasmSessionService>,
+        Arc<RuntimeSessionAdapter>,
+        meerkat_core::SessionId,
+    ) = with_runtime_state(|state| {
         let session = state
             .sessions
             .get(&handle)
             .ok_or_else(|| err_js("SESSION_NOT_FOUND", &format!("unknown handle: {handle}")))?;
-        Ok((state.session_service.clone(), session.session_id.clone()))
+        Ok((
+            state.session_service.clone(),
+            state.runtime_adapter.clone(),
+            session.session_id.clone(),
+        ))
     })?;
     futures::executor::block_on(session_service.archive(&session_id)).map_err(err_session)?;
+    futures::executor::block_on(runtime_adapter.unregister_session(&session_id));
     with_runtime_state_mut(|state| {
         state.sessions.remove(&handle);
         Ok(())
@@ -2602,7 +2872,7 @@ mod tests {
             "anthropic".to_string(),
             "sk-test".to_string(),
         )]));
-        let (service, mob_state) =
+        let (service, _runtime_adapter, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
 
         let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({

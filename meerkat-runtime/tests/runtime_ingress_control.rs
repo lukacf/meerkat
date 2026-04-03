@@ -62,8 +62,8 @@ impl CoreExecutor for ResultExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceipt {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -71,9 +71,9 @@ impl CoreExecutor for ResultExecutor {
                 message_count: 0,
                 sequence: 0,
             },
-            session_snapshot: None,
-            run_result: Some(make_run_result("runtime ingress ok")),
-        })
+            None,
+            make_run_result("runtime ingress ok"),
+        ))
     }
 
     async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -97,8 +97,8 @@ impl CoreExecutor for RecordingBatchExecutor {
             .lock()
             .await
             .push(primitive.contributing_input_ids().to_vec());
-        Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceipt {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -106,9 +106,9 @@ impl CoreExecutor for RecordingBatchExecutor {
                 message_count: 0,
                 sequence: 0,
             },
-            session_snapshot: None,
-            run_result: Some(make_run_result("batched runtime ingress ok")),
-        })
+            None,
+            make_run_result("batched runtime ingress ok"),
+        ))
     }
 
     async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {

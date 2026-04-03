@@ -417,6 +417,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -490,6 +491,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -634,6 +636,7 @@ async fn accept_with_executor_triggers_loop() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -767,6 +770,7 @@ async fn failed_executor_continues_processing_backlog() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -856,6 +860,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -938,6 +943,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -1019,6 +1025,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -1053,6 +1060,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -1155,6 +1163,7 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -1258,6 +1267,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
                     },
                     session_snapshot: None,
                     run_result: None,
+                    terminal: None,
                 },
             ))
         })
@@ -1310,6 +1320,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -1384,6 +1395,7 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 
@@ -1469,6 +1481,7 @@ async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
                         },
                         session_snapshot: None,
                         run_result: None,
+                        terminal: None,
                     },
                 ))
             },
@@ -1523,8 +1536,8 @@ async fn dedup_terminal_input_returns_none_handle() {
             run_id: RunId,
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -1532,8 +1545,8 @@ async fn dedup_terminal_input_returns_none_handle() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                run_result: Some(RunResult {
+                None,
+                RunResult {
                     text: "done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -1542,8 +1555,8 @@ async fn dedup_terminal_input_returns_none_handle() {
                     structured_output: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
-                }),
-            })
+                },
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())
@@ -1621,8 +1634,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             // Simulate slow execution so duplicate arrives while in-flight
             tokio::time::sleep(Duration::from_millis(200)).await;
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -1630,8 +1643,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                run_result: Some(RunResult {
+                None,
+                RunResult {
                     text: "slow done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -1640,8 +1653,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                     structured_output: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
-                }),
-            })
+                },
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())
@@ -1771,6 +1784,7 @@ async fn completion_handle_resolves_without_result() {
                 },
                 session_snapshot: None,
                 run_result: None, // No RunResult
+                terminal: None,
             })
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -2009,6 +2023,7 @@ async fn successful_execution_fires_boundary_applied() {
                 },
                 session_snapshot: None,
                 run_result: None,
+                terminal: None,
             })
         }
 

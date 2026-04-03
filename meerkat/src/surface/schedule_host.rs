@@ -537,6 +537,13 @@ fn scheduled_completion_future(
                 failure_class: Some(OccurrenceFailureClass::RuntimeRejected),
                 materialized_session_id,
             },
+            CompletionOutcome::CallbackPending { tool_name, args } => DeliveryTerminal {
+                phase: OccurrencePhase::DeliveryFailed,
+                receipt: None,
+                detail: Some(format!("callback pending for tool '{tool_name}': {args}")),
+                failure_class: Some(OccurrenceFailureClass::RuntimeRejected),
+                materialized_session_id,
+            },
             CompletionOutcome::RuntimeTerminated(reason) => DeliveryTerminal {
                 phase: OccurrencePhase::DeliveryFailed,
                 receipt: None,

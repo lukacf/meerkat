@@ -655,9 +655,8 @@ impl MobActor {
     ) -> Result<(), MobError> {
         // Session registration + RuntimeLoop attachment is owned by the
         // provisioner's lazy `runtime_session_state()` init (called during
-        // provision_member and execute_runtime_input).  This method only
-        // handles autonomous-specific concerns: the keep-alive comms drain
-        // and the dispatch capability check.
+        // provision_member). stop_autonomous_member preserves registration
+        // (only aborts the drain), so resume just needs to re-spawn the drain.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let session_id = member_ref.session_id().ok_or_else(|| {
@@ -727,7 +726,10 @@ impl MobActor {
         .await
     }
 
-    /// Stop an autonomous member: interrupt, wait for quiescence, teardown.
+    /// Stop an autonomous member: interrupt, abort comms drain, wait for quiescence.
+    ///
+    /// Does NOT unregister the session — that happens only on dispose (retire/destroy).
+    /// This allows resume to re-spawn the comms drain without re-registering.
     async fn stop_autonomous_member(
         &self,
         meerkat_id: &MeerkatId,
@@ -741,7 +743,11 @@ impl MobActor {
         {
             return Err(error);
         }
-        self.teardown_autonomous_runtime(member_ref).await;
+        // Abort the comms drain but keep the session registered.
+        if let (Some(adapter), Some(session_id)) = (&self.runtime_adapter, member_ref.session_id())
+        {
+            adapter.abort_comms_drain(session_id).await;
+        }
         // Ensure stop semantics are strong: do not report completion while the
         // session still appears active, otherwise immediate resume can race into
         // SessionError::Busy.
@@ -3069,11 +3075,16 @@ impl MobActor {
         }
     }
 
-    /// Stop the autonomous host loop if the member is in AutonomousHost mode.
+    /// Stop the autonomous member and unregister session (disposal only).
     async fn dispose_stop_host_loop(&self, ctx: &DisposalContext) -> Result<(), MobError> {
         if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             self.stop_autonomous_member(&ctx.meerkat_id, &ctx.entry.member_ref)
                 .await?;
+            // Full teardown: unregister from RuntimeSessionAdapter.
+            // stop_autonomous_member only aborts the drain; disposal also
+            // needs to release the session registration.
+            self.teardown_autonomous_runtime(&ctx.entry.member_ref)
+                .await;
         }
         Ok(())
     }

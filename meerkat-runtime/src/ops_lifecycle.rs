@@ -234,7 +234,11 @@ impl ShellState {
             records: HashMap::new(),
             pending_wait: None,
             detached_wake: None,
-            feed_buffer: Arc::new(FeedBuffer::new(max_completed)),
+            // Feed buffer is larger than authority retention to absorb bursts.
+            // Entries are only evicted by buffer capacity, not by consumer cursor,
+            // so the buffer must be large enough that consumers drain before
+            // the oldest entry is evicted.
+            feed_buffer: Arc::new(FeedBuffer::new(max_completed.saturating_mul(4).max(1024))),
         }
     }
 

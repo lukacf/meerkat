@@ -581,22 +581,38 @@ impl AgentToolDispatcher for CompositeDispatcher {
             rebound.completion_feed = feed;
             rebound.interrupt_baseline = baseline;
 
-            // Re-apply the interrupt receiver on the new wait tool, including
-            // completion feed + baseline for feed-aware wait interrupts.
-            if let Some(rx) = interrupt_rx {
+            // Re-apply wait tool wiring on the rebuilt dispatcher.
+            // Three cases: comms+feed, feed-only, or neither.
+            {
                 use crate::builtin::utility::WaitTool;
-                let new_wait = Arc::new(WaitTool::with_interrupt_and_feed(
-                    rx.clone(),
-                    rebound.completion_feed.clone(),
-                    rebound.interrupt_baseline.clone(),
-                ));
-                for tool in &mut rebound.builtin_tools {
-                    if tool.name() == "wait" {
-                        *tool = new_wait;
-                        break;
+                let new_wait: Option<Arc<dyn crate::builtin::BuiltinTool>> =
+                    if let Some(rx) = interrupt_rx {
+                        // Comms + optional feed
+                        rebound.wait_interrupt_rx = Some(rx.clone());
+                        Some(Arc::new(WaitTool::with_interrupt_and_feed(
+                            rx,
+                            rebound.completion_feed.clone(),
+                            rebound.interrupt_baseline.clone(),
+                        )))
+                    } else if let (Some(feed), Some(baseline)) =
+                        (&rebound.completion_feed, &rebound.interrupt_baseline)
+                    {
+                        // Feed-only (no comms)
+                        Some(Arc::new(WaitTool::with_feed_only(
+                            Arc::clone(feed),
+                            Arc::clone(baseline),
+                        )))
+                    } else {
+                        None
+                    };
+                if let Some(new_wait) = new_wait {
+                    for tool in &mut rebound.builtin_tools {
+                        if tool.name() == "wait" {
+                            *tool = new_wait;
+                            break;
+                        }
                     }
                 }
-                rebound.wait_interrupt_rx = Some(rx);
             }
 
             #[cfg(feature = "skills")]

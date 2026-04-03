@@ -374,17 +374,19 @@ mod tests {
             },
         );
 
-        match event {
-            AgentEvent::InteractionCallbackPending {
-                interaction_id: actual_id,
-                tool_name,
-                args,
-            } => {
-                assert_eq!(actual_id, interaction_id);
-                assert_eq!(tool_name, "external_mock");
-                assert_eq!(args, json!({ "value": "browser" }));
-            }
-            other => panic!("expected callback-pending interaction event, got {other:?}"),
+        assert!(
+            matches!(event, AgentEvent::InteractionCallbackPending { .. }),
+            "expected callback-pending interaction event"
+        );
+        if let AgentEvent::InteractionCallbackPending {
+            interaction_id: actual_id,
+            tool_name,
+            args,
+        } = event
+        {
+            assert_eq!(actual_id, interaction_id);
+            assert_eq!(tool_name, "external_mock");
+            assert_eq!(args, json!({ "value": "browser" }));
         }
     }
 }

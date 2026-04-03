@@ -7,6 +7,7 @@ mod models;
 mod params;
 mod result;
 mod runtime;
+mod schedule;
 mod session;
 pub mod skills;
 mod usage;
@@ -39,6 +40,10 @@ pub use runtime::{
     RuntimeAcceptParams, RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult,
     RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
     WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireRuntimeState,
+};
+pub use schedule::{
+    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesResult,
+    UpdateScheduleParams,
 };
 pub use session::{
     WireAssistantBlock, WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory,

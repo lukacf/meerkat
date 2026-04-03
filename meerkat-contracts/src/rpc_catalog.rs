@@ -91,6 +91,65 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::basic("session/stream_open", "Open a session event stream"),
         RpcMethodDescriptor::basic("session/stream_close", "Close a session event stream"),
+        RpcMethodDescriptor::typed(
+            "schedule/create",
+            "Create a schedule",
+            "CreateScheduleRequest",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/get",
+            "Get one schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/list",
+            "List schedules",
+            "ListSchedulesParams",
+            "ScheduleListResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/update",
+            "Update a schedule",
+            "UpdateScheduleParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/pause",
+            "Pause a schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/resume",
+            "Resume a schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/delete",
+            "Delete a schedule",
+            "ScheduleIdParams",
+            "Schedule",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/occurrences",
+            "List schedule occurrences",
+            "ScheduleIdParams",
+            "ScheduleOccurrencesResult",
+        ),
+        RpcMethodDescriptor::result_only(
+            "schedule/tools",
+            "List schedule transport tools",
+            "ScheduleToolsResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "schedule/call",
+            "Call a schedule transport tool",
+            "ScheduleToolCallParams",
+            "Value",
+        ),
         RpcMethodDescriptor::basic("turn/start", "Start a new turn on existing session"),
         RpcMethodDescriptor::basic("turn/interrupt", "Cancel in-flight turn"),
         RpcMethodDescriptor::basic("config/get", "Read config"),
@@ -308,6 +367,9 @@ mod tests {
         assert!(methods.iter().any(|m| m == "session/inject_context"));
         assert!(methods.iter().any(|m| m == "mob/events"));
         assert!(methods.iter().any(|m| m == "mob/member_send"));
+        assert!(methods.iter().any(|m| m == "schedule/list"));
+        assert!(methods.iter().any(|m| m == "schedule/occurrences"));
+        assert!(methods.iter().any(|m| m == "schedule/call"));
     }
 
     #[test]

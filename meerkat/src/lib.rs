@@ -153,6 +153,20 @@ pub use meerkat_core::{
 
 // Re-export client types
 pub use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse};
+pub use meerkat_schedule::{
+    CalendarFieldSpec, CalendarTriggerSpec, ClaimDueRequest, ClaimDueResult, CreateScheduleRequest,
+    DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
+    DisabledScheduleStore, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec,
+    MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, MobActionSpec, MobTargetBinding,
+    Occurrence, OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceOrdinal,
+    OccurrencePhase, OverlapPolicy, Schedule, ScheduleDomainError, ScheduleDriver,
+    ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision,
+    ScheduleService, ScheduleStore, ScheduleStoreError, ScheduleStoreKind, ScheduleTargetDelivery,
+    ScheduleTargetProbe, ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind,
+    ScheduledMobRuntimeMode, ScheduledSessionAction, SessionMaterializationSpec,
+    SessionTargetBinding, TargetBinding, TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest,
+    handle_schedule_tools_call, schedule_tools_list,
+};
 pub use meerkat_tools::ToolError;
 
 // AgentFactory and build_agent types
@@ -211,7 +225,11 @@ pub use meerkat_store::JsonlStore;
 pub use meerkat_store::MemoryStore;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::RedbScheduleStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::RedbSessionStore;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+pub use meerkat_store::SqliteScheduleStore;
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use meerkat_store::SqliteSessionStore;
 

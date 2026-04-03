@@ -9,6 +9,9 @@
 //! `SessionId`; the first `start_turn()` call for that ID materializes the
 //! session inside the service (which runs the first turn).
 
+#[path = "session_runtime/schedule_host.rs"]
+mod schedule_host;
+
 use std::collections::BTreeMap;
 #[cfg(feature = "mcp")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +22,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, encode_llm_client_override_for_service,
+    PersistentSessionService, ScheduleService, encode_llm_client_override_for_service,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::EventEnvelope;
@@ -46,7 +49,7 @@ use meerkat_core::{
     SessionLlmIdentity, SessionSystemContextState,
 };
 use meerkat_runtime::{RuntimeSessionAdapter, SessionServiceRuntimeExt};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
@@ -195,6 +198,8 @@ enum PendingSessionPhase {
 /// preserving the two-step create-then-run API required by JSON-RPC handlers.
 pub struct SessionRuntime {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    schedule_service: ScheduleService,
+    schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Sessions that have been "created" (ID returned to caller) but not yet
     /// materialized in the service. The first `start_turn` call promotes them.
     pending: RwLock<IndexMap<SessionId, PendingSession>>,
@@ -213,6 +218,8 @@ pub struct SessionRuntime {
     #[allow(dead_code)]
     notification_sink: crate::router::NotificationSink,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
+    #[cfg(feature = "mob")]
+    mob_state: StdRwLock<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
     #[cfg(feature = "mcp")]
     mcp_sessions: RwLock<std::collections::HashMap<SessionId, SessionMcpState>>,
     /// Channel for sending callback tool requests to the RPC server loop.
@@ -268,6 +275,7 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
@@ -284,6 +292,8 @@ impl SessionRuntime {
 
         Self {
             service,
+            schedule_service,
+            schedule_host: Mutex::new(None),
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
             factory: factory_clone,
@@ -298,6 +308,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            #[cfg(feature = "mob")]
+            mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -318,6 +330,7 @@ impl SessionRuntime {
         persistence: PersistenceBundle,
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
+        let schedule_service = ScheduleService::new(persistence.schedule_store());
         let runtime_adapter = persistence.runtime_adapter();
         let (store, runtime_store, blob_store) = persistence.into_parts();
         let factory_clone = factory.clone();
@@ -335,6 +348,8 @@ impl SessionRuntime {
 
         Self {
             service,
+            schedule_service,
+            schedule_host: Mutex::new(None),
             pending: RwLock::new(IndexMap::new()),
             max_sessions,
             factory: factory_clone,
@@ -349,6 +364,8 @@ impl SessionRuntime {
                 generation: 0,
                 registry: SourceIdentityRegistry::default(),
             })),
+            #[cfg(feature = "mob")]
+            mob_state: StdRwLock::new(None),
             #[cfg(feature = "mcp")]
             mcp_sessions: RwLock::new(std::collections::HashMap::new()),
             callback_request_tx: StdRwLock::new(None),
@@ -429,6 +446,10 @@ impl SessionRuntime {
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<RuntimeSessionAdapter> {
         self.runtime_adapter.clone()
+    }
+
+    pub fn schedule_service(&self) -> ScheduleService {
+        self.schedule_service.clone()
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
@@ -755,6 +776,18 @@ impl SessionRuntime {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn set_mob_state(&self, mob_state: Arc<meerkat_mob_mcp::MobMcpState>) {
+        if let Ok(mut slot) = self.mob_state.write() {
+            *slot = Some(mob_state);
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    pub fn mob_state(&self) -> Option<Arc<meerkat_mob_mcp::MobMcpState>> {
+        self.mob_state.read().ok().and_then(|slot| slot.clone())
     }
 
     pub fn set_skill_identity_registry(&self, registry: SourceIdentityRegistry) {
@@ -2532,6 +2565,8 @@ impl SessionRuntime {
             let mut pending = self.pending.write().await;
             pending.clear();
         }
+
+        self.shutdown_schedule_host().await;
 
         // Shut down the service.
         self.service.shutdown().await;

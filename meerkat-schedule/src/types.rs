@@ -812,7 +812,7 @@ impl Occurrence {
                 .is_some_and(|expires_at| expires_at <= now_utc)
     }
 
-    pub(crate) fn claim_token(&self) -> Option<Uuid> {
+    pub fn claim_token(&self) -> Option<Uuid> {
         self.claim_token
     }
 }

@@ -2475,6 +2475,7 @@ name = "meerkat"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "indexmap",
  "inventory",
@@ -2487,6 +2488,7 @@ dependencies = [
  "meerkat-memory",
  "meerkat-models",
  "meerkat-runtime",
+ "meerkat-schedule",
  "meerkat-session",
  "meerkat-skills",
  "meerkat-store",
@@ -2567,6 +2569,7 @@ version = "0.5.1"
 dependencies = [
  "inventory",
  "meerkat-core",
+ "meerkat-schedule",
  "schemars",
  "serde",
  "serde_json",
@@ -2697,6 +2700,7 @@ name = "meerkat-mcp-server"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "dirs",
  "futures",
@@ -2983,8 +2987,10 @@ name = "meerkat-store"
 version = "0.5.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "dirs",
  "meerkat-core",
+ "meerkat-schedule",
  "redb",
  "rusqlite",
  "serde",

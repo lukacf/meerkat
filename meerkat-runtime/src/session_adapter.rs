@@ -81,6 +81,16 @@ impl DriverEntry {
         }
     }
 
+    /// Whether this session is quiescent for detached-wake purposes.
+    ///
+    /// A session is quiescent when it is idle/attached (not running) AND has
+    /// no non-terminal inputs in its ledger. Queued-only inputs intentionally
+    /// block quiescence — `accept_input_without_wake` stages work without
+    /// waking, so detached-wake must not race with pending queue processing.
+    pub(crate) fn is_quiescent_for_detached_wake(&self) -> bool {
+        self.is_idle_or_attached() && self.as_driver().active_input_ids().is_empty()
+    }
+
     /// Attach an executor (Idle → Attached).
     pub(crate) fn attach(&mut self) -> Result<(), RuntimeStateTransitionError> {
         match self {

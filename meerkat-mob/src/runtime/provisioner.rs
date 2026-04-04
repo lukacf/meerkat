@@ -926,6 +926,15 @@ impl MultiBackendProvisioner {
             .session_service
             .create_session(create_session)
             .await?;
+        // Register external backend sessions with the runtime adapter so
+        // that accept_input_with_completion can route autonomous turns.
+        // This mirrors the registration in SessionBackend::provision_member.
+        if self.session.runtime_adapter.is_some() {
+            let _ = self
+                .session
+                .runtime_session_state(&created.session_id)
+                .await;
+        }
         if let (Some(owner_session_id), Some(registry)) = (owner_session_id, ops_registry) {
             self.session.ops_adapter.bind_session_registry(
                 created.session_id.clone(),

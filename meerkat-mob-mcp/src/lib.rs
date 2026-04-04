@@ -2063,6 +2063,7 @@ mod tests {
         keep_alive_notifiers: RwLock<HashMap<SessionId, Arc<Notify>>>,
         counter: AtomicU64,
         start_turn_delay_ms: AtomicU64,
+        runtime_adapter: Arc<meerkat_runtime::RuntimeSessionAdapter>,
     }
 
     impl MockSessionSvc {
@@ -2073,6 +2074,7 @@ mod tests {
                 keep_alive_notifiers: RwLock::new(HashMap::new()),
                 counter: AtomicU64::new(0),
                 start_turn_delay_ms: AtomicU64::new(0),
+                runtime_adapter: Arc::new(meerkat_runtime::RuntimeSessionAdapter::ephemeral()),
             }
         }
 
@@ -2301,6 +2303,10 @@ mod tests {
             true
         }
 
+        fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::RuntimeSessionAdapter>> {
+            Some(self.runtime_adapter.clone())
+        }
+
         async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
             true
         }
@@ -2315,6 +2321,29 @@ mod tests {
                 .await
                 .get(session_id)
                 .cloned())
+        }
+
+        async fn apply_runtime_turn(
+            &self,
+            session_id: &SessionId,
+            run_id: meerkat_core::RunId,
+            req: StartTurnRequest,
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+            contributing_input_ids: Vec<meerkat_core::InputId>,
+        ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+            <Self as SessionService>::start_turn(self, session_id, req).await?;
+            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                run_result: None,
+            })
         }
     }
 

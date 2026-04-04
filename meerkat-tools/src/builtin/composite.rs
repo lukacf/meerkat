@@ -9,7 +9,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutpu
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
-use meerkat_core::agent::OpsLifecycleBindError;
+use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -480,11 +480,30 @@ impl AgentToolDispatcher for CompositeDispatcher {
         update
     }
 
+    fn capabilities(&self) -> DispatcherCapabilities {
+        let has_wait = self.builtin_tools.iter().any(|t| t.name() == "wait");
+        let mut ops_lifecycle = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.job_manager.is_some() {
+            ops_lifecycle = true;
+        }
+        if !ops_lifecycle {
+            ops_lifecycle = self
+                .external
+                .as_ref()
+                .is_some_and(|ext| ext.capabilities().ops_lifecycle);
+        }
+        DispatcherCapabilities {
+            wait_interrupt: has_wait,
+            ops_lifecycle,
+            completion_feed: has_wait,
+        }
+    }
+
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: meerkat_core::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
-    {
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
         let mut owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
         // Swap the wait tool with an interrupt-aware version, including
@@ -504,23 +523,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
         // Stash the receiver for carry-forward across dispatcher rebuilds
         // (e.g., bind_ops_lifecycle creates a fresh CompositeDispatcher).
         owned.wait_interrupt_rx = Some(rx);
-        Ok(Arc::new(owned))
-    }
-
-    fn supports_wait_interrupt(&self) -> bool {
-        self.builtin_tools.iter().any(|t| t.name() == "wait")
-    }
-
-    fn supports_completion_feed_binding(&self) -> bool {
-        self.builtin_tools.iter().any(|t| t.name() == "wait")
+        Ok(BindOutcome::Bound(Arc::new(owned)))
     }
 
     fn bind_completion_feed(
         self: Arc<Self>,
         feed: std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>,
         baseline: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat_core::wait_interrupt::WaitInterruptBindError>
-    {
+    ) -> Result<BindOutcome, meerkat_core::wait_interrupt::WaitInterruptBindError> {
         let mut owned = Arc::try_unwrap(self)
             .map_err(|_| meerkat_core::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
         // Swap the wait tool with a feed-aware version (no comms rx).
@@ -537,22 +547,24 @@ impl AgentToolDispatcher for CompositeDispatcher {
         }
         owned.completion_feed = Some(feed);
         owned.interrupt_baseline = Some(baseline);
-        Ok(Arc::new(owned))
+        Ok(BindOutcome::Bound(Arc::new(owned)))
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn OpsLifecycleRegistry>,
         owner_session_id: SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let mut owned =
             Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
         #[allow(clippy::redundant_clone)]
         // clone needed on non-wasm32 where owner_session_id is reused
         let rebound_external = match owned.external.take() {
-            Some(external) if external.supports_ops_lifecycle_binding() => {
-                Some(external.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?)
-            }
+            Some(external) if external.capabilities().ops_lifecycle => Some(
+                external
+                    .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?
+                    .into_dispatcher(),
+            ),
             other => other,
         };
 
@@ -624,7 +636,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 rebound.register_skill_tools(skill_tools);
             }
 
-            Ok(Arc::new(rebound))
+            Ok(BindOutcome::Bound(Arc::new(rebound)))
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -634,17 +646,6 @@ impl AgentToolDispatcher for CompositeDispatcher {
             let _ = rebound_external;
             Err(OpsLifecycleBindError::Unsupported)
         }
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.job_manager.is_some() {
-            return true;
-        }
-
-        self.external
-            .as_ref()
-            .is_some_and(|ext| ext.supports_ops_lifecycle_binding())
     }
 
     fn completion_enrichment(
@@ -751,7 +752,8 @@ mod tests {
         let (tx, rx) = tokio::sync::watch::channel(None::<WaitInterrupt>);
         let rebound = dispatcher
             .bind_wait_interrupt(rx)
-            .expect("bind_wait_interrupt should succeed");
+            .expect("bind_wait_interrupt should succeed")
+            .into_dispatcher();
 
         // Dispatch a wait call and interrupt it
         let call_json =
@@ -959,7 +961,7 @@ mod tests {
         .expect("composite dispatcher should build");
 
         assert!(
-            dispatcher.supports_ops_lifecycle_binding(),
+            dispatcher.capabilities().ops_lifecycle,
             "shell-enabled composite dispatcher should support ops lifecycle binding"
         );
         assert!(
@@ -996,7 +998,8 @@ mod tests {
             Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
         let rebound = dispatcher
             .bind_ops_lifecycle(Arc::clone(&registry), SessionId::new())
-            .expect("ops lifecycle binding should succeed");
+            .expect("ops lifecycle binding should succeed")
+            .into_dispatcher();
 
         let call_json = serde_json::value::RawValue::from_string(
             r#"{"command":"sleep 60","background":true}"#.to_string(),

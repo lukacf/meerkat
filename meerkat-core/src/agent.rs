@@ -165,6 +165,52 @@ pub struct DetachedOpCompletion {
     pub elapsed_ms: Option<u64>,
 }
 
+/// Dispatcher binding capabilities — what optional bindings this dispatcher supports.
+///
+/// Returned by [`AgentToolDispatcher::capabilities`]. Replaces individual
+/// `supports_*` boolean methods with a single structured query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DispatcherCapabilities {
+    /// Whether `bind_wait_interrupt` is implemented.
+    pub wait_interrupt: bool,
+    /// Whether `bind_ops_lifecycle` is implemented.
+    pub ops_lifecycle: bool,
+    /// Whether `bind_completion_feed` is implemented.
+    pub completion_feed: bool,
+}
+
+/// Result of a dispatcher binding operation.
+///
+/// Distinguishes "binding was applied" from "binding was skipped" so callers
+/// can decide whether to wire downstream side effects (e.g. bridge tasks).
+///
+/// **Semantics (decision 11 — supported/best-effort/rejected):**
+/// - `Ok(Bound(d))` = **supported** — binding succeeded, side effects should be wired
+/// - `Ok(Skipped(d))` = **best-effort** — inner shared or incompatible, dispatcher unchanged
+/// - `Err(SharedOwnership)` = **rejected** — outer wrapper is shared, caught by factory pre-check
+/// - `Err(Unsupported)` = **rejected** — type doesn't support this binding, caught by `capabilities()`
+pub enum BindOutcome {
+    /// Binding was applied. The dispatcher was rebound.
+    Bound(Arc<dyn AgentToolDispatcher>),
+    /// Binding was skipped — inner dispatcher was shared or unsupported.
+    /// The returned dispatcher is unchanged but safe to use.
+    Skipped(Arc<dyn AgentToolDispatcher>),
+}
+
+impl BindOutcome {
+    /// Extract the dispatcher, regardless of bind status.
+    pub fn into_dispatcher(self) -> Arc<dyn AgentToolDispatcher> {
+        match self {
+            Self::Bound(d) | Self::Skipped(d) => d,
+        }
+    }
+
+    /// Whether the binding was actually applied.
+    pub fn was_bound(&self) -> bool {
+        matches!(self, Self::Bound(_))
+    }
+}
+
 /// Trait for tool dispatchers
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -190,11 +236,16 @@ pub trait AgentToolDispatcher: Send + Sync {
         ExternalToolUpdate::default()
     }
 
+    /// Query which optional bindings this dispatcher supports.
+    fn capabilities(&self) -> DispatcherCapabilities {
+        DispatcherCapabilities::default()
+    }
+
     /// Bind a wait-interrupt receiver into this dispatcher, returning a rebound dispatcher.
     ///
     /// The consuming `Arc<Self>` receiver is required because some dispatchers
     /// (e.g. `CompositeDispatcher`) hold non-Clone state. The factory calls
-    /// this once before comms gateway composition, transferring ownership.
+    /// this once after final composition, transferring ownership.
     ///
     /// Default returns `Err(Unsupported)`. Dispatchers that contain a `WaitTool`
     /// (e.g. `CompositeDispatcher`) override this to swap in an interrupt-aware
@@ -203,17 +254,8 @@ pub trait AgentToolDispatcher: Send + Sync {
     fn bind_wait_interrupt(
         self: Arc<Self>,
         _rx: crate::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
-    }
-
-    /// Whether this dispatcher supports wait interrupt binding.
-    ///
-    /// Non-consuming probe that callers check before calling the consuming
-    /// `bind_wait_interrupt()`. Default: `false`. Dispatchers that contain a
-    /// `WaitTool` (e.g. `CompositeDispatcher`) override this to return `true`.
-    fn supports_wait_interrupt(&self) -> bool {
-        false
     }
 
     /// Bind a session-canonical ops registry into this dispatcher.
@@ -224,13 +266,8 @@ pub trait AgentToolDispatcher: Send + Sync {
         self: Arc<Self>,
         _registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
         _owner_session_id: crate::types::SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         Err(OpsLifecycleBindError::Unsupported)
-    }
-
-    /// Whether this dispatcher supports ops lifecycle binding.
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        false
     }
 
     /// Return the completion enrichment provider, if available.
@@ -248,18 +285,11 @@ pub trait AgentToolDispatcher: Send + Sync {
     /// Called by the factory when no comms runtime is available but a completion
     /// feed exists. The WaitTool will race sleep against feed advance without
     /// a comms interrupt channel. Default returns `Err(Unsupported)`.
-    /// Whether this dispatcher supports completion feed binding.
-    ///
-    /// Non-consuming probe. Check before calling the consuming `bind_completion_feed`.
-    fn supports_completion_feed_binding(&self) -> bool {
-        false
-    }
-
     fn bind_completion_feed(
         self: Arc<Self>,
         _feed: Arc<dyn crate::completion_feed::CompletionFeed>,
         _baseline: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported)
     }
 }
@@ -326,59 +356,106 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.poll_external_updates().await
     }
 
+    fn capabilities(&self) -> DispatcherCapabilities {
+        self.inner.capabilities()
+    }
+
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: crate::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        let rebound_inner = owned.inner.bind_wait_interrupt(rx)?;
-        Ok(Arc::new(FilteredToolDispatcher {
-            inner: rebound_inner,
-            allowed_tools: owned.allowed_tools,
-            filtered_tools: owned.filtered_tools,
-        }))
-    }
-
-    fn supports_wait_interrupt(&self) -> bool {
-        self.inner.supports_wait_interrupt()
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_wait_interrupt(rx)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            // Can't use outcome after into_dispatcher, reconstruct:
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
         owner_session_id: crate::types::SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, OpsLifecycleBindError> {
+    ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self).map_err(|_| OpsLifecycleBindError::SharedOwnership)?;
-        let rebound_inner = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
-        Ok(Arc::new(FilteredToolDispatcher {
-            inner: rebound_inner,
-            allowed_tools: owned.allowed_tools,
-            filtered_tools: owned.filtered_tools,
-        }))
-    }
-
-    fn supports_completion_feed_binding(&self) -> bool {
-        self.inner.supports_completion_feed_binding()
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_ops_lifecycle(registry, owner_session_id)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
     }
 
     fn bind_completion_feed(
         self: Arc<Self>,
         feed: Arc<dyn crate::completion_feed::CompletionFeed>,
         baseline: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
-        let rebound_inner = owned.inner.bind_completion_feed(feed, baseline)?;
-        Ok(Arc::new(FilteredToolDispatcher {
-            inner: rebound_inner,
-            allowed_tools: owned.allowed_tools,
-            filtered_tools: owned.filtered_tools,
-        }))
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        self.inner.supports_ops_lifecycle_binding()
+        if Arc::strong_count(&owned.inner) == 1 {
+            let outcome = owned.inner.bind_completion_feed(feed, baseline)?;
+            let bound = outcome.was_bound();
+            let d = outcome.into_dispatcher();
+            Ok(if bound {
+                BindOutcome::Bound(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            } else {
+                BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                    inner: d,
+                    allowed_tools: owned.allowed_tools,
+                    filtered_tools: owned.filtered_tools,
+                }))
+            })
+        } else {
+            Ok(BindOutcome::Skipped(Arc::new(FilteredToolDispatcher {
+                inner: owned.inner,
+                allowed_tools: owned.allowed_tools,
+                filtered_tools: owned.filtered_tools,
+            })))
+        }
     }
 
     fn completion_enrichment(

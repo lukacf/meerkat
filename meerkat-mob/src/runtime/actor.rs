@@ -652,7 +652,13 @@ impl MobActor {
             ))
         })?;
 
-        if let Some(adapter) = &self.runtime_adapter {
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            MobError::Internal(format!(
+                "autonomous member '{meerkat_id}' requires admission-capable substrate (runtime adapter)"
+            ))
+        })?;
+
+        {
             // Runtime-backed path: true admission ack via accept_input_with_completion.
             use meerkat_runtime::{Input, InputHeader, PromptInput};
 
@@ -712,80 +718,6 @@ impl MobActor {
                 meerkat_id.clone(),
                 InitialTurnHandle {
                     handle,
-                    completion_rx,
-                },
-            );
-        } else {
-            // No adapter (test/ephemeral): fall back to provisioner.start_turn()
-            // in a spawned task. Uses yield-check for immediate failure detection.
-            let member_ref_cloned = member_ref.clone();
-            let provisioner = self.provisioner.clone();
-            let log_id = meerkat_id.clone();
-            let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
-
-            let inner_handle: tokio::task::JoinHandle<Result<(), MobError>> =
-                tokio::spawn(async move {
-                    let result = provisioner
-                        .start_turn(
-                            &member_ref_cloned,
-                            meerkat_core::service::StartTurnRequest {
-                                prompt,
-                                system_prompt: None,
-                                render_metadata: None,
-                                handling_mode: meerkat_core::types::HandlingMode::Queue,
-                                event_tx: None,
-                                skill_references: None,
-                                flow_tool_overlay: None,
-                                additional_instructions: None,
-                            },
-                        )
-                        .await;
-                    match result {
-                        Ok(()) => {
-                            let _ = completion_tx.send(true);
-                        }
-                        Err(ref error) => {
-                            tracing::error!(
-                                meerkat_id = %log_id,
-                                error = %error,
-                                "autonomous initial turn failed"
-                            );
-                        }
-                    }
-                    result
-                });
-
-            // Yield to detect immediate failures (session-not-found, etc.)
-            tokio::task::yield_now().await;
-            if inner_handle.is_finished() {
-                match inner_handle.await {
-                    Ok(Ok(())) => {
-                        // Turn completed immediately and successfully.
-                        return Ok(());
-                    }
-                    Ok(Err(error)) => {
-                        self.teardown_autonomous_runtime(member_ref).await;
-                        return Err(error);
-                    }
-                    Err(join_error) => {
-                        self.teardown_autonomous_runtime(member_ref).await;
-                        return Err(MobError::Internal(format!(
-                            "autonomous initial turn panicked for '{meerkat_id}': {join_error}"
-                        )));
-                    }
-                }
-            }
-
-            // Wrap in a JoinHandle<()> for InitialTurnHandle (result already
-            // handled inside the task via completion_tx + logging).
-            let barrier_handle = tokio::spawn(async move {
-                let _ = inner_handle.await;
-            });
-
-            self.autonomous_initial_turns.lock().await.insert(
-                meerkat_id.clone(),
-                InitialTurnHandle {
-                    handle: barrier_handle,
                     completion_rx,
                 },
             );

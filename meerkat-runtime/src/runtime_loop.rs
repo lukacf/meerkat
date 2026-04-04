@@ -369,8 +369,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                         if has_new_bg_completion {
                             // Verify quiescence before injecting.
                             let d = driver.lock().await;
-                            let quiescent =
-                                d.is_idle_or_attached() && d.as_driver().active_input_ids().is_empty();
+                            let quiescent = d.is_quiescent_for_detached_wake();
                             drop(d);
 
                             if quiescent {
@@ -458,7 +457,7 @@ async fn maybe_inject_feed_wake(
 
         // Verify quiescence before injecting.
         let d = driver.lock().await;
-        if !d.is_idle_or_attached() || !d.as_driver().active_input_ids().is_empty() {
+        if !d.is_quiescent_for_detached_wake() {
             return false;
         }
         drop(d);
@@ -486,7 +485,7 @@ async fn maybe_inject_feed_wake(
         }
 
         let d = driver.lock().await;
-        if !d.is_idle_or_attached() || !d.as_driver().active_input_ids().is_empty() {
+        if !d.is_quiescent_for_detached_wake() {
             return false;
         }
         drop(d);

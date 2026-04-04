@@ -373,85 +373,135 @@ impl AgentToolDispatcher for ToolGateway {
         entry.dispatcher.dispatch(call).await
     }
 
+    fn capabilities(&self) -> crate::agent::DispatcherCapabilities {
+        let mut caps = crate::agent::DispatcherCapabilities::default();
+        for entry in &self.entries {
+            let c = entry.dispatcher.capabilities();
+            caps.wait_interrupt |= c.wait_interrupt;
+            caps.ops_lifecycle |= c.ops_lifecycle;
+            caps.completion_feed |= c.completion_feed;
+        }
+        caps
+    }
+
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: crate::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<crate::agent::BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
 
         let mut builder = ToolGatewayBuilder::new();
-        let mut any_rebound = false;
+        let mut any_bound = false;
         for entry in owned.entries {
-            // Only rebind entries that support it. Entries without a wait
-            // tool (e.g. comms overlays, MCP surfaces) are passed through
-            // as-is. This lets a mixed gateway (CompositeDispatcher + overlay)
-            // rebind correctly instead of failing on the first Unsupported entry.
-            if entry.dispatcher.supports_wait_interrupt() {
-                let rebound = entry.dispatcher.bind_wait_interrupt(rx.clone())?;
-                builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
-                any_rebound = true;
+            if entry.dispatcher.capabilities().wait_interrupt
+                && Arc::strong_count(&entry.dispatcher) == 1
+            {
+                let outcome = entry.dispatcher.bind_wait_interrupt(rx.clone())?;
+                if outcome.was_bound() {
+                    any_bound = true;
+                }
+                builder = builder.add_dispatcher_with_availability(
+                    outcome.into_dispatcher(),
+                    entry.availability,
+                );
             } else {
                 builder =
                     builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
             }
         }
 
-        // If no entry was actually rebound, the rx receiver will be dropped
-        // and waits remain non-interruptible. Signal this to the caller.
-        if !any_rebound {
-            return Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported);
-        }
-
         let gateway = builder
             .build()
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::Unsupported)?;
-        Ok(Arc::new(gateway))
-    }
-
-    fn supports_wait_interrupt(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|e| e.dispatcher.supports_wait_interrupt())
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(gateway);
+        Ok(if any_bound {
+            crate::agent::BindOutcome::Bound(d)
+        } else {
+            crate::agent::BindOutcome::Skipped(d)
+        })
     }
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
         owner_session_id: crate::types::SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::agent::OpsLifecycleBindError> {
+    ) -> Result<crate::agent::BindOutcome, crate::agent::OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
 
         let mut builder = ToolGatewayBuilder::new();
-        let mut any_rebound = false;
+        let mut any_bound = false;
         for entry in owned.entries {
-            if entry.dispatcher.supports_ops_lifecycle_binding() {
-                let rebound = entry
+            if entry.dispatcher.capabilities().ops_lifecycle
+                && Arc::strong_count(&entry.dispatcher) == 1
+            {
+                let outcome = entry
                     .dispatcher
                     .bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?;
-                builder = builder.add_dispatcher_with_availability(rebound, entry.availability);
-                any_rebound = true;
+                if outcome.was_bound() {
+                    any_bound = true;
+                }
+                builder = builder.add_dispatcher_with_availability(
+                    outcome.into_dispatcher(),
+                    entry.availability,
+                );
             } else {
                 builder =
                     builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
             }
         }
 
-        if !any_rebound {
-            return Err(crate::agent::OpsLifecycleBindError::Unsupported);
+        let gateway = builder
+            .build()
+            .map_err(|_| crate::agent::OpsLifecycleBindError::Unsupported)?;
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(gateway);
+        Ok(if any_bound {
+            crate::agent::BindOutcome::Bound(d)
+        } else {
+            crate::agent::BindOutcome::Skipped(d)
+        })
+    }
+
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+        baseline: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<crate::agent::BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+
+        let mut builder = ToolGatewayBuilder::new();
+        let mut any_bound = false;
+        for entry in owned.entries {
+            if entry.dispatcher.capabilities().completion_feed
+                && Arc::strong_count(&entry.dispatcher) == 1
+            {
+                let outcome = entry
+                    .dispatcher
+                    .bind_completion_feed(Arc::clone(&feed), Arc::clone(&baseline))?;
+                if outcome.was_bound() {
+                    any_bound = true;
+                }
+                builder = builder.add_dispatcher_with_availability(
+                    outcome.into_dispatcher(),
+                    entry.availability,
+                );
+            } else {
+                builder =
+                    builder.add_dispatcher_with_availability(entry.dispatcher, entry.availability);
+            }
         }
 
         let gateway = builder
             .build()
-            .map_err(|_| crate::agent::OpsLifecycleBindError::Unsupported)?;
-        Ok(Arc::new(gateway))
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|e| e.dispatcher.supports_ops_lifecycle_binding())
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::Unsupported)?;
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(gateway);
+        Ok(if any_bound {
+            crate::agent::BindOutcome::Bound(d)
+        } else {
+            crate::agent::BindOutcome::Skipped(d)
+        })
     }
 
     fn completion_enrichment(
@@ -580,31 +630,42 @@ impl AgentToolDispatcher for DynamicToolComposite {
         }
     }
 
-    fn supports_wait_interrupt(&self) -> bool {
-        self.dispatchers.iter().any(|d| d.supports_wait_interrupt())
+    fn capabilities(&self) -> crate::agent::DispatcherCapabilities {
+        let mut caps = crate::agent::DispatcherCapabilities::default();
+        for d in &self.dispatchers {
+            let c = d.capabilities();
+            caps.wait_interrupt |= c.wait_interrupt;
+            caps.ops_lifecycle |= c.ops_lifecycle;
+            caps.completion_feed |= c.completion_feed;
+        }
+        caps
     }
 
     fn bind_wait_interrupt(
         self: Arc<Self>,
         rx: crate::wait_interrupt::WaitInterruptReceiver,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::wait_interrupt::WaitInterruptBindError> {
+    ) -> Result<crate::agent::BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
         let mut rebound = Vec::with_capacity(owned.dispatchers.len());
+        let mut any_bound = false;
         for d in owned.dispatchers {
-            if d.supports_wait_interrupt() {
-                rebound.push(d.bind_wait_interrupt(rx.clone())?);
+            if d.capabilities().wait_interrupt && Arc::strong_count(&d) == 1 {
+                let outcome = d.bind_wait_interrupt(rx.clone())?;
+                if outcome.was_bound() {
+                    any_bound = true;
+                }
+                rebound.push(outcome.into_dispatcher());
             } else {
                 rebound.push(d);
             }
         }
-        Ok(Arc::new(DynamicToolComposite::new(rebound)))
-    }
-
-    fn supports_ops_lifecycle_binding(&self) -> bool {
-        self.dispatchers
-            .iter()
-            .any(|d| d.supports_ops_lifecycle_binding())
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(DynamicToolComposite::new(rebound));
+        Ok(if any_bound {
+            crate::agent::BindOutcome::Bound(d)
+        } else {
+            crate::agent::BindOutcome::Skipped(d)
+        })
     }
 
     fn completion_enrichment(
@@ -619,18 +680,57 @@ impl AgentToolDispatcher for DynamicToolComposite {
         self: Arc<Self>,
         registry: Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>,
         owner_session_id: crate::types::SessionId,
-    ) -> Result<Arc<dyn AgentToolDispatcher>, crate::agent::OpsLifecycleBindError> {
+    ) -> Result<crate::agent::BindOutcome, crate::agent::OpsLifecycleBindError> {
         let owned = Arc::try_unwrap(self)
             .map_err(|_| crate::agent::OpsLifecycleBindError::SharedOwnership)?;
         let mut rebound = Vec::with_capacity(owned.dispatchers.len());
+        let mut any_bound = false;
         for d in owned.dispatchers {
-            if d.supports_ops_lifecycle_binding() {
-                rebound.push(d.bind_ops_lifecycle(registry.clone(), owner_session_id.clone())?);
+            if d.capabilities().ops_lifecycle && Arc::strong_count(&d) == 1 {
+                let outcome =
+                    d.bind_ops_lifecycle(Arc::clone(&registry), owner_session_id.clone())?;
+                if outcome.was_bound() {
+                    any_bound = true;
+                }
+                rebound.push(outcome.into_dispatcher());
             } else {
                 rebound.push(d);
             }
         }
-        Ok(Arc::new(DynamicToolComposite::new(rebound)))
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(DynamicToolComposite::new(rebound));
+        Ok(if any_bound {
+            crate::agent::BindOutcome::Bound(d)
+        } else {
+            crate::agent::BindOutcome::Skipped(d)
+        })
+    }
+
+    fn bind_completion_feed(
+        self: Arc<Self>,
+        feed: Arc<dyn crate::completion_feed::CompletionFeed>,
+        baseline: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<crate::agent::BindOutcome, crate::wait_interrupt::WaitInterruptBindError> {
+        let owned = Arc::try_unwrap(self)
+            .map_err(|_| crate::wait_interrupt::WaitInterruptBindError::SharedOwnership)?;
+        let mut rebound = Vec::with_capacity(owned.dispatchers.len());
+        let mut any_bound = false;
+        for d in owned.dispatchers {
+            if d.capabilities().completion_feed && Arc::strong_count(&d) == 1 {
+                let outcome = d.bind_completion_feed(Arc::clone(&feed), Arc::clone(&baseline))?;
+                if outcome.was_bound() {
+                    any_bound = true;
+                }
+                rebound.push(outcome.into_dispatcher());
+            } else {
+                rebound.push(d);
+            }
+        }
+        let d: Arc<dyn AgentToolDispatcher> = Arc::new(DynamicToolComposite::new(rebound));
+        Ok(if any_bound {
+            crate::agent::BindOutcome::Bound(d)
+        } else {
+            crate::agent::BindOutcome::Skipped(d)
+        })
     }
 }
 
@@ -1036,8 +1136,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::panic)]
-    fn test_gateway_bind_wait_interrupt_unsupported_when_no_entry_rebound() {
-        // When no entry supports binding, the gateway returns Unsupported
+    fn test_gateway_bind_wait_interrupt_skipped_when_no_entry_bindable() {
+        // When no entry supports binding, the gateway returns Skipped
         // so the caller knows waits are not actually interruptible.
         let base: Arc<dyn AgentToolDispatcher> =
             Arc::new(MockDispatcher::new("base", &["task_create"]));
@@ -1053,11 +1153,13 @@ mod tests {
         );
 
         let (_tx, rx) = tokio::sync::watch::channel(None::<crate::wait_interrupt::WaitInterrupt>);
-        match gateway.bind_wait_interrupt(rx) {
-            Err(crate::wait_interrupt::WaitInterruptBindError::Unsupported) => {}
-            Ok(_) => panic!("expected Unsupported error when no entry can be rebound"),
-            Err(e) => panic!("expected Unsupported, got {e:?}"),
-        }
+        let outcome = gateway
+            .bind_wait_interrupt(rx)
+            .expect("bind should not error");
+        assert!(
+            !outcome.was_bound(),
+            "expected Skipped when no entry can be rebound"
+        );
     }
 
     #[test]

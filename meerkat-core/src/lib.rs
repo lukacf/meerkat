@@ -65,8 +65,8 @@ pub mod wait_interrupt;
 // Re-export main types at crate root
 pub use agent::{
     Agent, AgentBuilder, AgentLlmClient, AgentRunner, AgentSessionStore, AgentToolDispatcher,
-    CommsCapabilityError, CommsRuntime, ExternalToolUpdate, FilteredToolDispatcher,
-    LlmStreamResult,
+    BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
+    FilteredToolDispatcher, LlmStreamResult,
 };
 pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{Budget, BudgetLimits, BudgetPool};

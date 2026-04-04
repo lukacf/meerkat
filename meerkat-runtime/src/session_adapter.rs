@@ -427,26 +427,22 @@ impl RuntimeSessionAdapter {
         }
     }
 
-    /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
-    /// nothing processes them automatically). Useful for tests and legacy mode.
-    pub async fn register_session(&self, session_id: SessionId) {
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(existing) = sessions.get_mut(&session_id) {
-                existing.clear_dead_attachment();
-                return;
-            }
-        }
-
-        let mut entry = self.make_driver(&session_id);
-        if let Err(err) = entry.as_driver_mut().recover().await {
-            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
-            return;
-        }
-
-        // Try to recover ops lifecycle from durable store (if persistent).
-        let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
-        let (ops_lifecycle, epoch_id, cursor_state) = if let Some(ref store) = self.store {
+    /// Recover or create fresh ops lifecycle state for a session.
+    ///
+    /// This is the single canonical recovery seam. Both `register_session()`
+    /// and `ensure_session_with_executor()`'s cold path call this to create
+    /// epoch-local state. If a durable store is available, attempts to load
+    /// the persisted snapshot; otherwise creates fresh state with a new epoch.
+    async fn recover_or_create_ops_state(
+        &self,
+        session_id: &SessionId,
+    ) -> (
+        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+        meerkat_core::RuntimeEpochId,
+        Arc<meerkat_core::EpochCursorState>,
+    ) {
+        if let Some(ref store) = self.store {
+            let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
             match store.load_ops_lifecycle(&runtime_id).await {
                 Ok(Some(snapshot)) => {
                     let recovered_epoch = snapshot.epoch_id.clone();
@@ -497,7 +493,28 @@ impl RuntimeSessionAdapter {
                 meerkat_core::RuntimeEpochId::new(),
                 Arc::new(meerkat_core::EpochCursorState::new()),
             )
-        };
+        }
+    }
+
+    /// Register a runtime driver for a session (no RuntimeLoop — inputs queue but
+    /// nothing processes them automatically). Useful for tests and legacy mode.
+    pub async fn register_session(&self, session_id: SessionId) {
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(existing) = sessions.get_mut(&session_id) {
+                existing.clear_dead_attachment();
+                return;
+            }
+        }
+
+        let mut entry = self.make_driver(&session_id);
+        if let Err(err) = entry.as_driver_mut().recover().await {
+            tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
+            return;
+        }
+
+        let (ops_lifecycle, epoch_id, cursor_state) =
+            self.recover_or_create_ops_state(&session_id).await;
 
         let session_entry = RuntimeSessionEntry {
             driver: Arc::new(Mutex::new(entry)),
@@ -596,15 +613,16 @@ impl RuntimeSessionAdapter {
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                    let ops_lifecycle =
-                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+                    // Use the shared recovery helper — same path as register_session().
+                    let (ops_lifecycle, epoch_id, cursor_state) =
+                        self.recover_or_create_ops_state(&session_id).await;
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {
                             driver: driver.clone(),
                             ops_lifecycle: ops_lifecycle.clone(),
-                            epoch_id: meerkat_core::RuntimeEpochId::new(),
-                            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+                            epoch_id,
+                            cursor_state,
                             completions: completions.clone(),
                             attachment: None,
                             detached_wake: None,

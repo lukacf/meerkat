@@ -408,6 +408,22 @@ Sessions are realm-scoped and surface-neutral. Visibility depends on `realm_id` 
 
 Real-time events include `text_delta`, tool lifecycle events, hook events, and terminal run events.
 
+### Background completion delivery (CompletionFeed)
+
+Background shell job completions, mob member terminals, and async external tool results are delivered through the `CompletionFeed` seam. The feed is a monotonic append-only event log owned by the runtime epoch. Consumers (agent boundary, idle wake, wait tool) read through cursor-based `list_since()`.
+
+Key types: `CompletionFeed` trait (meerkat-core), `CompletionEntry`, `CompletionSeq`, `CompletionBatch`. Runtime implementation: `RuntimeCompletionFeed` in meerkat-runtime.
+
+The agent boundary injects `[BG_JOB]` system notices at the `CallingLlm` boundary for each new terminal entry. The runtime loop's idle wake fires on `wait_for_advance()` to inject continuation turns for quiescent sessions.
+
+### Durable runtime epoch recovery
+
+Runtime epoch state (ops lifecycle, completion feed entries, consumer cursors) can be durably persisted via `PersistedOpsSnapshot`. On process restart with a persistent `RuntimeStore`, the epoch is recovered with the same `RuntimeEpochId`, preserving completion entries and cursor positions. Without a store, the epoch rotates (fresh state, conversation resumed only).
+
+Recovery contract: bounded-loss, no invisible completions, possible duplicate notices. Terminal transitions are persisted via a bounded persistence channel; the loss window is the time between channel send and store commit.
+
+Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Recovery seam: `RuntimeSessionAdapter::recover_or_create_ops_state()`.
+
 ### Skills
 
 Skill loading is runtime-root aware. Workspace realms use project `.rkat/skills`; non-workspace realms use realm runtime roots.

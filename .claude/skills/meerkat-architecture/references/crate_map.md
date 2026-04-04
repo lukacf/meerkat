@@ -107,6 +107,11 @@ Surface binaries:
 | `RuntimeBuildMode` | Explicit runtime ownership mode for builds (`SessionOwned` / `StandaloneEphemeral`) |
 | `SessionRuntimeBindings` | Runtime-backed session bindings carrying `session_id`, `epoch_id`, ops lifecycle, and cursor state |
 | `RuntimeEpochId` / `EpochCursorState` | Epoch-local runtime continuity identity and consumer cursor state |
+| `RuntimeCompletionFeed` | Read handle to the completion feed (implements `CompletionFeed`) — meerkat-runtime |
+| `PersistedOpsSnapshot` | Serializable snapshot for durable epoch recovery — meerkat-runtime |
+| `RuntimeBindingsError` | Error type for `prepare_bindings()` — meerkat-runtime |
+| `CompletionFeed` | Trait for monotonic completion event log — meerkat-core |
+| `CompletionEntry` | Single completion event in the feed — meerkat-core |
 
 ## Agent Loop State Machine
 

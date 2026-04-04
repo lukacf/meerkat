@@ -95,6 +95,8 @@ meerkat-web-runtime → WASM browser deployment target (wasm_bindgen exports)
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
+**Runtime build mode:** All runtime-backed surfaces use `RuntimeSessionAdapter::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings`, then pass `RuntimeBuildMode::SessionOwned(bindings)` via `SessionBuildOptions.runtime_build_mode`. Standalone/test/WASM surfaces use `RuntimeBuildMode::StandaloneEphemeral` (the default).
+
 **Session lifecycle:** All surfaces (CLI, REST, MCP Server, JSON-RPC, WASM, Rust/Python/TypeScript/Web SDKs) route through `SessionService` for the full session lifecycle (create/turn/interrupt/read/list/archive). `FactoryAgentBuilder` bridges `AgentFactory` into the `SessionAgentBuilder` trait. Per-request build data is passed in-band via `CreateSessionRequest.build` / `SessionBuildOptions`.
 
 **Capability matrix:** See `docs/reference/capability-matrix.mdx` for build profiles, error codes, and feature behavior. See `docs/reference/session-contracts.mdx` for concurrency, durability, and compaction semantics.
@@ -169,7 +171,9 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-core/src/types.rs` - Core types (Message, Session, ToolCall, etc.)
 - `meerkat-core/src/service/mod.rs` - SessionService trait, SessionError
 - `meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig
+- `meerkat-core/src/completion_feed.rs` - CompletionFeed trait, CompletionEntry, CompletionSeq
 - `meerkat-core/src/memory.rs` - MemoryStore trait
+- `meerkat-core/src/runtime_epoch.rs` - RuntimeEpochId, SessionRuntimeBindings, RuntimeBuildMode, EpochCursorState
 - `meerkat-client/src/anthropic.rs` - Anthropic streaming implementation
 - `meerkat-session/src/ephemeral.rs` - EphemeralSessionService (in-memory session lifecycle)
 - `meerkat-session/src/compactor.rs` - DefaultCompactor implementation
@@ -181,6 +185,8 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-models/src/catalog.rs` - Curated model catalog (single source of truth for defaults/allowlists)
 - `meerkat-models/src/profile/mod.rs` - Model profile rules (capability detection, param schemas)
 - `meerkat-mcp/src/router.rs` - MCP tool routing
+- `meerkat-runtime/src/ops_lifecycle.rs` - RuntimeOpsLifecycleRegistry, PersistedOpsSnapshot, persistence channel
+- `meerkat-runtime/src/session_adapter.rs` - RuntimeSessionAdapter, prepare_bindings(), recover_or_create_ops_state()
 - `meerkat-cli/src/main.rs` - CLI entry point
 - `meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)
 - `meerkat/src/service_factory.rs` - FactoryAgentBuilder, FactoryAgent, build_ephemeral_service

@@ -432,6 +432,33 @@ let mut agent = factory.build_agent(build, &config).await?;
 `AgentBuildConfig` also carries:
 - `silent_comms_intents: Vec<String>` — intents injected silently (no LLM turn)
 - `preload_skills: Option<Vec<SkillId>>` — skills to inject at session creation
+- `runtime_build_mode: RuntimeBuildMode` — required, determines ops lifecycle ownership
+
+### Runtime build mode
+
+All runtime-backed surfaces (CLI, RPC, REST, MCP) must use `SessionOwned` bindings. Standalone/test/WASM surfaces use `StandaloneEphemeral`.
+
+```rust
+use meerkat::{RuntimeBuildMode, SessionRuntimeBindings};
+use meerkat_runtime::RuntimeSessionAdapter;
+use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
+
+// Runtime-backed surface: prepare bindings from the adapter
+let adapter = RuntimeSessionAdapter::persistent(store, blob_store);
+let bindings = adapter.prepare_bindings(session_id.clone()).await?;
+let build = SessionBuildOptions {
+    runtime_build_mode: RuntimeBuildMode::SessionOwned(bindings),
+    ..Default::default()
+};
+
+// Standalone/test/WASM: explicit opt-in (also the Default)
+let build = SessionBuildOptions {
+    runtime_build_mode: RuntimeBuildMode::StandaloneEphemeral,
+    ..Default::default()
+};
+```
+
+`prepare_bindings()` is the single canonical helper: it registers the session, mints the epoch, and returns `SessionRuntimeBindings { session_id, epoch_id, ops_lifecycle, cursor_state }`. The factory validates `bindings.session_id == session.id()` on `SessionOwned` builds.
 
 Skill introspection (standalone, no session required):
 

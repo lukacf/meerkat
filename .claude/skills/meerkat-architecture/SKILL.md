@@ -130,6 +130,8 @@ Use the dogma above to reject designs that still leave semantic truth in:
 10. Build system prompt + AgentBuilder + wire memory/compactor/skill-engine/ops-lifecycle/event-tap/checkpointer
 11. Build agent, set `SessionMetadata` (persist override intent, not flattened booleans)
 
+The factory validates `bindings.session_id == session.id()` for `SessionOwned` builds. Cross-wired bindings are rejected with `BuildAgentError::Config`.
+
 **Precedence at every step:** `build_config override > factory field > config resolution > default`
 
 **Dynamic tooling gotcha:** if a child dispatcher can change between turns (callback tools, agent mob tools), compose with `DynamicToolComposite` rather than a gateway that snapshots tool definitions once at construction.
@@ -192,6 +194,12 @@ Important current boundary:
 - tranche 2 is where barrier satisfaction gets reconciled end-to-end with authority truth instead of shell `wait_all` folklore
 - active turns surface detached completions through typed `collect_completed`/`drain_completed` projection, not legacy event channels
 - idle keep-alive sessions wake through the runtime-owned `DetachedWakeState` path above
+
+**Completion feed**: The registry owns a `FeedBuffer` that produces `CompletionEntry` events on terminal transitions. The `RuntimeCompletionFeed` read handle implements `CompletionFeed` (meerkat-core trait). Consumer cursors are epoch-owned via `EpochCursorState` on `SessionRuntimeBindings`.
+
+**Persistence channel**: When wired via `set_persistence_channel()`, terminal transitions capture a `PersistedOpsSnapshot` (authority state + completion entries + cursor values) and queue it to a bounded mpsc channel. A dedicated persistence task drains the channel to `RuntimeStore::persist_ops_lifecycle()`.
+
+**Recovery**: `RuntimeSessionAdapter::recover_or_create_ops_state()` loads persisted snapshots via `RuntimeOpsLifecycleRegistry::from_recovered()`. Non-terminal operations are stripped on recovery. The feed buffer is pre-seeded with persisted completion entries. Consumer cursors are restored from the snapshot.
 
 ## Session Service
 
@@ -368,13 +376,15 @@ Use this as the first regression checklist when touching post-`v0.5.0` architect
 8. **Sessions are first-class, persistence is optional** — Ephemeral and Persistent share the same trait.
 9. **No backward compatibility aliases** — 0.5 is a clean cut. No serde aliases for old names.
 10. **No `.unwrap()`/`.expect()`/`panic!()` in library code** — use `?` propagation or explicit error handling.
-11. **No shadow semantic truth** — if a helper, cache, queue, or surface carries authoritative meaning beside the machine/composition/protocol owner, the design is wrong.
-12. **No raw infra IDs as app-facing control nouns** — use domain handles publicly and keep canonical raw identity infra-only unless there is a very strong reason not to.
-13. **Definition-only mob creation** — `MobDefinition` is the only creation input. Do not resurrect prefabs or hidden template injection.
-14. **Persist intent, not resolved defaults** — use `ToolCategoryOverride` / `from_override()` when storing tooling policy.
-15. **One canonical step path** — `execute_step_with_all_guards()` is shared by flat and frame execution; parallel executors are a regression factory.
-16. **Operator authority is injected, not ambient** — mob support being enabled must not surface operator tools without runtime context.
-17. **Runtime owns detached wake** — background-op completion wakeups must flow through `DetachedWakeState` + `ContinuationInput`, not surface code.
+11. **Runtime-backed builds require bindings** — `RuntimeBuildMode::SessionOwned(bindings)` for runtime-backed surfaces; `StandaloneEphemeral` for WASM/tests/embedded. Factory never creates a competing registry for `SessionOwned`.
+12. **One recovery seam for epoch state** — `recover_or_create_ops_state()` on `RuntimeSessionAdapter` is the single canonical recovery helper. Both `register_session()` and `ensure_session_with_executor()` use it.
+13. **No shadow semantic truth** — if a helper, cache, queue, or surface carries authoritative meaning beside the machine/composition/protocol owner, the design is wrong.
+14. **No raw infra IDs as app-facing control nouns** — use domain handles publicly and keep canonical raw identity infra-only unless there is a very strong reason not to.
+15. **Definition-only mob creation** — `MobDefinition` is the only creation input. Do not resurrect prefabs or hidden template injection.
+16. **Persist intent, not resolved defaults** — use `ToolCategoryOverride` / `from_override()` when storing tooling policy.
+17. **One canonical step path** — `execute_step_with_all_guards()` is shared by flat and frame execution; parallel executors are a regression factory.
+18. **Operator authority is injected, not ambient** — mob support being enabled must not surface operator tools without runtime context.
+19. **Runtime owns detached wake** — background-op completion wakeups must flow through `DetachedWakeState` + `ContinuationInput`, not surface code.
 
 ## Key Files
 

@@ -252,8 +252,11 @@ impl AgentBuilder {
             system_context_state,
             default_event_tx: self.default_event_tx,
             ops_lifecycle: self.ops_lifecycle,
+            // Seed from the current feed watermark to avoid replaying retained
+            // completions from prior agent lifetimes (stop/resume, live reattach).
+            // Same pattern as runtime_loop.rs line 276. Computed before move.
+            applied_cursor: self.completion_feed.as_ref().map_or(0, |f| f.watermark()),
             completion_feed: self.completion_feed,
-            applied_cursor: 0,
             interrupt_baseline: self.interrupt_baseline,
             completion_enrichment: self.completion_enrichment,
             turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
@@ -617,5 +620,42 @@ mod tests {
             saw_turn_started,
             "tap should receive TurnStarted even without primary event channel"
         );
+    }
+
+    /// Regression: agent builder must seed applied_cursor from the feed's
+    /// current watermark, not from 0. Starting from 0 replays every retained
+    /// completion as new after stop/resume or live reattachment.
+    #[tokio::test]
+    async fn test_builder_seeds_applied_cursor_from_feed_watermark() {
+        use crate::completion_feed::tests::MockCompletionFeed;
+
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        // Feed already has activity at watermark 42.
+        let feed = Arc::new(MockCompletionFeed::with_watermark(42));
+
+        let agent = AgentBuilder::new()
+            .with_completion_feed(feed)
+            .build(client, tools, store)
+            .await;
+
+        assert_eq!(
+            agent.applied_cursor, 42,
+            "applied_cursor must seed from feed watermark, not 0"
+        );
+    }
+
+    /// Regression: without a feed, applied_cursor must be 0.
+    #[tokio::test]
+    async fn test_builder_applied_cursor_zero_without_feed() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new().build(client, tools, store).await;
+
+        assert_eq!(agent.applied_cursor, 0);
     }
 }

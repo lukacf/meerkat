@@ -109,3 +109,72 @@ impl<T: CompletionFeed + ?Sized> CompletionFeed for Arc<T> {
         (**self).wait_for_advance(after_seq)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, dead_code)]
+pub(crate) mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Simple in-memory mock for testing feed-dependent code paths.
+    #[derive(Debug)]
+    pub struct MockCompletionFeed {
+        watermark: AtomicU64,
+        entries: std::sync::Mutex<Vec<CompletionEntry>>,
+    }
+
+    impl MockCompletionFeed {
+        pub fn new() -> Self {
+            Self {
+                watermark: AtomicU64::new(0),
+                entries: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Create a feed pre-seeded at a given watermark (simulates prior activity).
+        pub fn with_watermark(watermark: CompletionSeq) -> Self {
+            Self {
+                watermark: AtomicU64::new(watermark),
+                entries: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        pub fn push(&self, entry: CompletionEntry) {
+            let mut entries = self.entries.lock().unwrap();
+            self.watermark.store(entry.seq, Ordering::Release);
+            entries.push(entry);
+        }
+    }
+
+    impl CompletionFeed for MockCompletionFeed {
+        fn watermark(&self) -> CompletionSeq {
+            self.watermark.load(Ordering::Acquire)
+        }
+
+        fn list_since(&self, after_seq: CompletionSeq) -> CompletionBatch {
+            let entries = self.entries.lock().unwrap();
+            CompletionBatch {
+                entries: entries
+                    .iter()
+                    .filter(|e| e.seq > after_seq)
+                    .cloned()
+                    .collect(),
+                watermark: self.watermark.load(Ordering::Acquire),
+            }
+        }
+
+        fn wait_for_advance(
+            &self,
+            _after_seq: CompletionSeq,
+        ) -> Pin<Box<dyn Future<Output = CompletionSeq> + Send + '_>> {
+            Box::pin(async move { self.watermark.load(Ordering::Acquire) })
+        }
+    }
+
+    #[test]
+    fn mock_feed_with_watermark_seeds_at_expected_value() {
+        let feed = MockCompletionFeed::with_watermark(42);
+        assert_eq!(feed.watermark(), 42);
+        assert!(feed.list_since(0).entries.is_empty());
+    }
+}

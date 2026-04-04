@@ -487,6 +487,7 @@ where
                     self.session.messages_mut().retain(
                         |m| !matches!(m, Message::User(u) if u.text_content().starts_with(BG_JOB_PREFIX)),
                     );
+                    // Feed path: ops-lifecycle-tracked completions from the runtime.
                     if let Some(ref feed) = self.completion_feed {
                         let batch = feed.list_since(self.applied_cursor);
                         for entry in batch.entries.iter().filter(|e| {
@@ -528,29 +529,31 @@ where
                         if let Some(ref baseline) = self.interrupt_baseline {
                             baseline.store(batch.watermark, std::sync::atomic::Ordering::Release);
                         }
-                    } else {
-                        // Fallback for direct AgentBuilder paths without CompletionFeed.
-                        // Shell completions arrive through poll_external_updates().
-                        for completion in &ext.background_completions {
-                            if !completion.status.is_terminal() {
-                                continue;
-                            }
-                            emit_event!(AgentEvent::BackgroundJobCompleted {
-                                job_id: completion.job_id.clone(),
-                                display_name: completion.display_name.clone(),
-                                status: completion.status.as_str().to_string(),
-                                detail: completion.detail.clone(),
-                            });
-                            let mut notice = format!(
-                                "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
-                                completion.display_name,
-                                completion.job_id,
-                                completion.status.as_str(),
-                                completion.detail,
-                            );
-                            notice.push_str("\nUse shell_job_status to get the full output.");
-                            self.session.push(Message::User(UserMessage::text(notice)));
+                    }
+
+                    // Legacy path: completions from custom/override dispatchers that
+                    // report through poll_external_updates().background_completions
+                    // without wiring into the ops-lifecycle registry. This runs
+                    // independently of the feed — they are complementary sources.
+                    for completion in &ext.background_completions {
+                        if !completion.status.is_terminal() {
+                            continue;
                         }
+                        emit_event!(AgentEvent::BackgroundJobCompleted {
+                            job_id: completion.job_id.clone(),
+                            display_name: completion.display_name.clone(),
+                            status: completion.status.as_str().to_string(),
+                            detail: completion.detail.clone(),
+                        });
+                        let mut notice = format!(
+                            "{BG_JOB_PREFIX}Background job `{}` (id={}) {}: {}",
+                            completion.display_name,
+                            completion.job_id,
+                            completion.status.as_str(),
+                            completion.detail,
+                        );
+                        notice.push_str("\nUse shell_job_status to get the full output.");
+                        self.session.push(Message::User(UserMessage::text(notice)));
                     }
 
                     // 4. Apply tool scope staged updates atomically at the CallingLlm boundary.

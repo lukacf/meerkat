@@ -322,6 +322,7 @@ impl<'de> Deserialize<'de> for InputState {
             helper.terminal_outcome,
             helper.last_run_id,
             helper.last_boundary_sequence,
+            helper.attempt_count,
             helper.history,
             helper.updated_at,
         );

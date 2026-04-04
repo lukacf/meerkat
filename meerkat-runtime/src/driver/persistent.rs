@@ -414,6 +414,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                         Some(InputTerminalOutcome::Consumed),
                         state.last_run_id().cloned(),
                         state.last_boundary_sequence(),
+                        state.attempt_count,
                         {
                             let mut h = state.history().to_vec();
                             h.push(InputStateHistoryEntry {
@@ -433,6 +434,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                         None,
                         state.last_run_id().cloned(),
                         state.last_boundary_sequence(),
+                        state.attempt_count,
                         {
                             let mut h = state.history().to_vec();
                             h.push(InputStateHistoryEntry {
@@ -462,6 +464,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                     None,
                     state.last_run_id().cloned(),
                     state.last_boundary_sequence(),
+                    state.attempt_count,
                     {
                         let mut h = state.history().to_vec();
                         h.push(InputStateHistoryEntry {

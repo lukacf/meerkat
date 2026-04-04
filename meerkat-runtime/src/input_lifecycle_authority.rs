@@ -242,6 +242,7 @@ impl InputLifecycleAuthority {
         terminal_outcome: Option<InputTerminalOutcome>,
         last_run_id: Option<RunId>,
         last_boundary_sequence: Option<u64>,
+        attempt_count: u32,
         history: Vec<InputStateHistoryEntry>,
         updated_at: DateTime<Utc>,
     ) -> Self {
@@ -251,7 +252,7 @@ impl InputLifecycleAuthority {
                 terminal_outcome,
                 last_run_id,
                 last_boundary_sequence,
-                attempt_count: 0,
+                attempt_count,
             },
             history,
             updated_at,
@@ -281,6 +282,11 @@ impl InputLifecycleAuthority {
     /// Last boundary sequence number.
     pub fn last_boundary_sequence(&self) -> Option<u64> {
         self.fields.last_boundary_sequence
+    }
+
+    /// Number of times this input has been staged for a run.
+    pub fn attempt_count(&self) -> u32 {
+        self.fields.attempt_count
     }
 
     /// State transition history.
@@ -1117,6 +1123,7 @@ mod tests {
             None,
             Some(run_id.clone()),
             Some(42),
+            2, // attempt_count
             vec![InputStateHistoryEntry {
                 timestamp: Utc::now(),
                 from: InputLifecycleState::Accepted,
@@ -1128,7 +1135,38 @@ mod tests {
         assert_eq!(auth.phase(), InputLifecycleState::Applied);
         assert_eq!(auth.last_run_id(), Some(&run_id));
         assert_eq!(auth.last_boundary_sequence(), Some(42));
+        assert_eq!(auth.attempt_count(), 2);
         assert_eq!(auth.history().len(), 1);
+    }
+
+    #[test]
+    fn restore_preserves_attempt_count_for_retry_bound() {
+        // Regression test: attempt_count must survive recovery so that
+        // MAX_STAGE_ATTEMPTS is not reset on restart.
+        let auth = InputLifecycleAuthority::restore(
+            InputLifecycleState::Queued,
+            None,
+            None,
+            None,
+            2, // 2 prior attempts
+            Vec::new(),
+            Utc::now(),
+        );
+
+        // One more stage + rollback should push to Abandoned (3 >= MAX_STAGE_ATTEMPTS)
+        let mut auth = auth;
+        auth.apply(InputLifecycleInput::StageForRun {
+            run_id: RunId::new(),
+        })
+        .unwrap();
+        assert_eq!(auth.attempt_count(), 3);
+
+        let t = auth.apply(InputLifecycleInput::RollbackStaged).unwrap();
+        assert_eq!(
+            t.next_phase,
+            InputLifecycleState::Abandoned,
+            "after 3 attempts (2 restored + 1 new), rollback should abandon"
+        );
     }
 
     // ---- Abandon from all non-terminal states ----

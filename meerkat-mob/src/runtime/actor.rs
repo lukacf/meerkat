@@ -739,13 +739,19 @@ impl MobActor {
                         },
                     )
                     .await;
-                let _ = completion_tx.send(true);
-                if let Err(ref error) = result {
-                    tracing::error!(
-                        meerkat_id = %log_id,
-                        error = %error,
-                        "autonomous initial turn failed"
-                    );
+                match result {
+                    Ok(()) => {
+                        let _ = completion_tx.send(true);
+                    }
+                    Err(ref error) => {
+                        tracing::error!(
+                            meerkat_id = %log_id,
+                            error = %error,
+                            "autonomous initial turn failed"
+                        );
+                        // Do NOT send true — let completion_tx drop, closing
+                        // the channel. Barrier waiters see RecvError.
+                    }
                 }
             });
 

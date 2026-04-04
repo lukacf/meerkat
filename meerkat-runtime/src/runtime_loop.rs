@@ -358,9 +358,13 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 && e.seq > last_injected_seq
                         });
 
+                        // Always advance observed_seq to prevent hot-spin.
+                        // The last_injected_seq guard prevents duplicate injection
+                        // when the session becomes quiescent on a future wake.
+                        observed_seq = batch.watermark;
+
                         if has_new_bg_completion {
-                            // Verify quiescence before injecting. Do NOT advance
-                            // observed_seq until injection succeeds.
+                            // Verify quiescence before injecting.
                             let d = driver.lock().await;
                             let quiescent =
                                 d.is_idle_or_attached() && d.as_driver().active_input_ids().is_empty();
@@ -372,7 +376,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 );
                                 let mut d = driver.lock().await;
                                 if d.as_driver_mut().accept_input(input).await.is_ok() {
-                                    observed_seq = batch.watermark;
                                     last_injected_seq = batch.watermark;
                                 }
                                 drop(d);
@@ -387,9 +390,6 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     break;
                                 }
                             }
-                        } else {
-                            // No actionable entries — advance past non-matching.
-                            observed_seq = batch.watermark;
                         }
                     } else if let Some(ref state) = detached_wake
                         && state.pending.load(std::sync::atomic::Ordering::Acquire)
@@ -446,14 +446,14 @@ async fn maybe_inject_feed_wake(
                 && e.seq > *last_injected_seq
         });
 
+        // Always advance observed_seq to prevent hot-spin on non-quiescent sessions.
+        *observed_seq = batch.watermark;
+
         if !has_new_bg_completion {
-            // Safe to advance — nothing actionable, just skip past non-matching entries.
-            *observed_seq = batch.watermark;
             return false;
         }
 
-        // Verify quiescence before injecting. Do NOT advance observed_seq yet —
-        // if quiescence fails, the same entries must be visible on the next pass.
+        // Verify quiescence before injecting.
         let d = driver.lock().await;
         if !d.is_idle_or_attached() || !d.as_driver().active_input_ids().is_empty() {
             return false;
@@ -465,8 +465,7 @@ async fn maybe_inject_feed_wake(
         );
         let mut d = driver.lock().await;
         if d.as_driver_mut().accept_input(input).await.is_ok() {
-            *observed_seq = batch.watermark;
-            *last_injected_seq = batch.watermark;
+            *last_injected_seq = *observed_seq;
             return true;
         }
         false

@@ -6,30 +6,41 @@ This file derives the implementation order from the traced requirements, not fro
 
 | Phase | Goal | Primary spec coverage | Entry gate | Exit gate |
 | --- | --- | --- | --- | --- |
-| Phase 0 | Close external target contracts on real hardware before architecture changes commit the project to bad assumptions. | `REQ-001`, `REQ-002`, `REQ-003`, `CHOKE-001` | Hardware, credentials, and internal probe harness can be executed | All High-criticality matrix rows are closed |
+| Phase 0 | Close single-node target contracts and Meerkat-model assumptions on real hardware before architecture changes commit the project to bad assumptions. | `REQ-001`, `REQ-002`, `REQ-003`, `REQ-013`, `CHOKE-001` | Hardware, credentials, and internal probe harness can be executed | All Phase-0-owned High-criticality rows are closed |
 | Phase 1 | Perform architecture prep and seam extraction without introducing embedded-specific shadow logic. | `REQ-004`, `REQ-005`, `REQ-006`, `CHOKE-002` | Phase 0 passed | Shared transport, persistent-service decoupling, and host-tool glue exist and are test-backed |
 | Phase 2 | Assemble the real embedded surface and ESP backend through the canonical runtime-backed path. | `REQ-007`, `REQ-008`, `REQ-009`, `CHOKE-003` | Phase 1 passed | Embedded runtime path, ESP backend, and embedded profile are all green |
-| Phase 3 | Deliver authoritative user-facing examples that are also full E2E smoke tests. | `REQ-010`, `REQ-011`, `E2E-001`, `E2E-002`, `E2E-003`, `E2E-004`, `E2E-005`, `CHOKE-004` | Phase 2 passed | Examples 036 and 037 pass host-sim and hardware smoke |
+| Phase 3 | Deliver authoritative user-facing examples that are also full E2E smoke tests, including swarm viability closure on the real embedded stack. | `REQ-010`, `REQ-011`, `E2E-001`, `E2E-002`, `E2E-003`, `E2E-004`, `E2E-005`, `CHOKE-004`, `CHOKE-005` | Phase 2 passed | Examples 036 and 037 pass host-sim and hardware smoke, and the swarm rows are closed |
 | Final closure | Remove all provisional state from the required scope and freeze artifacts. | `REQ-012` plus every remaining `UNEXECUTED` row | Phase 3 passed | Full RTM and matrix are closed; freeze checklist passes |
 
 ## Phase 0 - External contract validation
 
 ### Goal
 
-Close the external assumptions that can invalidate the whole program before architecture refactors begin.
+Close the single-node target assumptions and Meerkat-model assumptions that can invalidate the whole program before architecture refactors begin.
 
 ### Covers
 
 - `REQ-001`
 - `REQ-002`
 - `REQ-003`
+- `REQ-013`
+- `INV-005`
+- `INV-006`
 - `CHOKE-001`
-- `ASSUMP-001` through `ASSUMP-011`
+- `ASSUMP-001`
+- `ASSUMP-002`
+- `ASSUMP-003`
+- `ASSUMP-004`
+- `ASSUMP-007`
+- `ASSUMP-008`
+- `ASSUMP-012`
 
 ### Required outputs
 
 - An internal real-board probe harness under `scripts/live_smoke/esp32-contract-probe/` that emits stable markers.
 - A conscious decision on the fastest sacrificial probe stack for Phase 0, separate from the production implementation stack.
+- A Rust-stack feasibility verdict for the planned `std` plus Tokio baseline on real hardware.
+- A toolchain bootstrap record that shows how the real target environment is reproduced.
 - Updated matrix verdicts in [02-external-contract-matrix.md](./02-external-contract-matrix.md).
 - Metrics and raw logs stored in a predictable artifact path.
 - A baseline decision confirmation that native embedded remains viable.
@@ -37,32 +48,38 @@ Close the external assumptions that can invalidate the whole program before arch
 ### Behavioral done-when
 
 - The single-node probe boots, joins Wi-Fi, syncs time, reaches a provider endpoint, and completes a streamed probe.
+- The probe includes a host-core check that verifies the current repo-side assumptions about the factory, provider, and runtime path before target-specific work is trusted.
+- The planned Rust stack is exercised on real hardware strongly enough to decide whether the current production path remains viable.
 - The probe records peak memory, stack, and latency envelopes.
-- Tool-callback acknowledgement is proven on the board.
-- The swarm probe proves peer discovery, telemetry exchange, and relative-position viability on a multi-node rig.
 - Backend APIs and service endpoints have been exercised from the host before the first target flash that depends on them.
-- No High-criticality assumption remains open.
+- No Phase-0-owned High-criticality assumption remains open.
 
 ### Real-entrypoint proof
 
-- `./scripts/live_smoke/esp32-contract-probe/run --mode all --hardware`
+- `./scripts/live_smoke/esp32-contract-probe/run --mode host-core-check`
+- `./scripts/live_smoke/esp32-contract-probe/run --mode single-node --hardware`
+- `./scripts/live_smoke/esp32-contract-probe/run --mode single-node-rust-stack --hardware`
 
 ### Negative control
 
-- Run the same probe harness with deliberately invalid prerequisites such as bad credentials, missing time sync, or a broken swarm inventory and verify failure markers are emitted deterministically.
+- Run the same probe harness with deliberately invalid prerequisites such as bad credentials, missing time sync, or a broken Rust-stack bootstrap and verify failure markers are emitted deterministically.
 
 ### Operational notes
 
 - Phase 0 is allowed to use a sacrificial vendor-native toolchain if it closes external contracts faster.
 - Board or library APIs used in Phase 0 should be verified against actual installed headers or source, not only secondary docs.
 - If the board supports OTA or another low-friction redeploy path, establish it as soon as the first Wi-Fi-enabled flash succeeds.
+- Sacrificial probe results do not close Rust-stack-specific rows by themselves; the planned Rust stack must be exercised separately before Phase 1 begins.
 - If the run is blocked on a physical prerequisite with no remaining software work, escalate the blocker instead of staying in a noisy polling loop.
+- Swarm and RSSI viability are intentionally excluded from Phase 0 and are owned by Phase 3 with Example 037.
 
 ### Evidence bundle
 
 - Raw serial log
 - Parsed marker summary
 - Memory and timing report
+- Toolchain bootstrap log
+- Rust-stack feasibility report
 - Board identity and environment notes
 - Matrix status updates with artifact paths
 
@@ -125,6 +142,7 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 - `REQ-007`
 - `REQ-008`
 - `REQ-009`
+- `INV-003`
 - `CONTRACT-001`
 - `CONTRACT-002`
 - `CONTRACT-003`
@@ -136,6 +154,7 @@ Add the real embedded surface and ESP backend through the existing runtime-backe
 ### Required outputs
 
 - `meerkat-embedded-runtime`
+- `meerkat-embedded-runtime` for any real shared surface glue extracted in Phase 1
 - `meerkat-esp-runtime`
 - Embedded profile definitions and deterministic unsupported-capability behavior
 - ESP storage, bootstrap, transport, and host-tool bindings behind existing seams
@@ -172,12 +191,18 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 
 - `REQ-010`
 - `REQ-011`
+- `INV-005`
 - `E2E-001`
 - `E2E-002`
 - `E2E-003`
 - `E2E-004`
 - `E2E-005`
+- `CONTRACT-002`
+- `CONTRACT-006`
 - `CHOKE-004`
+- `CHOKE-005`
+- `ASSUMP-010`
+- `ASSUMP-011`
 
 ### Required outputs
 
@@ -191,7 +216,7 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 ### Behavioral done-when
 
 - Example 036 proves the recommended single-node persistent event-agent pattern.
-- Example 037 proves the recommended multi-node triangulation and self-organization pattern.
+- Example 037 proves the recommended multi-node triangulation and self-organization pattern through either metric convergence or the predeclared topology-only fallback.
 - Example 036 documents or demonstrates the best available low-friction redeploy workflow for the chosen stack.
 - Example 037 produces a user-facing topology artifact from the same run data used for validation.
 - Both examples follow the repo-local rebuild pattern and the self-contained real-surface pattern.
@@ -204,7 +229,7 @@ Ship the real examples that also serve as authoritative smoke-entrypoints for CI
 
 ### Negative control
 
-- Run each example in a misconfigured mode that should fail deterministically and assert that the script exits non-zero with stable failure markers.
+- Run each example in a misconfigured mode that should fail deterministically and assert that the script exits non-zero with stable failure markers. For Example 037, also verify that a metric-positioning rejection falls back to the predeclared topology contract rather than reopening scope.
 
 ### Evidence bundle
 
@@ -225,12 +250,13 @@ Finish the required scope, close any remaining provisional state, and freeze the
 ### Covers
 
 - `REQ-012`
+- `INV-004`
 - every remaining `UNEXECUTED` row in [03-requirements-and-rtm.md](./03-requirements-and-rtm.md)
 
 ### Behavioral done-when
 
 - Every `MUST` row in the RTM has a real validation verdict.
-- Every High-criticality matrix row is `LIVE_VALIDATED`.
+- Every High-criticality matrix row is closed, and any `REJECTED` row is paired with its predeclared fallback or an explicit program-stop record.
 - No required-scope item is parked as “do this afterward”.
 - The freeze checklist passes with real artifact links.
 

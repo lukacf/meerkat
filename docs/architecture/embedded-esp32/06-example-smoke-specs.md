@@ -16,6 +16,7 @@ This file defines the two required ESP examples as user-facing recommended patte
 | EXAMPLE-RULE-008 | Both examples must teach a reusable operator workflow in the README, not only smoke invocations. | `CONTRACT-006`, [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md) |
 | EXAMPLE-RULE-009 | When the chosen stack supports low-friction redeploy such as OTA, the example must surface that workflow in its README and script ergonomics; otherwise the README must explain the limitation. | `REQ-010`, [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md) |
 | EXAMPLE-RULE-010 | Example 037 must generate an operator-facing topology report or visualizer from the same inventory and telemetry used in run and smoke modes. | `REQ-011`, [08-field-learnings-from-m5dial.md](./08-field-learnings-from-m5dial.md) |
+| EXAMPLE-RULE-011 | Example 037 must have a predeclared topology-only fallback if metric relative-position estimation is rejected on real hardware. | `REQ-011`, `CHOKE-005` |
 
 ## Example 036 - `examples/036-esp32-event-agent-sh`
 
@@ -109,7 +110,7 @@ The recommended single-node embedded pattern: a persistent event-driven field ag
 
 ### Purpose
 
-The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes, let them discover each other, exchange local telemetry such as Wi-Fi signal observations, self-organize into a relative-position or topology estimate, and expose that result in a form an operator can actually use.
+The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes, let them discover each other, exchange local telemetry such as Wi-Fi signal observations, self-organize into a relative-position estimate when the telemetry supports it, and otherwise fall back to a confidence-scored topology or adjacency artifact that is still useful to an operator.
 
 ### Inherited patterns
 
@@ -137,6 +138,7 @@ The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes
 - Repo-local runtime crates built from the current branch before flashing
 - A known fixture layout when running the positioning smoke variant
 - A merged topology artifact path such as HTML, SVG, JSON report, or equivalent
+- A documented threshold or verdict rule that decides between metric-position success and topology-only fallback
 
 ### Command contract
 
@@ -152,6 +154,7 @@ The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes
 - `MKT:SWARM:PEER_DISCOVERED`
 - `MKT:SWARM:MESSAGE_OK`
 - `MKT:SWARM:TELEMETRY_OK`
+- `MKT:SWARM:MODE:METRIC` or `MKT:SWARM:MODE:TOPOLOGY`
 - `MKT:SWARM:TOPOLOGY_ESTIMATE`
 - `MKT:SWARM:CONVERGED`
 - `MKT:SMOKE:PASS`
@@ -166,6 +169,8 @@ The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes
 - `MKT:OOM`
 - `MKT:SMOKE:FAIL`
 
+`MKT:SWARM:POSITION_UNSUPPORTED` is not a failure by itself when it is followed by the topology-only fallback path and a passing smoke result.
+
 ### Cleanup
 
 - Reset only the swarm state needed for deterministic reruns after artifacts are captured.
@@ -177,9 +182,9 @@ The recommended multi-node embedded pattern: flash a small set of ESP32-S3 nodes
 | Proof ID | Obligation | Owning spec IDs |
 | --- | --- | --- |
 | EX037-PROOF-001 | A flashed node set can discover peers and exchange telemetry over the chosen comms path. | `REQ-011`, `ASSUMP-010`, `E2E-005` |
-| EX037-PROOF-002 | Available instrumentation is sufficient to produce a relative-position or topology estimate that converges in the target fixture. | `REQ-011`, `ASSUMP-011`, `E2E-005` |
+| EX037-PROOF-002 | Available instrumentation is sufficient to close the example through either metric relative-position convergence or the predeclared topology-only fallback artifact in the target fixture. | `REQ-011`, `ASSUMP-011`, `E2E-005`, `CHOKE-005` |
 | EX037-PROOF-003 | The swarm scenario still routes through the same canonical runtime and tool contracts instead of a special-purpose side channel. | `CONTRACT-001`, `CONTRACT-002`, `CONTRACT-004`, `CONTRACT-006` |
-| EX037-PROOF-004 | Deterministic negative controls prove that discovery, telemetry, or convergence failures surface explicitly. | `REQ-009`, `E2E-004`, `CHOKE-004` |
+| EX037-PROOF-004 | Deterministic negative controls prove that discovery, telemetry, convergence, or fallback failures surface explicitly. | `REQ-009`, `E2E-004`, `CHOKE-004`, `CHOKE-005` |
 
 ## Example artifact requirements
 
@@ -192,3 +197,4 @@ Both examples must retain:
 - a proof-to-spec mapping covering every `EX036-PROOF-*` or `EX037-PROOF-*` row
 - redeploy notes or OTA evidence for Example 036 when supported by the stack
 - topology report or visualizer output for Example 037
+- the metric-versus-topology verdict used to close Example 037

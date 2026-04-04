@@ -639,24 +639,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .as_ref()
                 .map(|meta| meta.tooling.clone())
                 .unwrap_or_default();
-            // Prefer runtime_bindings_provider (returns full bindings bundle)
-            // over the legacy ops_lifecycle_provider (returns bare registry).
-            let (runtime_build_mode, ops_lifecycle_override) =
-                if let Some(provider) = &self.runtime_bindings_provider {
-                    match (provider)(id.clone()).await {
-                        Some(bindings) => (
-                            Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
-                            None,
-                        ),
-                        None => (None, None),
-                    }
-                } else {
-                    let legacy = match &self.ops_lifecycle_provider {
-                        Some(provider) => (provider)(id).await,
-                        None => None,
-                    };
-                    (None, legacy)
-                };
+            let runtime_build_mode = if let Some(provider) = &self.runtime_bindings_provider {
+                match (provider)(id.clone()).await {
+                    Some(bindings) => meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    None => meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
+                }
+            } else {
+                meerkat_core::RuntimeBuildMode::StandaloneEphemeral
+            };
             let build = SessionBuildOptions {
                 provider: stored_metadata.as_ref().map(|meta| meta.provider),
                 comms_name: stored_metadata
@@ -667,7 +657,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .and_then(|meta| meta.peer_meta.clone()),
                 resume_session: Some(stored),
                 blob_store_override: Some(Arc::clone(&self.blob_store)),
-                ops_lifecycle_override,
                 runtime_build_mode,
                 override_builtins: tooling.builtins.to_override(),
                 override_shell: tooling.shell.to_override(),

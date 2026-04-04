@@ -7,7 +7,6 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -174,12 +173,8 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    /// Canonical async-op registry for the owning session.
-    ///
-    /// Runtime-backed surfaces should provide the real per-session registry
-    /// from the runtime adapter rather than letting deeper layers allocate a
-    /// fresh local registry.
-    pub ops_lifecycle_override: Option<Arc<dyn OpsLifecycleRegistry>>,
+    // NOTE: ops_lifecycle_override was removed in Phase 3.
+    // Use runtime_build_mode instead.
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
@@ -242,15 +237,11 @@ pub struct SessionBuildOptions {
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed.
     ///
-    /// - `Some(SessionOwned(bindings))`: runtime-backed build with epoch-owned
+    /// - `SessionOwned(bindings)`: runtime-backed build with epoch-owned
     ///   bindings. Factory validates `bindings.session_id == session.id()`.
-    /// - `Some(StandaloneEphemeral)`: factory creates local-only ephemeral bindings.
-    /// - `None`: legacy compatibility path — resolves from `ops_lifecycle_override`
-    ///   if present, otherwise falls back to `StandaloneEphemeral`.
-    ///
-    /// New code should always set this explicitly. The `None` path will be
-    /// removed when `ops_lifecycle_override` is deleted.
-    pub runtime_build_mode: Option<crate::runtime_epoch::RuntimeBuildMode>,
+    /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
+    ///   Suitable for WASM, tests, embedded, and standalone surfaces.
+    pub runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode,
 }
 
 /// Session-scoped arguments passed to [`MobToolsFactory::build_mob_tools`].
@@ -320,7 +311,6 @@ impl Default for SessionBuildOptions {
             external_tools: None,
             blob_store_override: None,
             llm_client_override: None,
-            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -340,7 +330,7 @@ impl Default for SessionBuildOptions {
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
             mob_tools: None,
-            runtime_build_mode: None,
+            runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
         }
     }
 }
@@ -360,10 +350,6 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("external_tools", &self.external_tools.is_some())
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
-            .field(
-                "ops_lifecycle_override",
-                &self.ops_lifecycle_override.is_some(),
-            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)

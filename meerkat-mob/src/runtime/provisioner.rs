@@ -574,9 +574,8 @@ impl MobProvisioner for SessionBackend {
                 .await
                 .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
             if let Some(ref mut build) = req.create_session.build {
-                build.runtime_build_mode = Some(
-                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings),
-                );
+                build.runtime_build_mode =
+                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
             Some(member_session_id)
         } else {
@@ -1000,9 +999,8 @@ impl MultiBackendProvisioner {
                 .await
                 .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
             if let Some(ref mut build) = create_session.build {
-                build.runtime_build_mode = Some(
-                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings),
-                );
+                build.runtime_build_mode =
+                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
             Some(member_session_id)
         } else {

@@ -179,3 +179,27 @@ async fn bindings_registry_shares_completion_feed_with_adapter() {
         "adapter's feed and bindings' feed must be the same"
     );
 }
+
+// ─── Phase 3: runtime_build_mode is required (non-Option) ───
+
+#[test]
+fn session_build_options_default_has_standalone_ephemeral() {
+    let opts = meerkat_core::service::SessionBuildOptions::default();
+    assert!(
+        matches!(
+            opts.runtime_build_mode,
+            meerkat_core::RuntimeBuildMode::StandaloneEphemeral
+        ),
+        "Default SessionBuildOptions must have runtime_build_mode = StandaloneEphemeral"
+    );
+}
+
+#[test]
+fn session_build_options_debug_shows_build_mode() {
+    let opts = meerkat_core::service::SessionBuildOptions::default();
+    let debug = format!("{:?}", opts);
+    assert!(
+        debug.contains("StandaloneEphemeral"),
+        "Debug output must show the build mode variant"
+    );
+}

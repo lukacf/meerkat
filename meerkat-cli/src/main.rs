@@ -3348,8 +3348,7 @@ async fn run_agent(
             Some(instructions)
         },
         shell_env: None,
-        ops_lifecycle_override: None,
-        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         resume_override_mask: Default::default(),
         call_timeout_override: Default::default(),
         blob_store_override: None,
@@ -3852,10 +3851,7 @@ async fn resume_session_with_llm_override(
         app_context: None,
         additional_instructions: None,
         shell_env: None,
-        ops_lifecycle_override: None,
-        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-            resume_bindings,
-        )),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
         resume_override_mask: ResumeOverrideMask {
             provider_params: provider_params_override,
             ..Default::default()

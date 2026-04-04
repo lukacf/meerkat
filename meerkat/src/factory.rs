@@ -215,12 +215,6 @@ pub struct AgentBuildConfig {
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Optional blob store override used for image externalization/hydration.
     pub blob_store_override: Option<Arc<dyn BlobStore>>,
-    /// Canonical async-op registry for the owning session.
-    ///
-    /// Runtime-backed callers should provide the registry from the real
-    /// owning runtime/session rather than letting the factory allocate a
-    /// fresh fallback registry.
-    pub ops_lifecycle_override: Option<Arc<dyn OpsLifecycleRegistry>>,
     /// Per-build override for factory-level `enable_builtins`.
     /// When `Some`, takes precedence over `AgentFactory::enable_builtins`.
     pub override_builtins: Option<bool>,
@@ -304,7 +298,7 @@ pub struct AgentBuildConfig {
     pub resume_override_mask: meerkat_core::service::ResumeOverrideMask,
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed. See [`RuntimeBuildMode`] for details.
-    pub runtime_build_mode: Option<meerkat_core::RuntimeBuildMode>,
+    pub runtime_build_mode: meerkat_core::RuntimeBuildMode,
 }
 
 impl std::fmt::Debug for AgentBuildConfig {
@@ -333,10 +327,6 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
             .field("blob_store_override", &self.blob_store_override.is_some())
-            .field(
-                "ops_lifecycle_override",
-                &self.ops_lifecycle_override.is_some(),
-            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
@@ -392,7 +382,6 @@ impl AgentBuildConfig {
             provider_params: None,
             external_tools: None,
             blob_store_override: None,
-            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -416,7 +405,7 @@ impl AgentBuildConfig {
             checkpointer: None,
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
             resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
-            runtime_build_mode: None,
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
         }
     }
 
@@ -452,7 +441,6 @@ impl AgentBuildConfig {
             .llm_client_override
             .as_ref()
             .and_then(decode_llm_client_override_from_service);
-        self.ops_lifecycle_override = build.ops_lifecycle_override.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
@@ -493,7 +481,6 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
-            ops_lifecycle_override: self.ops_lifecycle_override.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
             override_memory: self.override_memory,
@@ -1396,28 +1383,9 @@ impl AgentFactory {
         let image_tool_results = meerkat_models::profile::profile_for(provider.as_str(), &model)
             .is_none_or(|p| p.image_tool_results);
         // Resolve ops lifecycle registry via RuntimeBuildMode.
-        //
-        // Precedence: runtime_build_mode > ops_lifecycle_override > StandaloneEphemeral.
-        // The ops_lifecycle_override path is a compat shim — new code should use
-        // runtime_build_mode with SessionOwned(bindings) from prepare_bindings().
-        use meerkat_core::runtime_epoch::{
-            RuntimeBuildMode, RuntimeEpochId, SessionRuntimeBindings,
-        };
+        use meerkat_core::runtime_epoch::RuntimeBuildMode;
 
-        let resolved_mode = build_config
-            .runtime_build_mode
-            .take()
-            .or_else(|| {
-                build_config.ops_lifecycle_override.clone().map(|reg| {
-                    RuntimeBuildMode::SessionOwned(SessionRuntimeBindings {
-                        session_id: session.id().clone(),
-                        epoch_id: RuntimeEpochId::new(),
-                        ops_lifecycle: reg,
-                        cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
-                    })
-                })
-            })
-            .unwrap_or(RuntimeBuildMode::StandaloneEphemeral);
+        let resolved_mode = &build_config.runtime_build_mode;
 
         #[allow(unused_variables)]
         let (ops_lifecycle, concrete_ops_lifecycle): (
@@ -2020,7 +1988,7 @@ impl AgentFactory {
             builder = builder.with_blob_store(blob_store);
         }
         builder = builder.with_ops_lifecycle(Arc::clone(&ops_lifecycle));
-        if let RuntimeBuildMode::SessionOwned(ref bindings) = resolved_mode {
+        if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
             builder = builder.with_epoch_cursor_state(Arc::clone(&bindings.cursor_state));
         }
 

@@ -1244,8 +1244,7 @@ async fn setup_session(
         override_shell: Some(true),
         override_mob: Some(true),
         resume_session: Some(prepared_session),
-        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
-        ops_lifecycle_override: None,
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         // When resuming a persisted session, the old metadata's tool category
         // overrides would silently replace these explicit values. Mask them so
         // the current build options win.
@@ -2312,17 +2311,9 @@ mod tests {
             PersistentSessionService::new(builder, 10, session_store, runtime_store, blob_store);
         {
             let adapter = runtime_adapter.clone();
-            session_service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+            session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
                 let adapter = adapter.clone();
-                let session_id = session_id.clone();
-                Box::pin(async move {
-                    adapter
-                        .ops_lifecycle_registry(&session_id)
-                        .await
-                        .map(|registry| {
-                            registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>
-                        })
-                })
+                Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
             }));
         }
         let service = Arc::new(session_service);

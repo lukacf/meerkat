@@ -293,15 +293,9 @@ impl AppState {
             PersistentSessionService::new(builder, 100, session_store, runtime_store, blob_store);
         {
             let adapter = runtime_adapter.clone();
-            session_service.set_ops_lifecycle_provider(Arc::new(move |session_id| {
+            session_service.set_runtime_bindings_provider(Arc::new(move |session_id| {
                 let adapter = adapter.clone();
-                let session_id = session_id.clone();
-                Box::pin(async move {
-                    adapter
-                        .ops_lifecycle_registry(&session_id)
-                        .await
-                        .map(|r| r as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-                })
+                Box::pin(async move { adapter.prepare_bindings(session_id).await.ok() })
             }));
         }
         let session_service = Arc::new(session_service);
@@ -547,7 +541,6 @@ async fn apply_runtime_turn(
                     .llm_client_override
                     .clone()
                     .map(encode_llm_client_override_for_service),
-                ops_lifecycle_override: None,
                 override_builtins: tooling.builtins.to_override(),
                 override_shell: tooling.shell.to_override(),
                 override_memory: tooling.memory.to_override(),
@@ -577,7 +570,7 @@ async fn apply_runtime_turn(
                 call_timeout_override: Default::default(),
                 blob_store_override: None,
                 mob_tools: None,
-                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             };
             let create_req = SvcCreateSessionRequest {
                 model: stored_metadata.as_ref().map_or_else(
@@ -1126,27 +1119,6 @@ async fn ensure_runtime_session_registered(
         .ensure_session_with_executor(session_id.clone(), executor)
         .await;
     Ok(())
-}
-
-async fn ensure_runtime_session_ops_registry(
-    state: &AppState,
-    session_id: &SessionId,
-) -> Result<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>, Response> {
-    let adapter = get_runtime_adapter(state);
-    adapter.register_session(session_id.clone()).await;
-    adapter
-        .ops_lifecycle_registry(session_id)
-        .await
-        .map(|registry| registry as Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>)
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("failed to obtain runtime ops registry for session: {session_id}")}),
-                ),
-            )
-                .into_response()
-        })
 }
 
 /// GET /runtime/{id}/state
@@ -2398,7 +2370,6 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
-        ops_lifecycle_override: None,
         override_builtins: req.enable_builtins,
         override_shell: req.enable_shell,
         override_memory: req.enable_memory,
@@ -2436,7 +2407,7 @@ async fn create_session_inner(
         call_timeout_override: Default::default(),
         blob_store_override: None,
         mob_tools: None,
-        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
     };
 
     let svc_req = SvcCreateSessionRequest {
@@ -2991,7 +2962,6 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
-            ops_lifecycle_override: None,
             override_builtins: None,
             override_shell: None,
             override_memory: None,
@@ -3021,7 +2991,7 @@ async fn continue_session_inner(
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: None,
-            runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         };
         let create_req = SvcCreateSessionRequest {
             model: req

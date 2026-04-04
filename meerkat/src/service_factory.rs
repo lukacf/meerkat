@@ -526,6 +526,13 @@ mod tests {
             .ok_or_else(|| "missing runtime registry".to_string())?
             as Arc<dyn OpsLifecycleRegistry>;
 
+        let bindings = meerkat_core::SessionRuntimeBindings {
+            session_id: session_id.clone(),
+            epoch_id: meerkat_core::runtime_epoch::RuntimeEpochId::new(),
+            ops_lifecycle: expected_registry.clone(),
+            cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
+        };
+
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "hello".to_string().into(),
@@ -538,7 +545,7 @@ mod tests {
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             build: Some(SessionBuildOptions {
                 resume_session: Some(session),
-                ops_lifecycle_override: Some(expected_registry.clone()),
+                runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
                 ..SessionBuildOptions::default()
             }),
             labels: None,

@@ -201,12 +201,16 @@ Runtime control plane for session-backed agent lifecycle:
 
 - **RuntimeControlPlane**: manages runtime-level state (attached, idle, retiring) and dispatches commands
 - **RuntimeDriver**: per-session driver that owns the `Agent` exclusively in a dedicated tokio task
-- **RuntimeSessionAdapter**: bridges `SessionService` into the runtime's event-driven model
+- **RuntimeSessionAdapter**: bridges `SessionService` into the runtime's event-driven model and owns session runtime bindings / epoch recovery
 - **Input taxonomy**: typed `Input` enum (Prompt, Peer, FlowStep, ExternalEvent, Continuation, Operation) with durability, origin, and visibility metadata
 - **InputLifecycleState**: full state machine for input processing (Accepted → Consumed | Superseded | Coalesced | Abandoned)
 
 This crate sits between surfaces and `SessionService`, providing the stateful runtime that owns
 keep-alive, ingress admission, and live routing semantics for the product surfaces.
+
+`RuntimeSessionAdapter::prepare_bindings(session_id)` is the canonical runtime-backed entry seam.
+It returns `SessionRuntimeBindings`, which bundle the session-scoped ops lifecycle registry,
+runtime epoch identity, and shared cursor state needed for recovery-safe completion handling.
 </Accordion>
 
 <Accordion title="meerkat-machine-schema">
@@ -441,7 +445,8 @@ The main entry point. Re-exports types and provides:
 - **build_persistent_service()**: runtime-backed persistent service constructor for the main Rust embedding path
 - **build_ephemeral_service()**: in-memory substrate constructor for testing and embedded Queue-only use
 - **AgentBuildConfig**: per-request configuration (model, system prompt, tool overrides, realm metadata)
-- **SessionBuildOptions**: in-band request build options used by all surfaces
+- **SessionBuildOptions**: in-band request build options used by all surfaces, including `runtime_build_mode`
+- **RuntimeBuildMode / SessionRuntimeBindings**: explicit runtime ownership contract for runtime-backed vs standalone builds
 
 The `FactoryAgentBuilder` pattern works as follows:
 
@@ -453,7 +458,7 @@ The `FactoryAgentBuilder` pattern works as follows:
     Service invokes `builder.build_agent(req, event_tx)`.
   </Step>
   <Step title="Delegate to factory">
-    `FactoryAgentBuilder` converts `SessionBuildOptions` into `AgentBuildConfig` and delegates to `AgentFactory::build_agent()`.
+    `FactoryAgentBuilder` converts `SessionBuildOptions` into `AgentBuildConfig` and delegates to `AgentFactory::build_agent()`. Runtime-backed surfaces thread `RuntimeBuildMode::SessionOwned(bindings)` through this seam; standalone/testing paths should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly.
   </Step>
   <Step title="Persist metadata">
     Realm metadata (`realm_id`, `instance_id`, `backend`, `config_generation`) is written into session metadata.

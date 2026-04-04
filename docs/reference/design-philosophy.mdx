@@ -32,6 +32,12 @@ The important 0.5 distinction is ownership:
 - `SessionService` is the substrate seam they route through
 - `EphemeralSessionService` remains useful, but it is not a co-equal product path for runtime semantics
 
+That ownership is expressed through the explicit runtime-binding contract:
+
+- runtime-backed surfaces obtain `SessionRuntimeBindings` from `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- those bindings flow through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+- standalone/testing/embedded paths opt into `RuntimeBuildMode::StandaloneEphemeral`
+
 ### Composition over configuration
 
 Optional capabilities are genuinely optional — not feature-flagged defaults that are always present:

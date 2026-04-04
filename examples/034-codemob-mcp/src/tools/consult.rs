@@ -131,6 +131,7 @@ pub async fn handle(
         resume_session: Some(session),
         override_shell: input.shell,
         additional_instructions,
+        runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
         ..SessionBuildOptions::default()
     };
     build.provider_params = input.provider_params;

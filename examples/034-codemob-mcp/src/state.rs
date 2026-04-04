@@ -17,7 +17,8 @@ type SessionSvc = EphemeralSessionService<FactoryAgentBuilder>;
 /// `EphemeralSessionService` (in-memory substrate). The `session_service`
 /// field provides direct access for the `consult` tool (single-agent, no mob).
 /// The `mob_state` wraps it for multi-agent orchestration in the `deliberate`
-/// tool. Production deployments use the runtime-backed path instead.
+/// tool. Production deployments use the runtime-backed path instead; this
+/// example intentionally stays in explicit standalone mode.
 ///
 /// API keys are read from environment variables by `Config::default()`:
 /// `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.

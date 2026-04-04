@@ -26,6 +26,8 @@ This page is a quick-lookup index. For settled 0.5 session/runtime semantics, se
 | `AgentError` | `meerkat_core` | Error types (LLM, tool, budget, hook, cancellation) |
 | `BudgetLimits` | `meerkat_core` | Resource constraints (tokens, duration, tool calls) |
 | `RetryPolicy` | `meerkat_core` | Exponential backoff configuration |
+| `RuntimeBuildMode` | `meerkat_core` | Explicit runtime ownership mode (`SessionOwned` vs `StandaloneEphemeral`) |
+| `SessionRuntimeBindings` | `meerkat_core` | Runtime-backed session bindings (`session_id`, `epoch_id`, ops lifecycle, cursor state) |
 | `MobRun` | `meerkat_mob` | Persisted flow run aggregate |
 | `MobRunStatus` | `meerkat_mob` | Flow run lifecycle (`pending`, `running`, `completed`, `failed`, `canceled`) |
 | `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
@@ -46,6 +48,16 @@ This page is a quick-lookup index. For settled 0.5 session/runtime semantics, se
 | `SkillSource` | `meerkat_core::skills` | Skill discovery from various sources | [Skills guide](/guides/skills) |
 | `HookEngine` | `meerkat_core` | Hook pipeline execution | [Hooks guide](/guides/hooks) |
 | `FlowTurnExecutor` | `meerkat_mob` | Runtime boundary between flow engine and dispatch/turn transport | [Mobs](/guides/mobs) |
+
+## Runtime-backed build seam
+
+For runtime-backed Rust surfaces, the canonical path is:
+
+1. `RuntimeSessionAdapter::prepare_bindings(session_id)`
+2. `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+3. `SessionService::create_session(...)`
+
+For standalone/testing/embedded paths, prefer `RuntimeBuildMode::StandaloneEphemeral` explicitly.
 
 ## Mobs (Rust SDK)
 

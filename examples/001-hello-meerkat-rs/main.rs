@@ -9,8 +9,9 @@
 //! - Running a single-turn session and reading the result
 //!
 //! Note: Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path
-//! with `PersistentSessionService` + `RuntimeSessionAdapter` for keep-alive,
-//! Queue/Steer routing, and comms. This example uses the direct path for simplicity.
+//! with `PersistentSessionService` + `RuntimeSessionAdapter` + session runtime
+//! bindings for keep-alive, Queue/Steer routing, and comms. This example uses
+//! the explicit standalone path for simplicity.
 //!
 //! ## Run
 //! ```bash

@@ -197,7 +197,7 @@ fn session_build_options_default_has_standalone_ephemeral() {
 #[test]
 fn session_build_options_debug_shows_build_mode() {
     let opts = meerkat_core::service::SessionBuildOptions::default();
-    let debug = format!("{:?}", opts);
+    let debug = format!("{opts:?}");
     assert!(
         debug.contains("StandaloneEphemeral"),
         "Debug output must show the build mode variant"

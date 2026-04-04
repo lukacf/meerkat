@@ -146,6 +146,18 @@ With branches: `ErrorRecovery`, `Cancelling`
 
 `RuntimeSessionAdapter` implements the `RuntimeControlPlane` trait with per-session `RuntimeDriver` instances (ephemeral or persistent).
 
+**Runtime-backed build seam:** product/runtime-backed surfaces should obtain
+`SessionRuntimeBindings` from `RuntimeSessionAdapter::prepare_bindings(session_id)`
+and pass them through `SessionBuildOptions.runtime_build_mode =
+RuntimeBuildMode::SessionOwned(bindings)`. Standalone/testing/embedded paths
+should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly.
+
+**Ownership split:**
+- `PersistentRuntimeDriver::recover()` owns input/runtime/control recovery
+- `RuntimeSessionAdapter` owns session-entry runtime recovery:
+  `ops_lifecycle`, `epoch_id`, and shared cursor state
+- `SessionRuntimeBindings` are the epoch-local witness for that ownership
+
 **Key operations:**
 - `ingest` — admit an input through policy resolution
 - `retire` — graceful drain (process queue, reject new input)
@@ -196,6 +208,11 @@ Two implementations:
 - `PersistentSessionService<B>` — durable substrate for runtime-backed product surfaces (CLI, RPC, REST, MCP; typically backed by sqlite or redb through `PersistenceBundle`)
 
 `FactoryAgentBuilder` bridges `AgentFactory` into `SessionAgentBuilder`.
+
+**Current usage rule:** if you are reviewing or designing a runtime-backed
+surface, look for `prepare_bindings()` and `RuntimeBuildMode::SessionOwned(...)`.
+If the code instead hand-rolls `register_session()` + registry extraction or
+leans on implicit standalone fallback, treat that as architectural drift.
 
 **Resume metadata:** `SessionTooling` is tri-state via `ToolCategoryOverride` (`Inherit`, `Enable`, `Disable`). Persist caller intent with `from_override()`, not resolved booleans, or resumed sessions will freeze tool availability at the capabilities of the build that created them.
 

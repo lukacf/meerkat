@@ -258,6 +258,7 @@ pub(crate) fn input_to_primitive(input: &Input, input_id: InputId) -> RunPrimiti
 }
 
 /// Spawn the per-session runtime loop with optional completion registry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_runtime_loop_with_completions(
     driver: crate::session_adapter::SharedDriver,
     mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,

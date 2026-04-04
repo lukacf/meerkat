@@ -49,6 +49,19 @@ rkat-rest --realm team-alpha
 rkat-mcp --realm team-alpha
 ```
 
+## Runtime-backed vs standalone
+
+Meerkat uses an explicit runtime-binding contract:
+
+- runtime-backed surfaces should call `RuntimeSessionAdapter::prepare_bindings(session_id)`
+- those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
+- standalone/testing/embedded paths should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly
+
+Use this mental model when helping users:
+
+- **runtime-backed**: CLI, REST, RPC, MCP server, long-lived mob/member surfaces, keep-alive, comms drain, runtime wake/recovery
+- **standalone/embedded**: direct in-memory substrate, WASM embedded sessions, examples/tests that intentionally do not want runtime-owned semantics
+
 ## Surfaces
 
 | Surface | Protocol | Use Case |
@@ -149,6 +162,7 @@ await mob.spawn([{ profile: 'worker', meerkat_id: 'w1' }]);
 
 **Architecture:**
 - Routes through `EphemeralSessionService<FactoryAgentBuilder>` → `AgentFactory::build_agent()` with override-first resource injection
+- Uses explicit standalone runtime mode (`RuntimeBuildMode::StandaloneEphemeral`) for embedded sessions rather than relying on runtime-backed bindings
 - `MobMcpState` handles all mob lifecycle operations (same state manager as native MCP mob surface)
 - `tokio_with_wasm` provides the async runtime (single-threaded, JS event loop backed)
 - `reqwest` uses browser `fetch` on wasm32

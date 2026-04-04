@@ -4,6 +4,10 @@ Multi-agent MCP server powered by Meerkat mobs. Gives Claude Code (or any MCP cl
 
 Each `deliberate` call spins up an ephemeral mob, agents collaborate (via structured flows or free-form comms), and the result is returned as a single tool response. MCP progress notifications provide live feedback during execution.
 
+This example intentionally uses the standalone/embedded session path. It does
+not pre-create runtime-backed `SessionRuntimeBindings`; session builds opt into
+standalone runtime mode explicitly.
+
 ## Quick Start
 
 ```bash

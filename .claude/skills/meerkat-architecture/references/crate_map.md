@@ -104,6 +104,9 @@ Surface binaries:
 | `ToolCategoryOverride` | Tri-state tooling intent across save/resume (`Inherit` / `Enable` / `Disable`) |
 | `DetachedWakeState` | Runtime-owned idle keep-alive wake for detached background ops |
 | `PeerInput.handling_mode` | Typed per-input policy override for actionable peer traffic only |
+| `RuntimeBuildMode` | Explicit runtime ownership mode for builds (`SessionOwned` / `StandaloneEphemeral`) |
+| `SessionRuntimeBindings` | Runtime-backed session bindings carrying `session_id`, `epoch_id`, ops lifecycle, and cursor state |
+| `RuntimeEpochId` / `EpochCursorState` | Epoch-local runtime continuity identity and consumer cursor state |
 
 ## Agent Loop State Machine
 
@@ -135,6 +138,14 @@ own runtime drain semantics; runtime-backed surfaces do.
 
 Detached background ops now wake idle keep_alive sessions through the runtime
 loop via `ContinuationInput`; surface-local waker tasks are a smell.
+
+Runtime-backed builds should go through:
+
+`prepare_bindings(session_id)` → `SessionRuntimeBindings` →
+`SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(...)`
+
+Standalone/testing/embedded paths should opt into
+`RuntimeBuildMode::StandaloneEphemeral` explicitly.
 ```
 
 ## Mob Lifecycle

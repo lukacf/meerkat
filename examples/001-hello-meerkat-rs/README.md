@@ -4,7 +4,7 @@ The simplest possible Meerkat Rust example. Create a `SessionService`, run one s
 
 ## Concepts
 - `AgentFactory` — shared wiring for runtime components
-- `build_ephemeral_service` — simple in-memory `SessionService` constructor for example/test or embedded usage
+- `build_ephemeral_service` — simple in-memory `SessionService` constructor for explicit standalone/example/test or embedded usage
 - `CreateSessionRequest` — canonical first-turn request shape
 - `RunResult` — structured output from a session turn
 
